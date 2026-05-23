@@ -220,6 +220,11 @@
       正在加载交接班审核内容...
     </section>
 
+    <section v-else-if="documentOmitted && session" class="review-empty-card">
+      <strong>审核状态已加载</strong>
+      <span>交接班正文正在后台载入，历史文件和当前状态可先查看。</span>
+    </section>
+
     <section v-else-if="!session" class="review-empty-card">
       <strong>{{ reviewPendingTitle }}</strong>
       <span>{{ reviewPendingMessage }}</span>

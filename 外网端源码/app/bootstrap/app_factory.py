@@ -413,10 +413,24 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
         if merged == (container.config if isinstance(container.config, dict) else {}):
             saved = copy.deepcopy(container.config if isinstance(container.config, dict) else merged)
+            already_applied = False
         else:
-            saved = save_settings(merged, container.config_path)
+            persist_snapshot = getattr(container, "persist_config_snapshot", None)
+            if callable(persist_snapshot):
+                saved = persist_snapshot(
+                    merged,
+                    source="启动角色选择",
+                    mode="light",
+                    persist_json=True,
+                )
+                already_applied = True
+            else:
+                saved = save_settings(merged, container.config_path)
+                already_applied = False
         apply_snapshot = getattr(container, "apply_config_snapshot", None)
-        if callable(apply_snapshot):
+        if already_applied:
+            pass
+        elif callable(apply_snapshot):
             apply_snapshot(saved, mode="light")
         else:
             container.config = copy.deepcopy(saved)
@@ -499,12 +513,19 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_monthly_change_report_scheduler(source="关闭自动")
             if container.monthly_event_report_scheduler:
                 container.stop_monthly_event_report_scheduler(source="关闭自动")
+            if getattr(container, "scheduler_orchestrator", None):
+                container.shutdown_scheduler_orchestrator(source="关闭自动")
             if container.updater_service:
                 container.stop_updater(source="关闭自动")
             if container.alert_log_uploader:
                 container.stop_alert_log_uploader(source="关闭自动")
             if container.shared_bridge_service:
                 container.stop_shared_bridge(source="关闭自动")
+            if getattr(container, "config_runtime_service", None):
+                try:
+                    container.config_runtime_service.shutdown()
+                except Exception:  # noqa: BLE001
+                    pass
             container.job_service.shutdown_task_engine()
             try:
                 shutdown_handover_review_api_executor()
@@ -1168,10 +1189,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             )
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
-        done = container.job_service.wait_job(job.job_id)
-        if done.status == "success":
-            return True, "ok"
-        return False, done.error or done.summary or "任务失败"
+        detail = f"已提交每日用电明细自动流程任务 job_id={job.job_id}"
+        container.add_system_log(f"[调度] {detail}")
+        return True, detail
 
     def handover_scheduler_callback(slot: str, source: str) -> tuple[bool, str]:
         from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
@@ -1258,14 +1278,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 notify.send_failure(stage=source, detail=str(exc), emit_log=container.add_system_log)
                 return False, str(exc)
-            done = container.job_service.wait_job(job.job_id)
-            if done.status == "success":
-                detail = f"交接班定时确认并上传云文档完成 job_id={job.job_id}, batch={batch_key}, slot={slot}"
-                container.add_system_log(f"[交接班][云文档补上传调度] {detail}")
-                return True, detail
-            detail = done.error or done.summary or "交接班定时确认并上传云文档失败"
-            notify.send_failure(stage=source, detail=detail, emit_log=container.add_system_log)
-            return False, detail
+            detail = f"已提交交接班定时确认并上传云文档任务 job_id={job.job_id}, batch={batch_key}, slot={slot}"
+            container.add_system_log(f"[交接班][云文档补上传调度] {detail}")
+            return True, detail
 
         if slot in {"station_110_midnight", "station_110_noon"}:
             if role_mode == "internal":
@@ -1302,14 +1317,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 notify.send_failure(stage=source, detail=str(exc), emit_log=container.add_system_log)
                 return False, str(exc)
-            done = container.job_service.wait_job(job.job_id)
-            if done.status == "success":
-                detail = f"110站审核链接发送完成 job_id={job.job_id}, slot={slot}"
-                container.add_system_log(f"[交接班][110站审核链接调度] {detail}")
-                return True, detail
-            detail = done.error or done.summary or "110站审核链接发送失败"
-            notify.send_failure(stage=source, detail=detail, emit_log=container.add_system_log)
-            return False, detail
+            detail = f"已提交110站审核链接发送任务 job_id={job.job_id}, slot={slot}"
+            container.add_system_log(f"[交接班][110站审核链接调度] {detail}")
+            return True, detail
 
         now = datetime.now()
         if slot == "morning":
@@ -1514,10 +1524,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             )
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
-        done = container.job_service.wait_job(job.job_id)
-        if done.status == "success":
-            return True, "ok"
-        return False, done.error or done.summary or "任务失败"
+        detail = f"已提交交接班定时生成任务 job_id={job.job_id}, duty_date={duty_date}, duty_shift={duty_shift}"
+        container.add_system_log(f"[交接班调度] {detail}")
+        return True, detail
 
     def wet_bulb_collection_scheduler_callback(source: str) -> tuple[bool, str]:
         from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
@@ -1652,10 +1661,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             )
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
-        done = container.job_service.wait_job(job.job_id)
-        if done.status == "success":
-            return True, "ok"
-        return False, done.error or done.summary or "任务失败"
+        detail = f"已提交湿球温度采集任务 job_id={job.job_id}"
+        container.add_system_log(f"[湿球温度定时采集调度] {detail}")
+        return True, detail
 
     def chiller_mode_upload_scheduler_callback(source: str) -> tuple[bool, str]:
         from handover_log_module.service.chiller_mode_upload_service import ChillerModeUploadService
@@ -1676,48 +1684,51 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             )
             return False, detail
 
-        bridge_service, bridge_error = _resolve_bridge_runtime()
-        if bridge_service is None:
-            detail = f"共享桥接未就绪，外网端无法执行制冷模式参数上传调度：{_bridge_runtime_error_text(bridge_error)}"
-            container.add_system_log(f"[制冷模式参数上传调度] {detail}")
-            container.record_chiller_mode_upload_external_run(
-                status="failed",
-                source="scheduler",
-                detail=detail,
-                duration_ms=0,
-            )
-            return False, detail
+        def _failure_detail_from_result(result: Dict[str, Any] | None) -> str:
+            failed_files = (result or {}).get("failed_files", [])
+            detail_items = []
+            if isinstance(failed_files, list):
+                for failed in failed_files[:5]:
+                    if not isinstance(failed, dict):
+                        continue
+                    building = str(failed.get("building", "") or "-").strip() or "-"
+                    file_path = str(failed.get("file_path", "") or "").strip()
+                    file_name = os.path.basename(file_path) if file_path else "-"
+                    error = str(failed.get("error", "") or "未知错误").strip() or "未知错误"
+                    detail_items.append(f"{building}/{file_name}: {error}")
+            return "；".join(detail_items) if detail_items else "未提供失败明细"
 
-        try:
-            target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
-            if not target_buildings:
-                detail = "共享缓存楼栋列表为空，无法选择制冷模式参数源文件"
-                container.add_system_log(f"[制冷模式参数上传调度] {detail}")
-                container.record_chiller_mode_upload_external_run(
-                    status="failed",
-                    source="scheduler",
-                    detail=detail,
-                    duration_ms=0,
+        def _run_from_cache(emit_log):
+            started_at = datetime.now()
+            try:
+                bridge_service, bridge_error = _resolve_bridge_runtime()
+                if bridge_service is None:
+                    raise RuntimeError(
+                        f"共享桥接未就绪，外网端无法执行制冷模式参数上传调度：{_bridge_runtime_error_text(bridge_error)}"
+                    )
+                target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
+                if not target_buildings:
+                    raise RuntimeError("共享缓存楼栋列表为空，无法选择制冷模式参数源文件")
+                emit_log(
+                    "[制冷模式参数上传调度] 后台读取共享缓存最新索引: "
+                    f"family={ChillerModeUploadService.SOURCE_FAMILY}, buildings={','.join(target_buildings)}"
                 )
-                return False, detail
-            selection = bridge_service.get_latest_source_cache_selection(
-                source_family=ChillerModeUploadService.SOURCE_FAMILY,
-                buildings=target_buildings,
-                max_selection_age_hours=1.0,
-            )
-            cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
-            if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
-                detail = _build_latest_cache_wait_text("制冷模式参数", selection if isinstance(selection, dict) else {})
-                container.add_system_log(f"[制冷模式参数上传调度] {detail}")
-                container.record_chiller_mode_upload_external_run(
-                    status="skipped",
-                    source="scheduler",
-                    detail=detail,
-                    duration_ms=0,
+                selection = bridge_service.get_latest_source_cache_selection(
+                    source_family=ChillerModeUploadService.SOURCE_FAMILY,
+                    buildings=target_buildings,
+                    max_selection_age_hours=1.0,
                 )
-                return False, f"skip:{detail}"
-
-            def _run_from_cache(emit_log):
+                cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
+                if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    detail = _build_latest_cache_wait_text("制冷模式参数", selection if isinstance(selection, dict) else {})
+                    emit_log(f"[制冷模式参数上传调度] {detail}")
+                    container.record_chiller_mode_upload_external_run(
+                        status="skipped",
+                        source="scheduler_job",
+                        detail=detail,
+                        duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                    )
+                    return {"status": "skipped", "summary": detail}
                 service = ChillerModeUploadService(runtime_config)
                 source_units = [
                     {
@@ -1728,48 +1739,41 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 ]
                 result = service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
                 if str((result or {}).get("status", "") or "").strip().lower() == "failed":
-                    failed_files = (result or {}).get("failed_files", [])
-                    detail_items = []
-                    if isinstance(failed_files, list):
-                        for failed in failed_files[:5]:
-                            if not isinstance(failed, dict):
-                                continue
-                            building = str(failed.get("building", "") or "-").strip() or "-"
-                            file_path = str(failed.get("file_path", "") or "").strip()
-                            file_name = os.path.basename(file_path) if file_path else "-"
-                            error = str(failed.get("error", "") or "未知错误").strip() or "未知错误"
-                            detail_items.append(f"{building}/{file_name}: {error}")
-                    raise RuntimeError("制冷模式参数上传失败：" + ("；".join(detail_items) if detail_items else "未提供失败明细"))
+                    raise RuntimeError("制冷模式参数上传失败：" + _failure_detail_from_result(result))
+                status = str((result or {}).get("status", "success") or "success").strip().lower()
+                container.record_chiller_mode_upload_external_run(
+                    status=status,
+                    source="scheduler_job",
+                    detail=str((result or {}).get("summary", "") or ""),
+                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                )
                 return result
+            except Exception as exc:  # noqa: BLE001
+                container.record_chiller_mode_upload_external_run(
+                    status="failed",
+                    source="scheduler_job",
+                    detail=str(exc),
+                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                )
+                raise
 
+        try:
             job = _start_external_cache_job(
                 name="制冷模式参数上传-共享文件",
                 feature="chiller_mode_upload_cache_latest",
                 resource_key="shared_bridge:chiller_mode_upload",
                 run_func=_run_from_cache,
+                dedupe_key=f"chiller_mode_upload:scheduler:{datetime.now().strftime('%Y%m%d%H%M')}",
             )
             submit_detail = f"已提交制冷模式参数共享文件上传任务 job_id={job.job_id}"
             container.add_system_log(f"[制冷模式参数上传调度] {submit_detail}")
-            started_at = datetime.now()
-            done = container.job_service.wait_job(job.job_id)
-            duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
-            if done.status != "success":
-                detail = done.error or done.summary or "制冷模式参数上传任务失败"
-                container.record_chiller_mode_upload_external_run(
-                    status="failed",
-                    source="scheduler",
-                    detail=detail,
-                    duration_ms=duration_ms,
-                )
-                return False, detail
-            detail = f"制冷模式参数共享文件上传完成 job_id={job.job_id}"
             container.record_chiller_mode_upload_external_run(
-                status="success",
+                status="accepted",
                 source="scheduler",
-                detail=detail,
-                duration_ms=duration_ms,
+                detail=submit_detail,
+                duration_ms=0,
             )
-            return True, detail
+            return True, submit_detail
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
             container.add_system_log(f"[制冷模式参数上传调度] 任务提交失败：{error_text}")

@@ -15,6 +15,26 @@ from app.worker.task_handlers import HANDLER_REGISTRY
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 _ACTIVE_STATUSES = ["queued", "waiting_resource", "running"]
 _DENIED_WORKER_HANDLERS = {"test_echo_payload", "test_sleep"}
+_ACTION_WORKER_ALIASES = {
+    "alarm_event_upload": "alarm_event_upload",
+    "branch_power_daily": "branch_power_from_download",
+    "branch_power_from_download": "branch_power_from_download",
+    "daily_report_auth_open": "daily_report_auth_open",
+    "daily_report_recapture": "daily_report_recapture",
+    "day_metric_from_download": "day_metric_from_download",
+    "handover_cloud_retry_batch": "handover_cloud_retry_batch",
+    "handover_cloud_retry_single": "handover_cloud_retry_single",
+    "handover_confirm_all": "handover_confirm_all",
+    "handover_generate": "handover_review_regenerate",
+    "handover_review_regenerate": "handover_review_regenerate",
+    "manual_upload": "manual_upload",
+    "monthly_multi_date": "multi_date",
+    "multi_date": "multi_date",
+    "resume_upload": "resume_upload",
+    "sheet_import": "sheet_import",
+    "wet_bulb_collection": "wet_bulb_collection_run",
+    "wet_bulb_collection_run": "wet_bulb_collection_run",
+}
 
 
 def _allowed_worker_handlers() -> List[str]:
@@ -69,7 +89,8 @@ def _refresh_runtime_status_after_task_mutation(container: Any, reason: str) -> 
 @router.get("/capabilities")
 def task_capabilities() -> Dict[str, Any]:
     return {
-        "submit_actions": ["worker"],
+        "submit_actions": ["worker", *sorted(_ACTION_WORKER_ALIASES.keys())],
+        "action_worker_aliases": dict(sorted(_ACTION_WORKER_ALIASES.items())),
         "worker_handlers": _allowed_worker_handlers(),
         "active_statuses": list(_ACTIVE_STATUSES),
     }
@@ -78,11 +99,26 @@ def task_capabilities() -> Dict[str, Any]:
 @router.get("/state")
 def task_state_snapshot(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
+    job_payload: Dict[str, Any] = {}
+    try:
+        job_payload = {
+            "active_job_ids": container.job_service.active_job_ids(include_waiting=True),
+            "job_counts": container.job_service.job_counts(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        job_payload = {
+            "active_job_ids": [],
+            "job_counts": {},
+            "job_state_error": str(exc),
+        }
+    health_getter = getattr(container, "app_state_health_snapshot", None)
+    if callable(health_getter):
+        return {"ok": True, **health_getter(), **job_payload}
     repository = getattr(container, "app_state_repository", None)
     if repository is None:
-        return {"ok": True, "ready": False, "reason": "app_state_not_initialized"}
+        return {"ok": True, "ready": False, "reason": "app_state_not_initialized", **job_payload}
     try:
-        return {"ok": True, **repository.snapshot()}
+        return {"ok": True, **repository.snapshot(), **job_payload}
     except Exception as exc:  # noqa: BLE001
         try:
             container.add_system_log(f"[统一任务] 状态库快照读取失败，已降级: {exc}")
@@ -93,6 +129,7 @@ def task_state_snapshot(request: Request) -> Dict[str, Any]:
             "ready": False,
             "reason": "app_state_snapshot_failed",
             "error": str(exc),
+            **job_payload,
         }
 
 
@@ -176,14 +213,18 @@ def submit_task(request: Request, body: Dict[str, Any] = Body(default_factory=di
     container = request.app.state.container
     payload = _payload_dict(body, field_name="body")
     action = str(payload.get("action", "") or "").strip().lower()
-    if action != "worker":
-        raise HTTPException(status_code=400, detail="当前统一任务入口仅支持 action=worker")
-
+    if not action:
+        action = "worker"
     worker_handler = str(payload.get("worker_handler", "") or "").strip()
+    if action != "worker":
+        worker_handler = _ACTION_WORKER_ALIASES.get(action, action if action in HANDLER_REGISTRY else "")
+    if action == "worker" and not worker_handler:
+        raise HTTPException(status_code=400, detail="action=worker 需要提供 worker_handler")
     if worker_handler not in HANDLER_REGISTRY or worker_handler in _DENIED_WORKER_HANDLERS:
-        raise HTTPException(status_code=400, detail=f"未知 worker_handler: {worker_handler}")
+        raise HTTPException(status_code=400, detail=f"未知或不允许的任务动作: action={action}, worker_handler={worker_handler}")
 
-    feature = str(payload.get("feature", "") or worker_handler).strip() or worker_handler
+    default_feature = action if action != "worker" else worker_handler
+    feature = str(payload.get("feature", "") or default_feature).strip() or worker_handler
     name = str(payload.get("name", "") or feature).strip() or feature
     worker_payload = _payload_dict(payload.get("payload", {}), field_name="payload")
     resource_keys = _list_texts(payload.get("resource_keys", []))

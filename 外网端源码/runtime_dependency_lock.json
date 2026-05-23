@@ -46,6 +46,11 @@
       "package": "python-multipart",
       "version": "0.0.22",
       "import_name": "multipart"
+    },
+    {
+      "package": "APScheduler",
+      "version": "3.11.2",
+      "import_name": "apscheduler"
     }
   ]
 }

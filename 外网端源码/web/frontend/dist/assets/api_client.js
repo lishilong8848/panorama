@@ -492,6 +492,10 @@ export async function getHandoverReviewBootstrapApi(buildingCode, params = {}, o
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}/bootstrap`, params), options);
 }
 
+export async function getHandoverReviewSnapshotApi(buildingCode, params = {}, options = {}) {
+  return apiJson(appendQuery(`/api/handover/review/${buildingCode}/snapshot`, params), options);
+}
+
 export async function getHandoverReviewStatusApi(buildingCode, params = {}, options = {}) {
   return apiJson(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options);
 }

@@ -289,6 +289,28 @@ def _unit_from_row(row: RawRow) -> int | None:
         return 5
     if "六号冷机" in text or "6号冷机" in lowered:
         return 6
+    fallback_text = " ".join(
+        _text(getattr(row, attr, ""))
+        for attr in ("d_name", "b_text")
+    )
+    fallback_lowered = fallback_text.casefold()
+    digit_match = re.search(r"(?<!\d)([1-6])\s*(?:号|#)", fallback_text)
+    if digit_match:
+        return int(digit_match.group(1))
+    chinese_map = {
+        "一号": 1,
+        "二号": 2,
+        "三号": 3,
+        "四号": 4,
+        "五号": 5,
+        "六号": 6,
+    }
+    for token, number in chinese_map.items():
+        if token in fallback_text:
+            return number
+    for number in range(1, 7):
+        if f"{number}号" in fallback_lowered:
+            return number
     return None
 
 
@@ -856,7 +878,7 @@ def _resolve_public_flow_values(query: CapacitySourceQuery, *, zone: str, contex
     tank_text = query.first_text_by_d_aliases(_FLOW_ALIASES["tank"], zone=zone, allow_global=True)
     if building == "D楼":
         primary = query.first_number_by_d_aliases(["一次侧总流量"], zone=zone, allow_global=True)
-        tank = query.first_number_by_d_aliases(["蓄冷罐总管道流量"], zone=zone, allow_global=True)
+        tank = query.first_number_by_d_aliases(["蓄冷罐总管道流量", "蓄冷罐流量"], zone=zone, allow_global=True)
         if primary is not None and tank is not None:
             second_text = _format_calc_value(float(primary) - float(tank))
     return {cells["first"]: first_text, cells["second"]: second_text, cells["tank"]: tank_text}
@@ -1010,6 +1032,19 @@ def _block_cell_map(zone: str, position: int) -> Dict[str, str]:
     return {name: _offset_cell(base_cell, row_offset=row_offset, col_offset=col_offset) for name, base_cell in _WEST_BLOCK_BASE_CELLS.items()}
 
 
+def _cooling_mode_plate_pressure_cells(block: Dict[str, str]) -> set[str]:
+    pressure_cell = _text(block.get("plate_cooling_in_pressure"))
+    if not pressure_cell:
+        return set()
+    try:
+        column, row = coordinate_from_string(pressure_cell.upper())
+    except Exception:  # noqa: BLE001
+        return {pressure_cell}
+    # Only these right-side pressure cells are plate-exchanger fields in cooling mode:
+    # N25:N30 / AA25:AA30 and N35:N40 / AA35:AA40. Merged label rows are not written.
+    return {f"{column}{int(row) + offset}" for offset in (0, 1, 3, 4, 5)}
+
+
 def _fan_values(query: CapacitySourceQuery, *, zone: str, unit: int) -> Dict[int, str]:
     matched_rows = query.rows_by_d_regexes(
         [
@@ -1058,19 +1093,14 @@ def _build_zone_unit_values(query: CapacitySourceQuery, *, zone: str, running_un
         results[block["title"]] = f"{unit_number}号制冷单元→{mode_text}"
         skip_chiller_values = building == "E楼" and mode_text == "板换"
         skip_plate_values = mode_text == "制冷"
+        plate_pressure_skip_cells = _cooling_mode_plate_pressure_cells(block) if skip_plate_values else set()
         if skip_plate_values:
-            for key in _PLATE_HEAT_EXCHANGER_KEYS:
-                target_cell = block.get(key)
-                if target_cell:
-                    results[target_cell] = "/"
-            if block.get("plate_cooling_in_pressure_dup"):
-                results[block["plate_cooling_in_pressure_dup"]] = "/"
+            for target_cell in plate_pressure_skip_cells:
+                results[target_cell] = "/"
         for key, aliases in alias_groups.items():
             if key == "primary_pump_freq" and not aliases:
                 continue
             if skip_chiller_values and key in _E_BUILDING_CHILLER_SKIP_KEYS:
-                continue
-            if skip_plate_values and key in _PLATE_HEAT_EXCHANGER_KEYS:
                 continue
             value_text = query.first_text_by_d_aliases(aliases, zone=zone, unit=unit_number, allow_global=False)
             if not value_text:
@@ -1080,10 +1110,12 @@ def _build_zone_unit_values(query: CapacitySourceQuery, *, zone: str, running_un
                 if not converted:
                     _emit_pressure_format_warning(context, zone=zone, unit=unit_number, key=key, value=value_text)
             target_cell = block.get(key)
-            if target_cell:
+            if target_cell and target_cell not in plate_pressure_skip_cells:
                 results[target_cell] = value_text
             if key == "plate_cooling_in_pressure":
-                results[block["plate_cooling_in_pressure_dup"]] = value_text
+                dup_cell = block["plate_cooling_in_pressure_dup"]
+                if dup_cell not in plate_pressure_skip_cells:
+                    results[dup_cell] = value_text
         fan_values = _fan_values(query, zone=zone, unit=unit_number)
         if fan_values.get(1):
             results[block["fan_1"]] = fan_values[1]

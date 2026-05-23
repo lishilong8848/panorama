@@ -1308,6 +1308,7 @@ class ReviewSessionService:
         *,
         limit: int,
         days: int = 3,
+        duty_date: str = "",
     ) -> List[Dict[str, Any]]:
         repository = self._generated_file_index
         if repository is None:
@@ -1315,6 +1316,7 @@ class ReviewSessionService:
         try:
             rows = repository.list_handover_generated_file_sessions(
                 building=building,
+                duty_date=str(duty_date or "").strip(),
                 days=days,
                 limit=limit,
             )
@@ -2471,15 +2473,18 @@ class ReviewSessionService:
         building: str,
         *,
         limit: int = 10,
+        duty_date: str = "",
     ) -> List[Dict[str, Any]]:
         history_limit = max(0, int(limit or 0))
         if history_limit <= 0:
             return []
+        duty_date_text = str(duty_date or "").strip()
 
         indexed_rows = self._list_indexed_generated_file_sessions(
             str(building or "").strip(),
             limit=history_limit,
             days=3,
+            duty_date=duty_date_text,
         )
         if len(indexed_rows) >= history_limit:
             return indexed_rows
@@ -2491,6 +2496,8 @@ class ReviewSessionService:
             if isinstance(item, dict) and str(item.get("session_id", "") or "").strip()
         }
         for session in self.list_building_sessions(building):
+            if duty_date_text and str(session.get("duty_date", "") or "").strip() != duty_date_text:
+                continue
             session_id = str(session.get("session_id", "") or "").strip()
             if session_id and session_id in seen_session_ids:
                 continue

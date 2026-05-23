@@ -57,7 +57,7 @@ export const DASHBOARD_SCHEDULER_OVERVIEW_SECTION = `        <section class="con
               </div>
               <div class="hint">当前角色：{{ sharedBridgeSelfCheckOverview.roleLabel }}</div>
               <div class="hint">共享目录：{{ sharedBridgeSelfCheckOverview.rootDirText }}</div>
-              <div class="hint">数据库：{{ sharedBridgeSelfCheckOverview.dbPathText }}</div>
+              <div class="hint">桥接：{{ sharedBridgeSelfCheckOverview.dbPathText }}</div>
               <div class="hint">{{ sharedBridgeSelfCheckOverview.summaryText }}</div>
               <div class="hint" v-if="sharedBridgeSelfCheckOverview.checkedAtText">最近自检：{{ sharedBridgeSelfCheckOverview.checkedAtText }}</div>
               <div class="hint" v-if="sharedBridgeSelfCheckOverview.errorText">最近异常：{{ sharedBridgeSelfCheckOverview.errorText }}</div>

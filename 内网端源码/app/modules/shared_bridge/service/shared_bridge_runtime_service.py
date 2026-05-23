@@ -50,6 +50,7 @@ from app.shared.runtime.internal_download_browser_pool_runtime import (
     clear_internal_download_browser_pool,
     set_internal_download_browser_pool,
 )
+from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from app.shared.utils.atomic_file import (
     atomic_copy_file,
     atomic_write_text,
@@ -147,6 +148,7 @@ class SharedBridgeRuntimeService:
         self._cached_health_snapshot: Dict[str, Any] | None = None
         self._store_issue_log_markers: Dict[str, float] = {}
         self._store: SharedBridgeStore | None = None
+        self._store_root = ""
         self._mailbox_store: SharedBridgeMailboxStore | None = None
         self._mirror_store: SharedBridgeRuntimeMirrorStore | None = None
         self._internal_download_pool: InternalDownloadBrowserPool | None = None
@@ -793,10 +795,13 @@ class SharedBridgeRuntimeService:
     def _refresh_config(self) -> None:
         deployment = self.runtime_config.get("deployment", {})
         bridge_cfg = self.runtime_config.get("shared_bridge", {})
+        bridge_http_cfg = self.runtime_config.get("internal_bridge_http", {})
         if not isinstance(deployment, dict):
             deployment = {}
         if not isinstance(bridge_cfg, dict):
             bridge_cfg = {}
+        if not isinstance(bridge_http_cfg, dict):
+            bridge_http_cfg = {}
         resolved_bridge_cfg = resolve_shared_bridge_paths(bridge_cfg, deployment.get("role_mode"))
         resolved_bridge_cfg["root_dir"] = normalize_windows_path_text(
             str(resolved_bridge_cfg.get("root_dir", "") or "").strip()
@@ -814,12 +819,24 @@ class SharedBridgeRuntimeService:
         self.stale_task_timeout_sec = max(60, int(resolved_bridge_cfg.get("stale_task_timeout_sec", 1800) or 1800))
         self.artifact_retention_days = max(1, int(resolved_bridge_cfg.get("artifact_retention_days", 7) or 7))
         self.sqlite_busy_timeout_ms = max(1000, int(resolved_bridge_cfg.get("sqlite_busy_timeout_ms", 15000) or 15000))
+        bridge_mode = str(resolved_bridge_cfg.get("bridge_mode", "") or "").strip().lower()
+        use_http_local_store = (
+            self.role_mode == "internal"
+            and bridge_mode == "http"
+            and bool(bridge_http_cfg.get("enabled", False))
+        )
+        if use_http_local_store:
+            local_root = resolve_runtime_state_root(runtime_config=self.runtime_config) / "internal_bridge_http"
+            self._store_root = str(local_root)
+            self._mailbox_store = None
+        else:
+            self._store_root = self.shared_bridge_root
+            self._mailbox_store = SharedBridgeMailboxStore(self.shared_bridge_root) if self.shared_bridge_root else None
         self._store = (
-            SharedBridgeStore(self.shared_bridge_root, busy_timeout_ms=self.sqlite_busy_timeout_ms)
-            if self.shared_bridge_root
+            SharedBridgeStore(self._store_root, busy_timeout_ms=self.sqlite_busy_timeout_ms)
+            if self._store_root
             else None
         )
-        self._mailbox_store = SharedBridgeMailboxStore(self.shared_bridge_root) if self.shared_bridge_root else None
         self._mirror_store = SharedBridgeRuntimeMirrorStore(
             runtime_config=self.runtime_config,
             role_mode=self.role_mode or "external",
@@ -857,7 +874,7 @@ class SharedBridgeRuntimeService:
             store_db_path = getattr(self._store, "db_path", None)
             if store_db_path:
                 return str(store_db_path)
-        root_text = str(self.shared_bridge_root or "").strip()
+        root_text = str(self._store_root or self.shared_bridge_root or "").strip()
         if not root_text:
             return ""
         return str(Path(root_text) / "bridge.db")
@@ -1685,6 +1702,9 @@ class SharedBridgeRuntimeService:
             }
 
         root_path = Path(root_text)
+        store_db_text = self._shared_bridge_db_path_text()
+        store_db_path = Path(store_db_text) if store_db_text else (root_path / "bridge.db")
+        bridge_db_label = "本地桥接状态库" if str(self._store_root or "").strip() and str(self._store_root).strip() != root_text else "共享桥接数据库"
         cache_paths = (
             self._source_cache_service.get_required_directory_paths()
             if self._source_cache_service is not None and hasattr(self._source_cache_service, "get_required_directory_paths")
@@ -1692,7 +1712,7 @@ class SharedBridgeRuntimeService:
         )
         path_specs = [
             ("root_dir", "共享根目录", root_path, "directory"),
-            ("bridge_db", "共享桥接数据库", root_path / "bridge.db", "file"),
+            ("bridge_db", bridge_db_label, store_db_path, "file"),
             ("artifacts", "任务产物目录", root_path / "artifacts", "directory"),
             ("logs", "桥接日志目录", root_path / "logs", "directory"),
             ("tmp", "桥接临时目录", root_path / "tmp", "directory"),

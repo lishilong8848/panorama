@@ -100,6 +100,20 @@ def normalize_review_access_state(raw: Any) -> Dict[str, Any]:
 
 
 def load_review_access_state(runtime_config: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        from app.core.app_state import AppStateRepository
+
+        cfg = runtime_config if isinstance(runtime_config, dict) else {}
+        state_runtime_config = cfg
+        if isinstance(cfg.get("_global_paths", {}), dict):
+            state_runtime_config = {"paths": dict(cfg.get("_global_paths", {}))}
+        repository = AppStateRepository(runtime_config=state_runtime_config, app_dir=get_app_dir())
+        repository.ensure_ready()
+        payload = repository.get_runtime_kv("handover_review_access", "manual_base_url")
+        if isinstance(payload, dict) and payload:
+            return normalize_review_access_state(payload)
+    except Exception:
+        pass
     path = resolve_review_access_state_path(runtime_config)
     if not path.exists():
         return review_access_state_template()

@@ -238,7 +238,15 @@ class HandoverXlsxWriteQueueService:
         empty_rounds = 0
         try:
             while True:
-                job = store.claim_next_xlsx_write_job()
+                try:
+                    job = store.claim_next_xlsx_write_job()
+                except Exception as exc:  # noqa: BLE001
+                    empty_rounds = 0
+                    self.emit_log(
+                        f"[交接班][xlsx队列] worker领取任务异常，稍后重试 building={building}, error={exc}"
+                    )
+                    time.sleep(1.0)
+                    continue
                 if not job:
                     empty_rounds += 1
                     if empty_rounds >= 6:
@@ -264,7 +272,23 @@ class HandoverXlsxWriteQueueService:
                         f"task_type={job.get('task_type', '-')}, error={error}"
                     )
                 finally:
-                    store.finish_xlsx_write_job(job_id=_text(job.get("job_id")), success=success, error=error)
+                    try:
+                        store.finish_xlsx_write_job(job_id=_text(job.get("job_id")), success=success, error=error)
+                    except Exception as exc:  # noqa: BLE001
+                        self.emit_log(
+                            f"[交接班][xlsx队列] 写回任务状态失败，已尝试恢复running任务 "
+                            f"building={building}, job_id={job.get('job_id', '-')}, error={exc}"
+                        )
+                        try:
+                            recovered = store.recover_xlsx_write_jobs_for_startup()
+                            if recovered:
+                                self.emit_log(
+                                    f"[交接班][xlsx队列] 已恢复running任务为pending building={building}, count={recovered}"
+                                )
+                        except Exception as recover_exc:  # noqa: BLE001
+                            self.emit_log(
+                                f"[交接班][xlsx队列] 恢复running任务失败 building={building}, error={recover_exc}"
+                            )
                     elapsed_ms = int((time.perf_counter() - started) * 1000)
                     self.emit_log(
                         f"[交接班][xlsx队列] 完成 building={building}, job_id={job.get('job_id', '-')}, "

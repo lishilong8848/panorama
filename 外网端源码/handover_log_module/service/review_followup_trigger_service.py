@@ -30,6 +30,17 @@ from handover_log_module.service.source_data_attachment_bitable_export_service i
     SourceDataAttachmentBitableExportService,
 )
 
+_STATION_H_LONG_DAY_ROLE_BY_NAME = {
+    "梅冰冰": "设施运维经理",
+    "马进宇": "设施运维副经理",
+    "曹李培": "综合管理",
+    "王庆华": "暖通主管",
+    "周海祥": "电气主管",
+    "曹毅": "弱电主管",
+    "明志勇": "安全&消防工程师",
+    "高荣": "消防主管",
+}
+
 
 def _normalize_export_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
@@ -1379,14 +1390,62 @@ class ReviewFollowupTriggerService:
 
     @staticmethod
     def _station_h_long_day_text(value: Any) -> str:
-        text = str(value or "").strip()
-        if not text:
+        names = ReviewFollowupTriggerService._station_h_split_people(value)
+        if not names:
             return "常白岗：/"
-        if "：" in text:
-            text = text.split("：", 1)[1].strip()
-        elif ":" in text:
-            text = text.split(":", 1)[1].strip()
-        return f"常白岗：{text or '/'}"
+        name_set = set(names)
+        filtered_names = [
+            name
+            for name in _STATION_H_LONG_DAY_ROLE_BY_NAME
+            if name in name_set
+        ]
+        return f"常白岗：{' '.join(filtered_names) if filtered_names else '/'}"
+
+    @staticmethod
+    def _station_h_fixed_cell_values(document: Dict[str, Any] | None) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        fixed_blocks = document.get("fixed_blocks", []) if isinstance(document, dict) else []
+        if not isinstance(fixed_blocks, list):
+            return values
+        for block in fixed_blocks:
+            if not isinstance(block, dict):
+                continue
+            fields = block.get("fields", [])
+            if not isinstance(fields, list):
+                continue
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                cell = str(field.get("cell", "") or "").strip().upper()
+                if cell:
+                    values[cell] = field.get("value", "")
+        return values
+
+    def _station_h_cabinet_values_from_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
+        source_cells = {"B12": "B13", "D12": "D13", "F12": "F13", "H12": "H13"}
+        try:
+            document, _synced_session = self._review_document_state_service.load_document(session)
+            fixed_values = self._station_h_fixed_cell_values(document)
+            if "B13" in fixed_values or "D13" in fixed_values:
+                return {
+                    target_cell: fixed_values.get(source_cell, "")
+                    for target_cell, source_cell in source_cells.items()
+                }
+        except Exception:
+            pass
+
+        output_file = Path(str(session.get("output_file", "") or "").strip())
+        if not output_file.exists():
+            raise FileNotFoundError("交接班日志未生成")
+        workbook = load_workbook_quietly(output_file, data_only=True)
+        try:
+            worksheet = workbook["交接班日志"] if "交接班日志" in workbook.sheetnames else workbook.active
+            return {
+                target_cell: worksheet[source_cell].value
+                for target_cell, source_cell in source_cells.items()
+            }
+        finally:
+            workbook.close()
 
     def _station_h_cabinet_totals(self, sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
         by_building = {
@@ -1395,23 +1454,19 @@ class ReviewFollowupTriggerService:
             if isinstance(session, dict)
         }
         totals = {"B12": 0.0, "D12": 0.0, "F12": 0.0, "H12": 0.0}
-        source_cells = {"B12": "B13", "D12": "D13", "F12": "F13", "H12": "H13"}
         missing_buildings: List[str] = []
         failed: List[str] = []
         for building in HandoverCloudSheetSyncService.MANAGED_BUILDINGS:
             session = by_building.get(building, {})
-            output_file = Path(str(session.get("output_file", "") or "").strip())
-            if not output_file.exists():
+            if not session:
                 missing_buildings.append(building)
                 continue
             try:
-                workbook = load_workbook_quietly(output_file, data_only=True)
-                try:
-                    worksheet = workbook["交接班日志"] if "交接班日志" in workbook.sheetnames else workbook.active
-                    for target_cell, source_cell in source_cells.items():
-                        totals[target_cell] += float(self._station_h_number(worksheet[source_cell].value))
-                finally:
-                    workbook.close()
+                values = self._station_h_cabinet_values_from_session(session)
+                for target_cell in totals:
+                    totals[target_cell] += float(self._station_h_number(values.get(target_cell, "")))
+            except FileNotFoundError:
+                missing_buildings.append(building)
             except Exception as exc:  # noqa: BLE001
                 failed.append(f"{building}: {exc}")
         if missing_buildings:

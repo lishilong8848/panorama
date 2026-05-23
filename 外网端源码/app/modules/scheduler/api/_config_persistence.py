@@ -121,6 +121,7 @@ def persist_scheduler_toggle(container: Any, *, path: Sequence[str], auto_start_
         patch = {"auto_start_in_gui": desired_auto_start}
         if desired_auto_start:
             patch["enabled"] = True
+        applied = False
         if _handover_common_scheduler_path(path):
             result = save_handover_common_scheduler_patch(
                 container,
@@ -133,8 +134,15 @@ def persist_scheduler_toggle(container: Any, *, path: Sequence[str], auto_start_
             merged = copy.deepcopy(container.config if isinstance(container.config, dict) else {})
             scheduler_cfg = _ensure_dict_path(merged, path)
             scheduler_cfg.update(patch)
-            saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+            saved = persist_full_config(
+                container,
+                merged,
+                source="调度开关",
+                mode="light",
+            )
+            applied = True
+        if not applied:
+            container.reload_config(saved)
         recorder = getattr(container, "record_external_scheduler_toggle", None)
         if callable(recorder):
             try:
@@ -149,6 +157,28 @@ def persist_scheduler_toggle(container: Any, *, path: Sequence[str], auto_start_
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def persist_full_config(
+    container: Any,
+    merged: Dict[str, Any],
+    *,
+    source: str = "配置保存",
+    mode: str = "light",
+    save_options: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    persister = getattr(container, "persist_config_snapshot", None)
+    if callable(persister):
+        return persister(
+            copy.deepcopy(merged if isinstance(merged, dict) else {}),
+            source=source,
+            mode=mode,
+            persist_json=True,
+            save_options=save_options or {},
+        )
+    saved = save_settings(merged, container.config_path, **(save_options or {}))
+    container.reload_config(saved)
+    return saved
 
 
 def record_scheduler_config_autostart(container: Any, *, path: Sequence[str], scheduler_cfg: Dict[str, Any]) -> None:

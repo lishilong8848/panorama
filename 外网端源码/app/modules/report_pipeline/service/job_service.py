@@ -1235,6 +1235,9 @@ class JobService:
                         if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
                             return
                     self._acquire_job_resources(job)
+                    with self._lock:
+                        if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                            return
                     control_port = self._allocate_worker_control_port()
                     command = self._build_worker_command(
                         job_dir=self._task_engine_store.resolve_job_dir(job.job_id),
@@ -1821,10 +1824,29 @@ class JobService:
                 unavailable.append(resource_key)
         return unavailable
 
+    def _mark_cancelled_before_run_locked(self, job: JobState, stage: StageState) -> None:
+        now_text = self._now_text()
+        job.status = "cancelled"
+        job.summary = "cancelled"
+        job.finished_at = now_text
+        job.wait_reason = ""
+        job.wait_started_monotonic = 0.0
+        stage.status = "cancelled"
+        stage.summary = "cancelled"
+        stage.finished_at = now_text
+        self._persist_job_snapshot(job)
+
     def _acquire_job_resources(self, job: JobState) -> None:
         stage = self._get_primary_stage(job)
+        if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+            with self._lock:
+                self._mark_cancelled_before_run_locked(job, stage)
+            return
         if not job.resource_keys:
             with self._lock:
+                if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                    self._mark_cancelled_before_run_locked(job, stage)
+                    return
                 job.status = "running"
                 job.started_at = self._now_text()
                 stage.status = "running"
@@ -1838,6 +1860,10 @@ class JobService:
         wait_started_at = datetime.now()
         while True:
             with self._condition:
+                if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                    self._mark_cancelled_before_run_locked(job, stage)
+                    self._condition.notify_all()
+                    return
                 unavailable = self._resource_unavailable_keys(job)
                 if not unavailable:
                     for resource_key in job.resource_keys:
@@ -2208,6 +2234,9 @@ class JobService:
             stage = self._get_primary_stage(job)
             try:
                 self._acquire_job_resources(job)
+                with self._lock:
+                    if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                        return
                 with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
                     result = run_func(lambda line: self.log(job.job_id, line))
                 with self._lock:
@@ -2674,6 +2703,7 @@ class JobService:
                     payload={"reason": "user_requested", "timestamp": now_text},
                 )
                 job.done_event.set()
+                self._condition.notify_all()
                 result = job.to_dict()
                 self._persist_resource_snapshot()
                 return result

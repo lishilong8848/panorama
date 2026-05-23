@@ -120,6 +120,11 @@ def load_handover_config(config: Dict[str, Any] | None = None) -> Dict[str, Any]
     global_feishu = resolve_feishu_auth_settings(runtime_cfg)
     global_paths = runtime_cfg.get("paths", {}) if isinstance(runtime_cfg.get("paths", {}), dict) else {}
     global_shared_bridge = runtime_cfg.get("shared_bridge", {}) if isinstance(runtime_cfg.get("shared_bridge", {}), dict) else {}
+    global_internal_bridge_http = (
+        runtime_cfg.get("internal_bridge_http", {})
+        if isinstance(runtime_cfg.get("internal_bridge_http", {}), dict)
+        else {}
+    )
     if not base_cfg.get("sites") and isinstance(global_download.get("sites"), list):
         base_cfg["sites"] = copy.deepcopy(global_download["sites"])
     base_cfg["_global_download"] = copy.deepcopy(global_download)
@@ -127,6 +132,7 @@ def load_handover_config(config: Dict[str, Any] | None = None) -> Dict[str, Any]
     base_cfg["_global_feishu"] = copy.deepcopy(global_feishu)
     base_cfg["_global_paths"] = copy.deepcopy(global_paths)
     base_cfg["_shared_bridge"] = copy.deepcopy(global_shared_bridge)
+    base_cfg["_internal_bridge_http"] = copy.deepcopy(global_internal_bridge_http)
     base_cfg["_deployment_role_mode"] = _normalize_role_mode(
         (runtime_cfg.get("deployment", {}) if isinstance(runtime_cfg.get("deployment", {}), dict) else {}).get("role_mode", "")
     )

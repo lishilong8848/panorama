@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.core.app_state import AppStateRepository
 from app.config.handover_segment_store import (
     HANDOVER_SEGMENT_BUILDINGS,
     building_code_from_name,
@@ -22,6 +23,7 @@ from handover_log_module.service.review_access_snapshot_service import (
     normalize_review_base_url,
 )
 from handover_log_module.service.review_session_service import ReviewSessionService
+from pipeline_utils import get_app_dir
 
 
 STATION_110_BUILDING = "110站"
@@ -107,11 +109,30 @@ def _normalize_delivery_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
 class ReviewLinkDeliveryService:
     _station_110_delivery_lock = threading.RLock()
 
-    def __init__(self, runtime_config: Dict[str, Any], *, config_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        runtime_config: Dict[str, Any],
+        *,
+        config_path: str | Path | None = None,
+        app_state_repository: AppStateRepository | None = None,
+    ) -> None:
         self.runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
         self.config_path = Path(config_path) if config_path else None
         self.handover_cfg = _resolve_handover_config(self.runtime_config)
         self._review_service = ReviewSessionService(self.handover_cfg)
+        self._app_state_repository = app_state_repository or self._build_app_state_repository()
+
+    def _build_app_state_repository(self) -> AppStateRepository | None:
+        try:
+            app_dir = self.config_path.parent if self.config_path else get_app_dir()
+            repository = AppStateRepository(runtime_config=self.runtime_config, app_dir=app_dir)
+            repository.ensure_ready()
+            return repository
+        except Exception:
+            return None
+
+    def configure_app_state_repository(self, repository: AppStateRepository | None) -> None:
+        self._app_state_repository = repository
 
     def _review_cfg(self) -> Dict[str, Any]:
         review_ui = self.handover_cfg.get("review_ui", {})
@@ -852,13 +873,41 @@ class ReviewLinkDeliveryService:
         return root / "station_110_review_link_delivery.json"
 
     def _load_station_110_delivery_state(self) -> Dict[str, Any]:
+        repository = self._app_state_repository
+        if repository is not None:
+            try:
+                payload = repository.get_runtime_kv("handover_review_link_delivery", "station_110")
+                if isinstance(payload, dict) and payload:
+                    return payload
+            except Exception:
+                pass
         path = self._station_110_delivery_state_path()
         payload = load_cached_json(path, {}, encoding="utf-8-sig")
-        return payload if isinstance(payload, dict) else {}
+        state = payload if isinstance(payload, dict) else {}
+        if state and repository is not None:
+            try:
+                repository.put_runtime_kv("handover_review_link_delivery", "station_110", state)
+                bak_path = path.with_suffix(path.suffix + ".bak")
+                if not bak_path.exists():
+                    try:
+                        bak_path.write_text(path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return state
 
     def _save_station_110_delivery_state(self, payload: Dict[str, Any]) -> None:
+        normalized = payload if isinstance(payload, dict) else {}
+        repository = self._app_state_repository
+        if repository is not None:
+            try:
+                repository.put_runtime_kv("handover_review_link_delivery", "station_110", normalized)
+                return
+            except Exception:
+                pass
         path = self._station_110_delivery_state_path()
-        save_cached_json(path, payload if isinstance(payload, dict) else {}, indent=2, encoding="utf-8")
+        save_cached_json(path, normalized, indent=2, encoding="utf-8")
 
     @staticmethod
     def _station_110_delivery_key(duty_date: str, duty_shift: str) -> str:

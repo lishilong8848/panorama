@@ -14,6 +14,7 @@ RUNTIME_DEPENDENCY_SPECS: List[Dict[str, str]] = [
     {"package": "pymysql", "import_name": "pymysql"},
     {"package": "playwright", "import_name": "playwright"},
     {"package": "python-multipart", "import_name": "multipart"},
+    {"package": "APScheduler", "import_name": "apscheduler"},
 ]
 
 
@@ -59,4 +60,3 @@ def build_runtime_dependency_lock(
         "generated_at": str(generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")).strip(),
         "packages": packages,
     }
-

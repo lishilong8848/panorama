@@ -39,9 +39,10 @@ export function buildSharedBridgeSelfCheckOverview(raw, healthSharedBridge = {},
     roleMode === "internal" ? "采集端" : roleMode === "external" ? "外网端" : "当前角色",
   );
   const rootDirText = normalizeText(payload.root_dir || healthSharedBridge.root_dir, "未配置");
+  const httpBridgeBaseUrl = normalizeText(payload.http_bridge_base_url || healthSharedBridge.http_bridge_base_url);
   const dbPathText = normalizeText(
-    payload.db_path,
-    rootDirText && rootDirText !== "未配置" ? `${rootDirText}\\bridge.db` : "未配置",
+    httpBridgeBaseUrl,
+    rootDirText && rootDirText !== "未配置" ? "HTTP source-index" : "未配置",
   );
   const checkedAtText = normalizeText(payload.checked_at);
   const errorText = normalizeText(payload.error);
@@ -62,7 +63,7 @@ export function buildSharedBridgeSelfCheckOverview(raw, healthSharedBridge = {},
     if (rootDirText === "未配置") {
       summaryText = "请先在配置中心填写当前角色对应的共享目录。";
     } else {
-      summaryText = "按钮会补齐共享桥接、源文件缓存和临时目录，并检查当前角色能否真实看到 ready 文件。";
+      summaryText = "按钮会检查内网端 HTTP 桥接、source-index 和共享源文件索引，不扫描共享目录。";
     }
   }
   return {
@@ -73,6 +74,7 @@ export function buildSharedBridgeSelfCheckOverview(raw, healthSharedBridge = {},
     roleLabel,
     rootDirText,
     dbPathText,
+    httpBridgeBaseUrl,
     checkedAtText,
     errorText,
     readyEntryCount,

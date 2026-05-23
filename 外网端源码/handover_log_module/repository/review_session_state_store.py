@@ -1285,6 +1285,10 @@ class ReviewSessionStateStore:
                 "SELECT * FROM review_shared_blocks WHERE block_key = ?",
                 (block_key,),
             ).fetchone()
+            conn.execute(
+                "DELETE FROM review_shared_block_locks WHERE lock_key = ? AND holder_client_id = ?",
+                (block_key, normalized_client_id),
+            )
             lock_row = conn.execute(
                 """
                 SELECT *

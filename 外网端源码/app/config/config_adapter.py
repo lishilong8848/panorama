@@ -610,6 +610,10 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     deployment["role_mode"] = normalize_role_mode(deployment.get("role_mode"))
     deployment["last_started_role_mode"] = normalize_role_mode(deployment.get("last_started_role_mode"))
     shared_bridge = _resolve_shared_bridge_paths(common, deployment)
+    internal_bridge_http = deep_merge_defaults(
+        _dict(common.get("internal_bridge_http")),
+        _dict(DEFAULT_CONFIG_V3["common"].get("internal_bridge_http")),
+    )
     internal_source_cache = deep_merge_defaults(
         _dict(common.get("internal_source_cache")),
         _dict(DEFAULT_CONFIG_V3["common"].get("internal_source_cache")),
@@ -706,6 +710,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "download": runtime_download,
         "deployment": copy.deepcopy(deployment),
         "shared_bridge": copy.deepcopy(shared_bridge),
+        "internal_bridge_http": copy.deepcopy(internal_bridge_http),
         "internal_source_cache": copy.deepcopy(internal_source_cache),
         "internal_source_sites": copy.deepcopy(internal_source_sites),
         "network": {
@@ -798,6 +803,10 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
     shared_bridge["internal_root_dir"] = internal_root
     shared_bridge["external_root_dir"] = external_root
     common["shared_bridge"] = resolve_shared_bridge_paths(shared_bridge, deployment.get("role_mode"))
+    common["internal_bridge_http"] = deep_merge_defaults(
+        _dict(runtime.get("internal_bridge_http")),
+        _dict(common.get("internal_bridge_http")),
+    )
     common["internal_source_cache"] = deep_merge_defaults(
         _dict(runtime.get("internal_source_cache")),
         _dict(common.get("internal_source_cache")),

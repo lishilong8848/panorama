@@ -5,8 +5,8 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
+    persist_full_config,
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
 )
@@ -123,8 +123,7 @@ def chiller_mode_upload_scheduler_config(payload: Dict[str, Any], request: Reque
             scheduler_cfg[key] = text
 
     try:
-        saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+        saved = persist_full_config(container, merged, source="制冷模式参数上传调度配置保存", mode="light")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -142,4 +141,3 @@ def chiller_mode_upload_scheduler_config(payload: Dict[str, Any], request: Reque
         }
     )
     return data
-

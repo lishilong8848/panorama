@@ -414,6 +414,29 @@ class RuntimeStatusCoordinator:
             if isinstance(shared_bridge_snapshot, dict)
             else self._safe_shared_bridge_snapshot(mode=shared_bridge_mode)
         )
+        app_state_health: Dict[str, Any] = {}
+        try:
+            health_getter = getattr(self._container, "app_state_health_snapshot", None)
+            if callable(health_getter):
+                app_state_health = health_getter()
+        except Exception as exc:  # noqa: BLE001
+            app_state_health = {
+                "ready": False,
+                "reason": "app_state_health_failed",
+                "error": str(exc),
+            }
+        scheduler_engine: Dict[str, Any] = {}
+        try:
+            scheduler_getter = getattr(self._container, "scheduler_engine_snapshot", None)
+            if callable(scheduler_getter):
+                scheduler_engine = scheduler_getter()
+        except Exception as exc:  # noqa: BLE001
+            scheduler_engine = {
+                "engine": "APScheduler",
+                "ready": False,
+                "reason": "scheduler_engine_health_failed",
+                "error": str(exc),
+            }
         return {
             "ok": True,
             "health_mode": "lite",
@@ -431,6 +454,8 @@ class RuntimeStatusCoordinator:
             "activation_error": str(app_state.get("activation_error", "") or "").strip(),
             "startup_role_confirmed": bool(app_state.get("startup_role_confirmed", False)),
             "started_at": str(app_state.get("started_at", "") or "").strip(),
+            "app_state": app_state_health if isinstance(app_state_health, dict) else {},
+            "scheduler_engine": scheduler_engine if isinstance(scheduler_engine, dict) else {},
         }
 
     def _safe_shared_bridge_snapshot(self, *, mode: str) -> Dict[str, Any]:

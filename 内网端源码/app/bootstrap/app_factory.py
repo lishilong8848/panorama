@@ -28,6 +28,7 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
     start_waiting_bridge_job,
 )
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
+from app.modules.internal_bridge_http.api.routes import router as internal_bridge_http_router
 from app.modules.shared_bridge.service.runtime_status_coordinator import RuntimeStatusCoordinator
 from app.modules.user.api.routes import router as user_router
 from app.modules.websocket.api.log_stream_routes import router as logs_router
@@ -74,6 +75,7 @@ _ROLE_SELECTION_ALLOWED_PREFIXES = (
     "/assets/",
     "/assets-src/",
     "/api/bridge/internal-runtime-status/buildings/",
+    "/api/internal-bridge/",
 )
 
 
@@ -171,6 +173,7 @@ def _register_common_routes(app: FastAPI) -> None:
     app.include_router(pipeline_router)
     app.include_router(logs_router)
     app.include_router(shared_bridge_router)
+    app.include_router(internal_bridge_http_router)
     app.include_router(user_router)
 
 

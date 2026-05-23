@@ -297,16 +297,25 @@ def _review_bootstrap_cache_put(
         }
 
 
-def _review_history_cache_key(*, building: str, selected_session_id: str) -> str:
-    return f"{str(building or '').strip()}|{str(selected_session_id or '').strip()}"
+def _review_history_cache_key(*, building: str, selected_session_id: str, history_date: str = "") -> str:
+    return (
+        f"{str(building or '').strip()}|"
+        f"{str(selected_session_id or '').strip()}|"
+        f"{str(history_date or '').strip()}"
+    )
 
 
 def _review_history_cache_get(
     *,
     building: str,
     selected_session_id: str,
+    history_date: str = "",
 ) -> Dict[str, Any] | None:
-    key = _review_history_cache_key(building=building, selected_session_id=selected_session_id)
+    key = _review_history_cache_key(
+        building=building,
+        selected_session_id=selected_session_id,
+        history_date=history_date,
+    )
     with _REVIEW_DOCUMENT_CACHE_GUARD:
         cached = _REVIEW_HISTORY_CACHE.get(key)
         if not isinstance(cached, dict):
@@ -323,9 +332,14 @@ def _review_history_cache_put(
     *,
     building: str,
     selected_session_id: str,
+    history_date: str = "",
     payload: Dict[str, Any],
 ) -> None:
-    key = _review_history_cache_key(building=building, selected_session_id=selected_session_id)
+    key = _review_history_cache_key(
+        building=building,
+        selected_session_id=selected_session_id,
+        history_date=history_date,
+    )
     with _REVIEW_DOCUMENT_CACHE_GUARD:
         _REVIEW_HISTORY_CACHE[key] = {
             "payload": copy.deepcopy(payload if isinstance(payload, dict) else {}),
@@ -1103,8 +1117,7 @@ def _start_handover_followup_job_after_confirm(
         resource_keys=_handover_resource_keys(
             "network:external",
             f"handover_followup:{target_batch}",
-            batch_key=target_batch,
-            building=target_building,
+            f"handover_cloud_batch:{target_batch}",
         ),
         priority="manual",
         feature="handover_followup_continue",
@@ -1745,6 +1758,83 @@ def _queue_capacity_overlay_after_review_save(
     return updated_session, True
 
 
+def _sync_outdoor_temperature_to_batch_documents_async(
+    container,
+    *,
+    batch_key: str,
+    source_building: str,
+    source_session_id: str,
+    cells: Dict[str, Any],
+) -> None:
+    target_batch = str(batch_key or "").strip()
+    source_building_text = str(source_building or "").strip()
+    source_session_text = str(source_session_id or "").strip()
+    if not target_batch:
+        return
+    started = time.perf_counter()
+    try:
+        service = _build_review_session_service(container)
+        document_state = _build_review_document_state_service(container)
+        queue_service = _build_xlsx_write_queue_service(
+            container,
+            review_service=service,
+            document_state=document_state,
+        )
+        result = service.sync_outdoor_temperature_to_batch_documents(
+            batch_key=target_batch,
+            cells=copy.deepcopy(cells if isinstance(cells, dict) else {}),
+            source_session_id=source_session_text,
+        )
+        updated_sessions = (
+            result.get("updated_sessions", [])
+            if isinstance(result.get("updated_sessions", []), list)
+            else []
+        )
+        _review_history_cache_invalidate_sessions(updated_sessions)
+        queued_count = 0
+        for outdoor_session in updated_sessions:
+            if not isinstance(outdoor_session, dict):
+                continue
+            outdoor_building = str(outdoor_session.get("building", "") or "").strip()
+            outdoor_session_id = str(outdoor_session.get("session_id", "") or "").strip()
+            if not outdoor_building or not outdoor_session_id:
+                continue
+            try:
+                patched_state = ReviewBuildingDocumentStore(
+                    config=_handover_cfg(container),
+                    building=outdoor_building,
+                ).get_document(outdoor_session_id)
+                patched_revision = (
+                    int(patched_state.get("revision", 0) or 0)
+                    if isinstance(patched_state, dict)
+                    else int(outdoor_session.get("revision", 0) or 0)
+                )
+                queue_service.enqueue_review_excel_sync(
+                    session=outdoor_session,
+                    target_revision=patched_revision,
+                )
+                queue_service.enqueue_capacity_overlay_sync(outdoor_session)
+                queued_count += 1
+            except Exception as exc:  # noqa: BLE001
+                container.add_system_log(
+                    f"[交接班][室外温湿度共享] 其他楼后台同步排队失败: "
+                    f"building={outdoor_building}, session_id={outdoor_session_id}, error={exc}"
+                )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        container.add_system_log(
+            f"[交接班][室外温湿度共享] 后台同步完成: batch={target_batch}, "
+            f"source={source_building_text or '-'}, updated={int(result.get('updated_count', 0) or 0)}, "
+            f"queued={queued_count}, elapsed_ms={elapsed_ms}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        container.add_system_log(
+            f"[交接班][室外温湿度共享] 后台同步失败: batch={target_batch}, "
+            f"source={source_building_text or '-'}, session_id={source_session_text or '-'}, "
+            f"elapsed_ms={elapsed_ms}, error={exc}"
+        )
+
+
 def _normalized_review_defaults_snapshot(
     *,
     footer_service: FooterInventoryDefaultsService,
@@ -2126,6 +2216,7 @@ def _empty_history_payload(
     *,
     latest_session_id: str = "",
     selected_session_id: str = "",
+    history_date: str = "",
     error: str = "",
 ) -> Dict[str, Any]:
     latest_session_id_text = str(latest_session_id or "").strip()
@@ -2142,22 +2233,37 @@ def _empty_history_payload(
         "selected_history_excluded_reason": "",
         "history_limit": HISTORY_CLOUD_SUCCESS_LIMIT,
         "history_rule": HISTORY_CLOUD_SUCCESS_RULE,
+        "history_date": str(history_date or "").strip(),
         "sessions": [],
         "degraded": bool(str(error or "").strip()),
         "error": str(error or "").strip(),
     }
 
 
-def _build_history_payload(service: ReviewSessionService, *, building: str, selected_session_id: str) -> Dict[str, Any]:
+def _build_history_payload(
+    service: ReviewSessionService,
+    *,
+    building: str,
+    selected_session_id: str,
+    history_date: str = "",
+) -> Dict[str, Any]:
     latest_getter = getattr(service, "get_latest_session_id_fast", None)
     if not callable(latest_getter):
         latest_getter = getattr(service, "get_latest_session_id", None)
     latest_session_id = str(latest_getter(building) if callable(latest_getter) else "").strip()
+    history_date_text = str(history_date or "").strip()
     history_getter = getattr(service, "list_building_generated_file_history_sessions_fast", None)
     if not callable(history_getter):
         history_getter = getattr(service, "list_building_generated_file_history_sessions", None)
     if callable(history_getter):
-        sessions = history_getter(building, limit=HISTORY_CLOUD_SUCCESS_LIMIT)
+        try:
+            sessions = history_getter(
+                building,
+                limit=HISTORY_CLOUD_SUCCESS_LIMIT,
+                duty_date=history_date_text,
+            )
+        except TypeError:
+            sessions = history_getter(building, limit=HISTORY_CLOUD_SUCCESS_LIMIT)
     else:
         sessions = service.list_building_cloud_history_sessions(building, limit=HISTORY_CLOUD_SUCCESS_LIMIT)
     selected_session_id_text = str(selected_session_id or "").strip()
@@ -2214,6 +2320,7 @@ def _build_history_payload(service: ReviewSessionService, *, building: str, sele
         "selected_history_excluded_reason": selected_history_excluded_reason,
         "history_limit": HISTORY_CLOUD_SUCCESS_LIMIT,
         "history_rule": HISTORY_CLOUD_SUCCESS_RULE,
+        "history_date": history_date_text,
         "sessions": history_sessions,
     }
 
@@ -2223,11 +2330,13 @@ def _build_history_payload_safe(
     *,
     building: str,
     selected_session_id: str,
+    history_date: str = "",
     emit_log=None,
 ) -> Dict[str, Any]:
     cached = _review_history_cache_get(
         building=building,
         selected_session_id=selected_session_id,
+        history_date=history_date,
     )
     if isinstance(cached, dict) and cached:
         return cached
@@ -2236,10 +2345,12 @@ def _build_history_payload_safe(
             service,
             building=building,
             selected_session_id=selected_session_id,
+            history_date=history_date,
         )
         _review_history_cache_put(
             building=building,
             selected_session_id=selected_session_id,
+            history_date=history_date,
             payload=payload,
         )
         return payload
@@ -2259,6 +2370,7 @@ def _build_history_payload_safe(
         return _empty_history_payload(
             latest_session_id=latest_session_id,
             selected_session_id=selected_session_id,
+            history_date=history_date,
             error="history_unavailable",
         )
 
@@ -2835,14 +2947,12 @@ def _build_review_display_state(
                 "tone": "danger",
             }
         )
-    save_allowed = bool(session_payload) and not remote_editor_active and not cloud_sheet_uploading
+    save_allowed = bool(session_payload) and not remote_editor_active
     save_disabled_reason = ""
     if not session_payload:
         save_disabled_reason = "暂无可保存的交接班记录"
     elif remote_editor_active:
         save_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
-    elif cloud_sheet_uploading:
-        save_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再保存修改"
     cloud_status = str(cloud_sheet_state.get("status", "")).strip().lower()
     cloud_reason_code = str(cloud_sheet_state.get("reason_code", "")).strip().lower()
     confirmed_cloud_retry_allowed = bool(confirmed) and (
@@ -3972,6 +4082,70 @@ def handover_review_data(
     )
 
 
+@router.get("/api/handover/review/{building_code}/snapshot")
+@_dedicated_review_endpoint
+def handover_review_snapshot(
+    building_code: str,
+    request: Request,
+    duty_date: str = "",
+    duty_shift: str = "",
+    session_id: str = "",
+    history_date: str = "",
+    client_id: str = "",
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
+    service, parser, _, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+    review_ui = _review_ui_payload(parser)
+    session, pending_payload = _load_review_session_or_pending(
+        service,
+        building=building,
+        duty_date=duty_date,
+        duty_shift=duty_shift,
+        session_id=session_id,
+        config=handover_cfg,
+        review_ui=review_ui,
+        emit_log=container.add_system_log,
+    )
+    if pending_payload is not None:
+        pending_payload["snapshot_mode"] = "sqlite_session"
+        pending_payload["document_omitted"] = True
+        return pending_payload
+    try:
+        batch_status = service.get_batch_status(session["batch_key"])
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    selected_session_id = str(session.get("session_id", "") or "").strip()
+    history_payload = _build_history_payload_safe(
+        service,
+        building=building,
+        selected_session_id=selected_session_id,
+        history_date=history_date,
+        emit_log=container.add_system_log,
+    )
+    response = {
+        "ok": True,
+        "building": building,
+        "session": session,
+        "document": {},
+        "document_omitted": True,
+        "snapshot_mode": "sqlite_session",
+        "batch_status": batch_status,
+        "concurrency": _empty_concurrency(),
+        "review_ui": review_ui,
+        "history": history_payload,
+    }
+    return _attach_review_display_state(
+        response,
+        service=service,
+        building=building,
+        client_id=str(client_id or "").strip(),
+        emit_log=container.add_system_log,
+        include_concurrency=False,
+    )
+
+
 @router.get("/api/handover/review/{building_code}/bootstrap")
 @_dedicated_review_endpoint
 def handover_review_bootstrap(
@@ -4171,6 +4345,7 @@ def handover_review_history(
     duty_date: str = "",
     duty_shift: str = "",
     session_id: str = "",
+    history_date: str = "",
     force: str = "",
 ) -> Dict[str, Any]:
     container = request.app.state.container
@@ -4194,10 +4369,12 @@ def handover_review_history(
             service,
             building=building,
             selected_session_id=selected_session_id,
+            history_date=history_date,
         )
         _review_history_cache_put(
             building=building,
             selected_session_id=selected_session_id,
+            history_date=history_date,
             payload=history_payload,
         )
     else:
@@ -4205,6 +4382,7 @@ def handover_review_history(
             service,
             building=building,
             selected_session_id=selected_session_id,
+            history_date=history_date,
             emit_log=container.add_system_log,
         )
     return {
@@ -4684,9 +4862,6 @@ def handover_review_save(
     if not isinstance(document, dict):
         raise HTTPException(status_code=400, detail="document 格式错误")
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
-    target_cloud_state = ReviewSessionService._normalize_cloud_sheet_sync(target.get("cloud_sheet_sync", {}))
-    if str(target_cloud_state.get("status", "")).strip().lower() in {"uploading", "syncing"}:
-        raise HTTPException(status_code=409, detail="当前楼栋云文档上传中，请等待上传完成后再保存修改")
     try:
         session_base_revision = int(payload.get("session_base_revision") or target.get("revision", 0) or base_revision or 0)
     except (TypeError, ValueError) as exc:
@@ -4761,8 +4936,8 @@ def handover_review_save(
     saved_document_revision = int(base_revision or 0)
     auto_cloud_sync_result: Dict[str, Any] = {}
     with container.job_service.resource_guard(
-        name=f"handover_save:{batch_key or building}:{session_id}",
-        resource_keys=_handover_resource_keys(building=building, batch_key=batch_key),
+        name=f"handover_save:{building}:{session_id}",
+        resource_keys=_handover_resource_keys(building=building),
     ):
         write_started = time.perf_counter()
         previous_document_state: Dict[str, Any] | None = None
@@ -4831,25 +5006,27 @@ def handover_review_save(
                     client_id=str(payload.get("client_id", "")).strip(),
                     cells=outdoor_shared_publish_cells,
                 )
-                outdoor_batch_sync_result = service.sync_outdoor_temperature_to_batch_documents(
+                outdoor_batch_sync_result = {
+                    "status": "queued",
+                    "updated_count": 0,
+                    "shared_revision": shared_save.get("shared_blocks", {})
+                    .get("outdoor_temperature", {})
+                    .get("revision", ""),
+                }
+                background_tasks.add_task(
+                    _sync_outdoor_temperature_to_batch_documents_async,
+                    container,
                     batch_key=batch_key,
-                    cells=outdoor_shared_publish_cells,
+                    source_building=building,
                     source_session_id=session_id,
-                )
-                if isinstance(outdoor_batch_sync_result.get("batch_status", {}), dict):
-                    batch_status = outdoor_batch_sync_result.get("batch_status", batch_status)
-                _review_history_cache_invalidate_sessions(
-                    outdoor_batch_sync_result.get("updated_sessions", [])
-                    if isinstance(outdoor_batch_sync_result.get("updated_sessions", []), list)
-                    else []
+                    cells=copy.deepcopy(outdoor_shared_publish_cells),
                 )
                 container.add_system_log(
-                    f"[交接班][室外温湿度共享] 已同步五楼共享温湿度: "
+                    f"[交接班][室外温湿度共享] 当前楼保存完成，其他楼同步已排队: "
                     f"building={building}, session_id={session_id}, "
                     f"B7={outdoor_shared_publish_cells.get('B7', '') or '-'}, "
                     f"D7={outdoor_shared_publish_cells.get('D7', '') or '-'}, "
-                    f"shared_revision={shared_save.get('shared_blocks', {}).get('outdoor_temperature', {}).get('revision', '-')}, "
-                    f"其他楼更新={int(outdoor_batch_sync_result.get('updated_count', 0) or 0)}"
+                    f"shared_revision={outdoor_batch_sync_result.get('shared_revision', '-')}"
                 )
             except ReviewSessionStoreUnavailableError as exc:
                 _raise_review_store_http_error(exc, saved_document=True)
@@ -5105,6 +5282,57 @@ def handover_review_save(
                 )
             ),
         },
+        "document_save": {
+            "status": "saved",
+            "state_text": "审核内容已保存",
+            "revision": saved_document_revision,
+            "elapsed_ms": int(write_elapsed_ms or 0),
+        },
+        "excel_sync": (
+            copy.deepcopy(session.get("excel_sync", {}))
+            if isinstance(session.get("excel_sync", {}), dict)
+            else {
+                "status": "queued" if queued_excel_sync else "skipped",
+                "error": "",
+            }
+        ),
+        "capacity_sync": (
+            copy.deepcopy(session.get("capacity_sync", {}))
+            if isinstance(session.get("capacity_sync", {}), dict)
+            else {
+                "status": "queued" if queued_capacity_sync else "skipped",
+                "error": "",
+            }
+        ),
+        "shared_blocks": {
+            "substation_110kv": {
+                "status": "unchanged",
+                "state_text": "110KV变电站未随本接口修改",
+                "error": "",
+            },
+            "outdoor_temperature": {
+                "status": (
+                    str(outdoor_batch_sync_result.get("status", "") or "queued")
+                    if outdoor_shared_publish_cells is not None and isinstance(outdoor_batch_sync_result, dict)
+                    else "unchanged"
+                ),
+                "state_text": (
+                    "室外温湿度已保存，其他楼后台同步中"
+                    if outdoor_shared_publish_cells is not None
+                    else "室外温湿度未变化"
+                ),
+                "error": (
+                    str(outdoor_batch_sync_result.get("error", "") or "")
+                    if isinstance(outdoor_batch_sync_result, dict)
+                    else ""
+                ),
+            },
+        },
+        "cloud_sync": (
+            copy.deepcopy(auto_cloud_sync_result.get("cloud_sheet_sync", {}))
+            if isinstance(auto_cloud_sync_result.get("cloud_sheet_sync", {}), dict)
+            else {"status": "idle", "error": ""}
+        ),
         "concurrency": _self_held_concurrency(
             lock_concurrency,
             current_revision=int(session.get("revision", 0) or 0),
@@ -5170,8 +5398,8 @@ def handover_review_confirm(
     _ensure_cloud_sheet_not_uploading_or_409(target_session, action="操作确认状态")
     target_batch_key = str(target_session.get("batch_key", "")).strip()
     with container.job_service.resource_guard(
-        name=f"handover_confirm:{target_batch_key}:{building}",
-        resource_keys=_handover_resource_keys(batch_key=target_batch_key),
+        name=f"handover_confirm_local:{building}:{session_id}",
+        resource_keys=_handover_resource_keys(building=building),
     ):
         try:
             parser = ReviewDocumentParser(_handover_cfg(container))

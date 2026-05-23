@@ -88,6 +88,28 @@ class AppStateRepository:
             CREATE INDEX IF NOT EXISTS idx_config_snapshots_created_at
                 ON config_snapshots(created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS runtime_kv (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(namespace, key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_runtime_kv_updated
+                ON runtime_kv(namespace, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS config_write_queue (
+                queue_id TEXT PRIMARY KEY,
+                patch_json TEXT NOT NULL DEFAULT '{}',
+                source TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'queued',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_config_write_queue_status
+                ON config_write_queue(status, created_at DESC);
+
             CREATE TABLE IF NOT EXISTS scheduler_jobs (
                 scheduler_key TEXT PRIMARY KEY,
                 feature TEXT NOT NULL DEFAULT '',
@@ -186,7 +208,7 @@ class AppStateRepository:
         conn.execute(
             """
             INSERT OR REPLACE INTO app_meta(key, value, updated_at)
-            VALUES('schema_version', '1', ?)
+            VALUES('schema_version', '2', ?)
             """,
             (now,),
         )
@@ -202,6 +224,86 @@ class AppStateRepository:
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (snapshot_id, source, config_path, _json_dumps(payload), now),
+            )
+
+    def put_runtime_kv(self, namespace: str, key: str, payload: Dict[str, Any]) -> None:
+        self.ensure_ready()
+        namespace_text = str(namespace or "").strip()
+        key_text = str(key or "").strip()
+        if not namespace_text or not key_text:
+            return
+        now = _now_text()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_kv(namespace, key, payload_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(namespace, key) DO UPDATE SET
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+                """,
+                (namespace_text, key_text, _json_dumps(payload if isinstance(payload, dict) else {}), now),
+            )
+
+    def get_runtime_kv(self, namespace: str, key: str) -> Dict[str, Any] | None:
+        self.ensure_ready()
+        namespace_text = str(namespace or "").strip()
+        key_text = str(key or "").strip()
+        if not namespace_text or not key_text:
+            return None
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM runtime_kv
+                WHERE namespace=? AND key=?
+                """,
+                (namespace_text, key_text),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def enqueue_config_write(self, *, queue_id: str, patch: Dict[str, Any], source: str) -> None:
+        self.ensure_ready()
+        queue_id_text = str(queue_id or "").strip()
+        if not queue_id_text:
+            return
+        now = _now_text()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO config_write_queue(
+                    queue_id, patch_json, source, status, error, created_at, finished_at
+                ) VALUES (?, ?, ?, 'queued', '', ?, '')
+                """,
+                (
+                    queue_id_text,
+                    _json_dumps(patch if isinstance(patch, dict) else {}),
+                    str(source or "").strip(),
+                    now,
+                ),
+            )
+
+    def finish_config_write(self, *, queue_id: str, status: str, error: str = "") -> None:
+        self.ensure_ready()
+        queue_id_text = str(queue_id or "").strip()
+        if not queue_id_text:
+            return
+        normalized_status = str(status or "").strip().lower() or "finished"
+        now = _now_text()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE config_write_queue
+                SET status=?, error=?, finished_at=?
+                WHERE queue_id=?
+                """,
+                (normalized_status, str(error or "").strip(), now, queue_id_text),
             )
 
     def upsert_scheduler_job(self, scheduler_key: str, payload: Dict[str, Any]) -> None:
@@ -346,6 +448,7 @@ class AppStateRepository:
         self,
         *,
         building: str,
+        duty_date: str = "",
         days: int = 3,
         limit: int = 6,
     ) -> list[Dict[str, Any]]:
@@ -354,22 +457,37 @@ class AppStateRepository:
         if not building_name:
             return []
         safe_limit = max(1, int(limit or 6))
-        safe_days = max(1, int(days or 3))
-        cutoff = (datetime.now() - timedelta(days=safe_days - 1)).strftime("%Y-%m-%d")
+        duty_date_text = str(duty_date or "").strip()
         with self.connect(read_only=True) as conn:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM generated_files
-                WHERE feature='handover_log'
-                  AND building=?
-                  AND duty_date>=?
-                ORDER BY duty_date DESC,
-                    CASE duty_shift WHEN 'night' THEN 2 ELSE 1 END DESC,
-                    updated_at DESC
-                """,
-                (building_name, cutoff),
-            ).fetchall()
+            if duty_date_text:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM generated_files
+                    WHERE feature='handover_log'
+                      AND building=?
+                      AND duty_date=?
+                    ORDER BY CASE duty_shift WHEN 'night' THEN 2 ELSE 1 END DESC,
+                        updated_at DESC
+                    """,
+                    (building_name, duty_date_text),
+                ).fetchall()
+            else:
+                safe_days = max(1, int(days or 3))
+                cutoff = (datetime.now() - timedelta(days=safe_days - 1)).strftime("%Y-%m-%d")
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM generated_files
+                    WHERE feature='handover_log'
+                      AND building=?
+                      AND duty_date>=?
+                    ORDER BY duty_date DESC,
+                        CASE duty_shift WHEN 'night' THEN 2 ELSE 1 END DESC,
+                        updated_at DESC
+                    """,
+                    (building_name, cutoff),
+                ).fetchall()
         grouped: Dict[str, Dict[str, Any]] = {}
         order: list[str] = []
         for row in rows:
@@ -407,6 +525,8 @@ class AppStateRepository:
             table_counts: Dict[str, int] = {}
             for table_name in (
                 "config_snapshots",
+                "runtime_kv",
+                "config_write_queue",
                 "scheduler_jobs",
                 "task_jobs",
                 "task_events",
@@ -416,8 +536,13 @@ class AppStateRepository:
             ):
                 row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {table_name}").fetchone()
                 table_counts[table_name] = int(row["cnt"] if row else 0)
+            schema_row = conn.execute("SELECT value, updated_at FROM app_meta WHERE key='schema_version'").fetchone()
         return {
             "db_path": str(self.db_path),
+            "runtime_root": str(self.runtime_root),
             "ready": True,
+            "checked_at": _now_text(),
+            "schema_version": str(schema_row["value"] if schema_row else "2"),
+            "schema_updated_at": str(schema_row["updated_at"] if schema_row else ""),
             "table_counts": table_counts,
         }

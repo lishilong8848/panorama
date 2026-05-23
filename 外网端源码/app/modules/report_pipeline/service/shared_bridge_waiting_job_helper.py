@@ -3,22 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple
 
 
-def get_or_create_bridge_task(
-    bridge_service,
-    *,
-    get_or_create_name: str,
-    create_name: str,
-    **kwargs,
-) -> Dict[str, Any]:
-    get_or_create = getattr(bridge_service, get_or_create_name, None)
-    if callable(get_or_create):
-        return get_or_create(**kwargs)
-    create = getattr(bridge_service, create_name, None)
-    if callable(create):
-        return create(**kwargs)
-    raise AttributeError(f"共享桥接服务缺少方法: {get_or_create_name}/{create_name}")
-
-
 def start_waiting_bridge_job(
     *,
     job_service,
@@ -51,11 +35,23 @@ def start_waiting_bridge_job(
     task_kwargs = dict(bridge_kwargs or {})
     task_kwargs["resume_job_id"] = getattr(job, "job_id", "")
     task_kwargs.setdefault("requested_by", submitted_by)
-    task = get_or_create_bridge_task(
-        bridge_service,
-        get_or_create_name=bridge_get_or_create_name,
-        create_name=bridge_create_name,
-        **task_kwargs,
-    )
-    job_service.bind_bridge_task(str(getattr(job, "job_id", "") or "").strip(), str(task.get("task_id", "") or "").strip())
-    return job, task
+    create_http = getattr(bridge_service, "create_http_bridge_task", None)
+    job_id = str(getattr(job, "job_id", "") or "").strip()
+    try:
+        if callable(create_http):
+            task = create_http(
+                get_or_create_name=bridge_get_or_create_name,
+                create_name=bridge_create_name,
+                bridge_kwargs=task_kwargs,
+            )
+            if isinstance(task, dict):
+                job_service.bind_bridge_task(job_id, str(task.get("task_id", "") or "").strip())
+                return job, task
+        raise RuntimeError("内网端 HTTP 桥接未配置或不可用，已移除共享 bridge.db 任务回退")
+    except Exception as exc:
+        error_text = str(exc or "").strip() or "内网端 HTTP 桥接派发失败"
+        try:
+            job_service.fail_waiting_job(job_id, error_text=error_text, summary="内网端 HTTP 桥接派发失败")
+        except Exception:
+            pass
+        raise

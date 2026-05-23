@@ -302,7 +302,13 @@ def main(argv: list[str] | None = None) -> None:
     host = str(args.host).strip() or str(console_cfg.get("host", "127.0.0.1")).strip() or "127.0.0.1"
     port = int(args.port) if args.port else int(console_cfg.get("port", 18765))
     if deployment_role_mode == "internal":
-        host = "127.0.0.1"
+        bridge_http_cfg = common_cfg.get("internal_bridge_http", {}) if isinstance(common_cfg, dict) else {}
+        if isinstance(bridge_http_cfg, dict) and bool(bridge_http_cfg.get("enabled", False)):
+            host = str(bridge_http_cfg.get("bind_host", "") or "0.0.0.0").strip() or "0.0.0.0"
+            if not args.port and int(bridge_http_cfg.get("port", 0) or 0) > 0:
+                port = int(bridge_http_cfg.get("port", 18765) or 18765)
+        else:
+            host = "127.0.0.1"
     elif deployment_role_mode == "external" and _is_loopback_host(host):
         host = "0.0.0.0"
     elif not deployment_role_mode:
@@ -322,7 +328,10 @@ def main(argv: list[str] | None = None) -> None:
     browser_url = _with_browser_route(browser_url, deployment_role_mode)
     if deployment_role_mode == "internal":
         print(f"[内网端] 本地管理页地址: {local_url}", flush=True)
-        print("[内网端] 仅监听 127.0.0.1，不提供局域网访问入口。", flush=True)
+        if _is_loopback_host(host):
+            print("[内网端] 仅监听 127.0.0.1，不提供局域网访问入口。", flush=True)
+        else:
+            print(f"[内网端] HTTP直连桥接已启用，监听地址: {host}:{port}，请确保防火墙仅放行外网端机器。", flush=True)
     elif deployment_role_mode == "external":
         print(f"[控制台] 本机访问地址: {local_url}", flush=True)
         if lan_url:

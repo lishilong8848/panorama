@@ -5,8 +5,8 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
+    persist_full_config,
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
 )
@@ -123,8 +123,7 @@ def day_metric_upload_scheduler_config(payload: Dict[str, Any], request: Request
                 raise HTTPException(status_code=400, detail="state_file 不能为空")
             scheduler_cfg[key] = text
     try:
-        saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+        saved = persist_full_config(container, merged, source="12项独立上传调度配置保存", mode="light")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

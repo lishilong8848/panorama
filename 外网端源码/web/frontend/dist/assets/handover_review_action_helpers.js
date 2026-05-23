@@ -166,12 +166,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
       || staleRevisionConflict.value
     ) return;
     if (dirty.value) {
-      const saved = await saveDocument({ reason: "confirm" });
+      const saved = await saveDocument({ reason: "confirm", allowSubstationFailure: true });
       if (!saved) return;
-      if (dirty.value) {
-        statusText.value = "审核内容仍有未保存修改，请保存完成后再确认。";
-        return;
-      }
     }
     confirming.value = true;
     errorText.value = "";
@@ -280,7 +276,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     if (!buildingCode || !session.value) return;
     if (dirty.value) {
-      const saved = await saveDocument({ reason: "cloud_update" });
+      const saved = await saveDocument({ reason: "cloud_update", allowSubstationFailure: true });
       if (!saved) return;
     }
     updatingHistoryCloudSync.value = true;
@@ -323,7 +319,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       return;
     }
     if (dirty.value) {
-      const saved = await saveDocument({ reason: "download" });
+      const saved = await saveDocument({ reason: "download", allowSubstationFailure: true });
       if (!saved) return;
     }
     downloading.value = true;
@@ -359,7 +355,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       return;
     }
     if (dirty.value) {
-      const saved = await saveDocument({ reason: "capacity_download" });
+      const saved = await saveDocument({ reason: "capacity_download", allowSubstationFailure: true });
       if (!saved) return;
     }
     if (!session.value || !session.value.session_id) {
@@ -414,7 +410,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       return;
     }
     if (dirty.value) {
-      const saved = await saveDocument({ reason: "capacity_image_send" });
+      const saved = await saveDocument({ reason: "capacity_image_send", allowSubstationFailure: true });
       if (!saved) return;
     }
     const sessionId = String(session.value?.session_id || "").trim();
@@ -548,7 +544,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     clearSaveTimers();
     if (dirty.value) {
-      const saved = await saveDocument({ reason: "manual" });
+      const saved = await saveDocument({ reason: "refresh", allowSubstationFailure: true });
       if (!saved) return;
     }
     needsRefresh.value = false;

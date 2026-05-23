@@ -20,16 +20,16 @@ export function formatSharedBridgeRuntimeError(raw) {
   if (normalized === "shared_bridge_service_unavailable") return "共享桥接服务不可用";
   if (normalized === "disabled_or_switching" || normalized === "disabled_or_unselected") return "当前未启用共享桥接";
   if (normalized === "misconfigured") return "共享桥接目录未配置";
-  if (normalized === "database is locked") return "共享桥接数据库正忙，请稍后重试";
-  if (normalized === "unable to open database file") return "无法打开共享桥接数据库文件";
+  if (normalized === "database is locked") return "本地状态库正忙，请稍后重试";
+  if (normalized === "unable to open database file") return "无法打开本地状态库文件";
   if (normalized === "cannot operate on a closed database" || normalized === "cannot operate on a closed database.") {
-    return "共享桥接数据库连接已关闭";
+    return "本地状态库连接已关闭";
   }
   if (normalized.includes("permissionerror") || normalized.includes("winerror 5")) {
     return "共享桥接目录无写入权限";
   }
   if (normalized.includes("no such table")) {
-    return "共享桥接数据库结构未初始化";
+    return "本地状态库结构未初始化";
   }
   return text;
 }

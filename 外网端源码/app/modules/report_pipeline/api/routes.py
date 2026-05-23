@@ -2302,17 +2302,46 @@ def _normalize_review_access_state(raw: Any) -> Dict[str, Any]:
 
 
 def _load_review_access_state(container) -> Dict[str, Any]:
+    repository = getattr(container, "app_state_repository", None)
+    if repository is not None:
+        try:
+            payload = repository.get_runtime_kv("handover_review_access", "manual_base_url")
+            if isinstance(payload, dict) and payload:
+                return _normalize_review_access_state(payload)
+        except Exception:  # noqa: BLE001
+            pass
     path = _resolve_review_access_state_path(container)
     if not path.exists():
         return _review_access_state_template()
     try:
-        return _normalize_review_access_state(load_cached_json(path, {}, encoding="utf-8"))
+        payload = _normalize_review_access_state(load_cached_json(path, {}, encoding="utf-8"))
+        if repository is not None:
+            try:
+                repository.put_runtime_kv("handover_review_access", "manual_base_url", payload)
+                bak_path = path.with_suffix(path.suffix + ".bak")
+                if not bak_path.exists():
+                    try:
+                        bak_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+                    except Exception:
+                        pass
+            except Exception:  # noqa: BLE001
+                pass
+        return payload
     except Exception:  # noqa: BLE001
         return _review_access_state_template()
 
 
 def _save_review_access_state(container, state: Dict[str, Any]) -> Dict[str, Any]:
     normalized = _normalize_review_access_state(state)
+    repository = getattr(container, "app_state_repository", None)
+    if repository is not None:
+        try:
+            repository.put_runtime_kv("handover_review_access", "manual_base_url", normalized)
+            return normalized
+        except Exception as exc:  # noqa: BLE001
+            add_log = getattr(container, "add_system_log", None)
+            if callable(add_log):
+                add_log(f"[审核访问] 写入SQLite状态失败，降级写JSON: {exc}")
     path = _resolve_review_access_state_path(container)
     save_cached_json(path, normalized, indent=2, encoding="utf-8")
     return normalized
@@ -3996,8 +4025,18 @@ def put_config(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
             save_kwargs["clear_paths"] = clear_paths
         if force_overwrite:
             save_kwargs["force_overwrite"] = force_overwrite
-        saved = save_settings(merged, container.config_path, **save_kwargs)
-        container.reload_config(saved)
+        persist_snapshot = getattr(container, "persist_config_snapshot", None)
+        if callable(persist_snapshot):
+            saved = persist_snapshot(
+                merged,
+                source="控制台配置保存",
+                mode="full",
+                persist_json=True,
+                save_options=save_kwargs,
+            )
+        else:
+            saved = save_settings(merged, container.config_path, **save_kwargs)
+            container.reload_config(saved)
         _mirror_handover_review_defaults_to_sqlite(
             container,
             saved_config=saved,
@@ -5881,7 +5920,7 @@ def retry_job(job_id: str, request: Request) -> Dict[str, Any]:
 
 
 @router.get("/api/jobs")
-def list_jobs(request: Request, limit: int = 2000, statuses: str = "") -> Dict[str, Any]:
+def list_jobs(request: Request, limit: int = 60, statuses: str = "") -> Dict[str, Any]:
     container = request.app.state.container
     normalized_statuses = [
         str(item or "").strip().lower()
@@ -5889,7 +5928,7 @@ def list_jobs(request: Request, limit: int = 2000, statuses: str = "") -> Dict[s
         if str(item or "").strip()
     ]
     runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
-    safe_limit = max(1, min(int(limit or 2000), 2000))
+    safe_limit = max(1, min(int(limit or 60), 2000))
     if (
         not normalized_statuses
         and runtime_status_coordinator is not None
@@ -6139,7 +6178,7 @@ def _build_external_source_cache_module(request: Request) -> Dict[str, Any]:
             last_overview = getattr(request.app.state, "_external_source_cache_overview_last_non_empty", None)
         except Exception:
             last_overview = None
-        fast_payload = _health_cached_component_sync_default(
+        fast_payload = _health_cached_component_async_default(
             request,
             key="external_source_cache_overview_fast",
             ttl_sec=1.0,
@@ -6277,6 +6316,17 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
                 payload[slot] = dict(slot_payload)
         return payload
 
+    scheduler_engine: Dict[str, Any] = {}
+    engine_getter = getattr(container, "scheduler_engine_snapshot", None)
+    if callable(engine_getter):
+        try:
+            scheduler_engine = engine_getter()
+        except Exception:
+            scheduler_engine = {
+                "engine": "APScheduler",
+                "ready": False,
+                "last_result": "snapshot_failed",
+            }
     summary = {
         "scheduler": _safe_scheduler("scheduler_status"),
         "handover_scheduler": _normalize_handover_scheduler(_safe_scheduler("handover_scheduler_status")),
@@ -6291,7 +6341,39 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
     for key, snapshot in list(summary.items()):
         if isinstance(snapshot, dict):
             summary[key] = {**snapshot, "display": present_scheduler_state(snapshot, role_mode=role_mode)}
+    summary["scheduler_engine"] = scheduler_engine if isinstance(scheduler_engine, dict) else {}
     return summary
+
+
+def _attach_scheduler_engine_overview(
+    scheduler_overview_summary: Dict[str, Any],
+    scheduler_status_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = dict(scheduler_overview_summary or {})
+    engine = scheduler_status_summary.get("scheduler_engine", {}) if isinstance(scheduler_status_summary, dict) else {}
+    if not isinstance(engine, dict):
+        return payload
+    items = payload.get("items", [])
+    items = list(items) if isinstance(items, list) else []
+    job_count = int(engine.get("job_count", 0) or 0)
+    ready = bool(engine.get("ready", False))
+    running = bool(engine.get("running", False))
+    next_run = str(engine.get("next_run_time", "") or "").strip()
+    value = f"APScheduler / {job_count} 个任务"
+    if not ready:
+        value = "APScheduler / 未初始化"
+    elif not running:
+        value = f"APScheduler / 已初始化，{job_count} 个任务"
+    item = {
+        "label": "调度内核",
+        "value": value,
+        "tone": "success" if ready and running else ("warning" if ready else "neutral"),
+        "description": f"最近下一次触发: {next_run}" if next_run else str(engine.get("last_result", "") or ""),
+    }
+    items = [item] + [entry for entry in items if not (isinstance(entry, dict) and entry.get("label") == "调度内核")]
+    payload["items"] = items
+    payload["scheduler_engine"] = engine
+    return payload
 
 
 def _build_external_schedulers_module(request: Request) -> Dict[str, Any]:
@@ -6312,6 +6394,10 @@ def _build_external_schedulers_module(request: Request) -> Dict[str, Any]:
         role_mode=role_mode or "external",
     )
     scheduler_overview_summary = present_scheduler_overview_summary(scheduler_overview_items)
+    scheduler_overview_summary = _attach_scheduler_engine_overview(
+        scheduler_overview_summary,
+        scheduler_status_summary,
+    )
     scheduler_overview = present_external_scheduler_overview(
         scheduler_overview_summary=scheduler_overview_summary,
         scheduler_overview_items=scheduler_overview_items,
@@ -6817,7 +6903,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         except Exception:
             last_overview = None
         fast_default = copy.deepcopy(last_overview) if isinstance(last_overview, dict) else {}
-        fast_payload = _health_cached_component_sync_default(
+        fast_payload = _health_cached_component_async_default(
             request,
             key="external_source_cache_overview_fast",
             ttl_sec=1.0,
@@ -6955,8 +7041,23 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
     }
+    scheduler_engine_getter = getattr(container, "scheduler_engine_snapshot", None)
+    if callable(scheduler_engine_getter):
+        try:
+            engine_snapshot = scheduler_engine_getter()
+            scheduler_status_summary["scheduler_engine"] = (
+                engine_snapshot if isinstance(engine_snapshot, dict) else {}
+            )
+        except Exception:
+            scheduler_status_summary["scheduler_engine"] = {
+                "engine": "APScheduler",
+                "ready": False,
+                "last_result": "snapshot_failed",
+            }
 
     for key, snapshot in list(scheduler_status_summary.items()):
+        if key == "scheduler_engine":
+            continue
         if isinstance(snapshot, dict):
             scheduler_status_summary[key] = {
                 **snapshot,
@@ -6969,6 +7070,10 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         role_mode=role_mode,
     )
     scheduler_overview_summary = present_scheduler_overview_summary(scheduler_overview_items)
+    scheduler_overview_summary = _attach_scheduler_engine_overview(
+        scheduler_overview_summary,
+        scheduler_status_summary,
+    )
 
     dashboard_display = present_external_dashboard_display(
         shared_source_cache_overview=shared_source_cache_overview,

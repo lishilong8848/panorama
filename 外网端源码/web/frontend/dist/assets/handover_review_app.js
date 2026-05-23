@@ -10,6 +10,7 @@ import {
   getHandoverReview110StationStatusApi,
   getHandoverReviewBootstrapApi,
   getHandoverReviewHistoryApi,
+  getHandoverReviewSnapshotApi,
   getHandoverReviewStatusApi,
   heartbeatHandoverReview110kvLockApi,
   parseHandoverReview110StationFileApi,
@@ -1642,6 +1643,7 @@ export function mountHandoverReviewApp(Vue) {
       const historyLoading = ref(false);
       const historyLoaded = ref(false);
       const historyCacheKey = ref("");
+      const documentOmitted = ref(false);
       const engineerDirectoryRows = ref([]);
       const engineerDirectoryLoading = ref(false);
       const engineerDirectoryLoaded = ref(false);
@@ -1699,7 +1701,8 @@ export function mountHandoverReviewApp(Vue) {
         }
         return "";
       });
-      function stopSubstation110kvLocalEditing(message = "") {
+      function stopSubstation110kvLocalEditing(message = "", options = {}) {
+        const { reloadLatest = false } = options || {};
         clearSubstation110kvAutoSaveTimer();
         clearSubstation110kvPreviewSyncTimer();
         clearSubstation110kvIdleReleaseTimer();
@@ -1713,6 +1716,9 @@ export function mountHandoverReviewApp(Vue) {
           errorText.value = "";
         }
         void releaseSubstation110kvLock();
+        if (reloadLatest) {
+          void loadReviewData({ background: true });
+        }
       }
       function hasReviewDocumentDirty() {
         return Boolean(
@@ -2043,7 +2049,7 @@ export function mountHandoverReviewApp(Vue) {
           }
           markDocumentDirty({ region: "sections" });
           statusText.value = `${targetName}已从多维刷新，正在保存...`;
-          const saved = await saveDocument({ reason: "event_section_refresh" });
+          const saved = await saveDocument({ reason: "event_section_refresh", allowSubstationFailure: true });
           statusText.value = saved
             ? `${targetName}已从多维刷新并保存`
             : `${targetName}已刷新，但保存未完成，请处理提示后手动保存`;
@@ -2682,9 +2688,11 @@ export function mountHandoverReviewApp(Vue) {
           if (isRevisionConflictError(error)) {
             const message = String(error?.message || "110KV变电站内容已被其他楼栋更新，请刷新后重试");
             if (message.includes("正在其他楼栋") || message.includes("正在其他")) {
-              statusText.value = message;
-              void loadReviewData({ background: true });
-              return;
+              stopSubstation110kvLocalEditing(
+                "110KV变电站正在其他楼栋编辑，本次110KV未保存，普通内容可继续保存。",
+                { reloadLatest: true },
+              );
+              return false;
             }
             beginRemoteSaveRefresh(message);
             void loadReviewData({ background: true });
@@ -2972,6 +2980,10 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       function hydrateFromPayload(payload, { fromBackground = false } = {}) {
+        if (payload?.document_omitted) {
+          applySnapshotPayload(payload);
+          return;
+        }
         const nextSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : null;
         const rawNextDocument = normalizeDocument(payload?.document || {});
         const nextDocument = fromBackground ? mergeInventoryFooterBlock(documentRef.value, rawNextDocument) : rawNextDocument;
@@ -2979,6 +2991,7 @@ export function mountHandoverReviewApp(Vue) {
         documentHydrating.value = true;
         building.value = String(payload?.building || nextSession?.building || "");
         documentRef.value = nextDocument;
+        documentOmitted.value = false;
         applyPayloadMeta(payload);
         dirtyRegions.value = emptyDirtyRegions();
         outdoorTemperatureDirty.value = false;
@@ -2994,6 +3007,19 @@ export function mountHandoverReviewApp(Vue) {
         window.setTimeout(() => {
           documentHydrating.value = false;
         }, 0);
+      }
+
+      function applySnapshotPayload(payload = {}) {
+        const nextSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : null;
+        building.value = String(payload?.building || nextSession?.building || building.value || "");
+        applyPayloadMeta(payload || {});
+        if (payload?.review_ui && typeof payload.review_ui === "object") {
+          pollIntervalMs.value = resolvePollInterval(payload.review_ui);
+        }
+        documentOmitted.value = Boolean(payload?.document_omitted);
+        if (!statusText.value && documentOmitted.value && nextSession) {
+          statusText.value = "已加载审核状态，正在载入交接班正文...";
+        }
       }
 
       function applySavedDocumentPayload(payload = {}, payloadVersion = 0) {
@@ -3038,8 +3064,24 @@ export function mountHandoverReviewApp(Vue) {
             loading.value = true;
           }
           if (resolvedMode === "bootstrap") {
-            statusText.value = "正在加载最新交接班内容...";
+            statusText.value = "正在加载审核状态...";
             errorText.value = "";
+            try {
+              const snapshotPayload = await getHandoverReviewSnapshotApi(
+                buildingCode,
+                buildLoadParams(),
+                buildRequestOptions(activeLoadController),
+              );
+              if (requestSeq === latestLoadRequestSeq) {
+                applySnapshotPayload(snapshotPayload);
+                loading.value = false;
+              }
+            } catch (error) {
+              if (error?.name === "AbortError") {
+                return false;
+              }
+            }
+            statusText.value = documentOmitted.value ? "已加载审核状态，正在载入交接班正文..." : "正在加载最新交接班内容...";
             let payload;
             try {
               payload = await getHandoverReviewBootstrapApi(
@@ -3272,33 +3314,54 @@ export function mountHandoverReviewApp(Vue) {
         markDocumentDirty({ region: "capacity_room_inputs", capacityCell: cellName });
       }
 
-      async function saveSubstation110kvIfNeeded() {
-        if (!substation110kvDirty.value) return true;
+      async function saveSubstation110kvIfNeeded(options = {}) {
+        const { allowFailure = false } = options || {};
+        const buildFailure = (message) => {
+          const text = String(message || "110KV变电站未保存，请稍后重试").trim();
+          const isSharedLockConflict = text.includes("正在其他楼栋") || text.includes("正在其他");
+          if (allowFailure && isSharedLockConflict) {
+            stopSubstation110kvLocalEditing(text, { reloadLatest: true });
+            return { ok: true, saved: false, skipped: true, reason: "shared_lock_conflict", warning: text };
+          }
+          if (allowFailure) {
+            statusText.value = text;
+            errorText.value = "";
+          } else {
+            errorText.value = text;
+            statusText.value = "110KV变电站保存失败，请处理后重试。";
+          }
+          refreshDirtyFlagFromRegions();
+          return { ok: false, partial: Boolean(allowFailure), error: text };
+        };
+        if (!substation110kvDirty.value) return { ok: true, saved: false };
         const locked = await ensureSubstation110kvLock();
-        if (!locked) return false;
+        if (!locked) return buildFailure("110KV变电站正在其他楼栋编辑，普通内容可继续保存，110KV本次未保存。");
         const saved = await flushSubstation110kvAutoSave();
         if (!saved || substation110kvDirty.value) {
-          return false;
+          if (allowFailure && !substation110kvDirty.value) {
+            const text = "110KV变电站正在其他楼栋编辑，本次110KV未保存，普通内容可继续保存。";
+            return { ok: true, saved: false, skipped: true, reason: "shared_lock_conflict", warning: text };
+          }
+          return buildFailure("110KV变电站仍有未保存修改，本次仅使用服务器已提交版本。");
         }
         try {
           await releaseSubstation110kvLock();
-          return true;
+          return { ok: true, saved: true };
         } catch (error) {
-          errorText.value = String(error?.message || error || "110KV变电站锁释放失败");
-          statusText.value = "保存失败，请处理后重试。";
-          return false;
+          return buildFailure(String(error?.message || error || "110KV变电站锁释放失败"));
         }
       }
 
       async function saveDocument(options = {}) {
-        const { reason = "manual" } = options || {};
-        if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || capacityImageSending.value || documentHydrating.value || syncingRemoteRevision.value || !session.value) return false;
+        const { reason = "manual", allowSubstationFailure = false } = options || {};
+        if (saving.value || regenerating.value || confirming.value || capacityImageSending.value || documentHydrating.value || syncingRemoteRevision.value || !session.value) return false;
         if (staleRevisionConflict.value) {
           beginRemoteSaveRefresh();
           return false;
         }
         const hasDocumentDirty = hasReviewDocumentDirty();
-        if (!dirty.value && !substation110kvDirty.value) {
+        const hasSubstationDirty = Boolean(substation110kvDirty.value);
+        if (!hasDocumentDirty && !hasSubstationDirty) {
           clearSaveTimers();
           dirty.value = false;
           statusText.value = isHistoryMode.value ? "历史交接班日志已保存" : "已保存";
@@ -3309,50 +3372,71 @@ export function mountHandoverReviewApp(Vue) {
         saving.value = true;
         errorText.value = "";
         if (hasDocumentDirty) {
-          await ensureEditingLock();
+          const locked = await ensureEditingLock();
+          if (!locked) {
+            saving.value = false;
+            errorText.value = "当前审核页编辑锁获取失败，请确认没有其他终端编辑后重试";
+            statusText.value = "保存失败，请处理后重试。";
+            return false;
+          }
         }
         const payloadDirtyRegions = cloneDirtyRegions(dirtyRegions.value);
         statusText.value = "正在保存审核内容...";
         try {
-          const sharedSaved = await saveSubstation110kvIfNeeded();
-          if (!sharedSaved) {
+          let documentSaved = false;
+          let saveStatus = null;
+          if (hasDocumentDirty) {
+            compactDocumentSectionRows(documentRef.value);
+            const response = await saveHandoverReviewApi(buildingCode, {
+              session_id: session.value.session_id,
+              base_revision: currentDocumentRevision(),
+              client_id: reviewClientId,
+              document: documentRef.value,
+              dirty_regions: payloadDirtyRegions,
+              shared_outdoor_temperature_dirty: outdoorTemperatureDirty.value,
+            });
+            applyPayloadMeta(response || {});
+            applySavedDocumentPayload(response || {}, payloadVersion);
+            broadcastHandoverReviewStatusChange(response || {});
+            saveStatus = response?.save_status && typeof response.save_status === "object"
+              ? response.save_status
+              : null;
+            documentSaved = true;
+            if (documentMutationVersion.value === payloadVersion) {
+              dirtyRegions.value = emptyDirtyRegions();
+              capacityLinkedDirty.value = false;
+              outdoorTemperatureDirty.value = false;
+              refreshDirtyFlagFromRegions();
+            } else {
+              dirty.value = true;
+              statusText.value = "保存过程中有新的修改，请再次保存后继续。";
+              return false;
+            }
+          }
+          const sharedResult = await saveSubstation110kvIfNeeded({
+            allowFailure: Boolean(allowSubstationFailure || documentSaved),
+          });
+          if (!sharedResult.ok) {
+            if (documentSaved || allowSubstationFailure) {
+              refreshDirtyFlagFromRegions();
+              if (documentSaved) {
+                staleRevisionConflict.value = false;
+                needsRefresh.value = false;
+              }
+              statusText.value = documentSaved
+                ? "普通内容已保存，110KV变电站未保存；本次后续操作将使用服务器已提交版本。"
+                : "110KV变电站未保存；本次后续操作将使用服务器已提交版本。";
+              return true;
+            }
             return false;
           }
-          if (!hasDocumentDirty) {
-            if (documentMutationVersion.value === payloadVersion) {
-              dirty.value = false;
-              dirtyRegions.value = emptyDirtyRegions();
-            }
-            statusText.value = "审核内容已保存";
-            return true;
-          }
-          compactDocumentSectionRows(documentRef.value);
-          const response = await saveHandoverReviewApi(buildingCode, {
-            session_id: session.value.session_id,
-            base_revision: currentDocumentRevision(),
-            client_id: reviewClientId,
-            document: documentRef.value,
-            dirty_regions: payloadDirtyRegions,
-            shared_outdoor_temperature_dirty: outdoorTemperatureDirty.value,
-          });
-          applyPayloadMeta(response || {});
-          applySavedDocumentPayload(response || {}, payloadVersion);
-          broadcastHandoverReviewStatusChange(response || {});
-          if (documentMutationVersion.value === payloadVersion) {
-            dirtyRegions.value = emptyDirtyRegions();
-            capacityLinkedDirty.value = false;
-            outdoorTemperatureDirty.value = false;
-            dirty.value = false;
-          } else {
-            dirty.value = true;
-          }
+          refreshDirtyFlagFromRegions();
           staleRevisionConflict.value = false;
           needsRefresh.value = false;
-          const saveStatus = response?.save_status && typeof response.save_status === "object"
-            ? response.save_status
-            : null;
-          statusText.value = String(saveStatus?.state_text || "").trim()
-            || (isHistoryMode.value ? "历史交接班日志已保存" : "已保存");
+          statusText.value = sharedResult.skipped
+            ? "普通内容已保存；110KV变电站正在其他楼栋编辑，本次110KV未保存。"
+            : (String(saveStatus?.state_text || "").trim()
+              || (isHistoryMode.value ? "历史交接班日志已保存" : "已保存"));
           return true;
         } catch (error) {
           if (isRevisionConflictError(error)) {
@@ -3498,7 +3582,7 @@ export function mountHandoverReviewApp(Vue) {
           return;
         }
         if (sessionId === String(session.value?.session_id || "").trim() && dirty.value) {
-          const saved = await saveDocument({ reason: "history_download" });
+          const saved = await saveDocument({ reason: "history_download", allowSubstationFailure: true });
           if (!saved) return;
         }
         downloading.value = true;
@@ -3537,7 +3621,7 @@ export function mountHandoverReviewApp(Vue) {
           return;
         }
         if (sessionId === String(session.value?.session_id || "").trim() && dirty.value) {
-          const saved = await saveDocument({ reason: "history_capacity_download" });
+          const saved = await saveDocument({ reason: "history_capacity_download", allowSubstationFailure: true });
           if (!saved) return;
         }
         capacityDownloading.value = true;
@@ -3630,6 +3714,7 @@ export function mountHandoverReviewApp(Vue) {
         building,
         session,
         reviewContext,
+        documentOmitted,
         document: documentRef,
         batchStatus,
         historyState,

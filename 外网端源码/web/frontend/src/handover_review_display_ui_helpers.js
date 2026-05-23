@@ -254,7 +254,6 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
         || saving.value
         || regenerating.value
         || confirming.value
-        || cloudSyncBusy.value
         || downloading.value
         || capacityDownloading.value
         || capacityImageSending.value
@@ -369,7 +368,6 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
         || saving.value
         || regenerating.value
         || confirming.value
-        || cloudSyncBusy.value
         || downloading.value
         || capacityDownloading.value
         || capacityImageSending.value

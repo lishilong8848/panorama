@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from app.config.config_adapter import adapt_runtime_config, normalize_role_mode, resolve_shared_bridge_paths
+from app.config.config_runtime_service import ConfigRuntimeService
 from app.config.secret_masking import load_masked_settings
 from app.config.runtime_role import apply_forced_role_mode, forced_role_mode_from_env, role_mode_label
 from app.config.settings_loader import load_bootstrap_settings, save_settings
@@ -25,10 +26,11 @@ from app.modules.shared_bridge.service.bridge_status_presenter import (
 from app.modules.report_pipeline.service.system_alert_log_upload_service import (
     SystemAlertLogUploadService,
 )
-from app.modules.scheduler.service.daily_scheduler_service import DailyAutoSchedulerService
-from app.modules.scheduler.service.handover_scheduler_manager import HandoverSchedulerManager
-from app.modules.scheduler.service.interval_scheduler_service import IntervalSchedulerService
-from app.modules.scheduler.service.monthly_scheduler_service import MonthlySchedulerService
+from app.modules.scheduler.service.apscheduler_orchestrator import (
+    ApschedulerHandoverSchedulerManager,
+    ApschedulerOrchestrator,
+    ApschedulerSchedulerFacade,
+)
 from app.modules.updater.service.updater_service import UpdaterService
 from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from app.shared.utils.file_utils import (
@@ -96,29 +98,31 @@ class AppContainer:
     frontend_assets_dir: Path
     job_service: JobService
     wifi_service: WifiSwitchService | None = None
-    scheduler: DailyAutoSchedulerService | None = None
+    scheduler_orchestrator: ApschedulerOrchestrator | None = None
+    scheduler: ApschedulerSchedulerFacade | None = None
     scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    handover_scheduler_manager: HandoverSchedulerManager | None = None
+    handover_scheduler_manager: ApschedulerHandoverSchedulerManager | None = None
     handover_scheduler_callback: Callable[[str, str], tuple[bool, str]] | None = None
-    wet_bulb_collection_scheduler: IntervalSchedulerService | None = None
+    wet_bulb_collection_scheduler: ApschedulerSchedulerFacade | None = None
     wet_bulb_collection_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    chiller_mode_upload_scheduler: IntervalSchedulerService | None = None
+    chiller_mode_upload_scheduler: ApschedulerSchedulerFacade | None = None
     chiller_mode_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    day_metric_upload_scheduler: IntervalSchedulerService | None = None
+    day_metric_upload_scheduler: ApschedulerSchedulerFacade | None = None
     day_metric_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    branch_power_upload_scheduler: IntervalSchedulerService | None = None
+    branch_power_upload_scheduler: ApschedulerSchedulerFacade | None = None
     branch_power_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    alarm_event_upload_scheduler: DailyAutoSchedulerService | None = None
+    alarm_event_upload_scheduler: ApschedulerSchedulerFacade | None = None
     alarm_event_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    monthly_change_report_scheduler: MonthlySchedulerService | None = None
+    monthly_change_report_scheduler: ApschedulerSchedulerFacade | None = None
     monthly_change_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    monthly_event_report_scheduler: MonthlySchedulerService | None = None
+    monthly_event_report_scheduler: ApschedulerSchedulerFacade | None = None
     monthly_event_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     updater_service: UpdaterService | None = None
     updater_restart_callback: Callable[[Dict[str, Any]], tuple[bool, str]] | None = None
     alert_log_uploader: SystemAlertLogUploadService | None = None
     shared_bridge_service: SharedBridgeRuntimeService | None = None
     app_state_repository: AppStateRepository | None = None
+    config_runtime_service: ConfigRuntimeService | None = None
     runtime_status_coordinator: Any | None = None
     system_logs: List[str] = field(default_factory=list)
     system_log_entries: List[Dict[str, Any]] = field(default_factory=list)
@@ -207,6 +211,7 @@ class AppContainer:
             self.app_state_repository.ensure_ready()
         except Exception as exc:  # noqa: BLE001
             self.add_system_log(f"[状态库] 初始化失败: {exc}")
+        self.ensure_config_runtime_service()
         self.job_service.configure_app_state_repository(self.app_state_repository)
         self.job_service.configure_task_engine(
             runtime_config=self.runtime_config,
@@ -420,104 +425,110 @@ class AppContainer:
                 if int(item.get("id", 0) or 0) in target_ids:
                     item["uploaded"] = True
 
-    def _build_scheduler(self) -> DailyAutoSchedulerService:
+    def ensure_scheduler_orchestrator(self) -> ApschedulerOrchestrator:
+        if self.scheduler_orchestrator is None:
+            self.scheduler_orchestrator = ApschedulerOrchestrator(emit_log=self.add_system_log)
+        return self.scheduler_orchestrator
+
+    def _runtime_state_root_text(self) -> str:
+        paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
+        if not isinstance(paths_cfg, dict):
+            return "runtime_state"
+        return str(paths_cfg.get("runtime_state_root", "") or "").strip() or "runtime_state"
+
+    def _build_scheduler(self) -> ApschedulerSchedulerFacade:
         scheduler_cfg = self.runtime_config.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {})
-        if not isinstance(paths_cfg, dict):
-            paths_cfg = {}
-        return DailyAutoSchedulerService(
-            config={"scheduler": scheduler_cfg, "paths": paths_cfg},
+        return ApschedulerSchedulerFacade(
+            scheduler_key="auto_flow",
+            feature="auto_flow",
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.scheduler_callback or self._scheduler_run_callback,
             is_busy=lambda: False,
-            thread_name="daily-auto-flow-daily-scheduler",
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="daily",
             source_name="每日用电明细自动流程",
         )
 
-    def _build_handover_scheduler_manager(self) -> HandoverSchedulerManager:
-        return HandoverSchedulerManager(
+    def _build_handover_scheduler_manager(self) -> ApschedulerHandoverSchedulerManager:
+        return ApschedulerHandoverSchedulerManager(
             config=self.runtime_config,
             emit_log=self.add_system_log,
             run_callback=self.handover_scheduler_callback or self._handover_scheduler_run_callback,
             is_busy=lambda: False,
+            orchestrator=self.ensure_scheduler_orchestrator(),
         )
 
-    def _build_wet_bulb_collection_scheduler(self) -> IntervalSchedulerService:
+    def _build_wet_bulb_collection_scheduler(self) -> ApschedulerSchedulerFacade:
         wet_cfg = self.runtime_config.get("wet_bulb_collection", {})
         if not isinstance(wet_cfg, dict):
             wet_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {})
-        if not isinstance(paths_cfg, dict):
-            paths_cfg = {}
-        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         scheduler_cfg = wet_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
-        return IntervalSchedulerService(
+        return ApschedulerSchedulerFacade(
+            scheduler_key="wet_bulb_collection",
+            feature="wet_bulb_collection",
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root=runtime_state_root or "runtime_state",
+            runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.wet_bulb_collection_scheduler_callback or self._wet_bulb_collection_scheduler_run_callback,
             is_busy=lambda: False,
-            thread_name="wet-bulb-collection-scheduler",
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="interval",
             source_name="湿球温度定时采集",
         )
 
-    def _build_chiller_mode_upload_scheduler(self) -> IntervalSchedulerService:
+    def _build_chiller_mode_upload_scheduler(self) -> ApschedulerSchedulerFacade:
         chiller_cfg = self.runtime_config.get("chiller_mode_upload", {})
         if not isinstance(chiller_cfg, dict):
             chiller_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {})
-        if not isinstance(paths_cfg, dict):
-            paths_cfg = {}
-        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         scheduler_cfg = chiller_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
         scheduler_cfg = dict(scheduler_cfg)
         scheduler_cfg["retry_failed_on_next_tick"] = False
-        return IntervalSchedulerService(
+        return ApschedulerSchedulerFacade(
+            scheduler_key="chiller_mode_upload",
+            feature="chiller_mode_upload",
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root=runtime_state_root or "runtime_state",
+            runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.chiller_mode_upload_scheduler_callback or self._chiller_mode_upload_scheduler_run_callback,
             is_busy=self._job_busy_for_feature_prefixes("chiller_mode_upload"),
-            thread_name="chiller-mode-upload-scheduler",
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="interval",
             source_name="制冷模式参数上传",
         )
 
-    def _build_day_metric_upload_scheduler(self) -> IntervalSchedulerService:
+    def _build_day_metric_upload_scheduler(self) -> ApschedulerSchedulerFacade:
         day_metric_cfg = self.runtime_config.get("day_metric_upload", {})
         if not isinstance(day_metric_cfg, dict):
             day_metric_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {})
-        if not isinstance(paths_cfg, dict):
-            paths_cfg = {}
-        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         scheduler_cfg = day_metric_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
-        return IntervalSchedulerService(
+        return ApschedulerSchedulerFacade(
+            scheduler_key="day_metric_upload",
+            feature="day_metric_upload",
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root=runtime_state_root or "runtime_state",
+            runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.day_metric_upload_scheduler_callback or self._day_metric_upload_scheduler_run_callback,
             is_busy=self._job_busy_for_feature_prefixes("day_metric"),
-            thread_name="day-metric-upload-interval-scheduler",
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="interval",
             source_name="12项独立上传",
         )
 
-    def _build_branch_power_upload_scheduler(self) -> IntervalSchedulerService:
+    def _build_branch_power_upload_scheduler(self) -> ApschedulerSchedulerFacade:
         features = self.config.get("features", {}) if isinstance(self.config, dict) else {}
         branch_cfg = features.get("branch_power_upload", {}) if isinstance(features, dict) else {}
         if not isinstance(branch_cfg, dict):
             branch_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {})
-        if not isinstance(paths_cfg, dict):
-            paths_cfg = {}
-        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip()
         scheduler_cfg = branch_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
@@ -531,36 +542,40 @@ class AppContainer:
         except Exception:  # noqa: BLE001
             raw_minute = 30
         scheduler_cfg["minute_offset"] = max(0, raw_minute) % 60
-        return IntervalSchedulerService(
+        return ApschedulerSchedulerFacade(
+            scheduler_key="branch_power_upload",
+            feature="branch_power_upload",
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root=runtime_state_root or "runtime_state",
+            runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.branch_power_upload_scheduler_callback or self._branch_power_upload_scheduler_run_callback,
             is_busy=self._job_busy_for_feature_prefixes("branch_power"),
-            thread_name="branch-power-upload-interval-scheduler",
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="interval",
             source_name="自动上传支路功率",
         )
 
-    def _build_alarm_event_upload_scheduler(self) -> DailyAutoSchedulerService:
+    def _build_alarm_event_upload_scheduler(self) -> ApschedulerSchedulerFacade:
         alarm_cfg = self.runtime_config.get("alarm_export", {})
         if not isinstance(alarm_cfg, dict):
             alarm_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {})
-        if not isinstance(paths_cfg, dict):
-            paths_cfg = {}
-        return DailyAutoSchedulerService(
-            config={
-                "scheduler": alarm_cfg.get("scheduler", {}),
-                "paths": paths_cfg,
-            },
+        scheduler_cfg = alarm_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        return ApschedulerSchedulerFacade(
+            scheduler_key="alarm_event_upload",
+            feature="alarm_event_upload",
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.alarm_event_upload_scheduler_callback or self._alarm_event_upload_scheduler_run_callback,
             is_busy=self._job_busy_for_feature_prefixes("alarm_event_upload"),
-            thread_name="alarm-event-upload-daily-scheduler",
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="daily",
             source_name="告警信息上传",
         )
 
-    def _build_monthly_change_report_scheduler(self) -> MonthlySchedulerService:
+    def _build_monthly_change_report_scheduler(self) -> ApschedulerSchedulerFacade:
         handover_cfg = self.runtime_config.get("handover_log", {})
         if not isinstance(handover_cfg, dict):
             handover_cfg = {}
@@ -570,19 +585,20 @@ class AppContainer:
         scheduler_cfg = monthly_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
-        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip() if isinstance(paths_cfg, dict) else ""
-        return MonthlySchedulerService(
+        return ApschedulerSchedulerFacade(
+            scheduler_key="monthly_change_report",
+            feature="monthly_change_report",
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root=runtime_state_root,
+            runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.monthly_change_report_scheduler_callback or self._monthly_change_report_scheduler_run_callback,
             is_busy=self._job_busy_for_feature_prefixes("monthly_change_report"),
-            thread_name="monthly-change-report-scheduler",
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="monthly",
             source_name="月度变更统计表处理",
         )
 
-    def _build_monthly_event_report_scheduler(self) -> MonthlySchedulerService:
+    def _build_monthly_event_report_scheduler(self) -> ApschedulerSchedulerFacade:
         handover_cfg = self.runtime_config.get("handover_log", {})
         if not isinstance(handover_cfg, dict):
             handover_cfg = {}
@@ -592,15 +608,16 @@ class AppContainer:
         scheduler_cfg = monthly_cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
-        paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
-        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip() if isinstance(paths_cfg, dict) else ""
-        return MonthlySchedulerService(
+        return ApschedulerSchedulerFacade(
+            scheduler_key="monthly_event_report",
+            feature="monthly_event_report",
             scheduler_cfg=scheduler_cfg,
-            runtime_state_root=runtime_state_root,
+            runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.monthly_event_report_scheduler_callback or self._monthly_event_report_scheduler_run_callback,
             is_busy=self._job_busy_for_feature_prefixes("monthly_event_report"),
-            thread_name="monthly-event-report-scheduler",
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="monthly",
             source_name="月度事件统计表处理",
         )
 
@@ -953,11 +970,30 @@ class AppContainer:
             "source": str(source or "").strip(),
             "states": normalized_states,
         }
+        repository = self.app_state_repository
+        if repository is not None:
+            try:
+                repository.put_runtime_kv("scheduler_autostart", "external", payload)
+                return payload
+            except Exception as exc:  # noqa: BLE001
+                self.add_system_log(f"[调度] 写入SQLite调度记忆失败，降级写JSON: {exc}")
         save_cached_json(self._external_scheduler_autostart_path(), payload, indent=2, encoding="utf-8")
         return payload
 
     def _load_external_scheduler_autostart_payload(self) -> Dict[str, Any]:
         path = self._external_scheduler_autostart_path()
+        repository = self.app_state_repository
+        if repository is not None:
+            try:
+                payload = repository.get_runtime_kv("scheduler_autostart", "external")
+                if isinstance(payload, dict) and payload:
+                    return {
+                        "source": str(payload.get("source", "") or "").strip(),
+                        "updated_at": str(payload.get("updated_at", "") or "").strip(),
+                        "states": self._normalize_external_scheduler_states(payload.get("states")),
+                    }
+            except Exception as exc:  # noqa: BLE001
+                self.add_system_log(f"[调度] 读取SQLite调度记忆失败，尝试旧JSON: {exc}")
         if not path.exists():
             return {}
         try:
@@ -967,11 +1003,23 @@ class AppContainer:
             return {}
         if not isinstance(raw, dict):
             return {}
-        return {
+        migrated = {
             "source": str(raw.get("source", "") or "").strip(),
             "updated_at": str(raw.get("updated_at", "") or "").strip(),
             "states": self._normalize_external_scheduler_states(raw.get("states")),
         }
+        if repository is not None:
+            try:
+                repository.put_runtime_kv("scheduler_autostart", "external", raw)
+                bak_path = path.with_suffix(path.suffix + ".bak")
+                if not bak_path.exists():
+                    try:
+                        bak_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+                    except Exception:
+                        pass
+            except Exception as exc:  # noqa: BLE001
+                self.add_system_log(f"[调度] 旧JSON调度记忆迁移SQLite失败，继续使用JSON: {exc}")
+        return migrated
 
     @staticmethod
     def _safe_file_mtime(path: Path | str | None) -> float:
@@ -1013,6 +1061,109 @@ class AppContainer:
         except Exception:  # noqa: BLE001
             pass
         return payload
+
+    def ensure_config_runtime_service(self) -> ConfigRuntimeService:
+        if self.config_runtime_service is not None:
+            self.config_runtime_service.configure(self.config, self.runtime_config)
+            return self.config_runtime_service
+        if self.app_state_repository is None:
+            self.app_state_repository = AppStateRepository(
+                runtime_config=self.runtime_config,
+                app_dir=get_app_dir(),
+            )
+        try:
+            self.app_state_repository.ensure_ready()
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[状态库] 配置运行态服务初始化时状态库不可用，已降级: {exc}")
+        self.config_runtime_service = ConfigRuntimeService(
+            config_path=self.config_path,
+            repository=self.app_state_repository,
+            save_settings_func=save_settings,
+            emit_log=lambda text: self.add_system_log(text),
+        )
+        self.config_runtime_service.configure(self.config, self.runtime_config)
+        return self.config_runtime_service
+
+    def persist_config_snapshot(
+        self,
+        settings: Dict[str, Any],
+        *,
+        source: str = "配置保存",
+        mode: str = "light",
+        persist_json: bool = True,
+        save_options: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        service = self.ensure_config_runtime_service()
+        saved_config = service.apply_config_snapshot(
+            settings,
+            source=source,
+            persist_json=persist_json,
+            save_options=save_options or {},
+        )
+        self.apply_config_snapshot(saved_config, mode=mode)
+        return copy.deepcopy(saved_config)
+
+    def flush_config_writes(self, timeout_sec: float = 5.0) -> bool:
+        service = self.config_runtime_service
+        if service is None:
+            return True
+        return service.flush(timeout_sec=timeout_sec)
+
+    def app_state_health_snapshot(self) -> Dict[str, Any]:
+        repository = self.app_state_repository
+        if repository is None:
+            return {
+                "ready": False,
+                "reason": "app_state_not_initialized",
+                "db_path": "",
+                "table_counts": {},
+            }
+        try:
+            snapshot = repository.snapshot()
+            snapshot["ready"] = bool(snapshot.get("ready", False))
+            return snapshot
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self.add_system_log(f"[状态库] 健康检查失败，已降级: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
+            return {
+                "ready": False,
+                "reason": "app_state_snapshot_failed",
+                "error": str(exc),
+                "db_path": str(getattr(repository, "db_path", "") or ""),
+                "table_counts": {},
+            }
+
+    def scheduler_engine_snapshot(self) -> Dict[str, Any]:
+        orchestrator = self.scheduler_orchestrator
+        if orchestrator is None:
+            return {
+                "engine": "APScheduler",
+                "ready": False,
+                "running": False,
+                "job_count": 0,
+                "jobs": [],
+                "next_run_time": "",
+                "last_result": "not_initialized",
+            }
+        try:
+            return orchestrator.snapshot()
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self.add_system_log(f"[调度] APScheduler 状态快照读取失败，已降级: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
+            return {
+                "engine": "APScheduler",
+                "ready": False,
+                "running": False,
+                "job_count": 0,
+                "jobs": [],
+                "next_run_time": "",
+                "last_result": "snapshot_failed",
+                "error": str(exc),
+            }
 
     def resolve_external_scheduler_autostart_state(self, *, force_refresh: bool = False) -> Dict[str, Any]:
         cached = self.external_scheduler_autostart_runtime_state
@@ -1667,9 +1818,12 @@ class AppContainer:
                         pass
             if not saved_labels:
                 return {"ok": True, "changed": False, "saved": []}
-            saved_config = save_settings(merged, self.config_path)
-            self.config = copy.deepcopy(saved_config)
-            self.runtime_config = adapt_runtime_config(self.config)
+            saved_config = self.persist_config_snapshot(
+                merged,
+                source=f"{source}:运行调度自动启动状态",
+                mode="light",
+                persist_json=True,
+            )
             self.add_system_log(
                 f"[调度] {source}: 已保存当前运行调度为下次自动启动: {','.join(saved_labels)}"
             )
@@ -1719,6 +1873,7 @@ class AppContainer:
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
             ("monthly_change_report_scheduler", self.stop_monthly_change_report_scheduler),
             ("monthly_event_report_scheduler", self.stop_monthly_event_report_scheduler),
+            ("scheduler_orchestrator", self.shutdown_scheduler_orchestrator),
             ("updater", self.stop_updater),
             ("alert_log_uploader", self.stop_alert_log_uploader),
             ("shared_bridge", self.stop_shared_bridge),
@@ -1946,6 +2101,16 @@ class AppContainer:
             f"running={bool(result.get('running', False))}"
         )
         return result
+
+    def shutdown_scheduler_orchestrator(self, source: str = "关闭自动") -> Dict[str, Any]:
+        if not self.scheduler_orchestrator:
+            return {"stopped": False, "running": False, "reason": "not_initialized"}
+        try:
+            self.scheduler_orchestrator.shutdown()
+            return {"stopped": True, "running": False, "reason": "stopped", "source": source}
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[调度] {source}停止 APScheduler 编排器失败: {exc}")
+            return {"stopped": False, "running": True, "reason": "failed", "error": str(exc)}
 
     def start_updater(self, source: str = "自动") -> Dict[str, Any]:
         self.ensure_updater_service()
@@ -2629,6 +2794,8 @@ class AppContainer:
     def _apply_runtime_config_snapshot(self, settings: Dict[str, Any]) -> None:
         self.config = copy.deepcopy(settings)
         self.runtime_config = adapt_runtime_config(self.config)
+        if self.config_runtime_service is not None:
+            self.config_runtime_service.configure(self.config, self.runtime_config)
         self.job_service.update_log_buffer_size(int(self._console_cfg().get("log_buffer_size", 5000)))
         self.wifi_service = WifiSwitchService(self.runtime_config)
         self.job_service.configure_task_engine(

@@ -789,7 +789,7 @@ def build_job_panel_summary(
     emit_log: Callable[[str], None] | None = None,
     strict: bool = False,
 ) -> Dict[str, Any]:
-    safe_limit = max(1, min(max(int(limit or 0), _FULL_TASK_PANEL_LIMIT), _FULL_TASK_PANEL_LIMIT))
+    safe_limit = max(1, min(int(limit or 60), _FULL_TASK_PANEL_LIMIT))
     incomplete_jobs = _safe_jobs(
         container,
         limit=safe_limit,

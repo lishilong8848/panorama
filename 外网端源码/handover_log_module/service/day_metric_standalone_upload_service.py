@@ -6,12 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.config.config_compat_cleanup import sanitize_day_metric_upload_config
 from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
-from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
-from app.modules.shared_bridge.service.shared_source_cache_service import SharedSourceCacheService
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.day_metric_bitable_export_service import DayMetricBitableExportService
@@ -149,44 +146,9 @@ class DayMetricStandaloneUploadService:
     def _source_reuse_enabled(self) -> bool:
         return True
 
-    def _deployment_role_mode(self) -> str:
-        deployment = self.runtime_config.get("deployment", {})
-        if isinstance(deployment, dict):
-            role_mode = normalize_role_mode(deployment.get("role_mode"))
-            if role_mode:
-                return role_mode
-        return normalize_role_mode(self.handover_cfg.get("_deployment_role_mode"))
-
-    def _shared_bridge_cfg(self) -> Dict[str, Any]:
-        bridge_cfg = self.runtime_config.get("shared_bridge", {})
-        if isinstance(bridge_cfg, dict) and bridge_cfg:
-            return bridge_cfg
-        common = self.runtime_config.get("common", {})
-        if isinstance(common, dict):
-            bridge_cfg = common.get("shared_bridge", {})
-            if isinstance(bridge_cfg, dict):
-                return bridge_cfg
-        return {}
-
-    def _new_shared_source_cache_service(self, *, emit_log: Callable[[str], None]) -> SharedSourceCacheService | None:
-        bridge_cfg = self._shared_bridge_cfg()
-        if not isinstance(bridge_cfg, dict) or not bool(bridge_cfg.get("enabled", False)):
-            return None
-        resolved_bridge = resolve_shared_bridge_paths(bridge_cfg, self._deployment_role_mode())
-        root_dir = str(resolved_bridge.get("root_dir", "") or "").strip()
-        if not root_dir:
-            return None
-        store = SharedBridgeStore(
-            root_dir,
-            busy_timeout_ms=max(1000, _safe_int(resolved_bridge.get("sqlite_busy_timeout_ms", 5000), 5000)),
-        )
-        store.ensure_ready()
-        return SharedSourceCacheService(
-            runtime_config=self.runtime_config,
-            store=store,
-            download_browser_pool=self._download_browser_pool,
-            emit_log=emit_log,
-        )
+    def _new_shared_source_cache_service(self, *, emit_log: Callable[[str], None]) -> None:
+        emit_log("[12项独立上传] 外网端已改用内网 HTTP source-index，不再打开共享 bridge.db")
+        return None
 
     def _selected_buildings(self, *, building_scope: str, building: str | None) -> List[str]:
         if str(building_scope or "").strip() == "single":

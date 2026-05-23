@@ -5,8 +5,8 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.settings_loader import save_settings
 from app.modules.scheduler.api._config_persistence import (
+    persist_full_config,
     persist_scheduler_toggle,
     record_scheduler_config_autostart,
 )
@@ -133,8 +133,7 @@ def branch_power_upload_scheduler_config(payload: Dict[str, Any], request: Reque
     scheduler_cfg["retry_failed_on_next_tick"] = False
 
     try:
-        saved = save_settings(merged, container.config_path)
-        container.reload_config(saved)
+        saved = persist_full_config(container, merged, source="支路三源表整日直传调度配置保存", mode="light")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

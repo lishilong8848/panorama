@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 import json
@@ -25,7 +25,7 @@ from app.modules.report_pipeline.service.monthly_bridge_service import (
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
-from app.modules.shared_bridge.service.shared_bridge_mailbox_store import SharedBridgeMailboxStore
+from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.shared_bridge.service.shared_bridge_runtime_mirror_store import SharedBridgeRuntimeMirrorStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_ALARM_EVENT,
@@ -40,8 +40,14 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     SharedSourceCacheService,
     is_accessible_cached_file_path,
 )
+from app.modules.shared_bridge.service.bridge_status_presenter import (
+    present_alarm_event_family,
+    present_external_source_cache_family,
+    present_external_source_cache_overview,
+)
 from app.modules.report_pipeline.service.job_service import JobService
-from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
+
+
 class InternalDownloadBrowserPool:  # 外网端不承载内网浏览器池实现
     def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
         raise RuntimeError("外网端源码不包含内网下载浏览器池")
@@ -144,9 +150,12 @@ class SharedBridgeRuntimeService:
         self._cached_internal_alert_status: Dict[str, Any] = self._empty_internal_alert_status()
         self._cached_health_snapshot: Dict[str, Any] | None = None
         self._store_issue_log_markers: Dict[str, float] = {}
-        self._store: SharedBridgeStore | None = None
-        self._mailbox_store: SharedBridgeMailboxStore | None = None
+        self._store: Any | None = None
         self._mirror_store: SharedBridgeRuntimeMirrorStore | None = None
+        self._internal_bridge_http_client: InternalBridgeHttpClient | None = None
+        self._internal_bridge_http_enabled = False
+        self._bridge_mode = "http"
+        self._http_bridge_failure_log_markers: Dict[str, float] = {}
         self._internal_download_pool: InternalDownloadBrowserPool | None = None
         self._source_cache_service: SharedSourceCacheService | None = None
         self._startup_logged = False
@@ -468,14 +477,12 @@ class SharedBridgeRuntimeService:
         return normalized_units
 
     def _build_branch_power_daily_units_from_cache(self, *, business_date: str, buildings: List[str]) -> List[Dict[str, Any]]:
-        if self._source_cache_service is None:
-            raise RuntimeError("共享源缓存服务未初始化")
         requested_buildings = [str(item or "").strip() for item in buildings if str(item or "").strip()]
         if not requested_buildings:
-            requested_buildings = self._source_cache_service.get_enabled_buildings()
+            requested_buildings = self.get_source_cache_buildings()
         family_maps: Dict[str, Dict[str, Dict[str, Any]]] = {}
         for family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH):
-            entries = self._source_cache_service.get_latest_ready_entries(
+            entries = self.get_latest_source_cache_entries(
                 source_family=family,
                 buildings=requested_buildings or None,
                 bucket_key=business_date,
@@ -546,7 +553,7 @@ class SharedBridgeRuntimeService:
                 )
             except Exception as exc:  # noqa: BLE001
                 cache_error = str(exc)
-        if not normalized_units and not buildings:
+        if not normalized_units:
             normalized_units = self._normalize_branch_power_daily_units(
                 source_units=[item for item in source_units if isinstance(item, dict)],
                 business_date=business_date,
@@ -627,20 +634,30 @@ class SharedBridgeRuntimeService:
         return True
 
     def _build_wet_bulb_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        if not self._store:
-            raise RuntimeError("共享桥接存储未初始化")
         task_id = str(task.get("task_id", "") or "").strip()
-        artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
         source_units: List[Dict[str, str]] = []
-        for item in artifacts:
-            relative_path = str(item.get("relative_path", "") or "").strip()
-            building = str(item.get("building", "") or "").strip()
-            if not relative_path or not building:
+        result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
+        internal = result.get("internal", {}) if isinstance(result.get("internal", {}), dict) else {}
+        for item in internal.get("source_units", []) if isinstance(internal.get("source_units", []), list) else []:
+            if not isinstance(item, dict):
                 continue
-            file_path = self._resolve_ready_artifact_file_path(item)
-            if file_path is None:
-                raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {relative_path}")
-            source_units.append({"building": building, "file_path": str(file_path)})
+            building = str(item.get("building", "") or "").strip()
+            file_path = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+            if building and file_path:
+                source_units.append({"building": building, "file_path": file_path})
+        if not source_units:
+            if not self._store:
+                raise RuntimeError("共享桥接存储未初始化")
+            artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+            for item in artifacts:
+                relative_path = str(item.get("relative_path", "") or "").strip()
+                building = str(item.get("building", "") or "").strip()
+                if not relative_path or not building:
+                    continue
+                file_path = self._resolve_ready_artifact_file_path(item)
+                if file_path is None:
+                    raise FileNotFoundError(f"共享目录中的湿球温度源文件不存在或不可访问: {relative_path}")
+                source_units.append({"building": building, "file_path": str(file_path)})
         if not source_units:
             raise RuntimeError("共享目录中没有可继续处理的湿球温度源文件")
         return {
@@ -654,21 +671,19 @@ class SharedBridgeRuntimeService:
         }
 
     def _build_handover_history_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        if self._source_cache_service is None:
-            raise RuntimeError("共享源缓存服务未初始化")
         task_id = str(task.get("task_id", "") or "").strip()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         buildings = self._normalize_text_list(request.get("buildings", []))
         if not buildings:
-            buildings = self._source_cache_service.get_enabled_buildings()
+            buildings = self.get_source_cache_buildings()
         duty_date = str(request.get("duty_date", "") or "").strip()
         duty_shift = str(request.get("duty_shift", "") or "").strip().lower()
-        cached_entries = self._source_cache_service.get_handover_by_date_entries(
+        cached_entries = self.get_handover_by_date_cache_entries(
             duty_date=duty_date,
             duty_shift=duty_shift,
             buildings=buildings,
         )
-        capacity_entries = self._source_cache_service.get_handover_capacity_by_date_entries(
+        capacity_entries = self.get_handover_capacity_by_date_cache_entries(
             duty_date=duty_date,
             duty_shift=duty_shift,
             buildings=buildings,
@@ -712,15 +727,13 @@ class SharedBridgeRuntimeService:
         }
 
     def _build_day_metric_history_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        if self._source_cache_service is None:
-            raise RuntimeError("共享源缓存服务未初始化")
         task_id = str(task.get("task_id", "") or "").strip()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         selected_dates = self._normalize_text_list(request.get("selected_dates", []))
         building_scope = str(request.get("building_scope", "") or "").strip() or "all_enabled"
-        target_buildings = [str(request.get("building", "") or "").strip()] if building_scope == "single" else self._source_cache_service.get_enabled_buildings()
+        target_buildings = [str(request.get("building", "") or "").strip()] if building_scope == "single" else self.get_source_cache_buildings()
         target_buildings = [item for item in target_buildings if item]
-        cached_entries = self._source_cache_service.get_day_metric_by_date_entries(
+        cached_entries = self.get_day_metric_by_date_cache_entries(
             selected_dates=selected_dates,
             buildings=target_buildings,
         )
@@ -753,13 +766,12 @@ class SharedBridgeRuntimeService:
         }
 
     def _build_monthly_cache_fill_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        if self._source_cache_service is None:
-            raise RuntimeError("共享源缓存服务未初始化")
         task_id = str(task.get("task_id", "") or "").strip()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         selected_dates = self._normalize_text_list(request.get("selected_dates", []))
-        cached_entries = self._source_cache_service.get_monthly_by_date_entries(selected_dates=selected_dates)
-        expected = len(selected_dates) * len(self._source_cache_service.get_enabled_buildings())
+        target_buildings = self.get_source_cache_buildings()
+        cached_entries = self.get_monthly_by_date_cache_entries(selected_dates=selected_dates, buildings=target_buildings)
+        expected = len(selected_dates) * len(target_buildings)
         if len(cached_entries) < expected:
             raise RuntimeError(f"月报历史缓存未齐全: dates={','.join(selected_dates) or '-'}")
         file_items = [
@@ -802,19 +814,14 @@ class SharedBridgeRuntimeService:
                 "summary": "共享续传状态已就绪，正在继续断点续传",
                 "log_text": f"[共享桥接] 任务={task_id} 续传状态已就绪，正在自动恢复原任务",
             }
-        source_root = str(internal_result.get("source_root", "") or "").strip()
-        if mode == "auto_once" and self._source_cache_service is not None:
+        if mode == "auto_once":
             target_bucket_key = (
                 str(request.get("target_bucket_key", "") or "").strip()
                 or str(internal_result.get("target_bucket_key", "") or "").strip()
                 or self.current_source_cache_bucket()
             )
-            target_buildings = [
-                str(item or "").strip()
-                for item in self._source_cache_service.get_enabled_buildings()
-                if str(item or "").strip()
-            ]
-            cached_entries = self._source_cache_service.get_latest_ready_entries(
+            target_buildings = self.get_source_cache_buildings()
+            cached_entries = self.get_latest_source_cache_entries(
                 source_family=FAMILY_MONTHLY_REPORT,
                 buildings=target_buildings,
                 bucket_key=target_bucket_key,
@@ -847,46 +854,18 @@ class SharedBridgeRuntimeService:
                         "summary": "共享文件已到位，正在继续处理月报自动流程",
                         "log_text": f"[共享桥接] 任务={task_id} 月报 canonical 共享文件已齐全，正在自动恢复原任务",
                     }
-            if not source_root:
-                raise RuntimeError("月报共享桥接缺少可继续处理的 canonical 源文件")
-        if not source_root:
-            raise RuntimeError("月报共享桥接缺少 source_root")
-        if self.role_mode == "external":
-            raise RuntimeError("月报共享桥接缺少 canonical 共享缓存索引，外网端不扫描共享目录 source_root")
-        file_items = []
-        source_root_path = Path(source_root)
-        for file_path in sorted(source_root_path.rglob("*.xlsx")):
-            if not file_path.is_file():
-                continue
-            if not is_accessible_cached_file_path(file_path):
-                raise FileNotFoundError(f"月报共享源文件不存在或不可访问: {file_path}")
-            building = str(file_path.stem.split("--")[-1] if "--" in file_path.stem else "").strip()
-            upload_date = str(file_path.parent.name.split("--")[0] if "--" in file_path.parent.name else "").strip()
-            file_items.append({"building": building, "file_path": str(file_path), "upload_date": upload_date})
-        if not file_items:
-            raise RuntimeError("月报共享桥接未找到可继续处理的共享源文件")
-        return {
-            "worker_payload": {
-                "resume_kind": "shared_bridge_monthly_auto_once",
-                "file_items": file_items,
-                "source": str(request.get("source", "") or "共享桥接月报自动流程").strip() or "共享桥接月报自动流程",
-                "bridge_task_id": task_id,
-            },
-            "summary": "共享文件已到位，正在继续处理月报自动流程",
-            "log_text": f"[共享桥接] 任务={task_id} 月报共享文件已齐全，正在自动恢复原任务",
-        }
+            raise RuntimeError("月报共享桥接缺少可继续处理的 canonical 源文件；外网端不扫描共享目录 source_root")
+        raise RuntimeError("月报共享桥接缺少 canonical 共享缓存索引；外网端不扫描共享目录 source_root")
 
     def _build_alarm_event_upload_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        if self._source_cache_service is None:
-            raise RuntimeError("共享源缓存服务未初始化")
         task_id = str(task.get("task_id", "") or "").strip()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         mode = str(task.get("mode", "") or request.get("mode", "") or "").strip().lower() or "full"
         building = str(request.get("building", "") or "").strip()
-        selection = self._source_cache_service.get_alarm_event_upload_selection(
+        selection = self.get_alarm_event_upload_selection(
             building=building if mode == "single_building" else "",
         )
-        target_buildings = [building] if mode == "single_building" and building else self._source_cache_service.get_enabled_buildings()
+        target_buildings = [building] if mode == "single_building" and building else self.get_source_cache_buildings()
         if not target_buildings:
             target_buildings = [
                 str(item.get("building", "") or "").strip()
@@ -956,18 +935,28 @@ class SharedBridgeRuntimeService:
         self.node_label = _role_label(self.role_mode)
         self.shared_bridge_enabled = bool(resolved_bridge_cfg.get("enabled", False))
         self.shared_bridge_root = str(resolved_bridge_cfg.get("root_dir", "") or "").strip()
+        # 外网端已收口为 HTTP-only 桥接；旧 shared_db/auto 仅由基线脚本用于回归验证，
+        # 运行时无论配置里残留什么值，都强制归一为 http。
+        bridge_mode = "http"
+        self._bridge_mode = bridge_mode
+        http_cfg = self.runtime_config.get("internal_bridge_http", {})
+        self._internal_bridge_http_enabled = (
+            True
+            if self.role_mode == "external"
+            else (bool(http_cfg.get("enabled", False)) if isinstance(http_cfg, dict) else False)
+        )
+        self._internal_bridge_http_client = (
+            InternalBridgeHttpClient.from_runtime_config(self.runtime_config)
+            if self.role_mode == "external" and self._internal_bridge_http_enabled
+            else None
+        )
         self.poll_interval_sec = max(1, int(resolved_bridge_cfg.get("poll_interval_sec", 2) or 2))
         self.heartbeat_interval_sec = max(1, int(resolved_bridge_cfg.get("heartbeat_interval_sec", 5) or 5))
         self.claim_lease_sec = max(5, int(resolved_bridge_cfg.get("claim_lease_sec", 30) or 30))
         self.stale_task_timeout_sec = max(60, int(resolved_bridge_cfg.get("stale_task_timeout_sec", 1800) or 1800))
         self.artifact_retention_days = max(1, int(resolved_bridge_cfg.get("artifact_retention_days", 7) or 7))
         self.sqlite_busy_timeout_ms = max(1000, int(resolved_bridge_cfg.get("sqlite_busy_timeout_ms", 15000) or 15000))
-        self._store = (
-            SharedBridgeStore(self.shared_bridge_root, busy_timeout_ms=self.sqlite_busy_timeout_ms)
-            if self.shared_bridge_root
-            else None
-        )
-        self._mailbox_store = SharedBridgeMailboxStore(self.shared_bridge_root) if self.shared_bridge_root else None
+        self._store = None
         self._mirror_store = SharedBridgeRuntimeMirrorStore(
             runtime_config=self.runtime_config,
             role_mode=self.role_mode or "external",
@@ -1001,14 +990,649 @@ class SharedBridgeRuntimeService:
         }
 
     def _shared_bridge_db_path_text(self) -> str:
-        if self._store is not None:
-            store_db_path = getattr(self._store, "db_path", None)
-            if store_db_path:
-                return str(store_db_path)
-        root_text = str(self.shared_bridge_root or "").strip()
-        if not root_text:
-            return ""
-        return str(Path(root_text) / "bridge.db")
+        return ""
+
+    def _http_bridge_should_try(self) -> bool:
+        return (
+            self.role_mode == "external"
+            and bool(self._internal_bridge_http_enabled)
+            and self._bridge_mode == "http"
+            and self._internal_bridge_http_client is not None
+        )
+
+    def _http_bridge_forced(self) -> bool:
+        return self.role_mode == "external" and self._bridge_mode == "http"
+
+    def _emit_http_bridge_issue_log(self, scope: str, exc: Exception) -> None:
+        marker = f"{scope}|{type(exc).__name__}|{str(exc).strip().lower()}"
+        now_monotonic = time.monotonic()
+        previous = float(self._http_bridge_failure_log_markers.get(marker, 0.0) or 0.0)
+        if previous and now_monotonic - previous < self.STORE_ERROR_LOG_INTERVAL_SEC:
+            return
+        self._http_bridge_failure_log_markers[marker] = now_monotonic
+        self._emit_system_log(f"[共享桥接][HTTP] {scope}失败: {exc}")
+
+    @staticmethod
+    def _http_source_bucket_dt(bucket_key: Any) -> datetime | None:
+        text = str(bucket_key or "").strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y%m%d%H%M", "%Y%m%d%H"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 12:
+            try:
+                return datetime.strptime(digits[:12], "%Y%m%d%H%M")
+            except ValueError:
+                return None
+        if len(digits) >= 10:
+            try:
+                return datetime.strptime(digits[:10], "%Y%m%d%H")
+            except ValueError:
+                return None
+        return None
+
+    def _http_source_cache_buildings(self, buildings: List[str] | None = None) -> List[str]:
+        requested = [
+            str(item or "").strip()
+            for item in (buildings or [])
+            if str(item or "").strip()
+        ]
+        if requested:
+            return list(dict.fromkeys(requested))
+        if self._source_cache_service is not None:
+            try:
+                return list(dict.fromkeys(
+                    str(item or "").strip()
+                    for item in self._source_cache_service.get_enabled_buildings()
+                    if str(item or "").strip()
+                ))
+            except Exception:
+                pass
+        return list(_INTERNAL_ALERT_BUILDINGS)
+
+    def _normalize_http_source_index_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        item = copy.deepcopy(entry if isinstance(entry, dict) else {})
+        metadata = item.get("metadata", {})
+        if not isinstance(metadata, dict):
+            try:
+                metadata = json.loads(str(item.get("metadata_json", "") or "{}"))
+            except Exception:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+        item["metadata"] = metadata
+        item["source_family"] = str(item.get("source_family", "") or "").strip().lower()
+        item["building"] = str(item.get("building", "") or "").strip()
+        item["bucket_kind"] = str(item.get("bucket_kind", "") or "").strip().lower()
+        item["bucket_key"] = str(item.get("bucket_key", "") or "").strip()
+        item["status"] = str(item.get("status", "") or "ready").strip() or "ready"
+        relative = str(item.get("relative_path", "") or "").replace("\\", "/").strip()
+        item["relative_path"] = relative
+        # 内网端可能以本机 D:\share 返回 file_path；外网端应始终按自己的共享根路径解析。
+        if relative and self.shared_bridge_root:
+            item["file_path"] = str(Path(self.shared_bridge_root) / relative.replace("/", "\\"))
+        else:
+            item["file_path"] = str(item.get("file_path", "") or "").strip()
+        return item
+
+    def _http_source_index_query_specs(self, source_family: str, bucket_key: str) -> List[Dict[str, str]]:
+        target_bucket = str(bucket_key or "").strip()
+        if not target_bucket:
+            return [{"bucket_or_date": "", "bucket_kind": ""}]
+        family = str(source_family or "").strip().lower()
+        if family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} and self._http_source_bucket_dt(target_bucket) is None:
+            return [
+                {"bucket_or_date": target_bucket, "bucket_kind": "daily"},
+                {"bucket_or_date": target_bucket, "bucket_kind": "date"},
+                {"bucket_or_date": target_bucket, "bucket_kind": ""},
+            ]
+        return [{"bucket_or_date": target_bucket, "bucket_kind": ""}]
+
+    def _http_source_index_entries(
+        self,
+        *,
+        source_family: str,
+        buildings: List[str] | None = None,
+        bucket_key: str | None = None,
+        duty_shift: str = "",
+        limit_per_building: int = 20,
+    ) -> List[Dict[str, Any]] | None:
+        if not self._http_bridge_should_try():
+            if self._http_bridge_forced():
+                return []
+            return None
+        client = self._internal_bridge_http_client
+        if client is None:
+            return None
+        target_buildings = self._http_source_cache_buildings(buildings)
+        target_bucket = str(bucket_key or "").strip()
+        query_specs = self._http_source_index_query_specs(source_family, target_bucket)
+        output: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        try:
+            query_contexts: List[Dict[str, Any]] = []
+            for building in target_buildings:
+                for spec in query_specs:
+                    query_contexts.append(
+                        {
+                            "source_family": source_family,
+                            "bucket_or_date": spec.get("bucket_or_date", ""),
+                            "building": building,
+                            "bucket_kind": spec.get("bucket_kind", ""),
+                            "duty_shift": duty_shift,
+                            "limit": max(1, int(limit_per_building or 20)),
+                        }
+                    )
+            batch_reader = getattr(client, "source_index_batch", None)
+            if callable(batch_reader):
+                raw_results = batch_reader(query_contexts, default_limit=max(1, int(limit_per_building or 20)))
+            else:
+                raw_results = [
+                    {"index": index, "ok": True, "entries": client.source_index(**query)}
+                    for index, query in enumerate(query_contexts)
+                ]
+            rows_by_query_index: Dict[int, List[Dict[str, Any]]] = {}
+            for result in raw_results if isinstance(raw_results, list) else []:
+                if not isinstance(result, dict) or not bool(result.get("ok", False)):
+                    continue
+                index = int(result.get("index", -1) or -1)
+                entries = result.get("entries", [])
+                rows_by_query_index[index] = entries if isinstance(entries, list) else []
+            matched_buildings: set[str] = set()
+            for index, query in enumerate(query_contexts):
+                building = str(query.get("building", "") or "").strip()
+                if target_bucket and building in matched_buildings:
+                    continue
+                for row in rows_by_query_index.get(index, []):
+                    if not isinstance(row, dict):
+                        continue
+                    item = self._normalize_http_source_index_entry(row)
+                    if str(item.get("status", "") or "").strip().lower() != "ready":
+                        continue
+                    if str(item.get("source_family", "") or "").strip().lower() != str(source_family or "").strip().lower():
+                        continue
+                    if building and str(item.get("building", "") or "").strip() != building:
+                        continue
+                    if target_bucket:
+                        bucket = str(item.get("bucket_key", "") or "").strip()
+                        duty_date = str(item.get("duty_date", "") or "").strip()
+                        if target_bucket not in {bucket, duty_date}:
+                            continue
+                    identity = "|".join(
+                        [
+                            str(item.get("entry_id", "") or "").strip(),
+                            str(item.get("source_family", "") or "").strip(),
+                            str(item.get("building", "") or "").strip(),
+                            str(item.get("bucket_kind", "") or "").strip(),
+                            str(item.get("bucket_key", "") or "").strip(),
+                            str(item.get("duty_date", "") or "").strip(),
+                            str(item.get("relative_path", "") or "").strip(),
+                        ]
+                    )
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    output.append(item)
+                    if target_bucket and building:
+                        matched_buildings.add(building)
+        except Exception as exc:  # noqa: BLE001
+            self._emit_http_bridge_issue_log("读取源文件索引", exc)
+            if self._http_bridge_forced():
+                return []
+            return None
+        return output
+
+    def _http_latest_source_cache_selection(
+        self,
+        *,
+        source_family: str,
+        buildings: List[str] | None = None,
+        max_version_gap: int = 3,
+        max_selection_age_hours: float = 3.0,
+    ) -> Dict[str, Any] | None:
+        entries = self._http_source_index_entries(
+            source_family=source_family,
+            buildings=buildings,
+            limit_per_building=30,
+        )
+        if entries is None:
+            return None
+        target_buildings = self._http_source_cache_buildings(buildings)
+        latest_by_building: Dict[str, Dict[str, Any]] = {}
+        latest_bucket_dt: datetime | None = None
+        latest_bucket_key = ""
+        for entry in entries:
+            building = str(entry.get("building", "") or "").strip()
+            bucket_key = str(entry.get("bucket_key", "") or "").strip()
+            bucket_dt = self._http_source_bucket_dt(bucket_key)
+            if not building or bucket_dt is None:
+                continue
+            current = latest_by_building.get(building)
+            current_dt = self._http_source_bucket_dt(current.get("bucket_key", "")) if isinstance(current, dict) else None
+            if current_dt is None or bucket_dt > current_dt:
+                latest_by_building[building] = {**entry, "_bucket_dt": bucket_dt}
+            if latest_bucket_dt is None or bucket_dt > latest_bucket_dt:
+                latest_bucket_dt = bucket_dt
+                latest_bucket_key = bucket_key
+
+        selected_entries: List[Dict[str, Any]] = []
+        fallback_buildings: List[str] = []
+        missing_buildings: List[str] = []
+        stale_buildings: List[str] = []
+        building_rows: List[Dict[str, Any]] = []
+        best_bucket_age_hours: float | None = None
+        is_best_bucket_too_old = False
+
+        if latest_bucket_dt is not None:
+            age_hours = max(0.0, (datetime.now() - latest_bucket_dt).total_seconds() / 3600.0)
+            best_bucket_age_hours = round(age_hours, 3)
+            is_best_bucket_too_old = age_hours > float(max_selection_age_hours)
+
+        for building in target_buildings:
+            candidate = latest_by_building.get(building)
+            if candidate is None or latest_bucket_dt is None:
+                missing_buildings.append(building)
+                building_rows.append(
+                    {
+                        "building": building,
+                        "bucket_key": latest_bucket_key,
+                        "status": "waiting",
+                        "using_fallback": False,
+                        "version_gap": None,
+                        "downloaded_at": "",
+                        "last_error": "",
+                        "relative_path": "",
+                        "resolved_file_path": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                    }
+                )
+                continue
+            candidate_dt = candidate.get("_bucket_dt") if isinstance(candidate.get("_bucket_dt"), datetime) else None
+            version_gap = max(0, int((latest_bucket_dt - candidate_dt).total_seconds() // 3600)) if candidate_dt else 0
+            using_fallback = version_gap > 0
+            row = {
+                "building": building,
+                "bucket_key": str(candidate.get("bucket_key", "") or "").strip(),
+                "status": "ready",
+                "using_fallback": using_fallback,
+                "version_gap": version_gap,
+                "downloaded_at": str(candidate.get("downloaded_at", "") or "").strip(),
+                "last_error": "",
+                "relative_path": str(candidate.get("relative_path", "") or "").strip(),
+                "resolved_file_path": str(candidate.get("file_path", "") or "").strip(),
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
+            }
+            if version_gap > max_version_gap:
+                row["status"] = "stale"
+                stale_buildings.append(building)
+            else:
+                if using_fallback:
+                    fallback_buildings.append(building)
+                selected_entries.append({key: value for key, value in candidate.items() if key != "_bucket_dt"})
+            building_rows.append(row)
+
+        return {
+            "best_bucket_key": latest_bucket_key,
+            "best_bucket_age_hours": best_bucket_age_hours,
+            "max_selection_age_hours": float(max_selection_age_hours),
+            "is_best_bucket_too_old": is_best_bucket_too_old,
+            "selected_entries": selected_entries,
+            "fallback_buildings": fallback_buildings,
+            "missing_buildings": missing_buildings,
+            "stale_buildings": stale_buildings,
+            "blocked_buildings": [],
+            "buildings": building_rows,
+            "can_proceed": bool(target_buildings)
+            and not missing_buildings
+            and not stale_buildings
+            and not is_best_bucket_too_old
+            and len(selected_entries) == len(target_buildings),
+            "transport": "http",
+        }
+
+    def _http_alarm_event_upload_selection(self, *, building: str = "") -> Dict[str, Any] | None:
+        entries = self._http_source_index_entries(
+            source_family=FAMILY_ALARM_EVENT,
+            buildings=[building] if str(building or "").strip() else None,
+            limit_per_building=100,
+        )
+        if entries is None:
+            return None
+        reference_day = datetime.now().date()
+        previous_day = reference_day - timedelta(days=1)
+        target_buildings = self._http_source_cache_buildings([building] if str(building or "").strip() else None)
+        grouped: Dict[str, List[Dict[str, Any]]] = {name: [] for name in target_buildings}
+        for entry in entries:
+            row_building = str(entry.get("building", "") or "").strip()
+            if row_building not in grouped:
+                continue
+            bucket_kind = str(entry.get("bucket_kind", "") or "").strip().lower()
+            if bucket_kind and bucket_kind not in {"latest", "manual"}:
+                continue
+            downloaded_at_text = str(entry.get("downloaded_at", "") or "").strip()
+            downloaded_at_dt = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    downloaded_at_dt = datetime.strptime(downloaded_at_text.replace("/", "-"), fmt)
+                    break
+                except ValueError:
+                    continue
+            if downloaded_at_dt is None:
+                continue
+            grouped[row_building].append({**entry, "_downloaded_at_dt": downloaded_at_dt})
+        for name in target_buildings:
+            grouped[name].sort(
+                key=lambda item: (
+                    item.get("_downloaded_at_dt") or datetime.min,
+                    str(item.get("updated_at", "") or "").strip(),
+                    str(item.get("entry_id", "") or "").strip(),
+                ),
+                reverse=True,
+            )
+
+        selected_entries: List[Dict[str, Any]] = []
+        selected_by_building: Dict[str, Dict[str, Any]] = {}
+        building_rows: List[Dict[str, Any]] = []
+        used_previous_day_fallback: List[str] = []
+        missing_today_buildings: List[str] = []
+        missing_both_days_buildings: List[str] = []
+        for name in target_buildings:
+            candidates = grouped.get(name, [])
+            today_candidates = [
+                item
+                for item in candidates
+                if isinstance(item.get("_downloaded_at_dt"), datetime) and item["_downloaded_at_dt"].date() == reference_day
+            ]
+            yesterday_candidates = [
+                item
+                for item in candidates
+                if isinstance(item.get("_downloaded_at_dt"), datetime) and item["_downloaded_at_dt"].date() == previous_day
+            ]
+            selected: Dict[str, Any] | None = None
+            selection_scope = ""
+            if today_candidates:
+                selected = today_candidates[0]
+                selection_scope = "today"
+            else:
+                missing_today_buildings.append(name)
+                if yesterday_candidates:
+                    selected = yesterday_candidates[0]
+                    selection_scope = "yesterday_fallback"
+                    used_previous_day_fallback.append(name)
+                else:
+                    missing_both_days_buildings.append(name)
+            if selected is None:
+                building_rows.append(
+                    {
+                        "building": name,
+                        "bucket_key": "",
+                        "status": "waiting",
+                        "ready": False,
+                        "downloaded_at": "",
+                        "selected_downloaded_at": "",
+                        "last_error": "",
+                        "relative_path": "",
+                        "resolved_file_path": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                        "source_kind": "",
+                        "selection_scope": "missing",
+                    }
+                )
+                continue
+            normalized_selected = {key: value for key, value in selected.items() if key != "_downloaded_at_dt"}
+            normalized_selected["selection_scope"] = selection_scope
+            normalized_selected["source_kind"] = str(selected.get("bucket_kind", "") or "latest").strip().lower() or "latest"
+            selected_entries.append(normalized_selected)
+            selected_by_building[name] = normalized_selected
+            downloaded_at_text = str(selected.get("downloaded_at", "") or "").strip()
+            building_rows.append(
+                {
+                    "building": name,
+                    "bucket_key": str(selected.get("bucket_key", "") or "").strip(),
+                    "status": "ready",
+                    "ready": True,
+                    "downloaded_at": downloaded_at_text,
+                    "selected_downloaded_at": downloaded_at_text,
+                    "last_error": "",
+                    "relative_path": str(selected.get("relative_path", "") or "").strip(),
+                    "resolved_file_path": str(selected.get("file_path", "") or "").strip(),
+                    "blocked": False,
+                    "blocked_reason": "",
+                    "next_probe_at": "",
+                    "source_kind": normalized_selected["source_kind"],
+                    "selection_scope": selection_scope,
+                }
+            )
+        last_success_candidates = [
+            str(item.get("selected_downloaded_at", "") or "").strip()
+            for item in building_rows
+            if str(item.get("selected_downloaded_at", "") or "").strip()
+        ]
+        return {
+            "selection_policy": "today_latest_else_yesterday_fallback",
+            "selection_reference_date": reference_day.isoformat(),
+            "used_previous_day_fallback": used_previous_day_fallback,
+            "missing_today_buildings": missing_today_buildings,
+            "missing_both_days_buildings": missing_both_days_buildings,
+            "ready_count": len(selected_entries),
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "last_success_at": max(last_success_candidates) if last_success_candidates else "",
+            "current_bucket": reference_day.isoformat(),
+            "buildings": building_rows,
+            "latest_selection": {},
+            "selected_entries": selected_entries,
+            "selected_by_building": selected_by_building,
+            "transport": "http",
+        }
+
+    def _http_external_source_cache_family_payload(
+        self,
+        *,
+        source_family: str,
+        current_bucket: str,
+        buildings: List[str],
+        max_version_gap: int = 3,
+        max_selection_age_hours: float = 3.0,
+    ) -> Dict[str, Any] | None:
+        latest_selection = self._http_latest_source_cache_selection(
+            source_family=source_family,
+            buildings=buildings,
+            max_version_gap=max_version_gap,
+            max_selection_age_hours=max_selection_age_hours,
+        )
+        if latest_selection is None:
+            return None
+        live_rows = [
+            {
+                "building": row.get("building", ""),
+                "bucket_key": row.get("bucket_key", ""),
+                "status": row.get("status", "waiting"),
+                "ready": row.get("status") == "ready",
+                "downloaded_at": row.get("downloaded_at", ""),
+                "last_error": row.get("last_error", ""),
+                "relative_path": row.get("relative_path", ""),
+                "resolved_file_path": row.get("resolved_file_path", ""),
+                "blocked": False,
+                "blocked_reason": "",
+                "next_probe_at": "",
+            }
+            for row in latest_selection.get("buildings", [])
+            if isinstance(row, dict)
+        ]
+        live_payload = {
+            "ready_count": sum(1 for row in live_rows if row.get("status") == "ready"),
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "last_success_at": max(
+                (
+                    str(row.get("downloaded_at", "") or "").strip()
+                    for row in live_rows
+                    if str(row.get("downloaded_at", "") or "").strip()
+                ),
+                default="",
+            ),
+            "current_bucket": str(current_bucket or "").strip(),
+            "buildings": live_rows,
+            "latest_selection": latest_selection,
+        }
+        normalized_family = str(source_family or "").strip().lower()
+        display_overview = present_external_source_cache_family(
+            key=normalized_family,
+            title=FAMILY_LABELS.get(normalized_family, ""),
+            live_payload=live_payload,
+            latest_payload=latest_selection,
+        )
+        return {**live_payload, "display_overview": display_overview, "transport": "http"}
+
+    def _http_alarm_external_family_payload(self, *, buildings: List[str]) -> Dict[str, Any] | None:
+        selection = self._http_alarm_event_upload_selection()
+        if selection is None:
+            return None
+        selected_map = selection.get("selected_by_building", {}) if isinstance(selection.get("selected_by_building", {}), dict) else {}
+        output_rows: List[Dict[str, Any]] = []
+        for building in buildings:
+            selected = selected_map.get(building)
+            if isinstance(selected, dict):
+                output_rows.append(
+                    {
+                        "building": building,
+                        "bucket_key": str(selected.get("bucket_key", "") or "").strip(),
+                        "status": "ready",
+                        "ready": True,
+                        "downloaded_at": str(selected.get("downloaded_at", "") or "").strip(),
+                        "selected_downloaded_at": str(selected.get("downloaded_at", "") or "").strip(),
+                        "last_error": "",
+                        "relative_path": str(selected.get("relative_path", "") or "").strip(),
+                        "resolved_file_path": str(selected.get("file_path", "") or "").strip(),
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "source_kind": str(selected.get("source_kind", "") or "latest").strip().lower(),
+                        "selection_scope": str(selected.get("selection_scope", "") or "").strip(),
+                    }
+                )
+            else:
+                output_rows.append({"building": building, "status": "waiting", "selection_scope": "missing"})
+        raw_family = {
+            **selection,
+            "ready_count": sum(1 for row in output_rows if row.get("status") == "ready"),
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "last_success_at": max(
+                (
+                    str(row.get("downloaded_at", "") or "").strip()
+                    for row in output_rows
+                    if str(row.get("downloaded_at", "") or "").strip()
+                ),
+                default="",
+            ),
+            "current_bucket": datetime.now().date().isoformat(),
+            "buildings": output_rows,
+            "latest_selection": {},
+        }
+        presented = present_alarm_event_family(
+            raw_family,
+            key=FAMILY_ALARM_EVENT,
+            title=FAMILY_LABELS.get(FAMILY_ALARM_EVENT, ""),
+        )
+        presented["display_overview"] = dict(presented)
+        presented["transport"] = "http"
+        return presented
+
+    def _http_external_source_cache_overview_fast(self) -> Dict[str, Any] | None:
+        if not self._http_bridge_should_try():
+            return None
+        buildings = self._http_source_cache_buildings()
+        current_bucket = self.current_source_cache_bucket()
+        branch_day_bucket = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        chiller_bucket = datetime.now().strftime("%Y-%m-%d %H:%M")
+        snapshot = {
+            "enabled": bool(self.shared_bridge_enabled and self.role_mode in {"internal", "external"}),
+            "scheduler_running": False,
+            "current_hour_bucket": current_bucket,
+            "last_run_at": self._last_poll_at,
+            "last_success_at": self._last_poll_at,
+            "last_error": "",
+            "cache_root": str(self.shared_bridge_root or ""),
+        }
+        family_specs = [
+            (FAMILY_HANDOVER_LOG, current_bucket),
+            (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
+            (FAMILY_MONTHLY_REPORT, current_bucket),
+            (FAMILY_BRANCH_POWER, branch_day_bucket),
+            (FAMILY_BRANCH_CURRENT, branch_day_bucket),
+            (FAMILY_BRANCH_SWITCH, branch_day_bucket),
+            (FAMILY_CHILLER_MODE_SWITCH, chiller_bucket),
+        ]
+        try:
+            for family, bucket in family_specs:
+                payload = self._http_external_source_cache_family_payload(
+                    source_family=family,
+                    current_bucket=bucket,
+                    buildings=buildings,
+                    max_selection_age_hours=72.0 if family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} else 3.0,
+                )
+                if payload is None:
+                    return None
+                snapshot[family] = payload
+            alarm_payload = self._http_alarm_external_family_payload(buildings=buildings)
+            if alarm_payload is None:
+                return None
+            snapshot[FAMILY_ALARM_EVENT] = alarm_payload
+        except Exception as exc:  # noqa: BLE001
+            self._emit_http_bridge_issue_log("构建源文件状态页索引", exc)
+            if self._http_bridge_forced():
+                snapshot["last_error"] = str(exc)
+                snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
+                return copy.deepcopy(snapshot["display_overview"])
+            return None
+        snapshot["display_overview"] = present_external_source_cache_overview(snapshot)
+        return copy.deepcopy(snapshot["display_overview"])
+
+    def create_http_bridge_task(
+        self,
+        *,
+        get_or_create_name: str,
+        create_name: str,
+        bridge_kwargs: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        if not self._http_bridge_should_try():
+            if self._http_bridge_forced():
+                raise RuntimeError("内网端 HTTP 桥接未配置或 base_url 无法解析")
+            return None
+        client = self._internal_bridge_http_client
+        if client is None:
+            if self._http_bridge_forced():
+                raise RuntimeError("内网端 HTTP 桥接客户端未初始化")
+            return None
+        payload = copy.deepcopy(bridge_kwargs if isinstance(bridge_kwargs, dict) else {})
+        requested_by = str(payload.get("requested_by", "") or "manual").strip() or "manual"
+        try:
+            task = client.create_task(
+                get_or_create_name=get_or_create_name,
+                create_name=create_name,
+                payload=payload,
+                requested_by=requested_by,
+            )
+            if isinstance(task, dict):
+                task["transport"] = "http"
+                self._cache_task_detail(task)
+                return task
+        except Exception as exc:  # noqa: BLE001
+            self._emit_http_bridge_issue_log("派发任务", exc)
+            if self._http_bridge_forced():
+                raise RuntimeError(f"内网端 HTTP 桥接派发失败: {exc}") from exc
+        return None
 
     @staticmethod
     def _store_error_state(exc: Exception) -> str:
@@ -1064,21 +1688,24 @@ class SharedBridgeRuntimeService:
         if self._mirror_store is not None:
             self._mirror_store.upsert_task(task_payload)
 
-    def _list_mailbox_tasks(self, *, limit: int) -> List[Dict[str, Any]]:
-        if self._mailbox_store is None:
+    def _list_http_bridge_tasks(self, *, status: str = "", limit: int = 100) -> List[Dict[str, Any]]:
+        if not self._http_bridge_should_try() or self._internal_bridge_http_client is None:
             return []
         try:
-            return self._mailbox_store.list_tasks(limit=limit)
-        except Exception:
+            tasks = self._internal_bridge_http_client.list_tasks(status=status, limit=limit)
+            normalized: List[Dict[str, Any]] = []
+            for task in tasks if isinstance(tasks, list) else []:
+                if not isinstance(task, dict):
+                    continue
+                item = copy.deepcopy(task)
+                item["transport"] = "http"
+                normalized.append(item)
+            if normalized:
+                self._cache_task_list(normalized)
+            return normalized
+        except Exception as exc:  # noqa: BLE001
+            self._emit_http_bridge_issue_log("读取任务列表", exc)
             return []
-
-    def _get_mailbox_task(self, task_id: str) -> Dict[str, Any] | None:
-        if self._mailbox_store is None:
-            return None
-        try:
-            return self._mailbox_store.load_task(task_id)
-        except Exception:
-            return None
 
     @staticmethod
     def _task_counts_from_tasks(tasks: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -1596,11 +2223,16 @@ class SharedBridgeRuntimeService:
                     "last_error": "",
                 }
             )
-            internal_source_cache = (
-                self._source_cache_service.get_health_snapshot(mode=normalized_mode)
-                if self._source_cache_service is not None
-                else self._empty_internal_source_cache_snapshot()
-            )
+            if self.role_mode == "external" and self._http_bridge_should_try():
+                internal_source_cache = self._empty_internal_source_cache_snapshot()
+                internal_source_cache["status"] = "http_bridge"
+                internal_source_cache["last_error"] = "HTTP桥接模式下外网端不构建共享缓存完整快照"
+            else:
+                internal_source_cache = (
+                    self._source_cache_service.get_health_snapshot(mode=normalized_mode)
+                    if self._source_cache_service is not None
+                    else self._empty_internal_source_cache_snapshot()
+                )
             internal_alert_status = copy.deepcopy(self._cached_internal_alert_status)
             if not isinstance(internal_alert_status, dict) or not internal_alert_status:
                 if self._mirror_store is not None:
@@ -1617,6 +2249,9 @@ class SharedBridgeRuntimeService:
                 "enabled": self.shared_bridge_enabled,
                 "role_mode": self.role_mode,
                 "root_dir": self.shared_bridge_root,
+                "bridge_mode": self._bridge_mode,
+                "http_bridge_enabled": bool(self._internal_bridge_http_enabled),
+                "http_bridge_base_url": str(getattr(self._internal_bridge_http_client, "base_url", "") or ""),
                 "db_status": self._db_status,
                 "last_error": self._last_error,
                 "last_poll_at": self._last_poll_at,
@@ -1629,7 +2264,7 @@ class SharedBridgeRuntimeService:
                 "problematic": int(self._counts.get("problematic", 0)),
                 "task_count": int(self._counts.get("total_count", 0)),
                 "node_count": int(self._counts.get("node_count", 0)),
-                "node_heartbeat_ok": bool(self.is_running() and self._db_status == "ok"),
+                "node_heartbeat_ok": bool(self.is_running() and self._db_status in {"ok", "http"}),
                 "agent_status": "running" if self.is_running() else ("disabled" if not self._should_run() else "stopped"),
                 "heartbeat_interval_sec": self.heartbeat_interval_sec,
                 "poll_interval_sec": self.poll_interval_sec,
@@ -1652,10 +2287,9 @@ class SharedBridgeRuntimeService:
             raise
 
     def list_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
-        mailbox_tasks = self._list_mailbox_tasks(limit=limit)
-        if mailbox_tasks:
-            self._cache_task_list(mailbox_tasks)
-            return mailbox_tasks
+        http_tasks = self._list_http_bridge_tasks(limit=limit)
+        if http_tasks:
+            return http_tasks
         if not self._store:
             return self.get_cached_tasks(limit=limit)
         try:
@@ -1671,15 +2305,14 @@ class SharedBridgeRuntimeService:
                     busy_message="共享桥接数据库暂时忙碌，共享任务列表已降级为缓存结果",
                     unavailable_message="共享桥接数据库暂时不可用，共享任务列表已降级为缓存结果",
                 )
-                mailbox_tasks = self._list_mailbox_tasks(limit=limit)
-                if mailbox_tasks:
-                    self._cache_task_list(mailbox_tasks)
-                    return mailbox_tasks
                 return self.get_cached_tasks(limit=limit)
             raise
 
     def list_active_tasks(self, *, limit: int = 1000) -> list[Dict[str, Any]]:
         safe_limit = max(1, int(limit or 1000))
+        http_tasks = self._list_http_bridge_tasks(status="active", limit=safe_limit)
+        if http_tasks:
+            return http_tasks[:safe_limit]
         if not self._store:
             return [
                 task
@@ -1717,6 +2350,22 @@ class SharedBridgeRuntimeService:
 
     def list_recent_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
         safe_limit = max(1, int(limit or 100))
+        http_tasks = self._list_http_bridge_tasks(limit=safe_limit)
+        if http_tasks:
+            cached_active = [
+                task
+                for task in copy.deepcopy(self._cached_task_list)
+                if str(task.get("status", "") or "").strip().lower()
+                not in {"success", "failed", "partial_failed", "cancelled", "stale"}
+            ]
+            by_id: Dict[str, Dict[str, Any]] = {}
+            for task in [*cached_active, *http_tasks]:
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("task_id", "") or "").strip()
+                if task_id and task_id not in by_id:
+                    by_id[task_id] = task
+            return list(by_id.values())[:safe_limit]
         if not self._store:
             return self.get_cached_tasks(limit=safe_limit)
         try:
@@ -1750,10 +2399,17 @@ class SharedBridgeRuntimeService:
 
     def get_task(self, task_id: str) -> Dict[str, Any] | None:
         task_text = str(task_id or "").strip()
-        mailbox_task = self._get_mailbox_task(task_text)
-        if isinstance(mailbox_task, dict):
-            self._cache_task_detail(mailbox_task)
-            return mailbox_task
+        if self._http_bridge_should_try() and task_text:
+            try:
+                task = self._internal_bridge_http_client.get_task(task_text) if self._internal_bridge_http_client else None
+                if isinstance(task, dict):
+                    task["transport"] = "http"
+                    self._cache_task_detail(task)
+                    return task
+            except Exception as exc:  # noqa: BLE001
+                self._emit_http_bridge_issue_log("读取任务", exc)
+                if self._http_bridge_forced():
+                    return self.get_cached_task(task_text)
         if not self._store:
             return self.get_cached_task(task_text)
         try:
@@ -1774,18 +2430,35 @@ class SharedBridgeRuntimeService:
                     busy_message="共享桥接数据库暂时忙碌，共享任务详情已降级为缓存结果",
                     unavailable_message="共享桥接数据库暂时不可用，共享任务详情已降级为缓存结果",
                 )
-                mailbox_task = self._get_mailbox_task(task_text)
-                if isinstance(mailbox_task, dict):
-                    self._cache_task_detail(mailbox_task)
-                    return mailbox_task
                 return self.get_cached_task(task_text)
             raise
 
     def cancel_task(self, task_id: str) -> bool:
+        task_text = str(task_id or "").strip()
+        if self._http_bridge_should_try() and task_text:
+            try:
+                return bool(self._internal_bridge_http_client.cancel_task(task_text)) if self._internal_bridge_http_client else False
+            except Exception as exc:  # noqa: BLE001
+                self._emit_http_bridge_issue_log("取消任务", exc)
+                if self._http_bridge_forced():
+                    return False
+        if self._http_bridge_forced():
+            return False
         if not self._store:
             return False
-        self._store.ensure_ready()
-        return self._store.cancel_task(task_id)
+        try:
+            self._store.ensure_ready()
+            return bool(self._store.cancel_task(task_id))
+        except Exception as exc:  # noqa: BLE001
+            if self._is_recoverable_store_error(exc):
+                self._mark_store_read_degraded(
+                    scope="cancel_task",
+                    exc=exc,
+                    busy_message="共享桥接数据库暂时忙碌，取消任务已降级失败",
+                    unavailable_message="共享桥接数据库暂时不可用，取消任务已降级失败",
+                )
+                return False
+            raise
 
     def retry_task(self, task_id: str) -> bool:
         if not self._store:
@@ -1800,6 +2473,9 @@ class SharedBridgeRuntimeService:
             (FAMILY_HANDOVER_LOG, FAMILY_LABELS[FAMILY_HANDOVER_LOG]),
             (FAMILY_HANDOVER_CAPACITY_REPORT, FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT]),
             (FAMILY_MONTHLY_REPORT, FAMILY_LABELS[FAMILY_MONTHLY_REPORT]),
+            (FAMILY_BRANCH_POWER, FAMILY_LABELS[FAMILY_BRANCH_POWER]),
+            (FAMILY_BRANCH_CURRENT, FAMILY_LABELS[FAMILY_BRANCH_CURRENT]),
+            (FAMILY_BRANCH_SWITCH, FAMILY_LABELS[FAMILY_BRANCH_SWITCH]),
             (FAMILY_CHILLER_MODE_SWITCH, FAMILY_LABELS[FAMILY_CHILLER_MODE_SWITCH]),
             (FAMILY_ALARM_EVENT, FAMILY_LABELS[FAMILY_ALARM_EVENT]),
         )
@@ -1834,7 +2510,6 @@ class SharedBridgeRuntimeService:
         )
         path_specs = [
             ("root_dir", "共享根目录", root_path, "directory"),
-            ("bridge_db", "共享桥接数据库", root_path / "bridge.db", "file"),
             ("artifacts", "任务产物目录", root_path / "artifacts", "directory"),
             ("logs", "桥接日志目录", root_path / "logs", "directory"),
             ("tmp", "桥接临时目录", root_path / "tmp", "directory"),
@@ -1854,6 +2529,24 @@ class SharedBridgeRuntimeService:
                 FAMILY_MONTHLY_REPORT,
                 FAMILY_LABELS[FAMILY_MONTHLY_REPORT],
                 Path(str(cache_paths.get(FAMILY_MONTHLY_REPORT, "") or (root_path / FAMILY_LABELS[FAMILY_MONTHLY_REPORT]))),
+                "directory",
+            ),
+            (
+                FAMILY_BRANCH_POWER,
+                FAMILY_LABELS[FAMILY_BRANCH_POWER],
+                Path(str(cache_paths.get(FAMILY_BRANCH_POWER, "") or (root_path / FAMILY_LABELS[FAMILY_BRANCH_POWER]))),
+                "directory",
+            ),
+            (
+                FAMILY_BRANCH_CURRENT,
+                FAMILY_LABELS[FAMILY_BRANCH_CURRENT],
+                Path(str(cache_paths.get(FAMILY_BRANCH_CURRENT, "") or (root_path / FAMILY_LABELS[FAMILY_BRANCH_CURRENT]))),
+                "directory",
+            ),
+            (
+                FAMILY_BRANCH_SWITCH,
+                FAMILY_LABELS[FAMILY_BRANCH_SWITCH],
+                Path(str(cache_paths.get(FAMILY_BRANCH_SWITCH, "") or (root_path / FAMILY_LABELS[FAMILY_BRANCH_SWITCH]))),
                 "directory",
             ),
             (
@@ -1886,17 +2579,26 @@ class SharedBridgeRuntimeService:
             except OSError:
                 return False
 
+        use_http_index = self.role_mode == "external"
+        if use_http_index:
+            path_specs = [spec for spec in path_specs if spec[0] not in {"bridge_db", "artifacts", "logs", "tmp"}]
         before_exists = {key: _path_exists(path, kind) for key, _label, path, kind in path_specs}
         init_error = ""
         if initialize:
             try:
-                if self._store is not None:
+                if use_http_index:
+                    pass
+                elif self._store is not None:
                     self._store.ensure_ready()
                 elif self.role_mode != "external":
                     root_path.mkdir(parents=True, exist_ok=True)
                     for name in ("artifacts", "logs", "tmp"):
                         (root_path / name).mkdir(parents=True, exist_ok=True)
-                if self._source_cache_service is not None and hasattr(self._source_cache_service, "ensure_required_directories"):
+                if (
+                    not use_http_index
+                    and self._source_cache_service is not None
+                    and hasattr(self._source_cache_service, "ensure_required_directories")
+                ):
                     self._source_cache_service.ensure_required_directories()
             except Exception as exc:  # noqa: BLE001
                 init_error = str(exc)
@@ -1920,11 +2622,12 @@ class SharedBridgeRuntimeService:
             )
 
         db_error = ""
-        if self._store is not None:
+        if use_http_index:
+            db_error = ""
+        elif self._store is not None:
             try:
                 self._store.ensure_ready()
-                mailbox_tasks = self._list_mailbox_tasks(limit=200)
-                if not mailbox_tasks and self._mirror_store is not None:
+                if self._mirror_store is not None:
                     self._mirror_store.list_tasks(limit=200)
             except Exception as exc:  # noqa: BLE001
                 db_error = str(exc)
@@ -1936,7 +2639,19 @@ class SharedBridgeRuntimeService:
         for family_key, family_label in families:
             query_error = ""
             entries: List[Dict[str, Any]] = []
-            if self._store is not None:
+            used_http_entries = False
+            if use_http_index:
+                http_entries = self._http_source_index_entries(
+                    source_family=family_key,
+                    buildings=self.get_source_cache_buildings(),
+                    limit_per_building=max(1, int(ready_limit_per_family or 400)),
+                )
+                if http_entries is not None:
+                    entries = http_entries
+                    used_http_entries = True
+                else:
+                    query_error = "内网端 HTTP source-index 暂不可用"
+            if not used_http_entries and self._store is not None:
                 try:
                     entries = self._store.list_source_cache_entries(
                         source_family=family_key,
@@ -1981,6 +2696,10 @@ class SharedBridgeRuntimeService:
                 tone = "neutral"
                 status_text = "无就绪记录"
                 summary_text = "当前还没有 ready 记录。"
+            elif use_http_index:
+                tone = "success"
+                status_text = "HTTP索引就绪"
+                summary_text = "外网端通过内网端 HTTP source-index 获取 ready 记录，未访问共享 SQLite。"
             elif self.role_mode == "external":
                 tone = "success"
                 status_text = "索引就绪"
@@ -2019,7 +2738,13 @@ class SharedBridgeRuntimeService:
         status_text = "共享目录自检完成"
         tone = "success"
         message = "必要目录已检查完成。"
-        if init_error or db_error:
+        http_unavailable = bool(use_http_index and not self._http_bridge_should_try())
+        if http_unavailable:
+            status = "error"
+            status_text = "HTTP桥接不可用"
+            tone = "danger"
+            message = "内网端 HTTP 桥接未配置或 base_url 无法解析；外网端不会扫描共享目录。"
+        elif init_error or db_error:
             status = "error"
             status_text = "共享目录自检异常"
             tone = "danger"
@@ -2043,7 +2768,8 @@ class SharedBridgeRuntimeService:
             "role_mode": self.role_mode,
             "role_label": role_label,
             "root_dir": root_text,
-            "db_path": str(root_path / "bridge.db"),
+            "db_path": "",
+            "http_bridge_base_url": str(getattr(self._internal_bridge_http_client, "base_url", "") or "") if use_http_index else "",
             "checked_at": _now_text(),
             "enabled_buildings": self.get_source_cache_buildings(),
             "directories": directory_rows,
@@ -3104,6 +3830,16 @@ class SharedBridgeRuntimeService:
         buildings: List[str] | None = None,
         bucket_key: str | None = None,
     ) -> List[Dict[str, Any]]:
+        if self._http_bridge_should_try():
+            http_entries = self._http_source_index_entries(
+                source_family=source_family,
+                buildings=buildings,
+                bucket_key=bucket_key,
+            )
+            if http_entries is not None:
+                return http_entries
+        if self._http_bridge_forced():
+            return []
         if self._source_cache_service is None:
             return []
         return self._source_cache_service.get_latest_ready_entries(
@@ -3113,6 +3849,21 @@ class SharedBridgeRuntimeService:
         )
 
     def get_external_source_cache_overview_fast(self) -> Dict[str, Any]:
+        http_overview = self._http_external_source_cache_overview_fast()
+        if http_overview is not None:
+            return http_overview
+        if self._http_bridge_forced():
+            return {
+                "enabled": bool(self.shared_bridge_enabled),
+                "scheduler_running": False,
+                "current_hour_bucket": self.current_source_cache_bucket(),
+                "last_error": "内网端 HTTP source-index 暂不可用，外网端不会扫描共享目录。",
+                "display_overview": {
+                    "tone": "warning",
+                    "status_text": "HTTP索引不可用",
+                    "summary_text": "请检查内网端 HTTP 桥接服务和端口连通性。",
+                },
+            }
         if self._source_cache_service is None:
             return {}
         return self._source_cache_service.get_external_source_cache_overview_fast()
@@ -3125,6 +3876,30 @@ class SharedBridgeRuntimeService:
         max_version_gap: int = 3,
         max_selection_age_hours: float = 3.0,
     ) -> Dict[str, Any]:
+        if self._http_bridge_should_try():
+            http_selection = self._http_latest_source_cache_selection(
+                source_family=source_family,
+                buildings=buildings,
+                max_version_gap=max_version_gap,
+                max_selection_age_hours=max_selection_age_hours,
+            )
+            if http_selection is not None:
+                return http_selection
+        if self._http_bridge_forced():
+            return {
+                "best_bucket_key": "",
+                "best_bucket_age_hours": None,
+                "max_selection_age_hours": float(max_selection_age_hours),
+                "is_best_bucket_too_old": False,
+                "selected_entries": [],
+                "fallback_buildings": [],
+                "missing_buildings": list(buildings or []),
+                "stale_buildings": [],
+                "buildings": [],
+                "can_proceed": False,
+                "transport": "http",
+                "error": "内网端 HTTP source-index 暂不可用",
+            }
         if self._source_cache_service is None:
             return {
                 "best_bucket_key": "",
@@ -3146,6 +3921,17 @@ class SharedBridgeRuntimeService:
         )
 
     def get_handover_by_date_cache_entries(self, *, duty_date: str, duty_shift: str, buildings: List[str] | None = None) -> List[Dict[str, Any]]:
+        if self._http_bridge_should_try():
+            http_entries = self._http_source_index_entries(
+                source_family=FAMILY_HANDOVER_LOG,
+                buildings=buildings,
+                bucket_key=duty_date,
+                duty_shift=duty_shift,
+            )
+            if http_entries is not None:
+                return http_entries
+        if self._http_bridge_forced():
+            return []
         if self._source_cache_service is None:
             return []
         return self._source_cache_service.get_handover_by_date_entries(
@@ -3161,6 +3947,17 @@ class SharedBridgeRuntimeService:
         duty_shift: str,
         buildings: List[str] | None = None,
     ) -> List[Dict[str, Any]]:
+        if self._http_bridge_should_try():
+            http_entries = self._http_source_index_entries(
+                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+                buildings=buildings,
+                bucket_key=duty_date,
+                duty_shift=duty_shift,
+            )
+            if http_entries is not None:
+                return http_entries
+        if self._http_bridge_forced():
+            return []
         if self._source_cache_service is None:
             return []
         return self._source_cache_service.get_handover_capacity_by_date_entries(
@@ -3170,6 +3967,33 @@ class SharedBridgeRuntimeService:
         )
 
     def get_day_metric_by_date_cache_entries(self, *, selected_dates: List[str], buildings: List[str]) -> List[Dict[str, Any]]:
+        if self._http_bridge_should_try():
+            output: List[Dict[str, Any]] = []
+            used_http = True
+            for duty_date in [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]:
+                http_entries = self._http_source_index_entries(
+                    source_family=FAMILY_HANDOVER_LOG,
+                    buildings=buildings,
+                    bucket_key=duty_date,
+                    limit_per_building=10,
+                )
+                if http_entries is None:
+                    used_http = False
+                    break
+                for entry in http_entries:
+                    item = copy.deepcopy(entry)
+                    file_path = str(item.get("file_path", "") or "").strip()
+                    if file_path:
+                        item["source_file"] = file_path
+                    metadata = dict(item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {})
+                    metadata.setdefault("resolution_source", "http_source_index")
+                    metadata.setdefault("selected_source_file", file_path)
+                    item["metadata"] = metadata
+                    output.append(item)
+            if used_http:
+                return output
+        if self._http_bridge_forced():
+            return []
         if self._source_cache_service is None:
             return []
         return self._source_cache_service.get_day_metric_by_date_entries(
@@ -3187,6 +4011,8 @@ class SharedBridgeRuntimeService:
     ) -> List[Dict[str, Any]]:
         if self._source_cache_service is None:
             return []
+        if self._http_bridge_forced():
+            raise RuntimeError("外网端 HTTP 桥接模式下不直接扫描共享目录补齐12项历史缓存")
         return self._source_cache_service.fill_day_metric_history(
             selected_dates=selected_dates,
             building_scope=building_scope,
@@ -3195,6 +4021,24 @@ class SharedBridgeRuntimeService:
         )
 
     def get_monthly_by_date_cache_entries(self, *, selected_dates: List[str], buildings: List[str] | None = None) -> List[Dict[str, Any]]:
+        if self._http_bridge_should_try():
+            output: List[Dict[str, Any]] = []
+            used_http = True
+            for selected_date in [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]:
+                http_entries = self._http_source_index_entries(
+                    source_family=FAMILY_MONTHLY_REPORT,
+                    buildings=buildings,
+                    bucket_key=selected_date,
+                    limit_per_building=10,
+                )
+                if http_entries is None:
+                    used_http = False
+                    break
+                output.extend(http_entries)
+            if used_http:
+                return output
+        if self._http_bridge_forced():
+            return []
         if self._source_cache_service is None:
             return []
         return self._source_cache_service.get_monthly_by_date_entries(
@@ -3203,11 +4047,25 @@ class SharedBridgeRuntimeService:
         )
 
     def get_source_cache_buildings(self) -> List[str]:
+        if self._http_bridge_should_try():
+            return self._http_source_cache_buildings()
         if self._source_cache_service is None:
             return []
         return self._source_cache_service.get_enabled_buildings()
 
     def get_alarm_event_upload_selection(self, *, building: str = "") -> Dict[str, Any]:
+        if self._http_bridge_should_try():
+            http_selection = self._http_alarm_event_upload_selection(building=building)
+            if http_selection is not None:
+                return http_selection
+        if self._http_bridge_forced():
+            return {
+                "selected_entries": [],
+                "selection_reference_date": _now_text()[:10],
+                "missing_both_days_buildings": self._http_source_cache_buildings([building] if building else None),
+                "transport": "http",
+                "error": "内网端 HTTP source-index 暂不可用",
+            }
         if self._source_cache_service is None:
             return {
                 "selected_entries": [],
@@ -3217,6 +4075,8 @@ class SharedBridgeRuntimeService:
         return self._source_cache_service.get_alarm_event_upload_selection(building=building)
 
     def start_current_hour_source_cache_refresh(self) -> Dict[str, Any]:
+        if self._http_bridge_forced():
+            return {"accepted": False, "running": False, "reason": "external_http_only"}
         if self._source_cache_service is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
         return self._source_cache_service.start_current_hour_refresh()
@@ -3225,11 +4085,15 @@ class SharedBridgeRuntimeService:
         return self.start_current_hour_source_cache_refresh()
 
     def start_manual_alarm_source_cache_refresh(self) -> Dict[str, Any]:
+        if self._http_bridge_forced():
+            return {"accepted": False, "running": False, "reason": "external_http_only"}
         if self._source_cache_service is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
         return self._source_cache_service.start_manual_alarm_refresh()
 
     def start_building_latest_source_cache_refresh(self, *, source_family: str, building: str) -> Dict[str, Any]:
+        if self._http_bridge_forced():
+            return {"accepted": False, "running": False, "reason": "external_http_only"}
         if self._source_cache_service is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
         return self._source_cache_service.start_building_latest_refresh(
@@ -3238,6 +4102,8 @@ class SharedBridgeRuntimeService:
         )
 
     def delete_manual_alarm_source_cache_files(self) -> Dict[str, Any]:
+        if self._http_bridge_forced():
+            return {"accepted": False, "reason": "external_http_only", "deleted_count": 0}
         if self._source_cache_service is None:
             return {"accepted": False, "reason": "disabled", "deleted_count": 0}
         return self._source_cache_service.delete_manual_alarm_files()
@@ -3495,7 +4361,6 @@ class SharedBridgeRuntimeService:
                     level="info",
                     event_type="log",
                     payload={"message": line},
-                    sync_mailbox=False,
                 )
                 now_monotonic = time.monotonic()
                 if now_monotonic - last_heartbeat >= max(1.0, min(float(self.heartbeat_interval_sec), float(self.claim_lease_sec) / 2.0)):
@@ -4087,7 +4952,6 @@ class SharedBridgeRuntimeService:
             status="ready",
             size_bytes=target_path.stat().st_size,
             metadata=metadata,
-            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][交接班][内网] 已写入共享源文件 楼栋={building}, 路径={target_path}")
         return {"building": str(building or "").strip(), "relative_path": relative_path, "file_path": str(target_path)}
@@ -4125,7 +4989,6 @@ class SharedBridgeRuntimeService:
             status="ready",
             size_bytes=target_path.stat().st_size,
             metadata=metadata,
-            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][交接班容量][内网] 已写入共享源文件 楼栋={building}, 路径={target_path}")
         return {"building": str(building or "").strip(), "relative_path": relative_path, "file_path": str(target_path)}
@@ -4177,7 +5040,6 @@ class SharedBridgeRuntimeService:
             status="ready",
             size_bytes=target_path.stat().st_size,
             metadata=metadata,
-            sync_mailbox=False,
         )
         emit_log(
             f"[共享桥接][12项][内网] 已写入共享源文件 日期={duty_date}, 楼栋={building}, "
@@ -4223,7 +5085,6 @@ class SharedBridgeRuntimeService:
             status="ready",
             size_bytes=target_path.stat().st_size,
             metadata=metadata,
-            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][湿球温度][内网] 已写入共享源文件 楼栋={building}, 路径={target_path}")
         return {
@@ -4257,7 +5118,6 @@ class SharedBridgeRuntimeService:
                 "run_save_dir": str(payload.get("run_save_dir", "") or "").strip(),
                 "pending_upload_count": int(payload.get("pending_upload_count", 0) or 0),
             },
-            sync_mailbox=False,
         )
         emit_log(f"[共享桥接][月报][内网] 已写入共享续传状态 路径={target_path}")
         return {
@@ -4448,7 +5308,6 @@ class SharedBridgeRuntimeService:
                     next_task_status="ready_for_external",
                     task_result={"internal": stage_result, "status": "ready_for_external"},
                     record_event=False,
-                    sync_mailbox=False,
                 )
                 self._store.append_event(task_id=task_id, stage_id=stage_id, side="internal", level="info", event_type="await_external", payload={"message": "内网下载完成，等待外网继续处理"})
                 self._request_runtime_status_refresh(reason=f"handover_internal_download_completed:{task_id}")
@@ -4804,7 +5663,6 @@ class SharedBridgeRuntimeService:
                     next_task_status="ready_for_external",
                     task_result={"internal": stage_result, "status": "ready_for_external"},
                     record_event=False,
-                    sync_mailbox=False,
                 )
                 self._store.append_event(task_id=task_id, stage_id=stage_id, side="internal", level="info", event_type="await_external", payload={"message": "内网下载完成，等待外网继续上传"})
                 self._request_runtime_status_refresh(reason=f"day_metric_internal_download_completed:{task_id}")
@@ -4867,8 +5725,8 @@ class SharedBridgeRuntimeService:
                 requested_scope = str(request.get("building_scope", "") or "").strip() or "all_enabled"
                 if requested_scope == "single" and requested_building:
                     buildings = [requested_building]
-                elif self._source_cache_service is not None:
-                    buildings = [str(item or "").strip() for item in self._source_cache_service.get_enabled_buildings() if str(item or "").strip()]
+                else:
+                    buildings = [str(item or "").strip() for item in self.get_source_cache_buildings() if str(item or "").strip()]
 
             source_units_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
             expected_count = len(selected_dates) * len(buildings)
@@ -4886,10 +5744,10 @@ class SharedBridgeRuntimeService:
                     "building": building_name,
                     "source_file": source_file,
                 }
-            if self._source_cache_service is not None and selected_dates and buildings:
+            if selected_dates and buildings:
                 try:
                     emit_log("[共享桥接][12项][外网] 只读取内网端已登记的共享源文件索引")
-                    cached_entries = self._source_cache_service.get_day_metric_by_date_entries(
+                    cached_entries = self.get_day_metric_by_date_cache_entries(
                         selected_dates=selected_dates,
                         buildings=buildings,
                     )
@@ -5225,7 +6083,6 @@ class SharedBridgeRuntimeService:
                     next_task_status="ready_for_external",
                     task_result={"internal": stage_result, "status": "ready_for_external"},
                     record_event=False,
-                    sync_mailbox=False,
                 )
                 self._store.append_event(
                     task_id=task_id,
@@ -5384,7 +6241,7 @@ class SharedBridgeRuntimeService:
         try:
             target_buildings = [building] if mode == "single_building" and building else self._source_cache_service.get_enabled_buildings()
             target_buildings = [item for item in target_buildings if item]
-            selection = self._source_cache_service.get_alarm_event_upload_selection(
+            selection = self.get_alarm_event_upload_selection(
                 building=building if mode == "single_building" else "",
             )
             selected_entries = [
@@ -5413,7 +6270,7 @@ class SharedBridgeRuntimeService:
                     )
                     if isinstance(filled, dict):
                         filled_entries.append(dict(filled))
-                selection = self._source_cache_service.get_alarm_event_upload_selection(
+                selection = self.get_alarm_event_upload_selection(
                     building=building if mode == "single_building" else "",
                 )
                 selected_entries = [
@@ -5449,7 +6306,6 @@ class SharedBridgeRuntimeService:
                 next_task_status="ready_for_external",
                 task_result={"internal": stage_result, "status": "ready_for_external"},
                 record_event=False,
-                sync_mailbox=False,
             )
             self._store.append_event(
                 task_id=task_id,
@@ -5491,10 +6347,10 @@ class SharedBridgeRuntimeService:
         building = str(request.get("building", "") or "").strip()
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="external", claim_token=claim_token)
         try:
-            selection = self._source_cache_service.get_alarm_event_upload_selection(
+            selection = self.get_alarm_event_upload_selection(
                 building=building if mode == "single_building" else "",
             )
-            target_buildings = [building] if mode == "single_building" and building else self._source_cache_service.get_enabled_buildings()
+            target_buildings = [building] if mode == "single_building" and building else self.get_source_cache_buildings()
             target_buildings = [item for item in target_buildings if item]
             ready_buildings = {
                 str(item.get("building", "") or "").strip()
@@ -5699,15 +6555,15 @@ class SharedBridgeRuntimeService:
                     if str(item or "").strip()
                 ]
                 if not buildings:
-                    buildings = self._source_cache_service.get_enabled_buildings()
+                    buildings = self.get_source_cache_buildings()
                 duty_date = str(request.get("duty_date", "") or "").strip()
                 duty_shift = str(request.get("duty_shift", "") or "").strip().lower()
-                cached_entries = self._source_cache_service.get_handover_by_date_entries(
+                cached_entries = self.get_handover_by_date_cache_entries(
                     duty_date=duty_date,
                     duty_shift=duty_shift,
                     buildings=buildings,
                 )
-                capacity_entries = self._source_cache_service.get_handover_capacity_by_date_entries(
+                capacity_entries = self.get_handover_capacity_by_date_cache_entries(
                     duty_date=duty_date,
                     duty_shift=duty_shift,
                     buildings=buildings,
@@ -5772,9 +6628,9 @@ class SharedBridgeRuntimeService:
                     if str(item or "").strip()
                 ]
                 building_scope = str(request.get("building_scope", "") or "").strip() or "all_enabled"
-                target_buildings = [str(request.get("building", "") or "").strip()] if building_scope == "single" else self._source_cache_service.get_enabled_buildings()
+                target_buildings = [str(request.get("building", "") or "").strip()] if building_scope == "single" else self.get_source_cache_buildings()
                 target_buildings = [item for item in target_buildings if item]
-                cached_entries = self._source_cache_service.get_day_metric_by_date_entries(
+                cached_entries = self.get_day_metric_by_date_cache_entries(
                     selected_dates=selected_dates,
                     buildings=target_buildings,
                 )
@@ -5938,8 +6794,9 @@ class SharedBridgeRuntimeService:
                 for item in (request.get("selected_dates", []) if isinstance(request.get("selected_dates", []), list) else [])
                 if str(item or "").strip()
             ]
-            cached_entries = self._source_cache_service.get_monthly_by_date_entries(selected_dates=selected_dates)
-            expected = len(selected_dates) * len(self._source_cache_service.get_enabled_buildings())
+            target_buildings = self.get_source_cache_buildings()
+            cached_entries = self.get_monthly_by_date_cache_entries(selected_dates=selected_dates, buildings=target_buildings)
+            expected = len(selected_dates) * len(target_buildings)
             if len(cached_entries) < expected:
                 self._requeue_external_waiting_task(
                     task_id=task_id,
@@ -6080,7 +6937,6 @@ class SharedBridgeRuntimeService:
                     next_task_status="ready_for_external",
                     task_result={"internal": stage_result, "status": "ready_for_external"},
                     record_event=False,
-                    sync_mailbox=False,
                 )
                 self._store.append_event(
                     task_id=task_id,
@@ -6159,7 +7015,6 @@ class SharedBridgeRuntimeService:
                 next_task_status="ready_for_external",
                 task_result={"internal": stage_result, "status": "ready_for_external"},
                 record_event=False,
-                sync_mailbox=False,
             )
             self._store.append_event(
                 task_id=task_id,
@@ -6242,18 +7097,14 @@ class SharedBridgeRuntimeService:
                 )
                 return
             file_items = []
-            if mode == "auto_once" and self._source_cache_service is not None:
+            if mode == "auto_once":
                 target_bucket_key = (
                     str(request.get("target_bucket_key", "") or "").strip()
                     or str(internal_result.get("target_bucket_key", "") or "").strip()
                     or self.current_source_cache_bucket()
                 )
-                target_buildings = [
-                    str(item or "").strip()
-                    for item in self._source_cache_service.get_enabled_buildings()
-                    if str(item or "").strip()
-                ]
-                cached_entries = self._source_cache_service.get_latest_ready_entries(
+                target_buildings = self.get_source_cache_buildings()
+                cached_entries = self.get_latest_source_cache_entries(
                     source_family=FAMILY_MONTHLY_REPORT,
                     buildings=target_buildings,
                     bucket_key=target_bucket_key,
@@ -6268,29 +7119,16 @@ class SharedBridgeRuntimeService:
                         continue
                     file_items.append({"building": building, "file_path": file_path, "upload_date": upload_date})
                 if target_buildings and len(file_items) < len(target_buildings):
-                    source_root = str(internal_result.get("source_root", "") or "").strip()
-                    if not source_root:
-                        self._requeue_external_waiting_task(
-                            task_id=task_id,
-                            stage_id=stage_id,
-                            side="external",
-                            wait_message="等待内网补采同步",
-                            detail=f"月报 canonical 共享文件暂未齐全，等待共享目录同步后自动继续。bucket={target_bucket_key or '-'}",
-                        )
-                        return
+                    self._requeue_external_waiting_task(
+                        task_id=task_id,
+                        stage_id=stage_id,
+                        side="external",
+                        wait_message="等待内网补采同步",
+                        detail=f"月报 canonical 共享文件暂未齐全，等待 HTTP source-index 同步后自动继续。bucket={target_bucket_key or '-'}",
+                    )
+                    return
             if not file_items:
-                source_root = str(internal_result.get("source_root", "") or "").strip()
-                if not source_root:
-                    raise RuntimeError("月报共享桥接缺少 source_root")
-                if self.role_mode == "external":
-                    raise RuntimeError("月报共享桥接缺少 canonical 共享缓存索引，外网端不扫描共享目录 source_root")
-                source_root_path = Path(source_root)
-                for file_path in sorted(source_root_path.rglob("*.xlsx")):
-                    if not file_path.is_file():
-                        continue
-                    building = str(file_path.stem.split("--")[-1] if "--" in file_path.stem else "").strip()
-                    upload_date = str(file_path.parent.name.split("--")[0] if "--" in file_path.parent.name else "").strip()
-                    file_items.append({"building": building, "file_path": str(file_path), "upload_date": upload_date})
+                raise RuntimeError("月报共享桥接缺少 canonical 共享缓存索引，外网端不扫描共享目录 source_root")
             if not file_items:
                 raise RuntimeError("月报共享桥接未找到可继续处理的共享源文件")
             if resume_job_id:
@@ -6367,7 +7205,7 @@ class SharedBridgeRuntimeService:
         stage_text = str(stage_id or "").strip()
         if not task_text or not stage_text:
             return
-        retried = self._store.retry_task(task_text, record_event=False, sync_mailbox=False)
+        retried = self._store.retry_task(task_text, record_event=False)
         payload = {
             "message": wait_message,
             "detail": detail,
@@ -6403,7 +7241,7 @@ class SharedBridgeRuntimeService:
         )
 
     def _reconcile_waiting_jobs(self) -> None:
-        if self._job_service is None or not self._store:
+        if self._job_service is None:
             return
         try:
             waiting_jobs = self._job_service.list_jobs(limit=300, statuses=["waiting_resource"])
@@ -6556,7 +7394,23 @@ class SharedBridgeRuntimeService:
         while not self._stop_event.is_set():
             now_monotonic = time.monotonic()
             try:
-                if not self._store:
+                if self.role_mode == "external":
+                    if now_monotonic >= next_waiting_job_reconcile:
+                        self._reconcile_waiting_jobs()
+                        next_waiting_job_reconcile = now_monotonic + self.WAITING_JOB_RECONCILE_INTERVAL_SEC
+                    if self._http_bridge_should_try():
+                        self._db_status = "http"
+                        self._last_error = ""
+                    else:
+                        self._db_status = "http_unavailable"
+                        self._last_error = "内网端 HTTP 桥接未配置或不可达；外网端不会扫描共享目录"
+                    self._last_poll_at = _now_text()
+                    if not self._startup_logged:
+                        self._emit_system_log(
+                            f"[共享桥接] 运行时已启动: 角色={_role_label(self.role_mode)}, 桥接模式=HTTP, 共享目录={self.shared_bridge_root}, 节点ID={self.node_id}"
+                        )
+                        self._startup_logged = True
+                elif not self._store:
                     self._db_status = "misconfigured"
                     self._last_error = "共享桥接目录未配置"
                 else:
@@ -6594,16 +7448,11 @@ class SharedBridgeRuntimeService:
                     if self.role_mode == "internal":
                         self._process_internal_browser_alerts()
                     self._process_one_task_if_needed()
-                    mailbox_tasks = self._list_mailbox_tasks(limit=500)
-                    if mailbox_tasks:
-                        self._counts.update(self._task_counts_from_tasks(mailbox_tasks))
-                        self._cache_task_list(mailbox_tasks)
+                    mirrored_tasks = self._mirror_store.list_tasks(limit=500) if self._mirror_store is not None else []
+                    if mirrored_tasks:
+                        self._counts.update(self._task_counts_from_tasks(mirrored_tasks))
                     else:
-                        mirrored_tasks = self._mirror_store.list_tasks(limit=500) if self._mirror_store is not None else []
-                        if mirrored_tasks:
-                            self._counts.update(self._task_counts_from_tasks(mirrored_tasks))
-                        else:
-                            self._counts.update({"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0})
+                        self._counts.update({"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0})
                     self._db_status = "ok"
                     self._last_error = ""
                     self._last_poll_at = _now_text()
