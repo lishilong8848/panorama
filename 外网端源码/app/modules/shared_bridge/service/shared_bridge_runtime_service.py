@@ -4088,6 +4088,43 @@ class SharedBridgeRuntimeService:
             return []
         return self._source_cache_service.get_enabled_buildings()
 
+    def request_latest_source_cache_refresh(self, *, source_family: str, buildings: List[str]) -> Dict[str, Any]:
+        family = str(source_family or "").strip()
+        target_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        if not family or not target_buildings:
+            return {"ok": False, "accepted_count": 0, "reason": "empty_request", "results": []}
+        if self._http_bridge_should_try() and self._internal_bridge_http_client is not None:
+            try:
+                result = self._internal_bridge_http_client.refresh_latest_source_cache(
+                    source_family=family,
+                    buildings=target_buildings,
+                )
+                return result if isinstance(result, dict) else {"ok": False, "accepted_count": 0, "results": []}
+            except Exception as exc:  # noqa: BLE001
+                self._emit_http_bridge_issue_log("请求源文件补采", exc)
+                if self._http_bridge_forced():
+                    return {"ok": False, "accepted_count": 0, "reason": "http_failed", "error": str(exc), "results": []}
+        if self._http_bridge_forced():
+            return {"ok": False, "accepted_count": 0, "reason": "http_unavailable", "results": []}
+        if self._source_cache_service is None:
+            return {"ok": False, "accepted_count": 0, "reason": "source_cache_disabled", "results": []}
+        results: List[Dict[str, Any]] = []
+        accepted = 0
+        for building in target_buildings:
+            try:
+                item = self._source_cache_service.start_building_latest_refresh(
+                    source_family=family,
+                    building=building,
+                )
+                row = dict(item if isinstance(item, dict) else {})
+                row["building"] = building
+                if bool(row.get("accepted", False)) or bool(row.get("running", False)):
+                    accepted += 1
+                results.append(row)
+            except Exception as exc:  # noqa: BLE001
+                results.append({"building": building, "accepted": False, "running": False, "error": str(exc)})
+        return {"ok": accepted > 0, "accepted_count": accepted, "results": results}
+
     def get_alarm_event_upload_selection(self, *, building: str = "") -> Dict[str, Any]:
         if self._http_bridge_should_try():
             http_selection = self._http_alarm_event_upload_selection(building=building)

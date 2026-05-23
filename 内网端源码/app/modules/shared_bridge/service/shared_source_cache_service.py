@@ -6090,6 +6090,341 @@ class SharedSourceCacheService:
             "reason": "unsupported_family",
         }
 
+    def _latest_refresh_bucket_kind(self, source_family: str) -> str:
+        normalized_family = self._normalize_source_family(source_family)
+        if normalized_family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH}:
+            return "daily"
+        return "latest"
+
+    def _date_text_from_bucket_key(self, bucket_key: str) -> str:
+        bucket_dt = _parse_hour_bucket(str(bucket_key or "").strip())
+        if bucket_dt is not None:
+            return bucket_dt.strftime("%Y-%m-%d")
+        text = str(bucket_key or "").strip()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 8:
+            try:
+                return datetime.strptime(digits[:8], "%Y%m%d").strftime("%Y-%m-%d")
+            except ValueError:
+                return ""
+        return text if len(text) == 10 and text.count("-") == 2 else ""
+
+    def _latest_refresh_existing_entry(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+    ) -> Dict[str, Any] | None:
+        if self.store is None:
+            return None
+        normalized_family = self._normalize_source_family(source_family)
+        bucket_kind = self._latest_refresh_bucket_kind(normalized_family)
+        duty_date = bucket_key if bucket_kind == "daily" else ""
+        ready_entry = self._get_ready_entry(
+            source_family=normalized_family,
+            building=building,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift="",
+        )
+        if ready_entry and self._resolve_entry_file_path(ready_entry) is not None:
+            return ready_entry
+
+        bucket_date = self._date_text_from_bucket_key(bucket_key)
+        candidates: List[Dict[str, Any]] = []
+        for family_name in self._source_family_candidates(normalized_family):
+            rows = self.store.list_source_cache_entries(
+                source_family=family_name,
+                building=building,
+                status="ready",
+                limit=200,
+            )
+            candidates.extend(row for row in rows if isinstance(row, dict))
+        for row in candidates:
+            row_bucket_kind = str(row.get("bucket_kind", "") or "").strip().lower()
+            row_bucket_key = str(row.get("bucket_key", "") or "").strip()
+            row_duty_date = str(row.get("duty_date", "") or "").strip()
+            matched = row_bucket_kind == bucket_kind and row_bucket_key == bucket_key
+            if normalized_family == FAMILY_MONTHLY_REPORT and bucket_date:
+                matched = matched or (row_duty_date == bucket_date and row_bucket_kind in {"latest", "date"})
+            elif bucket_kind == "daily":
+                matched = matched or (row_duty_date == bucket_key and row_bucket_kind in {"daily", "day"})
+            if matched and self._resolve_entry_file_path(row) is not None:
+                return row
+        return None
+
+    def _candidate_existing_latest_paths(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+    ) -> List[Dict[str, str]]:
+        normalized_family = self._normalize_source_family(source_family)
+        bucket_kind = self._latest_refresh_bucket_kind(normalized_family)
+        suffix = ".json" if normalized_family == FAMILY_ALARM_EVENT else ".xlsx"
+        contexts: List[Dict[str, str]] = [
+            {
+                "bucket_kind": bucket_kind,
+                "bucket_key": bucket_key,
+                "duty_date": bucket_key if bucket_kind == "daily" else "",
+                "duty_shift": "",
+            }
+        ]
+        bucket_date = self._date_text_from_bucket_key(bucket_key)
+        if normalized_family == FAMILY_MONTHLY_REPORT and bucket_date:
+            contexts.extend(
+                [
+                    {
+                        "bucket_kind": "latest",
+                        "bucket_key": bucket_key,
+                        "duty_date": bucket_date,
+                        "duty_shift": "",
+                    },
+                    {
+                        "bucket_kind": "date",
+                        "bucket_key": bucket_date,
+                        "duty_date": bucket_date,
+                        "duty_shift": "",
+                    },
+                ]
+            )
+        output: List[Dict[str, str]] = []
+        seen: set[str] = set()
+        for context in contexts:
+            info = build_source_artifact_path(
+                source_family=normalized_family,
+                building=building,
+                suffix=suffix,
+                bucket_kind=context["bucket_kind"],
+                bucket_key=context["bucket_key"],
+                duty_date=context["duty_date"],
+                duty_shift=context["duty_shift"],
+            )
+            relative_path = info.relative_path.as_posix()
+            if relative_path in seen:
+                continue
+            seen.add(relative_path)
+            output.append({**context, "relative_path": relative_path})
+        return output
+
+    def _scan_existing_latest_file_candidates(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+    ) -> List[Dict[str, Any]]:
+        if self.shared_root is None:
+            return []
+        normalized_family = self._normalize_source_family(source_family)
+        suffix = ".json" if normalized_family == FAMILY_ALARM_EVENT else ".xlsx"
+        contexts = self._candidate_existing_latest_paths(
+            source_family=normalized_family,
+            building=building,
+            bucket_key=bucket_key,
+        )
+        output: List[Dict[str, Any]] = []
+        seen_paths: set[str] = set()
+
+        def _bucket_segment_from_relative(relative_path: str) -> str:
+            parts = Path(str(relative_path or "").replace("\\", "/")).parts
+            return str(parts[-2]) if len(parts) >= 2 else ""
+
+        def _month_segment_from_relative(relative_path: str) -> str:
+            parts = Path(str(relative_path or "").replace("\\", "/")).parts
+            return str(parts[-3]) if len(parts) >= 3 else ""
+
+        def _add_candidate(context: Dict[str, str], candidate: Path) -> None:
+            try:
+                if candidate.suffix.lower() != suffix.lower():
+                    return
+                if str(building or "").strip() not in candidate.name:
+                    return
+                if not _is_accessible_cached_file(candidate):
+                    return
+                key = str(candidate.resolve(strict=False)).casefold()
+                if key in seen_paths:
+                    return
+                seen_paths.add(key)
+                output.append({"context": context, "path": candidate})
+            except OSError:
+                return
+
+        for context in contexts:
+            relative_path = str(context.get("relative_path", "") or "").strip()
+            if not relative_path:
+                continue
+            exact_dir = self._resolve_relative_path_under_shared_root(str(Path(relative_path).parent))
+            if exact_dir is not None and exact_dir.exists() and exact_dir.is_dir():
+                try:
+                    for candidate in exact_dir.iterdir():
+                        _add_candidate(context, candidate)
+                except OSError as exc:
+                    self._emit(
+                        "[共享缓存] 内网端扫描目标时间桶目录失败: "
+                        f"family={normalized_family} building={building} dir={exact_dir}, error={exc}"
+                    )
+
+        if output:
+            return output
+
+        try:
+            family_root = self._family_root(normalized_family)
+        except Exception:
+            return []
+
+        for context in contexts:
+            relative_path = str(context.get("relative_path", "") or "").strip()
+            bucket_segment = _bucket_segment_from_relative(relative_path)
+            month_segment = _month_segment_from_relative(relative_path)
+            if not bucket_segment or not month_segment:
+                continue
+            month_dir = family_root / month_segment
+            if not month_dir.exists() or not month_dir.is_dir():
+                continue
+            pattern = f"*{building}*{suffix}"
+            scanned = 0
+            try:
+                for candidate in month_dir.rglob(pattern):
+                    scanned += 1
+                    if scanned > 5000:
+                        self._emit(
+                            "[共享缓存] 内网端扫描月份目录达到上限，停止继续扫描: "
+                            f"family={normalized_family} building={building} dir={month_dir}"
+                        )
+                        break
+                    if bucket_segment not in str(candidate):
+                        continue
+                    _add_candidate(context, candidate)
+            except OSError as exc:
+                self._emit(
+                    "[共享缓存] 内网端扫描月份目录失败: "
+                    f"family={normalized_family} building={building} dir={month_dir}, error={exc}"
+                )
+        return output
+
+    def _register_existing_latest_file_if_present(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+    ) -> Dict[str, Any] | None:
+        if self.shared_root is None:
+            return None
+        normalized_family = self._normalize_source_family(source_family)
+        for context in self._candidate_existing_latest_paths(
+            source_family=normalized_family,
+            building=building,
+            bucket_key=bucket_key,
+        ):
+            relative_path = str(context.get("relative_path", "") or "").strip()
+            candidate = self._resolve_relative_path_under_shared_root(relative_path)
+            if candidate is None or not _is_accessible_cached_file(candidate):
+                continue
+            try:
+                return self.store_existing_source_file(
+                    source_family=normalized_family,
+                    building=building,
+                    bucket_kind=str(context.get("bucket_kind", "") or "").strip(),
+                    bucket_key=str(context.get("bucket_key", "") or "").strip(),
+                    duty_date=str(context.get("duty_date", "") or "").strip(),
+                    duty_shift=str(context.get("duty_shift", "") or "").strip(),
+                    source_path=candidate,
+                    metadata={
+                        "family": normalized_family,
+                        "building": building,
+                        "recovered_from_existing_file": True,
+                        "recovered_at": _now_text(),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._emit(
+                    "[共享缓存] 现有源文件登记失败，将继续补采: "
+                    f"family={normalized_family} building={building} path={candidate}, error={exc}"
+                )
+        for scanned in self._scan_existing_latest_file_candidates(
+            source_family=normalized_family,
+            building=building,
+            bucket_key=bucket_key,
+        ):
+            context = scanned.get("context", {}) if isinstance(scanned, dict) else {}
+            candidate = scanned.get("path") if isinstance(scanned, dict) else None
+            if not isinstance(context, dict) or not isinstance(candidate, Path):
+                continue
+            try:
+                entry = self.store_existing_source_file(
+                    source_family=normalized_family,
+                    building=building,
+                    bucket_kind=str(context.get("bucket_kind", "") or "").strip(),
+                    bucket_key=str(context.get("bucket_key", "") or "").strip(),
+                    duty_date=str(context.get("duty_date", "") or "").strip(),
+                    duty_shift=str(context.get("duty_shift", "") or "").strip(),
+                    source_path=candidate,
+                    metadata={
+                        "family": normalized_family,
+                        "building": building,
+                        "recovered_from_existing_file": True,
+                        "recovered_by_directory_scan": True,
+                        "recovered_at": _now_text(),
+                    },
+                )
+                self._emit(
+                    "[共享缓存] 内网端扫描到现有源文件并补登记索引: "
+                    f"family={normalized_family} building={building} path={candidate}"
+                )
+                return entry
+            except Exception as exc:  # noqa: BLE001
+                self._emit(
+                    "[共享缓存] 扫描到的现有源文件登记失败，将继续补采: "
+                    f"family={normalized_family} building={building} path={candidate}, error={exc}"
+                )
+        return None
+
+    def _existing_latest_refresh_result(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+    ) -> Dict[str, Any] | None:
+        normalized_family = self._normalize_source_family(source_family)
+        ready_entry = self._latest_refresh_existing_entry(
+            source_family=normalized_family,
+            building=building,
+            bucket_key=bucket_key,
+        )
+        recovered = False
+        if ready_entry is None:
+            ready_entry = self._register_existing_latest_file_if_present(
+                source_family=normalized_family,
+                building=building,
+                bucket_key=bucket_key,
+            )
+            recovered = ready_entry is not None
+        if not ready_entry:
+            return None
+        file_path = self._resolve_entry_file_path(ready_entry)
+        if file_path is None:
+            return None
+        return {
+            "accepted": False,
+            "running": False,
+            "reason": "already_ready",
+            "scope": "single_building_family",
+            "source_family": normalized_family,
+            "building": building,
+            "bucket_key": bucket_key,
+            "bucket_kind": str(ready_entry.get("bucket_kind", "") or "").strip(),
+            "relative_path": str(ready_entry.get("relative_path", "") or "").strip(),
+            "file_path": str(file_path),
+            "downloaded_at": str(ready_entry.get("downloaded_at", "") or "").strip(),
+            "recovered_from_existing_file": recovered,
+        }
+
     def _run_building_latest_refresh_background(
         self,
         *,
@@ -6172,6 +6507,58 @@ class SharedSourceCacheService:
                 "bucket_key": bucket_key,
             }
         thread_key = (normalized_family, building_name, "latest", bucket_key)
+        with self._lock:
+            active_started_at = str(self._active_latest_downloads.get(thread_key, "") or "").strip()
+            active_thread = self._building_latest_refresh_threads.get(thread_key)
+            if active_started_at or (active_thread and active_thread.is_alive()):
+                return {
+                    "accepted": False,
+                    "running": True,
+                    "reason": "already_running",
+                    "scope": "single_building_family",
+                    "source_family": normalized_family,
+                    "building": building_name,
+                    "bucket_key": bucket_key,
+                }
+        existing_result = self._existing_latest_refresh_result(
+            source_family=normalized_family,
+            building=building_name,
+            bucket_key=bucket_key,
+        )
+        if existing_result is not None:
+            with self._lock:
+                self._ensure_light_family_cache_unlocked(
+                    source_family=normalized_family,
+                    bucket_key=bucket_key,
+                    buildings=[building_name],
+                )
+                self._set_light_building_status_unlocked(
+                    source_family=normalized_family,
+                    building=building_name,
+                    bucket_key=bucket_key,
+                    payload={
+                        "status": "ready",
+                        "ready": True,
+                        "downloaded_at": str(existing_result.get("downloaded_at", "") or _now_text()),
+                        "last_error": "",
+                        "relative_path": str(existing_result.get("relative_path", "") or ""),
+                        "resolved_file_path": str(existing_result.get("file_path", "") or ""),
+                        "started_at": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                    },
+                )
+                self._recompute_family_status_from_light_unlocked(
+                    source_family=normalized_family,
+                    bucket_key=bucket_key,
+                )
+            self._emit(
+                "[共享缓存] 补采跳过，现有源文件已就绪: "
+                f"family={normalized_family} building={building_name} bucket={bucket_key} "
+                f"path={existing_result.get('relative_path') or existing_result.get('file_path')}"
+            )
+            return existing_result
         with self._lock:
             active_started_at = str(self._active_latest_downloads.get(thread_key, "") or "").strip()
             active_thread = self._building_latest_refresh_threads.get(thread_key)

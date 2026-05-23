@@ -186,3 +186,13 @@ class InternalBridgeHttpClient:
         )
         results = payload.get("results", [])
         return results if isinstance(results, list) else []
+
+    def refresh_latest_source_cache(self, *, source_family: str, buildings: List[str]) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/internal-bridge/source-cache/refresh-latest",
+            payload={
+                "source_family": str(source_family or "").strip(),
+                "buildings": [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()],
+            },
+        )

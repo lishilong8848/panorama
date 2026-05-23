@@ -169,3 +169,23 @@ def query_internal_source_index_batch(
         default_limit=default_limit,
     )
     return {"ok": True, "results": results}
+
+
+@router.post("/source-cache/refresh-latest")
+def refresh_internal_latest_source_cache(
+    request: Request,
+    payload: Dict[str, Any],
+    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
+) -> Dict[str, Any]:
+    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    source_family = str(payload.get("source_family", "") or "") if isinstance(payload, dict) else ""
+    buildings = payload.get("buildings", []) if isinstance(payload, dict) else []
+    try:
+        return _runner(request).refresh_latest_source_cache(
+            source_family=source_family,
+            buildings=buildings if isinstance(buildings, list) else [],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

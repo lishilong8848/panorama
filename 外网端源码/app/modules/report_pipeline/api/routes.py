@@ -1738,6 +1738,29 @@ def _run_external_monthly_auto_once_shared_flow(
         f"ready={len(cached_entries)}/{len(target_buildings)}"
     )
     if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
+        missing_buildings = list(selection.get("missing_buildings", []) or [])
+        stale_buildings = list(selection.get("stale_buildings", []) or [])
+        ready_buildings = {
+            str(item.get("building", "") or "").strip()
+            for item in cached_entries
+            if isinstance(item, dict)
+        }
+        refresh_buildings = [
+            item
+            for item in [*missing_buildings, *stale_buildings, *target_buildings]
+            if str(item or "").strip() and str(item or "").strip() not in ready_buildings
+        ]
+        refresh_buildings = list(dict.fromkeys(str(item or "").strip() for item in refresh_buildings if str(item or "").strip()))
+        if refresh_buildings and hasattr(bridge_service, "request_latest_source_cache_refresh"):
+            refresh_result = bridge_service.request_latest_source_cache_refresh(
+                source_family="monthly_report_family",
+                buildings=refresh_buildings,
+            )
+            emit_log(
+                "[月报自动流程] 共享文件缺失，已请求内网端补采: "
+                f"buildings={','.join(refresh_buildings)}, "
+                f"accepted={refresh_result.get('accepted_count', 0) if isinstance(refresh_result, dict) else 0}"
+            )
         dedupe_key = _job_dedupe_key(
             "monthly_auto_once_wait_shared_bridge",
             bucket_key=str(selection.get("best_bucket_key", "") or "").strip(),
@@ -1894,6 +1917,29 @@ def _run_external_chiller_mode_upload_shared_flow(
         f"ready={len(cached_entries)}/{len(target_buildings)}"
     )
     if not selection["can_proceed"] or len(cached_entries) < len(target_buildings):
+        missing_buildings = list(selection.get("missing_buildings", []) or [])
+        stale_buildings = list(selection.get("stale_buildings", []) or [])
+        ready_buildings = {
+            str(item.get("building", "") or "").strip()
+            for item in cached_entries
+            if isinstance(item, dict)
+        }
+        refresh_buildings = [
+            item
+            for item in [*missing_buildings, *stale_buildings, *target_buildings]
+            if str(item or "").strip() and str(item or "").strip() not in ready_buildings
+        ]
+        refresh_buildings = list(dict.fromkeys(str(item or "").strip() for item in refresh_buildings if str(item or "").strip()))
+        if refresh_buildings and hasattr(bridge_service, "request_latest_source_cache_refresh"):
+            refresh_result = bridge_service.request_latest_source_cache_refresh(
+                source_family=FAMILY_CHILLER_MODE_SWITCH,
+                buildings=refresh_buildings,
+            )
+            emit_log(
+                "[制冷模式参数上传] 共享文件缺失，已请求内网端补采: "
+                f"buildings={','.join(refresh_buildings)}, "
+                f"accepted={refresh_result.get('accepted_count', 0) if isinstance(refresh_result, dict) else 0}"
+            )
         detail = _build_latest_cache_wait_detail(feature_name="制冷模式参数", selection=selection)
         emit_log(f"[制冷模式参数上传] 共享缓存尚未齐全，本次不扫描共享目录、不清空目标表: {detail}")
         return {

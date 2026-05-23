@@ -293,6 +293,16 @@ class InternalBridgeHttpTaskRunner:
             status="ready",
             limit=limit,
         )
+        entries = self._merge_main_source_cache_entries(
+            entries,
+            source_family=source_family,
+            building=building,
+            bucket_kind=kind_text,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            limit=limit,
+        )
         shared_root_text = str(getattr(self._main_service, "shared_bridge_root", "") or "").strip()
         shared_root = Path(shared_root_text) if shared_root_text else None
         output: List[Dict[str, Any]] = []
@@ -305,6 +315,128 @@ class InternalBridgeHttpTaskRunner:
                 item.setdefault("file_path", str(shared_root / relative.replace("/", "\\")))
             output.append(item)
         return output
+
+    def _merge_main_source_cache_entries(
+        self,
+        entries: List[Dict[str, Any]],
+        *,
+        source_family: str = "",
+        building: str = "",
+        bucket_kind: str = "",
+        bucket_key: str = "",
+        duty_date: str = "",
+        duty_shift: str = "",
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Merge HTTP-task-local index with the main internal source cache index.
+
+        The source-cache scheduler may have downloaded files before the HTTP
+        bridge runner was created. Reading both local SQLite indexes avoids
+        reporting a building as missing while still avoiding shared-folder scans.
+        """
+        merged: Dict[str, Dict[str, Any]] = {}
+
+        def _add(row: Dict[str, Any]) -> None:
+            if not isinstance(row, dict):
+                return
+            key = "|".join(
+                [
+                    str(row.get("entry_id", "") or "").strip(),
+                    str(row.get("source_family", "") or "").strip(),
+                    str(row.get("building", "") or "").strip(),
+                    str(row.get("bucket_kind", "") or "").strip(),
+                    str(row.get("bucket_key", "") or "").strip(),
+                    str(row.get("duty_date", "") or "").strip(),
+                    str(row.get("duty_shift", "") or "").strip(),
+                    str(row.get("relative_path", "") or "").strip(),
+                ]
+            )
+            if key.strip("|"):
+                existing = merged.get(key)
+                if existing is None or str(row.get("updated_at", "") or "") >= str(existing.get("updated_at", "") or ""):
+                    merged[key] = dict(row)
+
+        for row in entries if isinstance(entries, list) else []:
+            _add(row)
+
+        main_cache = getattr(self._main_service, "_source_cache_service", None)
+        main_store = getattr(main_cache, "store", None)
+        if main_store is not None:
+            try:
+                rows = main_store.list_source_cache_entries(
+                    source_family=source_family,
+                    building=building,
+                    bucket_kind=bucket_kind,
+                    bucket_key=bucket_key,
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    status="ready",
+                    limit=max(int(limit or 50), 200),
+                )
+                for row in rows if isinstance(rows, list) else []:
+                    _add(row)
+            except Exception as exc:  # noqa: BLE001
+                self._emit(f"[内网HTTP桥接] 合并主源文件索引失败: {exc}")
+
+        output = list(merged.values())
+        output.sort(
+            key=lambda row: (
+                str(row.get("downloaded_at", "") or "").strip(),
+                str(row.get("updated_at", "") or "").strip(),
+                str(row.get("entry_id", "") or "").strip(),
+            ),
+            reverse=True,
+        )
+        return output[: max(1, int(limit or 50))]
+
+    def refresh_latest_source_cache(
+        self,
+        *,
+        source_family: str,
+        buildings: List[str],
+    ) -> Dict[str, Any]:
+        family = str(source_family or "").strip()
+        target_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        if not family:
+            raise ValueError("source_family 不能为空")
+        if not target_buildings:
+            raise ValueError("buildings 不能为空")
+        results: List[Dict[str, Any]] = []
+        accepted = 0
+        already_ready = 0
+        for building in target_buildings:
+            try:
+                result = self._main_service.start_building_latest_source_cache_refresh(
+                    source_family=family,
+                    building=building,
+                )
+                item = dict(result if isinstance(result, dict) else {})
+                item["building"] = building
+                item["source_family"] = family
+                if bool(item.get("accepted", False)) or bool(item.get("running", False)):
+                    accepted += 1
+                elif str(item.get("reason", "") or "").strip().lower() == "already_ready":
+                    already_ready += 1
+                results.append(item)
+            except Exception as exc:  # noqa: BLE001
+                results.append(
+                    {
+                        "building": building,
+                        "source_family": family,
+                        "accepted": False,
+                        "running": False,
+                        "reason": "failed",
+                        "error": str(exc),
+                    }
+                )
+        return {
+            "ok": (accepted + already_ready) > 0,
+            "source_family": family,
+            "requested_buildings": target_buildings,
+            "accepted_count": accepted,
+            "already_ready_count": already_ready,
+            "results": results,
+        }
 
     def list_source_index_batch(self, queries: List[Dict[str, Any]], *, default_limit: int = 50) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []

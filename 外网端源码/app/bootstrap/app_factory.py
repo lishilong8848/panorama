@@ -1112,6 +1112,29 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 )
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    missing_buildings = list(selection.get("missing_buildings", []) or []) if isinstance(selection, dict) else []
+                    stale_buildings = list(selection.get("stale_buildings", []) or []) if isinstance(selection, dict) else []
+                    ready_buildings = {
+                        str(item.get("building", "") or "").strip()
+                        for item in cached_entries
+                        if isinstance(item, dict)
+                    }
+                    refresh_buildings = [
+                        item
+                        for item in [*missing_buildings, *stale_buildings, *target_buildings]
+                        if str(item or "").strip() and str(item or "").strip() not in ready_buildings
+                    ]
+                    refresh_buildings = list(dict.fromkeys(str(item or "").strip() for item in refresh_buildings if str(item or "").strip()))
+                    if refresh_buildings and hasattr(bridge_service, "request_latest_source_cache_refresh"):
+                        refresh_result = bridge_service.request_latest_source_cache_refresh(
+                            source_family="monthly_report_family",
+                            buildings=refresh_buildings,
+                        )
+                        container.add_system_log(
+                            "[调度] 月报共享文件缺失，已请求内网端补采: "
+                            f"buildings={','.join(refresh_buildings)}, "
+                            f"accepted={refresh_result.get('accepted_count', 0) if isinstance(refresh_result, dict) else 0}"
+                        )
                     dedupe_key = f"auto_once:scheduler:shared_bridge:{str(selection.get('best_bucket_key', '') or '').strip()}"
                     job, bridge_task = start_waiting_bridge_job(
                         job_service=container.job_service,
@@ -1720,6 +1743,29 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 )
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
+                    missing_buildings = list(selection.get("missing_buildings", []) or []) if isinstance(selection, dict) else []
+                    stale_buildings = list(selection.get("stale_buildings", []) or []) if isinstance(selection, dict) else []
+                    ready_buildings = {
+                        str(item.get("building", "") or "").strip()
+                        for item in cached_entries
+                        if isinstance(item, dict)
+                    }
+                    refresh_buildings = [
+                        item
+                        for item in [*missing_buildings, *stale_buildings, *target_buildings]
+                        if str(item or "").strip() and str(item or "").strip() not in ready_buildings
+                    ]
+                    refresh_buildings = list(dict.fromkeys(str(item or "").strip() for item in refresh_buildings if str(item or "").strip()))
+                    if refresh_buildings and hasattr(bridge_service, "request_latest_source_cache_refresh"):
+                        refresh_result = bridge_service.request_latest_source_cache_refresh(
+                            source_family=ChillerModeUploadService.SOURCE_FAMILY,
+                            buildings=refresh_buildings,
+                        )
+                        emit_log(
+                            "[制冷模式参数上传调度] 共享文件缺失，已请求内网端补采: "
+                            f"buildings={','.join(refresh_buildings)}, "
+                            f"accepted={refresh_result.get('accepted_count', 0) if isinstance(refresh_result, dict) else 0}"
+                        )
                     detail = _build_latest_cache_wait_text("制冷模式参数", selection if isinstance(selection, dict) else {})
                     emit_log(f"[制冷模式参数上传调度] {detail}")
                     container.record_chiller_mode_upload_external_run(
