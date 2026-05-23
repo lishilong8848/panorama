@@ -1655,6 +1655,73 @@ class ReviewFollowupTriggerService:
             emit_log(f"[交接班][H楼云表] 跟随云文档上传完成 batch={batch_key}, status={status}")
         return result
 
+    def _managed_building_cloud_sync_gaps(
+        self,
+        sessions: List[Dict[str, Any]],
+    ) -> List[str]:
+        by_building = {
+            str(session.get("building", "")).strip(): session
+            for session in sessions
+            if isinstance(session, dict)
+        }
+        gaps: List[str] = []
+        for building in HandoverCloudSheetSyncService.MANAGED_BUILDINGS:
+            session = by_building.get(building)
+            if not isinstance(session, dict):
+                gaps.append(f"{building}:missing_session")
+                continue
+            revision = int(session.get("revision", 0) or 0)
+            cloud_state = _normalize_cloud_sync_state(session.get("cloud_sheet_sync", {}))
+            if not self._is_cloud_sync_complete_for_revision(cloud_state, revision):
+                status = str(cloud_state.get("status", "")).strip().lower() or "pending"
+                gaps.append(f"{building}:{status}")
+        return gaps
+
+    def _attach_station_h_sync_result_after_final_building_upload(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        cloud_result: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        result = cloud_result if isinstance(cloud_result, dict) else {}
+        batch_meta = self._review_service.get_cloud_batch(batch_key) or {}
+        existing = batch_meta.get("station_h_sync", {}) if isinstance(batch_meta, dict) else {}
+        if isinstance(existing, dict) and str(existing.get("status", "")).strip().lower() == "success":
+            result["station_h_sync"] = {**existing, "reason": "already_synced_once"}
+            return result
+
+        uploaded_buildings = [
+            str(item or "").strip()
+            for item in list(result.get("uploaded_buildings", []) or [])
+            if str(item or "").strip()
+        ]
+        if not uploaded_buildings:
+            result["station_h_sync"] = {"status": "skipped", "reason": "no_new_building_upload"}
+            return result
+
+        batch_sessions = self._review_service.list_batch_sessions(batch_key)
+        gaps = self._managed_building_cloud_sync_gaps(batch_sessions)
+        if gaps:
+            result["station_h_sync"] = {
+                "status": "skipped",
+                "reason": "waiting_final_building_upload",
+                "pending": gaps,
+            }
+            emit_log(
+                f"[交接班][H楼云表] 等待最后楼栋云文档上传完成 batch={batch_key}, "
+                f"pending={','.join(gaps)}"
+            )
+            return result
+
+        return self._attach_station_h_sync_result(
+            batch_key=batch_key,
+            sessions=batch_sessions or sessions,
+            cloud_result=result,
+            emit_log=emit_log,
+        )
+
     def _attach_station_110_sync_result(
         self,
         *,
@@ -1689,7 +1756,7 @@ class ReviewFollowupTriggerService:
         cloud_result: Dict[str, Any],
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
-        result = self._attach_station_h_sync_result(
+        result = self._attach_station_h_sync_result_after_final_building_upload(
             batch_key=batch_key,
             sessions=sessions,
             cloud_result=cloud_result,

@@ -159,6 +159,15 @@ class ReviewBuildingDocumentStore:
             self._mark_ready(ready_key)
             self._ready = True
 
+    def ensure_read_ready(self) -> None:
+        """Prepare read paths without taking a schema write lock."""
+        ready_key = self._ready_key(self.db_path)
+        if self._ready or self._is_ready(ready_key):
+            return
+        if self.db_path.exists():
+            return
+        self.ensure_ready()
+
     @staticmethod
     def _create_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -294,7 +303,7 @@ class ReviewBuildingDocumentStore:
         }
 
     def get_document(self, session_id: str) -> Dict[str, Any] | None:
-        self.ensure_ready()
+        self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
             row = conn.execute(
                 "SELECT * FROM review_documents WHERE session_id=?",
@@ -611,7 +620,7 @@ class ReviewBuildingDocumentStore:
         return self._row_to_sync(row)
 
     def get_sync_state(self, session_id: str) -> Dict[str, Any]:
-        self.ensure_ready()
+        self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
             return self.get_sync_state_from_conn(conn, session_id)
 
@@ -867,7 +876,7 @@ class ReviewBuildingDocumentStore:
             return self.get_sync_state_from_conn(conn, session_id)
 
     def get_default(self, key: str) -> Dict[str, Any] | List[Dict[str, Any]] | None:
-        self.ensure_ready()
+        self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
             row = conn.execute(
                 "SELECT value_json FROM building_defaults WHERE default_key=?",
@@ -1060,7 +1069,7 @@ class ReviewBuildingDocumentStore:
             return int(cursor.rowcount or 0)
 
     def get_xlsx_write_job(self, job_id: str) -> Dict[str, Any] | None:
-        self.ensure_ready()
+        self.ensure_read_ready()
         job_id_text = str(job_id or "").strip()
         if not job_id_text:
             return None

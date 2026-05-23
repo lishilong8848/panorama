@@ -144,6 +144,15 @@ class ReviewSessionStateStore:
             self._mark_ready(ready_key)
             self._ready = True
 
+    def ensure_read_ready(self) -> None:
+        """Prepare read paths without taking a schema/migration write lock."""
+        ready_key = self._ready_key(self.db_path)
+        if self._ready or self._is_ready(ready_key):
+            return
+        if self.db_path.exists():
+            return
+        self.ensure_ready()
+
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
             """
@@ -442,7 +451,7 @@ class ReviewSessionStateStore:
         return batch_key
 
     def load_state(self) -> Dict[str, Any]:
-        self.ensure_ready()
+        self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
             sessions: Dict[str, Any] = {}
             for row in conn.execute("SELECT session_id, payload_json FROM review_sessions").fetchall():
@@ -494,7 +503,7 @@ class ReviewSessionStateStore:
         building_name = str(building or "").strip()
         if not building_name:
             return []
-        self.ensure_ready()
+        self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 """
@@ -736,7 +745,7 @@ class ReviewSessionStateStore:
         current_revision: int,
         client_id: str = "",
     ) -> Dict[str, Any]:
-        self.ensure_ready()
+        self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
             row = conn.execute(
                 """
@@ -922,7 +931,7 @@ class ReviewSessionStateStore:
         block_id_text = str(block_id or "").strip()
         if not batch_key_text or not block_id_text:
             return self._row_to_shared_block(None, batch_key=batch_key_text, block_id=block_id_text)
-        self.ensure_ready()
+        self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
             row = conn.execute(
                 """
@@ -951,7 +960,7 @@ class ReviewSessionStateStore:
                 current_revision=current_revision,
                 client_id=normalized_client_id,
             )
-        self.ensure_ready()
+        self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
             row = conn.execute(
                 """

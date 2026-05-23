@@ -3093,11 +3093,11 @@ export function mountHandoverReviewApp(Vue) {
               if (error?.name === "AbortError") {
                 return false;
               }
-              payload = await getHandoverReviewApi(
-                buildingCode,
-                buildLoadParams(),
-                buildRequestOptions(activeLoadController),
-              );
+              errorText.value = String(error?.message || error || "交接班正文加载失败");
+              statusText.value = documentOmitted.value
+                ? "审核状态已加载，交接班正文暂未返回"
+                : "交接班正文加载失败，请稍后重试";
+              return false;
             }
             if (requestSeq !== latestLoadRequestSeq) {
               return false;
