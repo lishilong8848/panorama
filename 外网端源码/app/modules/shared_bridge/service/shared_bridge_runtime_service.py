@@ -1017,28 +1017,50 @@ class SharedBridgeRuntimeService:
         text = str(bucket_key or "").strip()
         if not text:
             return None
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y-%m-%d", "%Y%m%d%H%M", "%Y%m%d%H", "%Y%m%d"):
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y-%m-%d"):
             try:
                 return datetime.strptime(text, fmt)
             except ValueError:
                 continue
         digits = "".join(ch for ch in text if ch.isdigit())
-        if len(digits) >= 12:
+        if len(digits) == 12:
+            try:
+                return datetime.strptime(digits, "%Y%m%d%H%M")
+            except ValueError:
+                pass
+        if len(digits) == 10:
+            try:
+                return datetime.strptime(digits, "%Y%m%d%H")
+            except ValueError:
+                pass
+        if len(digits) == 8:
+            try:
+                return datetime.strptime(digits, "%Y%m%d")
+            except ValueError:
+                pass
+        if len(digits) > 12:
             try:
                 return datetime.strptime(digits[:12], "%Y%m%d%H%M")
             except ValueError:
-                return None
-        if len(digits) >= 10:
-            try:
-                return datetime.strptime(digits[:10], "%Y%m%d%H")
-            except ValueError:
-                return None
-        if len(digits) >= 8:
-            try:
-                return datetime.strptime(digits[:8], "%Y%m%d")
-            except ValueError:
-                return None
+                pass
         return None
+
+    @staticmethod
+    def _http_source_bucket_is_date_only(bucket_key: Any) -> bool:
+        text = str(bucket_key or "").strip()
+        if not text:
+            return False
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").strftime("%Y-%m-%d") == text
+        except ValueError:
+            pass
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) != 8 or digits != text:
+            return False
+        try:
+            return datetime.strptime(digits, "%Y%m%d").strftime("%Y%m%d") == digits
+        except ValueError:
+            return False
 
     def _http_source_cache_buildings(self, buildings: List[str] | None = None) -> List[str]:
         requested = [
@@ -1124,7 +1146,9 @@ class SharedBridgeRuntimeService:
         if not target_bucket:
             return [{"bucket_or_date": "", "bucket_kind": ""}]
         family = str(source_family or "").strip().lower()
-        if family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} and self._http_source_bucket_dt(target_bucket) is None:
+        if family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} and (
+            self._http_source_bucket_is_date_only(target_bucket) or self._http_source_bucket_dt(target_bucket) is None
+        ):
             return [
                 {"bucket_or_date": target_bucket, "bucket_kind": "daily"},
                 {"bucket_or_date": target_bucket, "bucket_kind": "date"},
@@ -1231,12 +1255,14 @@ class SharedBridgeRuntimeService:
         *,
         source_family: str,
         buildings: List[str] | None = None,
+        target_bucket_key: str = "",
         max_version_gap: int = 3,
         max_selection_age_hours: float = 3.0,
     ) -> Dict[str, Any] | None:
         entries = self._http_source_index_entries(
             source_family=source_family,
             buildings=buildings,
+            bucket_key=target_bucket_key,
             limit_per_building=30,
         )
         if entries is None:
@@ -1244,7 +1270,7 @@ class SharedBridgeRuntimeService:
         target_buildings = self._http_source_cache_buildings(buildings)
         latest_by_building: Dict[str, Dict[str, Any]] = {}
         latest_bucket_dt: datetime | None = None
-        latest_bucket_key = ""
+        latest_bucket_key = str(target_bucket_key or "").strip()
         for entry in entries:
             building = str(entry.get("building", "") or "").strip()
             bucket_key = str(entry.get("bucket_key", "") or "").strip()
@@ -1257,7 +1283,8 @@ class SharedBridgeRuntimeService:
                 latest_by_building[building] = {**entry, "_bucket_dt": bucket_dt}
             if latest_bucket_dt is None or bucket_dt > latest_bucket_dt:
                 latest_bucket_dt = bucket_dt
-                latest_bucket_key = bucket_key
+                if not latest_bucket_key:
+                    latest_bucket_key = bucket_key
 
         selected_entries: List[Dict[str, Any]] = []
         fallback_buildings: List[str] = []
@@ -1488,6 +1515,7 @@ class SharedBridgeRuntimeService:
         latest_selection = self._http_latest_source_cache_selection(
             source_family=source_family,
             buildings=buildings,
+            target_bucket_key="" if source_family == FAMILY_CHILLER_MODE_SWITCH else current_bucket,
             max_version_gap=max_version_gap,
             max_selection_age_hours=max_selection_age_hours,
         )
