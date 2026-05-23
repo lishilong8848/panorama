@@ -63,6 +63,7 @@ from app.shared.utils.atomic_file import (
     atomic_copy_file,
     validate_excel_workbook_file,
 )
+from app.shared.utils.artifact_naming import source_bucket_segment
 from app.shared.utils.cached_json_file import save_cached_json
 from app.shared.utils.file_utils import normalize_windows_path_text
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
@@ -1156,6 +1157,43 @@ class SharedBridgeRuntimeService:
             ]
         return [{"bucket_or_date": target_bucket, "bucket_kind": ""}]
 
+    def _http_source_index_path_matches_bucket(
+        self,
+        *,
+        source_family: str,
+        target_bucket: str,
+        relative_path: str,
+    ) -> bool:
+        target_text = str(target_bucket or "").strip()
+        relative_text = str(relative_path or "").replace("\\", "/").strip()
+        if not target_text or not relative_text:
+            return False
+        family = str(source_family or "").strip().lower()
+        bucket_kinds = ["latest"]
+        if family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH}:
+            bucket_kinds = ["daily", "day", "date"]
+        elif family == FAMILY_CHILLER_MODE_SWITCH:
+            bucket_kinds = ["interval", "latest"]
+        elif family == FAMILY_MONTHLY_REPORT:
+            bucket_kinds = ["latest", "date"]
+        segments: set[str] = set()
+        for bucket_kind in bucket_kinds:
+            try:
+                segment = source_bucket_segment(
+                    source_family=family,
+                    bucket_kind=bucket_kind,
+                    bucket_key=target_text,
+                    duty_date=target_text if bucket_kind in {"daily", "day", "date"} else "",
+                    duty_shift="",
+                )
+            except Exception:
+                segment = ""
+            segment = str(segment or "").strip()
+            if segment:
+                segments.add(segment)
+        padded_path = f"/{relative_text}/"
+        return any(f"/{segment}/" in padded_path for segment in segments)
+
     def _http_source_index_entries(
         self,
         *,
@@ -1224,7 +1262,12 @@ class SharedBridgeRuntimeService:
                     if target_bucket:
                         bucket = str(item.get("bucket_key", "") or "").strip()
                         duty_date = str(item.get("duty_date", "") or "").strip()
-                        if target_bucket not in {bucket, duty_date}:
+                        relative_path = str(item.get("relative_path", "") or "").strip()
+                        if target_bucket not in {bucket, duty_date} and not self._http_source_index_path_matches_bucket(
+                            source_family=source_family,
+                            target_bucket=target_bucket,
+                            relative_path=relative_path,
+                        ):
                             continue
                     identity = "|".join(
                         [

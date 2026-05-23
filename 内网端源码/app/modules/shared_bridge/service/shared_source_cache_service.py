@@ -6249,7 +6249,11 @@ class SharedSourceCacheService:
                 if key in seen_paths:
                     return
                 seen_paths.add(key)
-                output.append({"context": context, "path": candidate})
+                try:
+                    mtime = float(candidate.stat().st_mtime)
+                except OSError:
+                    mtime = 0.0
+                output.append({"context": context, "path": candidate, "mtime": mtime})
             except OSError:
                 return
 
@@ -6275,6 +6279,44 @@ class SharedSourceCacheService:
             family_root = self._family_root(normalized_family)
         except Exception:
             return []
+
+        if normalized_family in {FAMILY_HANDOVER_LOG, FAMILY_HANDOVER_CAPACITY_REPORT}:
+            bucket_date = self._date_text_from_bucket_key(bucket_key)
+            date_digits = "".join(ch for ch in str(bucket_date or "") if ch.isdigit())[:8]
+            if len(date_digits) == 8:
+                month_dir = family_root / date_digits[:6]
+                shift_dirs = [
+                    ("", "交接班"),
+                    ("day", "白班"),
+                    ("night", "夜班"),
+                ]
+                for duty_shift, shift_text in shift_dirs:
+                    exact_dir = month_dir / f"{date_digits}--{shift_text}"
+                    if not exact_dir.exists() or not exact_dir.is_dir():
+                        continue
+                    context = {
+                        "bucket_kind": "latest",
+                        "bucket_key": bucket_key,
+                        "duty_date": bucket_date,
+                        "duty_shift": duty_shift,
+                    }
+                    try:
+                        for candidate in exact_dir.iterdir():
+                            _add_candidate(context, candidate)
+                    except OSError as exc:
+                        self._emit(
+                            "[共享缓存] 内网端扫描交接班日期目录失败: "
+                            f"family={normalized_family} building={building} dir={exact_dir}, error={exc}"
+                        )
+                if output:
+                    output.sort(
+                        key=lambda item: (
+                            float(item.get("mtime", 0.0) or 0.0) if isinstance(item, dict) else 0.0,
+                            str(item.get("path", "") or "") if isinstance(item, dict) else "",
+                        ),
+                        reverse=True,
+                    )
+                    return output
 
         if normalized_family == FAMILY_MONTHLY_REPORT:
             bucket_date = self._date_text_from_bucket_key(bucket_key)
