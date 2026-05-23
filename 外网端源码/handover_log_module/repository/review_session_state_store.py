@@ -34,6 +34,10 @@ def _default_holder_label(client_id: str) -> str:
 
 class ReviewSessionStateStore:
     DB_FILE = "handover_review_state.db"
+    READ_BUSY_TIMEOUT_MS = 750
+    _READY_PATHS_GUARD = threading.Lock()
+    _READY_PATHS: set[str] = set()
+    _READY_LOCKS: Dict[str, threading.Lock] = {}
     DEFAULT_STATE: Dict[str, Any] = {
         "review_sessions": {},
         "review_latest_by_building": {},
@@ -70,20 +74,45 @@ class ReviewSessionStateStore:
         self._ready_lock = threading.Lock()
         self._write_lock = threading.Lock()
 
+    @classmethod
+    def _ready_key(cls, path: Path) -> str:
+        return str(path.resolve(strict=False)).casefold()
+
+    @classmethod
+    def _is_ready(cls, key: str) -> bool:
+        with cls._READY_PATHS_GUARD:
+            return key in cls._READY_PATHS
+
+    @classmethod
+    def _mark_ready(cls, key: str) -> None:
+        with cls._READY_PATHS_GUARD:
+            cls._READY_PATHS.add(key)
+
+    @classmethod
+    def _init_lock_for_key(cls, key: str) -> threading.Lock:
+        with cls._READY_PATHS_GUARD:
+            lock = cls._READY_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                cls._READY_LOCKS[key] = lock
+            return lock
+
     @contextmanager
     def connect(self, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
         lock_context = nullcontext() if read_only else self._write_lock
+        timeout_ms = self.READ_BUSY_TIMEOUT_MS if read_only else self.busy_timeout_ms
         with lock_context:
             conn = sqlite3.connect(
                 str(self.db_path),
-                timeout=self.busy_timeout_ms / 1000.0,
+                timeout=max(0.1, timeout_ms / 1000.0),
                 check_same_thread=False,
             )
             conn.row_factory = sqlite3.Row
             try:
-                conn.execute("PRAGMA journal_mode=WAL")
+                if not read_only:
+                    conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+                conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
                 conn.execute("PRAGMA foreign_keys=ON")
                 if read_only:
                     conn.execute("PRAGMA query_only=ON")
@@ -98,14 +127,21 @@ class ReviewSessionStateStore:
                 conn.close()
 
     def ensure_ready(self) -> None:
+        ready_key = self._ready_key(self.db_path)
         if self._ready:
             return
-        with self._ready_lock:
-            if self._ready:
+        if self._is_ready(ready_key):
+            self._ready = True
+            return
+        init_lock = self._init_lock_for_key(ready_key)
+        with init_lock:
+            if self._is_ready(ready_key):
+                self._ready = True
                 return
             with self.connect() as conn:
                 self._create_schema(conn)
                 self._migrate_from_legacy_if_needed(conn)
+            self._mark_ready(ready_key)
             self._ready = True
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:

@@ -485,19 +485,19 @@ export async function exitCurrentRuntimeApi(payload = {}) {
 }
 
 export async function getHandoverReviewApi(buildingCode, params = {}, options = {}) {
-  return apiJson(appendQuery(`/api/handover/review/${buildingCode}`, params), options);
+  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}`, params), options, 15000);
 }
 
 export async function getHandoverReviewBootstrapApi(buildingCode, params = {}, options = {}) {
-  return apiJson(appendQuery(`/api/handover/review/${buildingCode}/bootstrap`, params), options);
+  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/bootstrap`, params), options, 15000);
 }
 
 export async function getHandoverReviewSnapshotApi(buildingCode, params = {}, options = {}) {
-  return apiJson(appendQuery(`/api/handover/review/${buildingCode}/snapshot`, params), options);
+  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/snapshot`, params), options, 5000);
 }
 
 export async function getHandoverReviewStatusApi(buildingCode, params = {}, options = {}) {
-  return apiJson(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options);
+  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options, 5000);
 }
 
 export async function refreshHandoverReviewEventSectionsApi(buildingCode, payload = {}) {

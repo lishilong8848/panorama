@@ -71,6 +71,9 @@ _HEALTH_COMPONENT_CACHE_LOCK_ATTR = "_health_component_cache_lock"
 _HANDOVER_REVIEW_HEALTH_CACHE_STATUS_PREFIX = "handover_review_status:"
 _HANDOVER_REVIEW_HEALTH_CACHE_ACCESS_PREFIX = "handover_review_access:"
 _REVIEW_API_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="handover-review-api")
+_REVIEW_SLOW_LOG_INTERVAL_SEC = 60.0
+_REVIEW_SLOW_LOG_LOCK = threading.Lock()
+_REVIEW_SLOW_LOG_STATE: dict[str, dict[str, Any]] = {}
 
 
 def shutdown_handover_review_api_executor() -> None:
@@ -80,6 +83,43 @@ def shutdown_handover_review_api_executor() -> None:
 async def _run_review_api(func):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_REVIEW_API_EXECUTOR, func)
+
+
+def _emit_review_slow_request_log(container, *, endpoint: str, elapsed_ms: int) -> None:
+    emit_log = getattr(container, "add_system_log", None)
+    if not callable(emit_log):
+        return
+    endpoint_text = str(endpoint or "-").strip() or "-"
+    now_monotonic = time.monotonic()
+    suppressed = 0
+    max_elapsed = int(elapsed_ms or 0)
+    should_log = False
+    with _REVIEW_SLOW_LOG_LOCK:
+        state = _REVIEW_SLOW_LOG_STATE.get(endpoint_text)
+        if not isinstance(state, dict):
+            _REVIEW_SLOW_LOG_STATE[endpoint_text] = {
+                "last_log_at": now_monotonic,
+                "suppressed": 0,
+                "max_elapsed_ms": max_elapsed,
+            }
+            should_log = True
+        else:
+            last_log_at = float(state.get("last_log_at", 0.0) or 0.0)
+            if now_monotonic - last_log_at < _REVIEW_SLOW_LOG_INTERVAL_SEC:
+                state["suppressed"] = int(state.get("suppressed", 0) or 0) + 1
+                state["max_elapsed_ms"] = max(int(state.get("max_elapsed_ms", 0) or 0), max_elapsed)
+                return
+            suppressed = int(state.get("suppressed", 0) or 0)
+            max_elapsed = max(int(state.get("max_elapsed_ms", 0) or 0), max_elapsed)
+            state["last_log_at"] = now_monotonic
+            state["suppressed"] = 0
+            state["max_elapsed_ms"] = int(elapsed_ms or 0)
+            should_log = True
+    if should_log:
+        suffix = f", suppressed={suppressed}, max_elapsed_ms={max_elapsed}" if suppressed > 0 else ""
+        emit_log(
+            f"[交接班][审核页接口] 慢请求 endpoint={endpoint_text}, elapsed_ms={int(elapsed_ms or 0)}{suffix}"
+        )
 
 
 def _dedicated_review_endpoint(func):
@@ -96,11 +136,11 @@ def _dedicated_review_endpoint(func):
                     request = next((item for item in args if isinstance(item, Request)), None)
                 container = getattr(getattr(request, "app", None), "state", None)
                 container = getattr(container, "container", None)
-                emit_log = getattr(container, "add_system_log", None)
-                if callable(emit_log):
-                    emit_log(
-                        f"[交接班][审核页接口] 慢请求 endpoint={getattr(func, '__name__', '-')}, elapsed_ms={elapsed_ms}"
-                    )
+                _emit_review_slow_request_log(
+                    container,
+                    endpoint=getattr(func, "__name__", "-"),
+                    elapsed_ms=elapsed_ms,
+                )
 
     _wrapper.__signature__ = inspect.signature(func)
     return _wrapper
@@ -129,6 +169,63 @@ def _raise_review_store_http_error(
     if saved_document:
         detail = f"当前文件已保存，但{detail}"
     raise HTTPException(status_code=503, detail=detail) from exc
+
+
+def _degraded_batch_status(
+    service: ReviewSessionService,
+    *,
+    batch_key: str,
+    error: str = "",
+) -> Dict[str, Any]:
+    key = str(batch_key or "").strip()
+    try:
+        duty_date, duty_shift = service.parse_batch_key(key)
+    except Exception:  # noqa: BLE001
+        duty_date, duty_shift = "", ""
+    try:
+        building_defs = service._building_defs()  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        building_defs = []
+    buildings = [
+        {
+            "building": str(item.get("name", "") or "").strip(),
+            "has_session": False,
+            "confirmed": False,
+            "session_id": "",
+            "revision": 0,
+            "updated_at": "",
+            "cloud_sheet_sync": ReviewSessionService._normalize_cloud_sheet_sync({}),
+        }
+        for item in building_defs
+        if isinstance(item, dict) and str(item.get("name", "") or "").strip()
+    ]
+    return {
+        "batch_key": key,
+        "duty_date": duty_date,
+        "duty_shift": duty_shift,
+        "has_any_session": False,
+        "confirmed_count": 0,
+        "required_count": len(buildings),
+        "all_confirmed": False,
+        "ready_for_followup_upload": False,
+        "buildings": buildings,
+        "degraded": True,
+        "error": str(error or "").strip() or "review_store_unavailable",
+    }
+
+
+def _get_batch_status_safe(
+    service: ReviewSessionService,
+    *,
+    batch_key: str,
+    emit_log=None,
+) -> Dict[str, Any]:
+    try:
+        return service.get_batch_status(batch_key)
+    except ReviewSessionStoreUnavailableError as exc:
+        if callable(emit_log):
+            emit_log(f"[交接班][审核批次状态] 已降级: batch={batch_key or '-'}, error={exc}")
+        return _degraded_batch_status(service, batch_key=batch_key, error=str(exc))
 
 
 def _empty_concurrency(current_revision: int = 0) -> Dict[str, Any]:
@@ -496,6 +593,49 @@ def _load_review_document_cached(
         document=document if isinstance(document, dict) else {},
     )
     return document, session_with_sync
+
+
+def _load_existing_review_document_snapshot(
+    container,
+    session: Dict[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Any], bool]:
+    payload = dict(session if isinstance(session, dict) else {})
+    building = str(payload.get("building", "") or "").strip()
+    session_id = str(payload.get("session_id", "") or "").strip()
+    if not building or not session_id:
+        return {}, payload, False
+    signature = _review_document_signature(payload)
+    cached_document = _review_document_cache_get(building=building, signature=signature)
+    if isinstance(cached_document, dict):
+        return cached_document, _attach_excel_sync_from_store(container, payload), True
+    try:
+        state = ReviewBuildingDocumentStore(
+            config=_handover_cfg(container),
+            building=building,
+        ).get_document(session_id)
+    except Exception as exc:  # noqa: BLE001
+        emit_log = getattr(container, "add_system_log", None)
+        if callable(emit_log):
+            emit_log(f"[交接班][审核SQLite] 快照读取降级 building={building}, session={session_id}, error={exc}")
+        return {}, _attach_excel_sync_from_store(container, payload), False
+    if not isinstance(state, dict):
+        return {}, _attach_excel_sync_from_store(container, payload), False
+    document = state.get("document", {}) if isinstance(state.get("document", {}), dict) else {}
+    resolved_session = _attach_excel_sync_from_store(container, payload)
+    try:
+        resolved_session["revision"] = int(state.get("revision", resolved_session.get("revision", 0)) or 0)
+    except Exception:  # noqa: BLE001
+        pass
+    resolved_signature = _review_document_signature(
+        resolved_session,
+        revision_override=int(resolved_session.get("revision", payload.get("revision", 0)) or 0),
+    )
+    _review_document_cache_put(
+        building=building,
+        signature=resolved_signature,
+        document=document,
+    )
+    return copy.deepcopy(document), resolved_session, True
 
 
 def _review_ui_payload(parser: ReviewDocumentParser | None) -> Dict[str, Any]:
@@ -2092,10 +2232,11 @@ def _pending_review_payload(
     emit_log=None,
 ) -> Dict[str, Any]:
     batch_key = service.build_batch_key(duty_date, duty_shift)
-    try:
-        batch_status = service.get_batch_status(batch_key)
-    except ReviewSessionStoreUnavailableError as exc:
-        _raise_review_store_http_error(exc)
+    batch_status = _get_batch_status_safe(
+        service,
+        batch_key=batch_key,
+        emit_log=emit_log,
+    )
     latest_session_id = _safe_latest_session_id(service, building=building, emit_log=emit_log)
     shift_text = _shift_label(duty_shift)
     message = f"{duty_date} {shift_text}交接班数据尚未生成，请在数据生成后再来查看。"
@@ -3291,6 +3432,7 @@ def _attach_review_display_state(
     client_revision: int = 0,
     emit_log=None,
     include_concurrency: bool = True,
+    include_shared_blocks: bool = True,
 ) -> Dict[str, Any]:
     response = dict(payload or {})
     session = response.get("session") if isinstance(response.get("session"), dict) else {}
@@ -3353,7 +3495,7 @@ def _attach_review_display_state(
     if include_concurrency:
         response["concurrency"] = concurrency
     batch_key = str(session.get("batch_key", "") or "").strip()
-    if batch_key:
+    if batch_key and include_shared_blocks:
         try:
             outdoor_state = service.get_outdoor_temperature_state(
                 batch_key=batch_key,
@@ -3366,7 +3508,9 @@ def _attach_review_display_state(
                 preferred_session=session,
             )
         except ReviewSessionStoreUnavailableError as exc:
-            _raise_review_store_http_error(exc)
+            if callable(emit_log):
+                emit_log(f"[交接班][室外温湿度共享] 状态读取已降级: batch={batch_key}, error={exc}")
+            outdoor_state = {"shared_blocks": {}, "shared_block_locks": {}}
         except Exception as exc:  # noqa: BLE001
             if callable(emit_log):
                 emit_log(f"[交接班][室外温湿度共享] 读取共享状态失败: batch={batch_key}, error={exc}")
@@ -4053,10 +4197,11 @@ def handover_review_data(
         document, session = _load_review_document_cached(document_state, session)
     except ReviewDocumentStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    try:
-        batch_status = service.get_batch_status(session["batch_key"])
-    except ReviewSessionStoreUnavailableError as exc:
-        _raise_review_store_http_error(exc)
+    batch_status = _get_batch_status_safe(
+        service,
+        batch_key=str(session.get("batch_key", "") or "").strip(),
+        emit_log=container.add_system_log,
+    )
     response = {
         "ok": True,
         "building": building,
@@ -4112,18 +4257,29 @@ def handover_review_snapshot(
         pending_payload["snapshot_mode"] = "sqlite_session"
         pending_payload["document_omitted"] = True
         return pending_payload
-    try:
-        batch_status = service.get_batch_status(session["batch_key"])
-    except ReviewSessionStoreUnavailableError as exc:
-        _raise_review_store_http_error(exc)
-    selected_session_id = str(session.get("session_id", "") or "").strip()
-    history_payload = _build_history_payload_safe(
+    batch_status = _get_batch_status_safe(
         service,
-        building=building,
-        selected_session_id=selected_session_id,
-        history_date=history_date,
+        batch_key=str(session.get("batch_key", "") or "").strip(),
         emit_log=container.add_system_log,
     )
+    selected_session_id = str(session.get("session_id", "") or "").strip()
+    if str(history_date or "").strip():
+        history_payload = _build_history_payload_safe(
+            service,
+            building=building,
+            selected_session_id=selected_session_id,
+            history_date=history_date,
+            emit_log=container.add_system_log,
+        )
+    else:
+        history_payload = _empty_history_payload(
+            latest_session_id=_safe_latest_session_id(
+                service,
+                building=building,
+                emit_log=container.add_system_log,
+            ),
+            selected_session_id=selected_session_id,
+        )
     response = {
         "ok": True,
         "building": building,
@@ -4143,6 +4299,7 @@ def handover_review_snapshot(
         client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
         include_concurrency=False,
+        include_shared_blocks=False,
     )
 
 
@@ -4174,15 +4331,21 @@ def handover_review_bootstrap(
     )
     if pending_payload is not None:
         return pending_payload
-    try:
-        payload, _from_cache = _build_review_bootstrap_payload(
-            building=building,
-            parser=parser,
-            document_state=document_state,
-            session=session,
-        )
-    except ReviewDocumentStateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    document, session_with_sync, found_snapshot = _load_existing_review_document_snapshot(container, session)
+    session_for_response = session_with_sync if isinstance(session_with_sync, dict) else dict(session)
+    revision = int(session_for_response.get("revision", session.get("revision", 0)) or 0)
+    payload = {
+        "ok": True,
+        "building": building,
+        "session": session_for_response,
+        "document": document if isinstance(document, dict) else {},
+        "document_omitted": not found_snapshot,
+        "review_ui": review_ui,
+        "prepared_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "document_revision": revision,
+        "snapshot_revision": revision,
+        "snapshot_source": "sqlite_document" if found_snapshot else "missing_sqlite_document",
+    }
     return _attach_review_display_state(
         payload,
         service=service,
@@ -4190,6 +4353,7 @@ def handover_review_bootstrap(
         client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
         include_concurrency=False,
+        include_shared_blocks=False,
     )
 
 
@@ -4299,10 +4463,11 @@ def handover_review_status(
     session = dict(session)
     session["document_revision"] = document_revision
     session["session_revision"] = session_revision
-    try:
-        batch_status = service.get_batch_status(session["batch_key"])
-    except ReviewSessionStoreUnavailableError as exc:
-        _raise_review_store_http_error(exc)
+    batch_status = _get_batch_status_safe(
+        service,
+        batch_key=str(session.get("batch_key", "") or "").strip(),
+        emit_log=container.add_system_log,
+    )
     poll_interval_sec = 5
     if isinstance(review_ui, dict):
         try:
@@ -4334,6 +4499,7 @@ def handover_review_status(
         client_session_id=str(client_session_id or "").strip(),
         client_revision=int(client_revision or 0),
         emit_log=container.add_system_log,
+        include_shared_blocks=False,
     )
 
 
