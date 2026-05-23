@@ -256,7 +256,11 @@
             </span>
           </div>
           <div class="review-table-wrap">
-            <table class="review-table review-substation-table" @paste.prevent="pasteSubstation110kvTable">
+            <table
+              class="review-table review-substation-table"
+              :key="substation110kvRenderKey"
+              @paste.prevent="pasteSubstation110kvTable"
+            >
               <thead>
                 <tr>
                   <th>进线/主变</th>

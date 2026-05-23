@@ -1678,6 +1678,15 @@ export function mountHandoverReviewApp(Vue) {
       });
       const capacityTrackedCellSet = computed(() => new Set(capacitySync.value.tracked_cells || CAPACITY_SYNC_TRACKED_CELLS));
       const substation110kvBlock = computed(() => sharedBlocks.value.substation_110kv || normalizeSubstation110kvBlock({}));
+      const substation110kvRenderKey = computed(() => {
+        const block = substation110kvBlock.value || {};
+        return [
+          String(block.batch_key || ""),
+          String(block.revision || 0),
+          String(block.updated_at || ""),
+          String(block.updated_by_building || ""),
+        ].join("|");
+      });
       const substation110kvLock = computed(() => sharedBlockLocks.value.substation_110kv || normalizeSharedLockPayload({}, substation110kvBlock.value.revision));
       const substation110kvLockedByOther = computed(() => Boolean(substation110kvLock.value?.is_editing_elsewhere));
       const substation110kvReadonly = computed(() => loading.value || saving.value || regenerating.value || substation110kvLockedByOther.value);
@@ -3757,6 +3766,7 @@ export function mountHandoverReviewApp(Vue) {
         capacitySync,
         capacityDownloadDisabled,
         substation110kvBlock,
+        substation110kvRenderKey,
         substation110kvReadonly,
         substation110kvLockedByOther,
         substation110kvMetaText,

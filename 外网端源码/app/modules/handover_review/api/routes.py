@@ -4303,7 +4303,8 @@ def handover_review_snapshot(
         client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
         include_concurrency=False,
-        include_shared_blocks=False,
+        include_shared_blocks=True,
+        include_outdoor_temperature=False,
     )
 
 
@@ -4357,7 +4358,8 @@ def handover_review_bootstrap(
         client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
         include_concurrency=False,
-        include_shared_blocks=False,
+        include_shared_blocks=True,
+        include_outdoor_temperature=False,
     )
 
 
