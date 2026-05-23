@@ -521,6 +521,8 @@ def _secondary_pump_display_number_from_row(row: RawRow, zone: str, building: st
     normalized_zone = _text(zone).lower() or _zone_of_row(row)
     if _text(building) == "A楼" and normalized_zone == "east" and 1 <= number <= 3:
         return number + 3
+    if _text(building) == "B楼" and normalized_zone == "west" and 1 <= number <= 3:
+        return number + 3
     return number
 
 
