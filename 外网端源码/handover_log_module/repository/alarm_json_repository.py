@@ -10,6 +10,8 @@ from handover_log_module.repository.alarm_summary import AlarmSummary
 
 
 FAMILY_ALARM_EVENT = "alarm_event_family"
+ALARM_SOURCE_LABEL = "告警信息源文件"
+LEGACY_SHARED_SOURCE_ROOT = "交接班共享源文件"
 EVENT_TIME_KEYS = ("event_time", "告警时间", "告警发生时间")
 RECOVER_STATUS_KEYS = ("is_recover", "恢复状态", "recover_status")
 ACCEPT_CONTENT_KEYS = ("accept_content", "accept_description", "处理内容", "处理描述")
@@ -75,18 +77,40 @@ class AlarmJsonRepository:
         return InternalBridgeHttpClient.from_runtime_config(runtime_cfg)
 
     def _entry_file_path(self, entry: Dict[str, Any]) -> str:
-        relative_path = str(entry.get("relative_path", "") or "").replace("\\", "/").strip()
+        raw_path = str(
+            entry.get("relative_path", "")
+            or entry.get("file_path", "")
+            or entry.get("source_file", "")
+            or ""
+        ).strip()
+        relative_path = self._relative_alarm_path(raw_path)
         if relative_path:
-            relative_candidate = Path(relative_path)
-            if (
-                not relative_candidate.is_absolute()
-                and not relative_candidate.drive
-                and not relative_candidate.root
-                and not any(part == ".." for part in relative_candidate.parts)
-            ):
-                return str(self._shared_root() / relative_path.replace("/", "\\"))
-            return ""
+            return str(self._shared_root() / relative_path.replace("/", "\\"))
         return str(entry.get("file_path", "") or entry.get("source_file", "") or "").strip()
+
+    @staticmethod
+    def _relative_alarm_path(path_text: str) -> str:
+        text = str(path_text or "").strip().replace("\\", "/").strip("/")
+        if not text:
+            return ""
+        for label in (ALARM_SOURCE_LABEL,):
+            marker = f"/{label}/"
+            index = text.find(marker)
+            if index >= 0:
+                return text[index + 1 :]
+            if text == label or text.startswith(f"{label}/"):
+                return text
+        legacy_marker = f"/{LEGACY_SHARED_SOURCE_ROOT}/"
+        index = text.find(legacy_marker)
+        if index >= 0:
+            return text[index + len(legacy_marker) :]
+        legacy_prefix = f"{LEGACY_SHARED_SOURCE_ROOT}/"
+        if text.startswith(legacy_prefix):
+            return text[len(legacy_prefix) :]
+        candidate = Path(text)
+        if candidate.is_absolute() or candidate.drive or candidate.root or any(part == ".." for part in candidate.parts):
+            return ""
+        return text
 
     def _http_alarm_entries(self, *, buildings: List[str]) -> List[Dict[str, Any]]:
         client = self._http_client()
