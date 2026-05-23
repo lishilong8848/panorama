@@ -6276,6 +6276,62 @@ class SharedSourceCacheService:
         except Exception:
             return []
 
+        if normalized_family == FAMILY_MONTHLY_REPORT:
+            bucket_date = self._date_text_from_bucket_key(bucket_key)
+            month_segment = ""
+            if bucket_date:
+                digits = "".join(ch for ch in bucket_date if ch.isdigit())
+                month_segment = digits[:6]
+            if not month_segment:
+                month_segment = datetime.now().strftime("%Y%m")
+            month_dir = family_root / month_segment
+            if month_dir.exists() and month_dir.is_dir():
+                pattern = f"*--月报*{building}*{suffix}"
+                scanned = 0
+                try:
+                    best_candidate: Path | None = None
+                    best_key: tuple[float, str] = (0.0, "")
+                    for candidate in month_dir.rglob(pattern):
+                        scanned += 1
+                        if scanned > 5000:
+                            self._emit(
+                                "[共享缓存] 内网端扫描月报月份目录达到上限，停止继续扫描: "
+                                f"building={building} dir={month_dir}"
+                            )
+                            break
+                        if not candidate.is_file():
+                            continue
+                        try:
+                            candidate_key = (candidate.stat().st_mtime, str(candidate))
+                        except OSError:
+                            continue
+                        if candidate_key > best_key:
+                            best_candidate = candidate
+                            best_key = candidate_key
+                    if best_candidate is not None:
+                        candidate = best_candidate
+                        name_digits = "".join(ch for ch in candidate.name if ch.isdigit())
+                        duty_date = ""
+                        if len(name_digits) >= 8:
+                            try:
+                                duty_date = datetime.strptime(name_digits[:8], "%Y%m%d").strftime("%Y-%m-%d")
+                            except ValueError:
+                                duty_date = ""
+                        context = {
+                            "bucket_kind": "latest",
+                            "bucket_key": bucket_key,
+                            "duty_date": duty_date,
+                            "duty_shift": "",
+                        }
+                        _add_candidate(context, candidate)
+                except OSError as exc:
+                    self._emit(
+                        "[共享缓存] 内网端扫描月报月份目录失败: "
+                        f"building={building} dir={month_dir}, error={exc}"
+                    )
+            if output:
+                return output
+
         for context in contexts:
             relative_path = str(context.get("relative_path", "") or "").strip()
             bucket_segment = _bucket_segment_from_relative(relative_path)

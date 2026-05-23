@@ -1017,7 +1017,7 @@ class SharedBridgeRuntimeService:
         text = str(bucket_key or "").strip()
         if not text:
             return None
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y%m%d%H%M", "%Y%m%d%H"):
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y-%m-%d", "%Y%m%d%H%M", "%Y%m%d%H", "%Y%m%d"):
             try:
                 return datetime.strptime(text, fmt)
             except ValueError:
@@ -1031,6 +1031,11 @@ class SharedBridgeRuntimeService:
         if len(digits) >= 10:
             try:
                 return datetime.strptime(digits[:10], "%Y%m%d%H")
+            except ValueError:
+                return None
+        if len(digits) >= 8:
+            try:
+                return datetime.strptime(digits[:8], "%Y%m%d")
             except ValueError:
                 return None
         return None
