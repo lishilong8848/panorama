@@ -3433,6 +3433,7 @@ def _attach_review_display_state(
     emit_log=None,
     include_concurrency: bool = True,
     include_shared_blocks: bool = True,
+    include_outdoor_temperature: bool = True,
 ) -> Dict[str, Any]:
     response = dict(payload or {})
     session = response.get("session") if isinstance(response.get("session"), dict) else {}
@@ -3496,37 +3497,40 @@ def _attach_review_display_state(
         response["concurrency"] = concurrency
     batch_key = str(session.get("batch_key", "") or "").strip()
     if batch_key and include_shared_blocks:
-        try:
-            outdoor_state = service.get_outdoor_temperature_state(
-                batch_key=batch_key,
-                client_id=str(client_id or "").strip(),
-                preferred_document=(
-                    response.get("document", {})
-                    if isinstance(response.get("document", {}), dict)
-                    else {}
-                ),
-                preferred_session=session,
+        outdoor_blocks = {}
+        outdoor_locks = {}
+        if include_outdoor_temperature:
+            try:
+                outdoor_state = service.get_outdoor_temperature_state(
+                    batch_key=batch_key,
+                    client_id=str(client_id or "").strip(),
+                    preferred_document=(
+                        response.get("document", {})
+                        if isinstance(response.get("document", {}), dict)
+                        else {}
+                    ),
+                    preferred_session=session,
+                )
+            except ReviewSessionStoreUnavailableError as exc:
+                if callable(emit_log):
+                    emit_log(f"[交接班][室外温湿度共享] 状态读取已降级: batch={batch_key}, error={exc}")
+                outdoor_state = {"shared_blocks": {}, "shared_block_locks": {}}
+            except Exception as exc:  # noqa: BLE001
+                if callable(emit_log):
+                    emit_log(f"[交接班][室外温湿度共享] 读取共享状态失败: batch={batch_key}, error={exc}")
+                outdoor_state = {"shared_blocks": {}, "shared_block_locks": {}}
+            outdoor_blocks = outdoor_state.get("shared_blocks", {}) if isinstance(outdoor_state, dict) else {}
+            outdoor_locks = outdoor_state.get("shared_block_locks", {}) if isinstance(outdoor_state, dict) else {}
+            outdoor_block = (
+                outdoor_blocks.get("outdoor_temperature", {})
+                if isinstance(outdoor_blocks, dict)
+                else {}
             )
-        except ReviewSessionStoreUnavailableError as exc:
-            if callable(emit_log):
-                emit_log(f"[交接班][室外温湿度共享] 状态读取已降级: batch={batch_key}, error={exc}")
-            outdoor_state = {"shared_blocks": {}, "shared_block_locks": {}}
-        except Exception as exc:  # noqa: BLE001
-            if callable(emit_log):
-                emit_log(f"[交接班][室外温湿度共享] 读取共享状态失败: batch={batch_key}, error={exc}")
-            outdoor_state = {"shared_blocks": {}, "shared_block_locks": {}}
-        outdoor_blocks = outdoor_state.get("shared_blocks", {}) if isinstance(outdoor_state, dict) else {}
-        outdoor_locks = outdoor_state.get("shared_block_locks", {}) if isinstance(outdoor_state, dict) else {}
-        outdoor_block = (
-            outdoor_blocks.get("outdoor_temperature", {})
-            if isinstance(outdoor_blocks, dict)
-            else {}
-        )
-        if isinstance(response.get("document", {}), dict) and isinstance(outdoor_block, dict):
-            response["document"], _changed = ReviewSessionService.apply_outdoor_temperature_to_document(
-                copy.deepcopy(response.get("document", {})),
-                outdoor_block.get("cells", {}) if isinstance(outdoor_block.get("cells", {}), dict) else {},
-            )
+            if isinstance(response.get("document", {}), dict) and isinstance(outdoor_block, dict):
+                response["document"], _changed = ReviewSessionService.apply_outdoor_temperature_to_document(
+                    copy.deepcopy(response.get("document", {})),
+                    outdoor_block.get("cells", {}) if isinstance(outdoor_block.get("cells", {}), dict) else {},
+                )
         shared_state = _get_substation_110kv_state_safe(
             service,
             batch_key=batch_key,
@@ -4499,7 +4503,8 @@ def handover_review_status(
         client_session_id=str(client_session_id or "").strip(),
         client_revision=int(client_revision or 0),
         emit_log=container.add_system_log,
-        include_shared_blocks=False,
+        include_shared_blocks=True,
+        include_outdoor_temperature=False,
     )
 
 
