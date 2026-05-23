@@ -1241,7 +1241,11 @@ class SharedBridgeRuntimeService:
             for result in raw_results if isinstance(raw_results, list) else []:
                 if not isinstance(result, dict) or not bool(result.get("ok", False)):
                     continue
-                index = int(result.get("index", -1) or -1)
+                index_raw = result.get("index", -1)
+                try:
+                    index = int(index_raw)
+                except (TypeError, ValueError):
+                    index = -1
                 entries = result.get("entries", [])
                 rows_by_query_index[index] = entries if isinstance(entries, list) else []
             matched_buildings: set[str] = set()
