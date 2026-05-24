@@ -114,6 +114,35 @@ def _delivery_has_successful_send(payload: Dict[str, Any] | None) -> bool:
     return status in {"success", "partial_failed"} and bool(sent_at) and bool(recipients)
 
 
+def _delivery_successful_recipient_set(payload: Dict[str, Any] | None) -> set[str]:
+    state = _normalize_delivery_state(payload)
+    return {
+        str(item or "").strip()
+        for item in state.get("successful_recipients", [])
+        if str(item or "").strip()
+    }
+
+
+def _delivery_covers_recipients(payload: Dict[str, Any] | None, open_ids: List[str]) -> bool:
+    required = {str(item or "").strip() for item in open_ids if str(item or "").strip()}
+    if not required or not _delivery_has_successful_send(payload):
+        return False
+    return required.issubset(_delivery_successful_recipient_set(payload))
+
+
+def _merge_recipient_ids(*groups: List[str]) -> List[str]:
+    output: List[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group if isinstance(group, list) else []:
+            open_id = str(item or "").strip()
+            if not open_id or open_id in seen:
+                continue
+            seen.add(open_id)
+            output.append(open_id)
+    return output
+
+
 def _is_automatic_delivery_source(source: str) -> bool:
     source_text = str(source or "").strip().lower()
     if source_text in {"manual", "manual_test", "test"}:
@@ -514,6 +543,13 @@ class ReviewLinkDeliveryService:
 
         source_text = str(source or "auto").strip().lower() or "auto"
         delivery_state = _normalize_delivery_state(normalized_session.get("review_link_delivery", {}))
+        recipient_snapshot = self._recipient_snapshot_for_building(building)
+        recipients = list(recipient_snapshot.get("recipients", []))
+        recipient_open_ids = [
+            str(item.get("open_id", "") or "").strip()
+            for item in recipients
+            if isinstance(item, dict) and str(item.get("open_id", "") or "").strip()
+        ]
         try:
             persisted_session = self._review_service.get_session_by_id(session_id)
         except Exception as exc:  # noqa: BLE001
@@ -531,7 +567,8 @@ class ReviewLinkDeliveryService:
                     "review_link_delivery": delivery_state,
                 }
 
-        if _is_automatic_delivery_source(source_text) and _delivery_has_successful_send(delivery_state):
+        automatic_source = _is_automatic_delivery_source(source_text)
+        if automatic_source and _delivery_covers_recipients(delivery_state, recipient_open_ids):
             emit_log(
                 "[交接班][审核链接发送] 跳过重复自动发送 "
                 f"building={building}, session_id={session_id}, "
@@ -543,15 +580,6 @@ class ReviewLinkDeliveryService:
                 "source": source_text,
             }
 
-        if source_text == "auto" and delivery_state["auto_attempted"] and not force:
-            emit_log(
-                "[交接班][审核链接发送] 跳过自动发送 "
-                f"building={building}, session_id={session_id}, reason=当前会话已自动发送过"
-            )
-            return delivery_state
-
-        recipient_snapshot = self._recipient_snapshot_for_building(building)
-        recipients = list(recipient_snapshot.get("recipients", []))
         snapshot = (
             review_access_snapshot
             if isinstance(review_access_snapshot, dict)
@@ -610,12 +638,27 @@ class ReviewLinkDeliveryService:
             )
             return next_state
 
+        previous_successful_recipients = [
+            open_id
+            for open_id in delivery_state.get("successful_recipients", [])
+            if str(open_id or "").strip() in set(recipient_open_ids)
+        ]
+        if automatic_source:
+            already_sent = set(previous_successful_recipients)
+            recipients_to_send = [
+                recipient
+                for recipient in recipients
+                if str(recipient.get("open_id", "") or "").strip() not in already_sent
+            ]
+        else:
+            recipients_to_send = recipients
+
         message_text = self._build_message(normalized_session, url)
         attempt_at = _now_text()
         successful_recipients: List[str] = []
         failed_recipients: List[Dict[str, str]] = []
         client = self._build_feishu_client()
-        for recipient in recipients:
+        for recipient in recipients_to_send:
             open_id = recipient["open_id"]
             note = recipient["note"]
             receive_id_type = self._resolve_effective_receive_id_type(open_id, "open_id")
@@ -645,12 +688,22 @@ class ReviewLinkDeliveryService:
                     f"receive_id_type={receive_id_type}, note={note or '-'}, error={exc}"
                 )
 
-        if successful_recipients and failed_recipients:
-            status = "partial_failed"
-            error = "部分收件人发送失败"
-        elif successful_recipients:
+        combined_successful_recipients = (
+            _merge_recipient_ids(previous_successful_recipients, successful_recipients)
+            if automatic_source
+            else successful_recipients
+        )
+        current_successful_set = {
+            open_id
+            for open_id in combined_successful_recipients
+            if open_id in set(recipient_open_ids)
+        }
+        if recipient_open_ids and len(current_successful_set) >= len(set(recipient_open_ids)):
             status = "success"
             error = ""
+        elif combined_successful_recipients:
+            status = "partial_failed"
+            error = "部分收件人发送失败"
         else:
             status = "failed"
             error = "全部收件人发送失败"
@@ -662,7 +715,7 @@ class ReviewLinkDeliveryService:
             "last_sent_at": attempt_at if successful_recipients else str(delivery_state.get("last_sent_at", "") or "").strip(),
             "error": error,
             "url": url,
-            "successful_recipients": successful_recipients,
+            "successful_recipients": combined_successful_recipients,
             "failed_recipients": failed_recipients,
             "source": source_text,
             "auto_attempted": bool(delivery_state.get("auto_attempted", False)) or source_text == "auto",
@@ -672,7 +725,7 @@ class ReviewLinkDeliveryService:
         emit_log(
             "[交接班][审核链接发送] 完成 "
             f"building={building}, session_id={session_id}, status={status}, "
-            f"successful={len(successful_recipients)}, failed={len(failed_recipients)}"
+            f"successful={len(combined_successful_recipients)}, failed={len(failed_recipients)}"
         )
         return next_state
 

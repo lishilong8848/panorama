@@ -1455,9 +1455,7 @@ class ReviewSessionService:
                 else {}
             )
             delivery_status = str(delivery.get("status", "") or "").strip().lower()
-            review_link_sent = delivery_status in {"success", "partial_failed"} and bool(
-                str(delivery.get("last_sent_at", "") or "").strip()
-            )
+            review_link_sent = delivery_status == "success" and bool(str(delivery.get("last_sent_at", "") or "").strip())
             reason_parts: List[str] = []
             if not has_session:
                 reason_parts.append("no_session")
