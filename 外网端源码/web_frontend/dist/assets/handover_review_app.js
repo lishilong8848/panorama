@@ -378,7 +378,28 @@ function normalizeCoolingPumpPressures(raw = {}) {
         })
         .filter((row) => row.zone && row.unit > 0)
     : [];
-  return { rows, tanks, secondary_rows: secondaryRows };
+  const primaryRows = Array.isArray(raw?.primary_rows)
+    ? raw.primary_rows
+        .filter((row) => row && typeof row === "object")
+        .map((row) => {
+          const zone = String(row.zone || "").trim().toLowerCase();
+          const unit = Number.parseInt(String(row.unit || 0), 10) || 0;
+          return {
+            row_id: String(row.row_id || `primary:${zone}:${unit}`).trim(),
+            zone,
+            zone_label: String(row.zone_label || (zone === "east" ? "东区" : "西区")).trim(),
+            unit,
+            unit_label: String(row.unit_label || (unit ? `${unit}#一次泵` : "一次泵")).trim(),
+            position: Number.parseInt(String(row.position || 0), 10) || 0,
+            mode_text: String(row.mode_text || "").trim(),
+            frequency: String(row.frequency ?? ""),
+            inlet_pressure: String(row.inlet_pressure ?? ""),
+            outlet_pressure: String(row.outlet_pressure ?? ""),
+          };
+        })
+        .filter((row) => row.zone && row.unit > 0)
+    : [];
+  return { rows, tanks, primary_rows: primaryRows, secondary_rows: secondaryRows };
 }
 
 const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
@@ -1743,6 +1764,7 @@ export function mountHandoverReviewApp(Vue) {
         dirty.value = hasReviewDocumentDirty() || substation110kvDirty.value;
       }
       const coolingPumpPressureRows = computed(() => documentRef.value?.cooling_pump_pressures?.rows || []);
+      const primaryPumpPressureRows = computed(() => documentRef.value?.cooling_pump_pressures?.primary_rows || []);
       const secondaryPumpPressureRows = computed(() => documentRef.value?.cooling_pump_pressures?.secondary_rows || []);
       const coolingTankRows = computed(() => {
         const tanks = documentRef.value?.cooling_pump_pressures?.tanks || {};
@@ -3261,6 +3283,16 @@ export function mountHandoverReviewApp(Vue) {
         markDocumentDirty({ region: "cooling_pump_pressures" });
       }
 
+      function updatePrimaryPumpPressure(rowIndex, key, value) {
+        const rows = documentRef.value?.cooling_pump_pressures?.primary_rows;
+        if (!Array.isArray(rows) || !rows[rowIndex]) return;
+        if (!["inlet_pressure", "outlet_pressure"].includes(String(key || ""))) return;
+        const nextValue = String(value ?? "");
+        if (String(rows[rowIndex][key] ?? "") === nextValue) return;
+        rows[rowIndex][key] = nextValue;
+        markDocumentDirty({ region: "cooling_pump_pressures" });
+      }
+
       function updateSecondaryPumpPressure(rowIndex, key, value) {
         const rows = documentRef.value?.cooling_pump_pressures?.secondary_rows;
         if (!Array.isArray(rows) || !rows[rowIndex]) return;
@@ -3772,6 +3804,7 @@ export function mountHandoverReviewApp(Vue) {
         substation110kvMetaText,
         substation110kvLockText,
         coolingPumpPressureRows,
+        primaryPumpPressureRows,
         secondaryPumpPressureRows,
         coolingTankRows,
         handoverPersonOptions,
@@ -3814,6 +3847,7 @@ export function mountHandoverReviewApp(Vue) {
         updateSubstation110kvCell,
         pasteSubstation110kvTable,
         updateCoolingPumpPressure,
+        updatePrimaryPumpPressure,
         updateSecondaryPumpPressure,
         updateCoolingTowerLevel,
         updateCoolingTankValue,

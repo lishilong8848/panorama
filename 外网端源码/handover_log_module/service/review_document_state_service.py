@@ -207,33 +207,38 @@ class ReviewDocumentStateService:
                         "mode_text": str(item.get("mode_text", "") or "").strip(),
                         "mode_code": str(item.get("mode_code", "") or "").strip(),
                         "metric_key": str(item.get("metric_key", "") or "").strip(),
+                        "frequency": str(item.get("frequency", "") or "").strip(),
                     }
                 )
             output[zone].sort(key=lambda item: int(item.get("unit", 0) or 0))
         return output
 
-    @staticmethod
-    def _running_units_from_capacity_file(capacity_output_file: str) -> Dict[str, List[Dict[str, Any]]]:
+    @classmethod
+    def _running_units_from_capacity_file(cls, capacity_output_file: str) -> Dict[str, List[Dict[str, Any]]]:
         output: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
         path = Path(str(capacity_output_file or "").strip())
         if not str(path).strip() or not path.exists() or not path.is_file():
             return output
-        workbook = load_workbook_quietly(path)
+        try:
+            workbook = load_workbook_quietly(path, data_only=True)
+        except Exception:  # noqa: BLE001
+            return output
         try:
             sheet = workbook.active
             title_cells = {
-                "west": ["D23", "D33"],
-                "east": ["Q23", "Q33"],
+                "west": [("D23", "J26"), ("D33", "J36")],
+                "east": [("Q23", "W26"), ("Q33", "W36")],
             }
             for zone, cells in title_cells.items():
-                for cell in cells:
-                    text = str(sheet[cell].value or "").strip()
+                for title_cell, frequency_cell in cells:
+                    text = str(sheet[title_cell].value or "").strip()
                     match = re.search(r"(\d+)\s*[#号]?\s*制冷单元\s*[→:：-]?\s*([\u4e00-\u9fff]*)", text)
                     if not match:
                         continue
                     unit = int(match.group(1))
                     mode_text = str(match.group(2) or "").strip()
-                    output[zone].append({"unit": unit, "mode_text": mode_text})
+                    frequency = cls._clean_capacity_cell_text(sheet[frequency_cell].value)
+                    output[zone].append({"unit": unit, "mode_text": mode_text, "frequency": frequency})
         finally:
             workbook.close()
         for zone in ("west", "east"):
@@ -248,6 +253,10 @@ class ReviewDocumentStateService:
     @staticmethod
     def _secondary_pump_pressure_defaults_key(zone: str, unit: int) -> str:
         return f"secondary:{str(zone or '').strip().lower()}:{int(unit or 0)}"
+
+    @staticmethod
+    def _primary_pump_pressure_defaults_key(zone: str, unit: int) -> str:
+        return f"primary:{str(zone or '').strip().lower()}:{int(unit or 0)}"
 
     @staticmethod
     def _cooling_tank_defaults_key(zone: str) -> str:
@@ -401,6 +410,13 @@ class ReviewDocumentStateService:
             if isinstance(payload.get("cooling_pump_pressures", {}), dict)
             else []
         )
+        current_primary_rows = (
+            payload.get("cooling_pump_pressures", {}).get("primary_rows", [])
+            if isinstance(payload.get("cooling_pump_pressures", {}), dict)
+            else []
+        )
+        capacity_output_file = str(session.get("capacity_output_file", "") or "")
+        capacity_file_units: Dict[str, List[Dict[str, Any]]] = {"west": [], "east": []}
         if not running_units.get("west") and not running_units.get("east"):
             if isinstance(current_rows, list) and current_rows:
                 for row in current_rows:
@@ -420,12 +436,40 @@ class ReviewDocumentStateService:
                                 "mode_text": str(row.get("mode_text", "") or "").strip(),
                                 "mode_code": str(row.get("mode_code", "") or "").strip(),
                                 "metric_key": str(row.get("metric_key", "") or "").strip(),
+                                "frequency": str(row.get("frequency", "") or "").strip(),
                             }
                         )
                 for zone in ("west", "east"):
                     running_units[zone].sort(key=lambda item: int(item.get("unit", 0) or 0))
             if not running_units.get("west") and not running_units.get("east"):
-                running_units = self._running_units_from_capacity_file(str(session.get("capacity_output_file", "") or ""))
+                capacity_file_units = self._running_units_from_capacity_file(capacity_output_file)
+                running_units = capacity_file_units
+        needs_frequency = any(
+            not str(item.get("frequency", "") or "").strip()
+            for zone in ("west", "east")
+            for item in running_units.get(zone, [])
+        )
+        if needs_frequency and not (capacity_file_units.get("west") or capacity_file_units.get("east")):
+            capacity_file_units = self._running_units_from_capacity_file(capacity_output_file)
+        if capacity_file_units.get("west") or capacity_file_units.get("east"):
+            frequency_by_key: Dict[tuple[str, int], str] = {}
+            for zone in ("west", "east"):
+                for item in capacity_file_units.get(zone, []):
+                    try:
+                        unit = int(item.get("unit", 0) or 0)
+                    except Exception:  # noqa: BLE001
+                        unit = 0
+                    frequency = str(item.get("frequency", "") or "").strip()
+                    if unit > 0 and frequency:
+                        frequency_by_key[(zone, unit)] = frequency
+            for zone in ("west", "east"):
+                for item in running_units.get(zone, []):
+                    try:
+                        unit = int(item.get("unit", 0) or 0)
+                    except Exception:  # noqa: BLE001
+                        unit = 0
+                    if unit > 0 and not str(item.get("frequency", "") or "").strip():
+                        item["frequency"] = frequency_by_key.get((zone, unit), "")
         current_by_key: Dict[str, Dict[str, Any]] = {}
         if isinstance(current_rows, list):
             for row in current_rows:
@@ -452,6 +496,20 @@ class ReviewDocumentStateService:
                 if key.endswith(":0"):
                     continue
                 current_secondary_by_key[key] = row
+        current_primary_by_key: Dict[str, Dict[str, Any]] = {}
+        if isinstance(current_primary_rows, list):
+            for row in current_primary_rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    unit = int(row.get("unit", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    unit = 0
+                key = self._primary_pump_pressure_defaults_key(str(row.get("zone", "") or ""), unit)
+                if key.endswith(":0"):
+                    continue
+                current_primary_by_key[key] = row
+        primary_rows: List[Dict[str, Any]] = []
         rows: List[Dict[str, Any]] = []
         for zone in ("west", "east"):
             zone_label = "西区" if zone == "west" else "东区"
@@ -483,6 +541,35 @@ class ReviewDocumentStateService:
                         "inlet_pressure": str(current.get("inlet_pressure", default.get("inlet_pressure", "")) or ""),
                         "outlet_pressure": str(current.get("outlet_pressure", default.get("outlet_pressure", "")) or ""),
                         "cooling_tower_level": tower_value,
+                    }
+                )
+                primary_key = self._primary_pump_pressure_defaults_key(zone, unit)
+                primary_current = current_primary_by_key.get(primary_key, {})
+                primary_default = defaults.get(primary_key, {}) if isinstance(defaults.get(primary_key, {}), dict) else {}
+                primary_rows.append(
+                    {
+                        "row_id": primary_key,
+                        "zone": zone,
+                        "zone_label": zone_label,
+                        "unit": unit,
+                        "unit_label": f"{unit}#一次泵",
+                        "position": index,
+                        "mode_text": str(unit_info.get("mode_text", "") or "").strip(),
+                        "frequency": str(unit_info.get("frequency", "") or "").strip(),
+                        "inlet_pressure": str(
+                            primary_current.get(
+                                "inlet_pressure",
+                                primary_default.get("inlet_pressure", ""),
+                            )
+                            or ""
+                        ),
+                        "outlet_pressure": str(
+                            primary_current.get(
+                                "outlet_pressure",
+                                primary_default.get("outlet_pressure", ""),
+                            )
+                            or ""
+                        ),
                     }
                 )
         tanks: Dict[str, Dict[str, Any]] = {}
@@ -540,7 +627,12 @@ class ReviewDocumentStateService:
                     ),
                 }
             )
-        payload["cooling_pump_pressures"] = {"rows": rows, "tanks": tanks, "secondary_rows": secondary_rows}
+        payload["cooling_pump_pressures"] = {
+            "rows": rows,
+            "tanks": tanks,
+            "primary_rows": primary_rows,
+            "secondary_rows": secondary_rows,
+        }
         return payload
 
     def attach_capacity_room_inputs(
@@ -838,6 +930,7 @@ class ReviewDocumentStateService:
                 else {}
             )
             raw_rows = cooling_payload.get("rows", []) if isinstance(cooling_payload, dict) else []
+            raw_primary_rows = cooling_payload.get("primary_rows", []) if isinstance(cooling_payload, dict) else []
             raw_secondary_rows = cooling_payload.get("secondary_rows", []) if isinstance(cooling_payload, dict) else []
             raw_tanks = cooling_payload.get("tanks", {}) if isinstance(cooling_payload, dict) else {}
             current_defaults = store.get_default("cooling_pump_pressures")
@@ -863,6 +956,28 @@ class ReviewDocumentStateService:
                             "inlet_pressure": inlet,
                             "outlet_pressure": outlet,
                             "cooling_tower_level": tower_level,
+                        }
+                    else:
+                        defaults.pop(key, None)
+            if isinstance(raw_primary_rows, list):
+                for row in raw_primary_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        unit = int(row.get("unit", 0) or 0)
+                    except Exception:  # noqa: BLE001
+                        unit = 0
+                    zone = str(row.get("zone", "") or "").strip().lower()
+                    if zone not in {"west", "east"} or unit <= 0:
+                        continue
+                    key = self._primary_pump_pressure_defaults_key(zone, unit)
+                    inlet = str(row.get("inlet_pressure", "") or "").strip()
+                    outlet = str(row.get("outlet_pressure", "") or "").strip()
+                    cooling_rows.append(row)
+                    if inlet or outlet:
+                        defaults[key] = {
+                            "inlet_pressure": inlet,
+                            "outlet_pressure": outlet,
                         }
                     else:
                         defaults.pop(key, None)

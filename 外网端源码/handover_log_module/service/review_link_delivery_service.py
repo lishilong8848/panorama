@@ -106,6 +106,21 @@ def _normalize_delivery_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
 
+def _delivery_has_successful_send(payload: Dict[str, Any] | None) -> bool:
+    state = _normalize_delivery_state(payload)
+    status = state.get("status", "")
+    sent_at = state.get("last_sent_at", "")
+    recipients = state.get("successful_recipients", [])
+    return status in {"success", "partial_failed"} and bool(sent_at) and bool(recipients)
+
+
+def _is_automatic_delivery_source(source: str) -> bool:
+    source_text = str(source or "").strip().lower()
+    if source_text in {"manual", "manual_test", "test"}:
+        return False
+    return bool(source_text)
+
+
 class ReviewLinkDeliveryService:
     _station_110_delivery_lock = threading.RLock()
 
@@ -499,6 +514,35 @@ class ReviewLinkDeliveryService:
 
         source_text = str(source or "auto").strip().lower() or "auto"
         delivery_state = _normalize_delivery_state(normalized_session.get("review_link_delivery", {}))
+        try:
+            persisted_session = self._review_service.get_session_by_id(session_id)
+        except Exception as exc:  # noqa: BLE001
+            persisted_session = None
+            emit_log(
+                "[交接班][审核链接发送] 去重状态读取失败，按当前会话继续 "
+                f"building={building}, session_id={session_id}, error={exc}"
+            )
+        if isinstance(persisted_session, dict):
+            persisted_delivery_state = _normalize_delivery_state(persisted_session.get("review_link_delivery", {}))
+            if _delivery_has_successful_send(persisted_delivery_state) or not _delivery_has_successful_send(delivery_state):
+                delivery_state = persisted_delivery_state
+                normalized_session = {
+                    **normalized_session,
+                    "review_link_delivery": delivery_state,
+                }
+
+        if _is_automatic_delivery_source(source_text) and _delivery_has_successful_send(delivery_state):
+            emit_log(
+                "[交接班][审核链接发送] 跳过重复自动发送 "
+                f"building={building}, session_id={session_id}, "
+                f"last_sent_at={delivery_state.get('last_sent_at', '-') or '-'}, source={source_text}"
+            )
+            return {
+                **delivery_state,
+                "skipped_duplicate": True,
+                "source": source_text,
+            }
+
         if source_text == "auto" and delivery_state["auto_attempted"] and not force:
             emit_log(
                 "[交接班][审核链接发送] 跳过自动发送 "
@@ -652,7 +696,7 @@ class ReviewLinkDeliveryService:
                 state = self.send_for_session(
                     review_session,
                     source="auto",
-                    force=True,
+                    force=False,
                     emit_log=emit_log,
                     review_access_snapshot=snapshot,
                 )

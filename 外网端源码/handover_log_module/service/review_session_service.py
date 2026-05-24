@@ -868,6 +868,7 @@ class ReviewSessionService:
                         "metric_key": str(item.get("metric_key", "") or "").strip(),
                         "mode_code": str(item.get("mode_code", "") or "").strip(),
                         "mode_text": str(item.get("mode_text", "") or "").strip(),
+                        "frequency": str(item.get("frequency", "") or "").strip(),
                     }
                 )
             output[zone].sort(key=lambda row: int(row.get("unit", 0) or 0))
@@ -1454,7 +1455,9 @@ class ReviewSessionService:
                 else {}
             )
             delivery_status = str(delivery.get("status", "") or "").strip().lower()
-            review_link_sent = delivery_status == "success" and bool(str(delivery.get("last_sent_at", "") or "").strip())
+            review_link_sent = delivery_status in {"success", "partial_failed"} and bool(
+                str(delivery.get("last_sent_at", "") or "").strip()
+            )
             reason_parts: List[str] = []
             if not has_session:
                 reason_parts.append("no_session")

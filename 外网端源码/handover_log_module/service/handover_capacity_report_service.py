@@ -134,6 +134,12 @@ _COOLING_PUMP_PRESSURE_TARGETS = {
     ("east", 1): ("V28", "V29"),
     ("east", 2): ("V38", "V39"),
 }
+_PRIMARY_PUMP_PRESSURE_TARGETS = {
+    ("west", 1): ("J28", "J29"),
+    ("west", 2): ("J38", "J39"),
+    ("east", 1): ("W28", "W29"),
+    ("east", 2): ("W38", "W39"),
+}
 _SECONDARY_PUMP_PRESSURE_TARGETS = {
     ("west", 1): ("G48", "K48"),
     ("west", 2): ("G50", "K50"),
@@ -2126,32 +2132,55 @@ class HandoverCapacityReportService:
     def _build_cooling_pump_pressure_values(cooling_pump_pressures: Dict[str, Any] | None) -> Dict[str, str]:
         payload = cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {}
         rows = payload.get("rows", [])
+        primary_rows = payload.get("primary_rows", [])
         secondary_rows = payload.get("secondary_rows", [])
         values: Dict[str, str] = {}
         for inlet_cell, outlet_cell in _COOLING_PUMP_PRESSURE_TARGETS.values():
             values[inlet_cell] = "/"
             values[outlet_cell] = "/"
-        if not isinstance(rows, list):
-            return values
-        zone_positions: Dict[str, int] = {"west": 0, "east": 0}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            zone = _text(row.get("zone")).lower()
-            if zone not in zone_positions:
-                continue
-            position = int(row.get("position", 0) or 0)
-            if position <= 0:
-                zone_positions[zone] += 1
-                position = zone_positions[zone]
-            if position not in {1, 2}:
-                continue
-            target = _COOLING_PUMP_PRESSURE_TARGETS.get((zone, position))
-            if not target:
-                continue
-            inlet_cell, outlet_cell = target
-            values[inlet_cell] = _text(row.get("inlet_pressure")) or "/"
-            values[outlet_cell] = _text(row.get("outlet_pressure")) or "/"
+        for inlet_cell, outlet_cell in _PRIMARY_PUMP_PRESSURE_TARGETS.values():
+            values[inlet_cell] = "/"
+            values[outlet_cell] = "/"
+        if isinstance(rows, list):
+            zone_positions: Dict[str, int] = {"west": 0, "east": 0}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                zone = _text(row.get("zone")).lower()
+                if zone not in zone_positions:
+                    continue
+                position = int(row.get("position", 0) or 0)
+                if position <= 0:
+                    zone_positions[zone] += 1
+                    position = zone_positions[zone]
+                if position not in {1, 2}:
+                    continue
+                target = _COOLING_PUMP_PRESSURE_TARGETS.get((zone, position))
+                if not target:
+                    continue
+                inlet_cell, outlet_cell = target
+                values[inlet_cell] = _text(row.get("inlet_pressure")) or "/"
+                values[outlet_cell] = _text(row.get("outlet_pressure")) or "/"
+        if isinstance(primary_rows, list):
+            primary_positions: Dict[str, int] = {"west": 0, "east": 0}
+            for row in primary_rows:
+                if not isinstance(row, dict):
+                    continue
+                zone = _text(row.get("zone")).lower()
+                if zone not in primary_positions:
+                    continue
+                position = int(row.get("position", 0) or 0)
+                if position <= 0:
+                    primary_positions[zone] += 1
+                    position = primary_positions[zone]
+                if position not in {1, 2}:
+                    continue
+                target = _PRIMARY_PUMP_PRESSURE_TARGETS.get((zone, position))
+                if not target:
+                    continue
+                inlet_cell, outlet_cell = target
+                values[inlet_cell] = _text(row.get("inlet_pressure")) or "/"
+                values[outlet_cell] = _text(row.get("outlet_pressure")) or "/"
         if isinstance(secondary_rows, list):
             secondary_positions: Dict[str, int] = {"west": 0, "east": 0}
             for row in secondary_rows:
@@ -2313,6 +2342,7 @@ class HandoverCapacityReportService:
             raw_defaults = {}
         defaults = raw_defaults if isinstance(raw_defaults, dict) else {}
         rows: List[Dict[str, Any]] = []
+        primary_rows: List[Dict[str, Any]] = []
         for zone in ("west", "east"):
             zone_label = "西区" if zone == "west" else "东区"
             for position, unit_info in enumerate(list((running_units or {}).get(zone, []))[:2], start=1):
@@ -2338,6 +2368,22 @@ class HandoverCapacityReportService:
                         "cooling_tower_level": _text(default.get("cooling_tower_level")),
                     }
                 )
+                primary_key = f"primary:{zone}:{unit}"
+                primary_default = defaults.get(primary_key, {}) if isinstance(defaults.get(primary_key, {}), dict) else {}
+                primary_rows.append(
+                    {
+                        "row_id": primary_key,
+                        "zone": zone,
+                        "zone_label": zone_label,
+                        "unit": unit,
+                        "unit_label": f"{unit}#一次泵",
+                        "position": position,
+                        "mode_text": _text(unit_info.get("mode_text")),
+                        "frequency": _text(unit_info.get("frequency")),
+                        "inlet_pressure": _text(primary_default.get("inlet_pressure")),
+                        "outlet_pressure": _text(primary_default.get("outlet_pressure")),
+                    }
+                )
         tanks: Dict[str, Dict[str, str]] = {}
         for zone in ("west", "east"):
             key = f"tank:{zone}"
@@ -2353,7 +2399,7 @@ class HandoverCapacityReportService:
             capacity_rows=capacity_rows or [],
             defaults=defaults,
         )
-        return {"rows": rows, "tanks": tanks, "secondary_rows": secondary_rows}
+        return {"rows": rows, "tanks": tanks, "primary_rows": primary_rows, "secondary_rows": secondary_rows}
 
     @staticmethod
     def _secondary_pump_pressures_from_capacity_rows(
