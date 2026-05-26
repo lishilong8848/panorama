@@ -1150,6 +1150,11 @@ def bridge_source_cache_alarm_upload_full(request: Request) -> Dict[str, Any]:
             return result
         if not accepted:
             error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
+            emit_log(
+                "[告警信息上传] 任务失败: "
+                f"reason={reason or '-'}, error={error_text}, "
+                f"mode={str(result.get('mode', '') or 'full')}, scope={str(result.get('scope', '') or 'all')}"
+            )
             raise RuntimeError(error_text)
         if reason == "partial_completed":
             failed_entries = ", ".join(str(item or "").strip() for item in result.get("failed_entries", []) or [] if str(item or "").strip())
@@ -1219,6 +1224,11 @@ def bridge_source_cache_alarm_upload_building(
             return result
         if not accepted:
             error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
+            emit_log(
+                "[告警信息上传] 任务失败: "
+                f"reason={reason or '-'}, error={error_text}, "
+                f"mode={str(result.get('mode', '') or 'single_building')}, scope={str(result.get('scope', '') or building_text)}"
+            )
             raise RuntimeError(error_text)
         if reason == "partial_completed":
             failed_entries = ", ".join(str(item or "").strip() for item in result.get("failed_entries", []) or [] if str(item or "").strip())

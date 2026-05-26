@@ -4764,7 +4764,7 @@ class SharedSourceCacheService:
         emit_log: Callable[[str], None] | None = None,
         selection_override: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        if not self.enabled or self.role_mode != "external" or self.store is None:
+        if not self.enabled or self.role_mode != "external":
             return {"accepted": False, "reason": "disabled"}
 
         normalized_mode = str(mode or "").strip().lower() or "full"
@@ -4892,7 +4892,7 @@ class SharedSourceCacheService:
             except Exception as exc:  # noqa: BLE001
                 parse_failed_entries.append(row_building or "未知楼栋")
                 entry_id = str(entry.get("entry_id", "") or "").strip()
-                if entry_id:
+                if entry_id and self.store is not None:
                     self.store.update_source_cache_entry_status(
                         entry_id,
                         status="failed",
@@ -5119,8 +5119,11 @@ class SharedSourceCacheService:
                 uploaded_by_mode=normalized_mode,
                 uploaded_scope=scope_text,
             ):
+                consumed_count += 1
+                if row_building:
+                    consumed_buildings.append(row_building)
                 continue
-            elif row_building:
+            elif self.store is not None and row_building:
                 consume_failed_entries.append(row_building)
 
         failed_entries = [*parse_failed_entries, *consume_failed_entries]
