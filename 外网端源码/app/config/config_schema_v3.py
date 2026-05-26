@@ -1384,7 +1384,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "auto_start_in_gui": False,
                 "run_time": "08:10:00",
                 "check_interval_sec": 30,
-                "catch_up_if_missed": True,
+                "catch_up_if_missed": False,
                 "retry_failed_in_same_period": True,
                 "state_file": "alarm_event_upload_scheduler_state.json",
             },

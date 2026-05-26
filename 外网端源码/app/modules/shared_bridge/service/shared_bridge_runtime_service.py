@@ -1550,6 +1550,100 @@ class SharedBridgeRuntimeService:
             "transport": "http",
         }
 
+    @staticmethod
+    def _parse_source_index_time(value: Any) -> datetime:
+        text = str(value or "").strip()
+        if not text:
+            return datetime.min
+        normalized = text.replace("/", "-")
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %H",
+            "%Y-%m-%d",
+            "%Y%m%d--%H%M",
+            "%Y%m%d--%H",
+            "%Y%m%d",
+        ):
+            try:
+                return datetime.strptime(normalized, fmt)
+            except ValueError:
+                pass
+        match = re.search(r"(\d{8})--(\d{2})(?:\D|$)", normalized)
+        if match:
+            try:
+                return datetime.strptime(f"{match.group(1)}--{match.group(2)}", "%Y%m%d--%H")
+            except ValueError:
+                return datetime.min
+        return datetime.min
+
+    @classmethod
+    def _source_index_sort_key(cls, entry: Dict[str, Any]) -> tuple[datetime, datetime, datetime, str]:
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        bucket_dt = datetime.min
+        for value in (
+            entry.get("bucket_key"),
+            metadata.get("data_hour_bucket"),
+            metadata.get("business_date"),
+            metadata.get("duty_date"),
+            entry.get("file_path"),
+            entry.get("relative_path"),
+        ):
+            bucket_dt = cls._parse_source_index_time(value)
+            if bucket_dt != datetime.min:
+                break
+        downloaded_dt = cls._parse_source_index_time(entry.get("downloaded_at"))
+        updated_dt = cls._parse_source_index_time(entry.get("updated_at"))
+        return bucket_dt, downloaded_dt, updated_dt, str(entry.get("entry_id", "") or "")
+
+    @classmethod
+    def _pick_latest_source_index_entries_for_date(
+        cls,
+        entries: List[Dict[str, Any]],
+        *,
+        selected_date: str,
+        buildings: List[str] | None,
+    ) -> List[Dict[str, Any]]:
+        date_text = str(selected_date or "").strip()
+        requested_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        requested_order = {building: index for index, building in enumerate(requested_buildings)}
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for raw in entries if isinstance(entries, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            building = str(raw.get("building", "") or "").strip()
+            if not building:
+                continue
+            if requested_buildings and building not in requested_order:
+                continue
+            file_path = str(raw.get("file_path", "") or "").strip()
+            if not file_path:
+                continue
+            metadata = raw.get("metadata", {}) if isinstance(raw.get("metadata", {}), dict) else {}
+            effective_date = (
+                str(raw.get("duty_date", "") or "").strip()
+                or str(metadata.get("duty_date", "") or "").strip()
+                or str(metadata.get("business_date", "") or "").strip()
+            )
+            if not effective_date:
+                parsed = cls._parse_source_index_time(raw.get("bucket_key"))
+                if parsed == datetime.min:
+                    parsed = cls._parse_source_index_time(file_path)
+                if parsed != datetime.min:
+                    effective_date = parsed.strftime("%Y-%m-%d")
+            if date_text and effective_date and effective_date != date_text:
+                continue
+            current = grouped.get(building)
+            if current is None or cls._source_index_sort_key(raw) > cls._source_index_sort_key(current):
+                grouped[building] = raw
+        return [
+            grouped[building]
+            for building in sorted(
+                grouped,
+                key=lambda item: requested_order.get(item, len(requested_order) + 1000),
+            )
+        ]
+
     def _http_external_source_cache_family_payload(
         self,
         *,
@@ -4090,12 +4184,16 @@ class SharedBridgeRuntimeService:
                     source_family=FAMILY_HANDOVER_LOG,
                     buildings=buildings,
                     bucket_key=duty_date,
-                    limit_per_building=10,
+                    limit_per_building=20,
                 )
                 if http_entries is None:
                     used_http = False
                     break
-                for entry in http_entries:
+                for entry in self._pick_latest_source_index_entries_for_date(
+                    http_entries,
+                    selected_date=duty_date,
+                    buildings=buildings,
+                ):
                     item = copy.deepcopy(entry)
                     file_path = str(item.get("file_path", "") or "").strip()
                     if file_path:
@@ -4144,12 +4242,18 @@ class SharedBridgeRuntimeService:
                     source_family=FAMILY_MONTHLY_REPORT,
                     buildings=buildings,
                     bucket_key=selected_date,
-                    limit_per_building=10,
+                    limit_per_building=20,
                 )
                 if http_entries is None:
                     used_http = False
                     break
-                output.extend(http_entries)
+                output.extend(
+                    self._pick_latest_source_index_entries_for_date(
+                        http_entries,
+                        selected_date=selected_date,
+                        buildings=buildings,
+                    )
+                )
             if used_http:
                 return output
         if self._http_bridge_forced():

@@ -93,6 +93,11 @@ class ApschedulerOrchestrator:
                     "misfire_grace_time": 300,
                 },
             )
+            try:
+                self._scheduler.remove_all_jobs()
+                self.emit_log("[调度] 已清理持久化 JobStore 中的旧任务，将按当前配置重新注册")
+            except Exception as exc:  # noqa: BLE001
+                self.emit_log(f"[调度] 清理持久化 JobStore 旧任务失败: {exc}")
             return self._scheduler
 
     def start(self) -> None:

@@ -342,8 +342,23 @@ def _run_external_alarm_upload_shared_flow(
         "[告警信息上传] 已进入后台共享文件处理: "
         f"mode={normalized_mode}, building={building or '-'}"
     )
+    emit_log(
+        "[告警信息上传] 开始读取内网 HTTP source-index: "
+        f"mode={normalized_mode}, buildings={','.join(target_buildings) or '-'}"
+    )
     selection = service.get_alarm_event_upload_selection(
         building=building if normalized_mode == "single_building" else "",
+    )
+    selected_entries = [
+        item
+        for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+        if isinstance(item, dict)
+    ]
+    emit_log(
+        "[告警信息上传] source-index 读取完成: "
+        f"ready={len(selected_entries)}/{len(target_buildings)}, "
+        f"transport={str(selection.get('transport', '') or '-').strip() or '-'}, "
+        f"error={str(selection.get('error', '') or '').strip() or '-'}"
     )
     target_bucket_key = ""
     current_alarm_bucket = getattr(service, "current_alarm_event_bucket", None)
@@ -359,11 +374,6 @@ def _run_external_alarm_upload_shared_flow(
             or selection.get("selection_reference_date", "")
             or ""
         ).strip()
-    selected_entries = [
-        item
-        for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
-        if isinstance(item, dict)
-    ]
     ready_buildings = {
         str(item.get("building", "") or "").strip()
         for item in selected_entries
@@ -371,6 +381,10 @@ def _run_external_alarm_upload_shared_flow(
     }
     missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
     if missing_buildings:
+        emit_log(
+            "[告警信息上传] 共享源文件未齐全，转入等待内网补采: "
+            f"missing={','.join(missing_buildings)}, target_bucket={target_bucket_key or '-'}"
+        )
         waiting_job, waiting_task = start_waiting_bridge_job(
             job_service=container.job_service,
             bridge_service=service,
