@@ -172,13 +172,42 @@ class _HvacFeishuAppClient:
                 f"[暖通运行数据同步] 表字段不存在，读取时跳过 table={table_id}, fields={','.join(missing[:12])}"
                 + (f" 等{len(missing)}项" if len(missing) > 12 else "")
             )
-        return self._client.list_records(
-            table_id=table_id,
-            page_size=self.page_size,
-            max_records=0,
-            view_id=str(view_id or "").strip(),
-            field_names=selected,
-        )
+        view_text = str(view_id or "").strip()
+        try:
+            return self._client.list_records(
+                table_id=table_id,
+                page_size=self.page_size,
+                max_records=0,
+                view_id=view_text,
+                field_names=selected,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not view_text:
+                raise
+            self.emit_log(
+                "[暖通运行数据同步] 按视图读取源表失败，自动降级为全表读取: "
+                f"table={table_id}, view_id={view_text}, error={exc}"
+            )
+        try:
+            return self._client.list_records(
+                table_id=table_id,
+                page_size=self.page_size,
+                max_records=0,
+                view_id="",
+                field_names=selected,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.emit_log(
+                "[暖通运行数据同步] 全表按字段读取失败，自动降级为全字段读取: "
+                f"table={table_id}, error={exc}"
+            )
+            return self._client.list_records(
+                table_id=table_id,
+                page_size=self.page_size,
+                max_records=0,
+                view_id="",
+                field_names=[],
+            )
 
     def batch_update(self, table_id: str, record_ids: List[str], patch: Dict[str, Any]) -> int:
         normalized_ids = [self._text(item) for item in record_ids if self._text(item)]

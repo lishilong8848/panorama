@@ -8,10 +8,10 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+from app.modules.feishu.service.feishu_token_manager import feishu_token_manager
 
 
 class FeishuSheetsClientRuntime:
-    AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     WIKI_GET_NODE_URL = "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node"
     WIKI_LIST_NODES_URL = "https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/nodes"
     WIKI_CREATE_NODE_URL = "https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/nodes"
@@ -115,23 +115,17 @@ class FeishuSheetsClientRuntime:
         raise RuntimeError("飞书请求失败: 未知错误")
 
     def refresh_token(self, force: bool = False) -> str:
-        if self._tenant_access_token and not force:
-            return self._tenant_access_token
-        try:
-            response = self._request_with_retry(
-                "POST",
-                self.AUTH_URL,
-                headers={"Content-Type": "application/json; charset=utf-8", "Connection": "close"},
-                json={"app_id": self.app_id, "app_secret": self.app_secret},
-            )
-            response.raise_for_status()
-            data = response.json()
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"飞书获取 token 失败: {exc}") from exc
-        if data.get("code") != 0 or not str(data.get("tenant_access_token", "")).strip():
-            raise RuntimeError(f"飞书获取 token 失败: {data}")
-        self._tenant_access_token = str(data["tenant_access_token"]).strip()
+        self._tenant_access_token = feishu_token_manager.get_token(
+            app_id=self.app_id,
+            app_secret=self.app_secret,
+            timeout=self.timeout,
+            force_refresh=force,
+        )
         return self._tenant_access_token
+
+    def invalidate_token(self) -> None:
+        self._tenant_access_token = None
+        feishu_token_manager.invalidate(app_id=self.app_id, app_secret=self.app_secret)
 
     def _request_json_with_auth_retry(
         self,
@@ -148,10 +142,9 @@ class FeishuSheetsClientRuntime:
         for api_attempt in range(1, attempts + 1):
             should_retry = False
             for auth_attempt in range(2):
-                if not self._tenant_access_token:
-                    self.refresh_token(force=False)
+                token = self.refresh_token(force=auth_attempt > 0)
                 headers = {
-                    "Authorization": f"Bearer {self._tenant_access_token}",
+                    "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json; charset=utf-8",
                 }
                 response = self._request_with_retry(
@@ -166,6 +159,7 @@ class FeishuSheetsClientRuntime:
                     response.raise_for_status()
                 except requests.HTTPError as exc:
                     if response.status_code in {401, 403} and auth_attempt == 0:
+                        self.invalidate_token()
                         self.refresh_token(force=True)
                         continue
                     error_body: Dict[str, Any]
@@ -193,6 +187,7 @@ class FeishuSheetsClientRuntime:
                 if body.get("code") == 0:
                     return body
                 if auth_attempt == 0 and self._is_token_invalid_code(body.get("code")):
+                    self.invalidate_token()
                     self.refresh_token(force=True)
                     continue
                 if self._is_retryable_api_error(body) and api_attempt < attempts:

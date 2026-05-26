@@ -8,10 +8,10 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 
 from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+from app.modules.feishu.service.feishu_token_manager import feishu_token_manager
 
 
 class FeishuBitableClient:
-    AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     CREATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
     LIST_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
     GET_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
@@ -104,6 +104,20 @@ class FeishuBitableClient:
         msg = str(body.get("msg", "")).lower()
         return "something went wrong" in msg
 
+    @staticmethod
+    def _response_error_detail(response: requests.Response) -> str:
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001
+            body = (response.text or "").strip()
+        if isinstance(body, (dict, list)):
+            text = json.dumps(body, ensure_ascii=False)
+        else:
+            text = str(body or "").strip()
+        if len(text) > 2000:
+            text = text[:2000] + "...(truncated)"
+        return text or "-"
+
     def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         total_attempts = self.request_retry_count + 1
         req_kwargs = dict(kwargs)
@@ -135,26 +149,18 @@ class FeishuBitableClient:
         raise RuntimeError("飞书请求失败: 未知错误")
 
     def refresh_token(self, force: bool = True) -> str:
-        if self._tenant_access_token and not force:
-            return self._tenant_access_token
-
-        try:
-            response = self._request_with_retry(
-                "POST",
-                self.AUTH_URL,
-                json={"app_id": self.app_id, "app_secret": self.app_secret},
-                headers={"Content-Type": "application/json; charset=utf-8", "Connection": "close"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"飞书获取token失败: {exc}") from exc
-
-        response.raise_for_status()
-        data = response.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"飞书获取token失败: {data}")
-        token = data["tenant_access_token"]
+        token = feishu_token_manager.get_token(
+            app_id=self.app_id,
+            app_secret=self.app_secret,
+            timeout=self.timeout,
+            force_refresh=force,
+        )
         self._tenant_access_token = token
         return token
+
+    def invalidate_token(self) -> None:
+        self._tenant_access_token = None
+        feishu_token_manager.invalidate(app_id=self.app_id, app_secret=self.app_secret)
 
     def _request_json_with_auth_retry(
         self,
@@ -173,11 +179,10 @@ class FeishuBitableClient:
         for api_attempt in range(1, api_attempts + 1):
             should_retry_api = False
             for auth_attempt in range(2):
-                if not self._tenant_access_token:
-                    self.refresh_token(force=False)
+                token = self.refresh_token(force=auth_attempt > 0)
 
                 headers: Dict[str, str] = {
-                    "Authorization": f"Bearer {self._tenant_access_token}",
+                    "Authorization": f"Bearer {token}",
                 }
                 if content_type_json:
                     headers["Content-Type"] = "application/json; charset=utf-8"
@@ -197,11 +202,16 @@ class FeishuBitableClient:
                 response = self._request_with_retry(method, url, **req_kwargs)
                 try:
                     response.raise_for_status()
-                except requests.HTTPError:
+                except requests.HTTPError as exc:
                     if response.status_code in {401, 403} and auth_attempt == 0:
+                        self.invalidate_token()
                         self.refresh_token(force=True)
                         continue
-                    raise
+                    detail = self._response_error_detail(response)
+                    raise RuntimeError(
+                        "飞书HTTP请求失败: "
+                        f"status={response.status_code}, url={response.url}, body={detail}"
+                    ) from exc
 
                 try:
                     body = response.json()
@@ -212,6 +222,7 @@ class FeishuBitableClient:
                     return body
 
                 if auth_attempt == 0 and self._is_token_invalid_code(body.get("code")):
+                    self.invalidate_token()
                     self.refresh_token(force=True)
                     continue
 
@@ -524,8 +535,6 @@ class FeishuBitableClient:
         return fields
 
     def upload_attachment(self, file_path: str) -> str:
-        if not self._tenant_access_token:
-            self.refresh_token()
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(file_path)

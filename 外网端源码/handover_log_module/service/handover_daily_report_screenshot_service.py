@@ -223,7 +223,15 @@ class HandoverDailyReportScreenshotService:
     async def _launch_headless_browser_with_fallback(self, playwright, emit_log: Callable[[str], None]):
         base_kwargs: Dict[str, Any] = {
             "headless": True,
-            "args": ["--ignore-certificate-errors"],
+            "chromium_sandbox": False,
+            "args": [
+                "--ignore-certificate-errors",
+                "--no-first-run",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+            ],
         }
         failures: List[str] = []
         for candidate in self._headless_launch_candidates():

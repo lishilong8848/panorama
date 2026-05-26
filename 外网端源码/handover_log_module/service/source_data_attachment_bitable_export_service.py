@@ -338,6 +338,15 @@ class SourceDataAttachmentBitableExportService:
                 duty_shift=shift_key,
                 cfg=cfg,
             )
+            file_token = client.upload_attachment(data_file_text)
+            row_fields = {
+                str(fields.get("type", "类型")).strip(): str(fixed_values.get("type", "动环数据")).strip(),
+                str(fields.get("building", "楼栋")).strip(): building_text,
+                str(fields.get("date", "日期")).strip(): self._midnight_timestamp_ms(duty_date_text),
+                str(fields.get("shift", "班次")).strip(): shift_text,
+                str(fields.get("attachment", "附件")).strip(): [{"file_token": file_token}],
+            }
+            client.batch_create_records(table_id=table_id, fields_list=[row_fields], batch_size=1)
             if deleted_record_ids and cfg.get("replace_existing", True):
                 client.batch_delete_records(
                     table_id=table_id,
@@ -348,16 +357,6 @@ class SourceDataAttachmentBitableExportService:
                     emit_log,
                     f"已删除旧记录: building={building_text}, duty_date={duty_date_text}, duty_shift={shift_key}, count={len(deleted_record_ids)}",
                 )
-
-            file_token = client.upload_attachment(data_file_text)
-            row_fields = {
-                str(fields.get("type", "类型")).strip(): str(fixed_values.get("type", "动环数据")).strip(),
-                str(fields.get("building", "楼栋")).strip(): building_text,
-                str(fields.get("date", "日期")).strip(): self._midnight_timestamp_ms(duty_date_text),
-                str(fields.get("shift", "班次")).strip(): shift_text,
-                str(fields.get("attachment", "附件")).strip(): [{"file_token": file_token}],
-            }
-            client.batch_create_records(table_id=table_id, fields_list=[row_fields], batch_size=1)
             uploaded_at = self._now_text()
             self._emit(
                 emit_log,

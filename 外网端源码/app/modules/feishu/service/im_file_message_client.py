@@ -9,10 +9,10 @@ from typing import Any, Dict, Optional
 import requests
 
 from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+from app.modules.feishu.service.feishu_token_manager import feishu_token_manager
 
 
 class FeishuImFileMessageClient:
-    AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     UPLOAD_FILE_URL = "https://open.feishu.cn/open-apis/im/v1/files"
     UPLOAD_IMAGE_URL = "https://open.feishu.cn/open-apis/im/v1/images"
     SEND_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
@@ -94,23 +94,18 @@ class FeishuImFileMessageClient:
         raise RuntimeError("飞书请求失败: 未知错误")
 
     def refresh_token(self, force: bool = False) -> str:
-        if self._tenant_access_token and not force:
-            return self._tenant_access_token
-        response = self._request_with_retry(
-            "POST",
-            self.AUTH_URL,
-            json={"app_id": self.app_id, "app_secret": self.app_secret},
-            headers={"Content-Type": "application/json; charset=utf-8", "Connection": "close"},
+        token = feishu_token_manager.get_token(
+            app_id=self.app_id,
+            app_secret=self.app_secret,
+            timeout=self.timeout,
+            force_refresh=force,
         )
-        response.raise_for_status()
-        payload = response.json()
-        if payload.get("code") != 0:
-            raise RuntimeError(f"飞书获取 token 失败: {payload}")
-        token = str(payload.get("tenant_access_token", "") or "").strip()
-        if not token:
-            raise RuntimeError("飞书获取 token 失败: tenant_access_token 为空")
         self._tenant_access_token = token
         return token
+
+    def invalidate_token(self) -> None:
+        self._tenant_access_token = None
+        feishu_token_manager.invalidate(app_id=self.app_id, app_secret=self.app_secret)
 
     def _request_json_with_auth_retry(
         self,
@@ -144,7 +139,7 @@ class FeishuImFileMessageClient:
                 response.raise_for_status()
             except requests.HTTPError as exc:
                 if response.status_code in {401, 403} and auth_attempt == 0:
-                    self._tenant_access_token = None
+                    self.invalidate_token()
                     continue
                 detail = self._extract_http_error_detail(response)
                 if detail:
@@ -154,7 +149,7 @@ class FeishuImFileMessageClient:
             if body.get("code") == 0:
                 return body
             if auth_attempt == 0 and self._is_token_invalid_code(body.get("code")):
-                self._tenant_access_token = None
+                self.invalidate_token()
                 continue
             raise RuntimeError(f"飞书接口调用失败: {body}")
         raise RuntimeError("飞书接口调用失败: 鉴权重试后仍失败")
