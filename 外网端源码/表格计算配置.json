@@ -4614,7 +4614,7 @@
         "auto_start_in_gui": true,
         "run_time": "08:10:00",
         "check_interval_sec": 30,
-        "catch_up_if_missed": false,
+        "catch_up_if_missed": true,
         "retry_failed_in_same_period": true,
         "state_file": "alarm_event_upload_scheduler_state.json"
       },

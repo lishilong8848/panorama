@@ -15,6 +15,7 @@ RUNTIME_DEPENDENCY_SPECS: List[Dict[str, str]] = [
     {"package": "playwright", "import_name": "playwright"},
     {"package": "python-multipart", "import_name": "multipart"},
     {"package": "APScheduler", "import_name": "apscheduler"},
+    {"package": "SQLAlchemy", "import_name": "sqlalchemy"},
 ]
 
 

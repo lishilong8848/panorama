@@ -175,6 +175,8 @@ def check_apscheduler_facade() -> None:
     engine_snapshot = container.scheduler_engine_snapshot()
     _assert(engine_snapshot.get("engine") == "APScheduler", "scheduler engine is not APScheduler")
     _assert(engine_snapshot.get("ready") is True, "scheduler engine snapshot is not ready")
+    _assert(engine_snapshot.get("jobstore") == "sqlalchemy_sqlite", "scheduler jobstore is not persistent SQLite")
+    _assert(str(engine_snapshot.get("jobstore_path", "") or "").endswith("apscheduler_jobs.sqlite3"), "scheduler jobstore path is unexpected")
     _assert(int(engine_snapshot.get("job_count", 0) or 0) >= 1, "scheduler engine has no registered jobs")
     container.stop_branch_power_upload_scheduler(source="baseline_check")
     container.shutdown_scheduler_orchestrator(source="baseline_check")

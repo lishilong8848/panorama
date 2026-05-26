@@ -2135,24 +2135,103 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(f"[告警信息上传调度] {detail}")
             return False, detail
 
+        try:
+            target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
+            selection = bridge_service.get_alarm_event_upload_selection()
+            selected_entries = [
+                item
+                for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+                if isinstance(item, dict)
+            ]
+            ready_buildings = {
+                str(item.get("building", "") or "").strip()
+                for item in selected_entries
+                if str(item.get("building", "") or "").strip()
+            }
+            missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
+            if missing_buildings:
+                target_bucket_key = str(
+                    selection.get("target_bucket_key", "")
+                    or selection.get("current_bucket", "")
+                    or selection.get("selection_reference_date", "")
+                    or ""
+                ).strip()
+                current_alarm_bucket = getattr(bridge_service, "current_alarm_event_bucket", None)
+                if callable(current_alarm_bucket):
+                    try:
+                        target_bucket_key = str(current_alarm_bucket() or "").strip() or target_bucket_key
+                    except Exception:
+                        pass
+                waiting_job, waiting_task = start_waiting_bridge_job(
+                    job_service=container.job_service,
+                    bridge_service=bridge_service,
+                    name="告警信息上传-等待内网补采",
+                    worker_handler="alarm_event_upload",
+                    worker_payload={
+                        "resume_kind": "shared_bridge_alarm_event_upload",
+                        "mode": "full",
+                    },
+                    resource_keys=["alarm_upload:global"],
+                    priority="scheduler",
+                    feature="alarm_event_upload",
+                    dedupe_key=f"alarm_event_upload_wait_shared_bridge:scheduler:full:{target_bucket_key or '-'}",
+                    submitted_by="scheduler",
+                    bridge_get_or_create_name="get_or_create_alarm_event_upload_task",
+                    bridge_create_name="create_alarm_event_upload_task",
+                    bridge_kwargs={
+                        "mode": "full",
+                        "target_bucket_key": target_bucket_key or None,
+                    },
+                )
+                task_id = str(waiting_task.get("task_id", "") or "-").strip() or "-"
+                job_id = str(waiting_job.get("job_id", "") or "-").strip() or "-"
+                detail = (
+                    f"已派发内网告警补采等待任务 task_id={task_id}, job_id={job_id}, "
+                    f"missing={','.join(missing_buildings)}"
+                )
+                container.add_system_log(f"[告警信息上传调度] {detail}")
+                return True, detail
+        except Exception as exc:  # noqa: BLE001
+            detail = f"告警源文件状态检查失败：{exc}"
+            container.add_system_log(f"[告警信息上传调度] {detail}")
+            return False, detail
+
         def _run(emit_log):
+            started_at = datetime.now()
+
             def _combined_log(line: str) -> None:
                 text = str(line or "").strip()
                 if text:
                     emit_log(text)
 
-            result = bridge_service.upload_alarm_event_source_cache_full_to_bitable(emit_log=_combined_log)
-            accepted = bool(result.get("accepted"))
-            reason = str(result.get("reason", "") or "").strip()
-            if not accepted:
-                error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
-                raise RuntimeError(error_text)
-            if reason == "partial_completed":
-                failed_entries = ", ".join(
-                    str(item or "").strip() for item in result.get("failed_entries", []) or [] if str(item or "").strip()
+            try:
+                result = bridge_service.upload_alarm_event_source_cache_full_to_bitable(emit_log=_combined_log)
+                accepted = bool(result.get("accepted"))
+                reason = str(result.get("reason", "") or "").strip()
+                if not accepted:
+                    error_text = str(result.get("error", "") or "").strip() or "告警信息文件上传失败"
+                    raise RuntimeError(error_text)
+                if reason == "partial_completed":
+                    failed_entries = ", ".join(
+                        str(item or "").strip() for item in result.get("failed_entries", []) or [] if str(item or "").strip()
+                    )
+                    raise RuntimeError(f"存在失败楼栋，请查看日志{f'：{failed_entries}' if failed_entries else ''}")
+                duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+                container.record_alarm_event_upload_external_run(
+                    status="success",
+                    source="scheduler_job",
+                    duration_ms=duration_ms,
                 )
-                raise RuntimeError(f"存在失败楼栋，请查看日志{f'：{failed_entries}' if failed_entries else ''}")
-            return result
+                return result
+            except Exception as exc:
+                duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+                container.record_alarm_event_upload_external_run(
+                    status="failed",
+                    source="scheduler_job",
+                    detail=str(exc),
+                    duration_ms=duration_ms,
+                )
+                raise
 
         try:
             job = _start_external_cache_job(

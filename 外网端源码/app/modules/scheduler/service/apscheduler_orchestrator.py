@@ -33,6 +33,21 @@ def _parse_datetime(value: str) -> datetime | None:
         return None
 
 
+_SCHEDULER_FIRE_REGISTRY: Dict[str, Callable[[str], None]] = {}
+_SCHEDULER_FIRE_REGISTRY_LOCK = threading.RLock()
+
+
+def _run_registered_scheduler_job(scheduler_key: str, trigger_source: str = "scheduler") -> None:
+    key = str(scheduler_key or "").strip()
+    source = str(trigger_source or "scheduler").strip() or "scheduler"
+    if not key:
+        return
+    with _SCHEDULER_FIRE_REGISTRY_LOCK:
+        handler = _SCHEDULER_FIRE_REGISTRY.get(key)
+    if callable(handler):
+        handler(source)
+
+
 class ApschedulerOrchestrator:
     """Single APScheduler owner for all external-side scheduler facades.
 
@@ -50,17 +65,28 @@ class ApschedulerOrchestrator:
         self.timezone = str(timezone or "Asia/Shanghai")
         self._lock = threading.RLock()
         self._scheduler: Any | None = None
+        self._jobstore_path = get_app_dir() / ".runtime" / "apscheduler_jobs.sqlite3"
+
+    def register_fire_handler(self, scheduler_key: str, handler: Callable[[str], None]) -> None:
+        key = str(scheduler_key or "").strip()
+        if not key or not callable(handler):
+            return
+        with _SCHEDULER_FIRE_REGISTRY_LOCK:
+            _SCHEDULER_FIRE_REGISTRY[key] = handler
 
     def _ensure_scheduler(self):
         with self._lock:
             if self._scheduler is not None:
                 return self._scheduler
             from apscheduler.executors.pool import ThreadPoolExecutor
+            from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
             from apscheduler.schedulers.background import BackgroundScheduler
 
+            self._jobstore_path.parent.mkdir(parents=True, exist_ok=True)
             self._scheduler = BackgroundScheduler(
                 timezone=self.timezone,
                 executors={"default": ThreadPoolExecutor(max_workers=12)},
+                jobstores={"default": SQLAlchemyJobStore(url=f"sqlite:///{self._jobstore_path.as_posix()}")},
                 job_defaults={
                     "coalesce": True,
                     "max_instances": 1,
@@ -94,13 +120,14 @@ class ApschedulerOrchestrator:
         name: str,
         trigger: Any,
         func: Callable[[], None],
+        args: list[Any] | tuple[Any, ...] | None = None,
         misfire_grace_time: int = 300,
     ) -> None:
-        self.start()
         scheduler = self._ensure_scheduler()
         scheduler.add_job(
             func=func,
             trigger=trigger,
+            args=list(args or []),
             id=job_id,
             name=name,
             replace_existing=True,
@@ -108,6 +135,7 @@ class ApschedulerOrchestrator:
             max_instances=1,
             misfire_grace_time=max(1, int(misfire_grace_time or 300)),
         )
+        self.start()
 
     def add_date_job(
         self,
@@ -116,6 +144,7 @@ class ApschedulerOrchestrator:
         name: str,
         run_date: datetime,
         func: Callable[[], None],
+        args: list[Any] | tuple[Any, ...] | None = None,
         misfire_grace_time: int = 300,
     ) -> None:
         from apscheduler.triggers.date import DateTrigger
@@ -125,6 +154,7 @@ class ApschedulerOrchestrator:
             name=name,
             trigger=DateTrigger(run_date=run_date),
             func=func,
+            args=list(args or []),
             misfire_grace_time=misfire_grace_time,
         )
 
@@ -136,6 +166,24 @@ class ApschedulerOrchestrator:
             scheduler.remove_job(job_id)
         except Exception:
             pass
+
+    def remove_jobs_by_prefix(self, prefix: str) -> None:
+        scheduler = self._scheduler
+        prefix_text = str(prefix or "").strip()
+        if scheduler is None or not prefix_text:
+            return
+        try:
+            jobs = list(scheduler.get_jobs())
+        except Exception:
+            jobs = []
+        for job in jobs:
+            job_id = str(getattr(job, "id", "") or "")
+            if not job_id.startswith(prefix_text):
+                continue
+            try:
+                scheduler.remove_job(job_id)
+            except Exception:
+                pass
 
     def get_job(self, job_id: str):
         scheduler = self._scheduler
@@ -170,6 +218,8 @@ class ApschedulerOrchestrator:
                     "ready": False,
                     "running": False,
                     "timezone": self.timezone,
+                    "jobstore": "sqlalchemy_sqlite",
+                    "jobstore_path": str(self._jobstore_path),
                     "job_count": 0,
                     "jobs": [],
                     "next_run_time": "",
@@ -202,6 +252,8 @@ class ApschedulerOrchestrator:
                 "ready": True,
                 "running": bool(getattr(scheduler, "running", False)),
                 "timezone": self.timezone,
+                "jobstore": "sqlalchemy_sqlite",
+                "jobstore_path": str(self._jobstore_path),
                 "job_count": len(rows),
                 "jobs": rows,
                 "next_run_time": next_run_text,
@@ -252,6 +304,10 @@ class ApschedulerSchedulerFacade:
         self._diag_lock = threading.Lock()
         self._diag_logs: list[str] = []
         self._max_diag_logs = 200
+        self.orchestrator.register_fire_handler(
+            self.scheduler_key,
+            lambda trigger_source: self._fire(trigger_source=trigger_source),
+        )
 
     def _normalize_cfg(self, scheduler_cfg: Dict[str, Any]) -> Dict[str, Any]:
         raw = scheduler_cfg if isinstance(scheduler_cfg, dict) else {}
@@ -458,7 +514,8 @@ class ApschedulerSchedulerFacade:
             job_id=self.scheduler_key,
             name=self.source_name,
             trigger=self._build_trigger(),
-            func=lambda: self._fire(trigger_source="scheduler"),
+            func=_run_registered_scheduler_job,
+            args=[self.scheduler_key, "scheduler"],
             misfire_grace_time=max(60, int(self.cfg.get("check_interval_sec", 30) or 30) * 3),
         )
 
@@ -466,12 +523,14 @@ class ApschedulerSchedulerFacade:
         now = datetime.now()
         if not (self._should_daily_catch_up(now) or self._should_monthly_catch_up(now)):
             return
+        self.orchestrator.remove_jobs_by_prefix(f"{self.scheduler_key}:catchup:")
         job_id = f"{self.scheduler_key}:catchup:{now.strftime('%Y%m%d%H%M%S')}"
         self.orchestrator.add_date_job(
             job_id=job_id,
             name=f"{self.source_name}-启动补偿",
             run_date=now + timedelta(seconds=1),
-            func=lambda: self._fire(trigger_source="catch_up"),
+            func=_run_registered_scheduler_job,
+            args=[self.scheduler_key, "catch_up"],
             misfire_grace_time=max(60, int(self.cfg.get("check_interval_sec", 30) or 30) * 3),
         )
         self._log("已登记启动补偿检查任务")
@@ -519,6 +578,7 @@ class ApschedulerSchedulerFacade:
     def stop(self) -> Dict[str, Any]:
         self._active = False
         self.orchestrator.remove_job(self.scheduler_key)
+        self.orchestrator.remove_jobs_by_prefix(f"{self.scheduler_key}:catchup:")
         self.runtime["last_decision"] = "skip:stopped"
         self._log("调度已停止")
         return {"stopped": True, "running": False, "reason": "stopped"}
@@ -558,7 +618,7 @@ class ApschedulerSchedulerFacade:
             self.state["last_run_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
             self.state["last_status"] = status
             self.state["last_error"] = "" if status in {"submitted", "skipped", "accepted", "success"} else detail
-            if status in {"submitted", "accepted", "success"}:
+            if status in {"accepted", "success", "ok"}:
                 self.state["last_success_period"] = period
             elif was_retry:
                 self.state["retry_done_period"] = period
@@ -632,15 +692,28 @@ class ApschedulerSchedulerFacade:
     ) -> None:
         attempt = attempt_at or datetime.now()
         normalized_status = str(status or "").strip().lower() or "unknown"
-        self.state["last_attempt_at"] = attempt.strftime("%Y-%m-%d %H:%M:%S")
-        self.state["last_status"] = normalized_status
-        self.state["last_error"] = "" if normalized_status in {"ok", "success", "accepted", "skipped"} else str(detail or "").strip()
-        self.state["last_source"] = str(source or "").strip()
-        self.state["last_duration_ms"] = max(0, int(duration_ms or 0))
-        if normalized_status in {"ok", "success", "accepted"}:
-            self.state["last_success_at"] = self.state["last_attempt_at"]
+        attempt_text = attempt.strftime("%Y-%m-%d %H:%M:%S")
+        success_statuses = {"ok", "success", "accepted"}
+        if self.schedule_kind == "interval":
+            self.state["last_attempt_at"] = attempt_text
+            self.state["last_status"] = normalized_status
+            self.state["last_error"] = "" if normalized_status in (success_statuses | {"skipped"}) else str(detail or "").strip()
+            self.state["last_source"] = str(source or "").strip()
+            self.state["last_duration_ms"] = max(0, int(duration_ms or 0))
+            if normalized_status in success_statuses:
+                self.state["last_success_at"] = self.state["last_attempt_at"]
+        else:
+            period = self._period(attempt)
+            self.state["last_attempt_period"] = period
+            self.state["last_run_at"] = attempt_text
+            self.state["last_status"] = normalized_status
+            self.state["last_error"] = "" if normalized_status in (success_statuses | {"skipped"}) else str(detail or "").strip()
+            if normalized_status in success_statuses:
+                self.state["last_success_period"] = period
+            elif self.state.get("last_success_period", "") == period:
+                self.state["last_success_period"] = ""
         self._save_state()
-        self.runtime["last_trigger_at"] = self.state["last_attempt_at"]
+        self.runtime["last_trigger_at"] = attempt_text
         self.runtime["last_trigger_result"] = normalized_status
 
     def reset_today_state_for_run_time_change(self, now: datetime | None = None) -> Dict[str, Any]:

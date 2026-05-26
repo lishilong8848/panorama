@@ -51,6 +51,11 @@
       "package": "APScheduler",
       "version": "3.11.2",
       "import_name": "apscheduler"
+    },
+    {
+      "package": "SQLAlchemy",
+      "version": "2.0.41",
+      "import_name": "sqlalchemy"
     }
   ]
 }

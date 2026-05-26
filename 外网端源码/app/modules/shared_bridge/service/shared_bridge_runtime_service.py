@@ -4267,7 +4267,41 @@ class SharedBridgeRuntimeService:
     ) -> Dict[str, Any]:
         if self._source_cache_service is None:
             return {"accepted": False, "reason": "disabled"}
-        return self._source_cache_service.upload_alarm_event_entries_full_to_bitable(emit_log=emit_log)
+        selection_override = self.get_alarm_event_upload_selection()
+        if self._http_bridge_forced() and str(selection_override.get("error", "") or "").strip():
+            return {
+                "accepted": False,
+                "reason": "source_index_unavailable",
+                "error": str(selection_override.get("error", "") or "").strip(),
+                "missing_both_days_buildings": list(selection_override.get("missing_both_days_buildings", []) or []),
+                "transport": "http",
+            }
+        selected_entries = [
+            item for item in (selection_override.get("selected_entries", []) or []) if isinstance(item, dict)
+        ]
+        ready_buildings = {
+            str(item.get("building", "") or "").strip()
+            for item in selected_entries
+            if str(item.get("building", "") or "").strip()
+        }
+        target_buildings = self._http_source_cache_buildings(None)
+        missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
+        if missing_buildings:
+            return {
+                "accepted": False,
+                "reason": "missing_source_entries",
+                "error": f"告警源文件尚未齐全，缺失楼栋：{','.join(missing_buildings)}",
+                "missing_both_days_buildings": missing_buildings,
+                "transport": str(selection_override.get("transport", "") or ""),
+            }
+        return self._source_cache_service.upload_alarm_event_entries_to_bitable(
+            mode="full",
+            building="",
+            replace_existing=None,
+            max_age_days=60,
+            emit_log=emit_log,
+            selection_override=selection_override,
+        )
 
     def upload_alarm_event_source_cache_single_building_to_bitable(
         self,
@@ -4277,9 +4311,39 @@ class SharedBridgeRuntimeService:
     ) -> Dict[str, Any]:
         if self._source_cache_service is None:
             return {"accepted": False, "reason": "disabled"}
-        return self._source_cache_service.upload_alarm_event_entries_single_building_to_bitable(
-            building=building,
+        building_text = str(building or "").strip()
+        selection_override = self.get_alarm_event_upload_selection(building=building_text)
+        if self._http_bridge_forced() and str(selection_override.get("error", "") or "").strip():
+            return {
+                "accepted": False,
+                "reason": "source_index_unavailable",
+                "error": str(selection_override.get("error", "") or "").strip(),
+                "missing_both_days_buildings": list(selection_override.get("missing_both_days_buildings", []) or []),
+                "transport": "http",
+            }
+        selected_entries = [
+            item for item in (selection_override.get("selected_entries", []) or []) if isinstance(item, dict)
+        ]
+        ready_buildings = {
+            str(item.get("building", "") or "").strip()
+            for item in selected_entries
+            if str(item.get("building", "") or "").strip()
+        }
+        if building_text and building_text not in ready_buildings:
+            return {
+                "accepted": False,
+                "reason": "missing_source_entries",
+                "error": f"告警源文件尚未齐全，缺失楼栋：{building_text}",
+                "missing_both_days_buildings": [building_text],
+                "transport": str(selection_override.get("transport", "") or ""),
+            }
+        return self._source_cache_service.upload_alarm_event_entries_to_bitable(
+            mode="single_building",
+            building=building_text,
+            replace_existing=False,
+            max_age_days=60,
             emit_log=emit_log,
+            selection_override=selection_override,
         )
 
     def debug_alarm_page_actions(self, *, building: str) -> Dict[str, Any]:

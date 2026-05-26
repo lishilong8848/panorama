@@ -2791,6 +2791,23 @@ class AppContainer:
             duration_ms=duration_ms,
         )
 
+    def record_alarm_event_upload_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.alarm_event_upload_scheduler:
+            return
+        self.alarm_event_upload_scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
     def _apply_runtime_config_snapshot(self, settings: Dict[str, Any]) -> None:
         self.config = copy.deepcopy(settings)
         self.runtime_config = adapt_runtime_config(self.config)

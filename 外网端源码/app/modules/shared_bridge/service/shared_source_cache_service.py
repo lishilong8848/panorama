@@ -4762,6 +4762,7 @@ class SharedSourceCacheService:
         replace_existing: bool | None,
         max_age_days: int = 60,
         emit_log: Callable[[str], None] | None = None,
+        selection_override: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         if not self.enabled or self.role_mode != "external" or self.store is None:
             return {"accepted": False, "reason": "disabled"}
@@ -4812,7 +4813,11 @@ class SharedSourceCacheService:
                     "running": False,
                     "error": error_text,
                 }
-        selection = self._build_alarm_external_selection(building=target_building)
+        selection = (
+            copy.deepcopy(selection_override)
+            if isinstance(selection_override, dict)
+            else self._build_alarm_external_selection(building=target_building)
+        )
         selected_entries = [
             item
             for item in selection.get("selected_entries", []) or []
