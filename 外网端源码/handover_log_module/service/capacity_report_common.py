@@ -18,6 +18,7 @@ _ZONE_CAPACITY_DIRECT_ALIASES_BY_BUILDING = {
     "B楼": ["系统制冷量"],
     "C楼": ["一次侧冷量"],
     "D楼": ["供冷量"],
+    "E楼": ["E-150-DDC-100_系统制冷量", "E-124-DDC-100_系统制冷量"],
 }
 _ZONE_CAPACITY_A_BUILDING_RT_TO_KW = 3.517
 _BLOCK_COL_OFFSET = column_index_from_string("Q") - column_index_from_string("D")
