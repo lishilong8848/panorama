@@ -102,6 +102,7 @@ class JobState:
     revision: int = 0
     last_event_id: int = 0
     wait_started_monotonic: float = 0.0
+    failure_notified_at: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -126,6 +127,7 @@ class JobState:
             "cancel_requested": bool(self.cancel_requested),
             "revision": int(self.revision or 0),
             "last_event_id": int(self.last_event_id or 0),
+            "failure_notified_at": self.failure_notified_at,
         }
 
 
@@ -258,6 +260,7 @@ class JobService:
         self._worker_python_fallback_logged: set[str] = set()
         self._task_engine_recovery_completed = False
         self._task_engine_last_cleanup_monotonic = 0.0
+        self._failure_notify_inflight: set[str] = set()
 
     def update_log_buffer_size(self, value: int) -> None:
         self.log_buffer_size = max(200, int(value))
@@ -758,16 +761,103 @@ class JobService:
         self._write_console_line(line)
 
     @staticmethod
-    def _job_success_notify_text(job: JobState) -> str:
+    def _job_failure_status(job: JobState) -> str:
+        failure_statuses = {
+            "failed",
+            "partial_failed",
+            "blocked",
+            "blocked_precondition",
+            "interrupted",
+            "stale",
+            "expired",
+        }
+        status_text = str(job.status or "").strip().lower()
+        if status_text in failure_statuses:
+            return status_text
+        if status_text not in {"success", "ok"}:
+            return ""
+        candidate_payloads: List[Any] = [getattr(job, "result", None)]
+        for stage in list(getattr(job, "stages", []) or []):
+            stage_status = str(getattr(stage, "status", "") or "").strip().lower()
+            if stage_status in failure_statuses or stage_status == "error":
+                return "failed" if stage_status == "error" else stage_status
+            candidate_payloads.append(getattr(stage, "result", None))
+        for payload in candidate_payloads:
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("ok") is False:
+                return str(payload.get("status", "") or "failed").strip().lower() or "failed"
+            payload_status = str(
+                payload.get("status", "")
+                or payload.get("result_status", "")
+                or payload.get("state", "")
+                or ""
+            ).strip().lower()
+            if payload_status in failure_statuses or payload_status == "error":
+                return "failed" if payload_status == "error" else payload_status
+            for count_key in (
+                "failed",
+                "failed_count",
+                "failure_count",
+                "error_count",
+                "partial_failed_count",
+            ):
+                try:
+                    if int(payload.get(count_key, 0) or 0) > 0:
+                        return "partial_failed"
+                except Exception:  # noqa: BLE001
+                    continue
+        return ""
+
+    @staticmethod
+    def _job_failure_detail(job: JobState) -> str:
+        error_text = str(job.error or "").strip()
+        if not error_text:
+            for stage in reversed(list(getattr(job, "stages", []) or [])):
+                stage_error = str(getattr(stage, "error", "") or "").strip()
+                if stage_error:
+                    error_text = stage_error
+                    break
+        if not error_text:
+            candidate_payloads: List[Any] = [getattr(job, "result", None)]
+            for stage in list(getattr(job, "stages", []) or []):
+                candidate_payloads.append(getattr(stage, "result", None))
+            for payload in candidate_payloads:
+                if not isinstance(payload, dict):
+                    continue
+                for key in ("error", "last_error", "message", "summary", "detail"):
+                    value = str(payload.get(key, "") or "").strip()
+                    if value and value.lower() not in {"ok", "success"}:
+                        error_text = value
+                        break
+                if error_text:
+                    break
+        if not error_text:
+            error_text = str(job.summary or "").strip()
+        if not error_text:
+            for line in reversed(list(job.logs or [])):
+                line_text = str(line or "").strip()
+                if "[文件流程失败]" in line_text or "失败" in line_text or "error=" in line_text.lower():
+                    error_text = line_text
+                    break
+        error_text = " ".join(error_text.split()) or "未提供失败详情"
+        if len(error_text) > 900:
+            error_text = error_text[:900] + "...(truncated)"
+        return error_text
+
+    def _job_failure_notify_text(self, job: JobState) -> str:
+        status_text = self._job_failure_status(job) or str(job.status or "").strip() or "failed"
+        error_text = self._job_failure_detail(job)
         return (
-            "全景助手控制台任务完成\n"
+            "全景助手控制台任务未成功\n"
             f"任务：{str(job.name or job.feature or '-').strip() or '-'}\n"
-            f"状态：成功\n"
-            f"完成时间：{str(job.finished_at or '').strip() or datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"状态：{status_text}\n"
+            f"时间：{str(job.finished_at or '').strip() or datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"原因：{error_text}\n"
             f"任务ID：{str(job.job_id or '').strip() or '-'}"
         )
 
-    def _job_success_notify_config(self) -> tuple[bool, str, float]:
+    def _job_failure_notify_config(self) -> tuple[bool, str, float]:
         runtime_cfg = self._runtime_config if isinstance(self._runtime_config, dict) else {}
         notify_cfg = runtime_cfg.get("notify", {})
         if not isinstance(notify_cfg, dict):
@@ -775,26 +865,49 @@ class JobService:
             notify_cfg = common_cfg.get("notify", {}) if isinstance(common_cfg, dict) else {}
         if not isinstance(notify_cfg, dict):
             notify_cfg = {}
-        enabled = bool(notify_cfg.get("task_success_webhook_enabled", True))
-        webhook_url = str(notify_cfg.get("task_success_webhook_url", "") or "").strip()
+        enabled = bool(
+            notify_cfg.get(
+                "task_failure_webhook_enabled",
+                notify_cfg.get("task_success_webhook_enabled", True),
+            )
+        )
+        webhook_url = str(
+            notify_cfg.get("task_failure_webhook_url", "")
+            or notify_cfg.get("task_success_webhook_url", "")
+            or ""
+        ).strip()
         try:
-            timeout_sec = float(notify_cfg.get("task_success_webhook_timeout", 5) or 5)
+            timeout_sec = float(
+                notify_cfg.get(
+                    "task_failure_webhook_timeout",
+                    notify_cfg.get("task_success_webhook_timeout", 5),
+                )
+                or 5
+            )
         except Exception:  # noqa: BLE001
             timeout_sec = 5.0
         return enabled, webhook_url, max(1.0, timeout_sec)
 
-    def _notify_job_success_to_feishu_async(self, job: JobState) -> None:
-        if str(job.status or "").strip().lower() != "success":
+    def _notify_job_failure_to_feishu_async(self, job: JobState) -> None:
+        if not self._job_failure_status(job):
             return
-        enabled, webhook_url, timeout_sec = self._job_success_notify_config()
+        enabled, webhook_url, timeout_sec = self._job_failure_notify_config()
         if not enabled or not webhook_url:
             return
+        job_id = str(job.job_id or "").strip()
+        if not job_id:
+            return
+        with self._lock:
+            if str(getattr(job, "failure_notified_at", "") or "").strip():
+                return
+            if job_id in self._failure_notify_inflight:
+                return
+            self._failure_notify_inflight.add(job_id)
         payload = {
             "msg_type": "text",
-            "content": {"text": self._job_success_notify_text(job)},
+            "content": {"text": self._job_failure_notify_text(job)},
         }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        job_id = str(job.job_id or "").strip()
         job_name = str(job.name or job.feature or "").strip()
 
         def _send() -> None:
@@ -804,16 +917,36 @@ class JobService:
                 headers={"Content-Type": "application/json; charset=utf-8"},
                 method="POST",
             )
+            sent = False
             try:
-                with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-                    response.read()
-                self._emit_service_log(f"[任务完成通知] 已发送飞书群机器人: job={job_id}, name={job_name or '-'}")
+                last_error = ""
+                for attempt in range(1, 4):
+                    try:
+                        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+                            response.read()
+                        sent = True
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = str(exc)
+                        if attempt < 3:
+                            time.sleep(min(2.0, 0.5 * attempt))
+                if sent:
+                    with self._lock:
+                        if not str(getattr(job, "failure_notified_at", "") or "").strip():
+                            job.failure_notified_at = self._now_text()
+                            self._persist_job_snapshot(job)
+                    self._emit_service_log(f"[任务失败通知] 已发送飞书群机器人: job={job_id}, name={job_name or '-'}")
+                else:
+                    self._emit_service_log(f"[任务失败通知] 发送飞书群机器人失败: job={job_id}, error={last_error}")
             except Exception as exc:  # noqa: BLE001
-                self._emit_service_log(f"[任务完成通知] 发送飞书群机器人失败: job={job_id}, error={exc}")
+                self._emit_service_log(f"[任务失败通知] 发送飞书群机器人失败: job={job_id}, error={exc}")
+            finally:
+                with self._lock:
+                    self._failure_notify_inflight.discard(job_id)
 
         threading.Thread(
             target=_send,
-            name=f"job-success-feishu-{job_id[:8] or 'unknown'}",
+            name=f"job-failure-feishu-{job_id[:8] or 'unknown'}",
             daemon=True,
         ).start()
 
@@ -1093,6 +1226,7 @@ class JobService:
             cancel_requested=bool(snapshot.get("cancel_requested", False)),
             revision=int(snapshot.get("revision") or 0),
             last_event_id=int(snapshot.get("last_event_id") or 0),
+            failure_notified_at=str(snapshot.get("failure_notified_at", "") or "").strip(),
         )
         stages: List[StageState] = []
         for item in list(snapshot.get("stages") or []):
@@ -1448,7 +1582,7 @@ class JobService:
                     self._release_resources(job.job_id, list(job.acquired_resources))
                     job.acquired_resources = []
                     if not retry_after_repair:
-                        self._notify_job_success_to_feishu_async(job)
+                        self._notify_job_failure_to_feishu_async(job)
                         job.done_event.set()
                 if retry_after_repair:
                     continue
@@ -2277,7 +2411,7 @@ class JobService:
                     self._persist_job_snapshot(job)
                 self._release_resources(job.job_id, list(job.acquired_resources))
                 job.acquired_resources = []
-                self._notify_job_success_to_feishu_async(job)
+                self._notify_job_failure_to_feishu_async(job)
                 job.done_event.set()
 
         thread = threading.Thread(target=_run, daemon=True, name=f"job-{job_id[:8]}")
@@ -2662,6 +2796,7 @@ class JobService:
             )
             job.done_event.set()
             self._persist_resource_snapshot()
+            self._notify_job_failure_to_feishu_async(job)
             return job
 
     def wait_job(self, job_id: str, timeout_sec: float | None = None) -> JobState:

@@ -1094,7 +1094,7 @@ def _cache_wait_detail(message: str) -> HTTPException:
     return HTTPException(status_code=409, detail=message)
 
 
-def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = True) -> list[Dict[str, Any]]:
+def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = False) -> list[Dict[str, Any]]:
     output: list[Dict[str, Any]] = []
     for item in entries if isinstance(entries, list) else []:
         if not isinstance(item, dict):
@@ -1122,7 +1122,7 @@ def _format_bucket_age_hours_text(value: Any) -> str:
     return f"{rounded:.1f} 小时"
 
 
-def _normalize_latest_cache_selection(selection: Any, *, verify_files: bool = True) -> Dict[str, Any]:
+def _normalize_latest_cache_selection(selection: Any, *, verify_files: bool = False) -> Dict[str, Any]:
     payload = selection if isinstance(selection, dict) else {}
     best_bucket_age_hours_raw = payload.get("best_bucket_age_hours")
     try:

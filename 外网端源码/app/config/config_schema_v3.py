@@ -38,8 +38,8 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "auth_token": "",
             "allowed_client_ips": [],
             "connect_timeout_sec": 3,
-            "read_timeout_sec": 15,
-            "request_timeout_sec": 10,
+            "read_timeout_sec": 5,
+            "request_timeout_sec": 5,
         },
         "internal_source_cache": {
             "enabled": True,
@@ -67,9 +67,9 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "on_download_failure": True,
             "on_wifi_failure": True,
             "on_upload_failure": True,
-            "task_success_webhook_enabled": True,
-            "task_success_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499",
-            "task_success_webhook_timeout": 5,
+            "task_failure_webhook_enabled": True,
+            "task_failure_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499",
+            "task_failure_webhook_timeout": 5,
         },
         "feishu_auth": {
             "app_id": "",

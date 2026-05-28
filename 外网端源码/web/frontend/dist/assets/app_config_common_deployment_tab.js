@@ -51,6 +51,33 @@ export const CONFIG_COMMON_DEPLOYMENT_TAB_TEMPLATE = `
       <div class="hint">外网端只使用外网共享目录，不保存源站账号和采集站点配置。</div>
     </div>
 
+    <div class="content-card config-panel-card">
+      <div class="section-title">内网 HTTP 桥接</div>
+      <div class="form-row">
+        <label class="label">启用 HTTP 桥接</label>
+        <input type="checkbox" v-model="config.internal_bridge_http.enabled" />
+      </div>
+      <div class="form-row">
+        <label class="label">内网端地址</label>
+        <input type="text" v-model.trim="config.internal_bridge_http.base_url" placeholder="留空时从共享目录自动推断" />
+      </div>
+      <div class="form-row">
+        <label class="label">桥接 Token</label>
+        <input type="password" v-model.trim="config.internal_bridge_http.auth_token" autocomplete="off" />
+      </div>
+      <div class="config-form-grid two-col">
+        <div class="form-row">
+          <label class="label">连接超时（秒）</label>
+          <input type="number" min="1" v-model.number="config.internal_bridge_http.connect_timeout_sec" />
+        </div>
+        <div class="form-row">
+          <label class="label">读取超时（秒）</label>
+          <input type="number" min="1" v-model.number="config.internal_bridge_http.read_timeout_sec" />
+        </div>
+      </div>
+      <div class="hint">外网端只通过 HTTP source-index 查询源文件索引；内网端不可达时会快速失败，不回退扫描共享目录。</div>
+    </div>
+
     <div class="content-card config-panel-card config-panel-card-wide">
       <div class="section-title">桥接调度参数</div>
       <div class="status-metric-grid-compact">

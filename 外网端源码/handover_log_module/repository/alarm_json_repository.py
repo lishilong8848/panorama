@@ -183,7 +183,7 @@ class AlarmJsonRepository:
                     "ready": False,
                     "downloaded_at": "",
                     "selected_downloaded_at": "",
-                    "last_error": "外网端已移除共享 bridge.db 告警索引读取，请通过内网 HTTP source-index 补齐告警源文件索引",
+                    "last_error": "外网端已移除旧共享库告警索引读取，请通过内网 HTTP source-index 补齐告警源文件索引",
                     "relative_path": "",
                     "resolved_file_path": "",
                     "blocked": False,

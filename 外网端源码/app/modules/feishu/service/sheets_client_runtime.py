@@ -158,10 +158,6 @@ class FeishuSheetsClientRuntime:
                 try:
                     response.raise_for_status()
                 except requests.HTTPError as exc:
-                    if response.status_code in {401, 403} and auth_attempt == 0:
-                        self.invalidate_token()
-                        self.refresh_token(force=True)
-                        continue
                     error_body: Dict[str, Any]
                     try:
                         parsed_body = response.json()
@@ -171,6 +167,14 @@ class FeishuSheetsClientRuntime:
                             "http_status": response.status_code,
                             "text": str(response.text or "").strip()[:500],
                         }
+                    if auth_attempt == 0 and self._is_token_invalid_code(error_body.get("code")):
+                        self.invalidate_token()
+                        self.refresh_token(force=True)
+                        continue
+                    if response.status_code in {401, 403} and auth_attempt == 0:
+                        self.invalidate_token()
+                        self.refresh_token(force=True)
+                        continue
                     raise RuntimeError(
                         self._format_api_error_message(
                             method=method,

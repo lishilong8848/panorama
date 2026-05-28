@@ -122,6 +122,7 @@ function ensureRoot(cfg) {
   cfg.paths = cfg.paths || {};
   cfg.deployment = cfg.deployment || {};
   cfg.shared_bridge = cfg.shared_bridge || {};
+  cfg.internal_bridge_http = cfg.internal_bridge_http || {};
   cfg.internal_source_sites = Array.isArray(cfg.internal_source_sites) ? cfg.internal_source_sites : [];
   cfg.input = cfg.input || {};
   cfg.output = cfg.output || {};
@@ -142,6 +143,20 @@ function ensureRoot(cfg) {
   cfg.handover_log.template = cfg.handover_log.template || {};
   cfg.handover_log.review_ui = cfg.handover_log.review_ui || {};
   cfg.web = cfg.web || {};
+
+  if (typeof cfg.notify.task_failure_webhook_enabled !== "boolean") {
+    cfg.notify.task_failure_webhook_enabled =
+      typeof cfg.notify.task_success_webhook_enabled === "boolean" ? cfg.notify.task_success_webhook_enabled : true;
+  }
+  if (!String(cfg.notify.task_failure_webhook_url || "").trim()) {
+    cfg.notify.task_failure_webhook_url =
+      String(cfg.notify.task_success_webhook_url || "").trim() ||
+      "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499";
+  }
+  if (typeof cfg.notify.task_failure_webhook_timeout !== "number") {
+    cfg.notify.task_failure_webhook_timeout =
+      typeof cfg.notify.task_success_webhook_timeout === "number" ? cfg.notify.task_success_webhook_timeout : 5;
+  }
 
   cfg.download.multi_date = cfg.download.multi_date || {};
   cfg.download.resume = cfg.download.resume || {};
@@ -233,6 +248,13 @@ function applyDeploymentDefaults(cfg) {
   setNumberDefault(cfg.shared_bridge, "stale_task_timeout_sec", 1800);
   setNumberDefault(cfg.shared_bridge, "artifact_retention_days", 7);
   setNumberDefault(cfg.shared_bridge, "sqlite_busy_timeout_ms", 15000);
+  setBooleanDefault(cfg.internal_bridge_http, "enabled", true);
+  setStringDefault(cfg.internal_bridge_http, "base_url", "");
+  setStringDefault(cfg.internal_bridge_http, "auth_token", "");
+  setNumberDefault(cfg.internal_bridge_http, "port", 18765);
+  setNumberDefault(cfg.internal_bridge_http, "connect_timeout_sec", 3);
+  setNumberDefault(cfg.internal_bridge_http, "read_timeout_sec", 5);
+  setNumberDefault(cfg.internal_bridge_http, "request_timeout_sec", 5);
   if (cfg.deployment.role_mode === "internal") {
     cfg.shared_bridge.root_dir = cfg.shared_bridge.internal_root_dir;
   } else if (cfg.deployment.role_mode === "external") {

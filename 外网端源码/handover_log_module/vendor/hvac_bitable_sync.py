@@ -3,19 +3,15 @@
 """
 Standard HVAC running-data processor for Feishu Bitable.
 
-The script intentionally does not store Feishu app secrets. It reuses the
-locally configured lark-cli identity, normally `--as bot`.
+This module only contains pure HVAC transformation helpers. Feishu API access
+is provided by the project-level Feishu app client.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import hashlib
 import re
-import shutil
-import subprocess
-import sys
 import time
 from collections.abc import Iterable
 from collections import defaultdict
@@ -38,11 +34,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target": {
         "table_id": "tblxOyKdyyiMTdhR",
         "view_id": "vewyJLUSVm",
-    },
-    "lark_cli": {
-        "command": "",
-        "node": "",
-        "run_js": "",
     },
     "weather": {
         "enabled": True,
@@ -518,262 +509,6 @@ def merge_config(path: Path | None) -> dict[str, Any]:
     return deep_update(config, user_config)
 
 
-class LarkCli:
-    def __init__(self, config: dict[str, Any], dry_run: bool = False) -> None:
-        self.config = config
-        self.dry_run = dry_run
-        self.identity = config["identity"]
-        self.base_token = config["base_token"]
-        self.command = self._resolve_command(config.get("lark_cli", {}))
-
-    @staticmethod
-    def _resolve_command(cli_config: dict[str, str]) -> list[str]:
-        if cli_config.get("command"):
-            return [cli_config["command"]]
-        node = cli_config.get("node")
-        run_js = cli_config.get("run_js")
-        if node and run_js and Path(node).exists() and Path(run_js).exists():
-            return [node, run_js]
-        exe = shutil.which("lark-cli")
-        if exe:
-            return [exe]
-        raise RuntimeError("未找到 lark-cli。请在 config.json 里配置 lark_cli.command，或配置 node/run_js。")
-
-    def run(self, args: list[str], *, write: bool = False) -> str:
-        if write and self.dry_run:
-            return json.dumps({"dry_run": True, "args": args}, ensure_ascii=False)
-        last_proc: subprocess.CompletedProcess[str] | None = None
-        for attempt in range(1, 4):
-            proc = subprocess.run(
-                self.command + args,
-                text=True,
-                encoding="utf-8",
-                capture_output=True,
-            )
-            if proc.returncode == 0:
-                return proc.stdout
-            last_proc = proc
-            retryable = any(
-                marker in (proc.stderr + proc.stdout)
-                for marker in ["connectex", "timeout", "TLS handshake timeout", "temporarily unavailable"]
-            )
-            if not retryable or attempt == 3:
-                break
-            time.sleep(2 * attempt)
-        assert last_proc is not None
-        raise RuntimeError(
-            "lark-cli 执行失败\n"
-            f"命令: {' '.join(args)}\n"
-            f"STDOUT:\n{last_proc.stdout}\n"
-            f"STDERR:\n{last_proc.stderr}"
-        )
-
-    def run_json(self, args: list[str], *, write: bool = False) -> dict[str, Any]:
-        return json.loads(self.run(args, write=write))
-
-    def send_post_message(self, chat_id: str, content: dict[str, Any], identity: str, idempotency_key: str) -> dict[str, Any]:
-        return self.run_json(
-            [
-                "im",
-                "+messages-send",
-                "--as",
-                identity,
-                "--chat-id",
-                chat_id,
-                "--msg-type",
-                "post",
-                "--content",
-                json.dumps(content, ensure_ascii=False, separators=(",", ":")),
-                "--idempotency-key",
-                idempotency_key,
-            ],
-            write=True,
-        )
-
-    def send_interactive_message(
-        self, chat_id: str, content: dict[str, Any], identity: str, idempotency_key: str
-    ) -> dict[str, Any]:
-        return self.run_json(
-            [
-                "im",
-                "+messages-send",
-                "--as",
-                identity,
-                "--chat-id",
-                chat_id,
-                "--msg-type",
-                "interactive",
-                "--content",
-                json.dumps(content, ensure_ascii=False, separators=(",", ":")),
-                "--idempotency-key",
-                idempotency_key,
-            ],
-            write=True,
-        )
-
-    def field_list(self, table_id: str) -> list[dict[str, Any]]:
-        data = self.run_json(
-            [
-                "base",
-                "+field-list",
-                "--as",
-                self.identity,
-                "--base-token",
-                self.base_token,
-                "--table-id",
-                table_id,
-                "--limit",
-                "200",
-            ]
-        )["data"]
-        return data["fields"]
-
-    def record_list(self, table_id: str, view_id: str, fields: list[str]) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
-        offset = 0
-        while True:
-            args = [
-                "base",
-                "+record-list",
-                "--as",
-                self.identity,
-                "--base-token",
-                self.base_token,
-                "--table-id",
-                table_id,
-                "--view-id",
-                view_id,
-                "--format",
-                "json",
-                "--limit",
-                "200",
-                "--offset",
-                str(offset),
-            ]
-            for field_name in fields:
-                args += ["--field-id", field_name]
-            block = self.run_json(args)["data"]
-            page = normalize_records(block)
-            records.extend(page)
-            if not block.get("has_more"):
-                break
-            if not page:
-                raise RuntimeError(f"{table_id}/{view_id} has_more=true 但没有返回记录")
-            offset += len(page)
-        return records
-
-    def field_create(self, table_id: str, payload: dict[str, Any]) -> None:
-        self.run(
-            [
-                "base",
-                "+field-create",
-                "--as",
-                self.identity,
-                "--base-token",
-                self.base_token,
-                "--table-id",
-                table_id,
-                "--json",
-                json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
-            ],
-            write=True,
-        )
-
-    def field_update(self, table_id: str, field_id: str, payload: dict[str, Any]) -> None:
-        self.run(
-            [
-                "base",
-                "+field-update",
-                "--as",
-                self.identity,
-                "--base-token",
-                self.base_token,
-                "--table-id",
-                table_id,
-                "--field-id",
-                field_id,
-                "--json",
-                json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
-            ],
-            write=True,
-        )
-
-    def batch_update(self, table_id: str, record_ids: list[str], patch: dict[str, Any]) -> int:
-        count = 0
-        for i in range(0, len(record_ids), 200):
-            chunk = [rid for rid in record_ids[i : i + 200] if rid]
-            if not chunk:
-                continue
-            payload = {"record_id_list": chunk, "patch": patch}
-            self.run(
-                [
-                    "base",
-                    "+record-batch-update",
-                    "--as",
-                    self.identity,
-                    "--base-token",
-                    self.base_token,
-                    "--table-id",
-                    table_id,
-                    "--json",
-                    json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
-                ],
-                write=True,
-            )
-            count += len(chunk)
-        return count
-
-    def batch_delete(self, table_id: str, record_ids: list[str]) -> int:
-        count = 0
-        for i in range(0, len(record_ids), 200):
-            chunk = [rid for rid in record_ids[i : i + 200] if rid]
-            if not chunk:
-                continue
-            payload = {"record_id_list": chunk}
-            self.run(
-                [
-                    "base",
-                    "+record-batch-delete",
-                    "--as",
-                    self.identity,
-                    "--base-token",
-                    self.base_token,
-                    "--table-id",
-                    table_id,
-                    "--json",
-                    json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
-                ],
-                write=True,
-            )
-            count += len(chunk)
-        return count
-
-    def batch_create(self, table_id: str, fields: list[str], rows: list[list[Any]]) -> int:
-        count = 0
-        for i in range(0, len(rows), 200):
-            chunk = rows[i : i + 200]
-            if not chunk:
-                continue
-            payload = {"fields": fields, "rows": chunk}
-            self.run(
-                [
-                    "base",
-                    "+record-batch-create",
-                    "--as",
-                    self.identity,
-                    "--base-token",
-                    self.base_token,
-                    "--table-id",
-                    table_id,
-                    "--json",
-                    json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
-                ],
-                write=True,
-            )
-            count += len(chunk)
-        return count
-
-
 def normalize_records(block: dict[str, Any]) -> list[dict[str, Any]]:
     raw_rows = block.get("data", [])
     field_names = block.get("fields") or block.get("field_id_list") or []
@@ -1102,7 +837,7 @@ def derive_source(records: list[dict[str, Any]]) -> SourceDerived:
     return derived
 
 
-def apply_source_patches(client: LarkCli, table_id: str, patches: dict[str, dict[str, Any]]) -> int:
+def apply_source_patches(client: Any, table_id: str, patches: dict[str, dict[str, Any]]) -> int:
     grouped: dict[str, list[str]] = defaultdict(list)
     payload_by_key: dict[str, dict[str, Any]] = {}
     for record_id, patch in patches.items():
@@ -1129,7 +864,7 @@ def select_payload(name: str, options: list[str]) -> dict[str, Any]:
     }
 
 
-def ensure_target_fields(client: LarkCli, target_table_id: str) -> dict[str, Any]:
+def ensure_target_fields(client: Any, target_table_id: str) -> dict[str, Any]:
     fields = {item["name"]: item for item in client.field_list(target_table_id)}
     changes = {"created": [], "updated": []}
 
@@ -1449,7 +1184,7 @@ def build_mode_switch_alert_card(rows: list[dict[str, Any]], max_items: int = 10
     }
 
 
-def send_mode_switch_alerts(client: LarkCli, rows: list[dict[str, Any]], notify_config: dict[str, Any]) -> dict[str, Any]:
+def send_mode_switch_alerts(client: Any, rows: list[dict[str, Any]], notify_config: dict[str, Any]) -> dict[str, Any]:
     alert_rows = [row for row in rows if row.get(T_MODE_SWITCH_HINT)]
     if not alert_rows:
         return {"sent": False, "reason": "no_alerts", "count": 0}
@@ -1522,7 +1257,7 @@ def build_target_rows(derived: SourceDerived) -> list[dict[str, Any]]:
 
 
 def upsert_target_rows(
-    client: LarkCli,
+    client: Any,
     target_table_id: str,
     target_view_id: str,
     target_rows: list[dict[str, Any]],
@@ -1623,7 +1358,6 @@ def verify_source(records: list[dict[str, Any]], derived: SourceDerived) -> list
                 )
     return mismatches
 
-
 def verify_target(records: list[dict[str, Any]], target_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_key = {scalar(record["fields"].get(F_TEXT)): record["fields"] for record in records if scalar(record["fields"].get(F_TEXT))}
     expected_keys = {row[F_TEXT] for row in target_rows if row.get(F_TEXT)}
@@ -1650,114 +1384,3 @@ def verify_target(records: list[dict[str, Any]], target_rows: list[dict[str, Any
         if key not in expected_keys and re.fullmatch(r"[A-E]楼-\d号制冷单元", str(key or "")):
             mismatches.append({"key": key, "field": F_TEXT, "expected": "not present", "actual": "stale record exists"})
     return mismatches
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Process HVAC source Bitable and sync running-mode target Bitable.")
-    parser.add_argument("--config", type=Path, help="JSON config path. Defaults to built-in table/view IDs.")
-    parser.add_argument("--dry-run", action="store_true", help="Read and calculate only; skip all writes.")
-    parser.add_argument("--source-only", action="store_true", help="Only process source table derived fields.")
-    parser.add_argument("--target-only", action="store_true", help="Only sync target table. Source patches are calculated but not written.")
-    parser.add_argument("--json-report", action="store_true", help="Print machine-readable JSON report.")
-    parser.add_argument("--send-mode-switch-alerts", action="store_true", help="Send rich-text mode-switch alerts to the configured Feishu chat.")
-    parser.add_argument("--mode-switch-alert-chat-id", help="Override Feishu chat_id for mode-switch alerts.")
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    config = merge_config(args.config)
-    client = LarkCli(config, dry_run=args.dry_run)
-
-    source_table = config["source"]["table_id"]
-    source_view = config["source"]["all_view_id"]
-    target_table = config["target"]["table_id"]
-    target_view = config["target"]["view_id"]
-
-    report: dict[str, Any] = {
-        "dry_run": args.dry_run,
-        "source_table": source_table,
-        "target_table": target_table,
-    }
-
-    source_records = client.record_list(source_table, source_view, SOURCE_FIELDS)
-    derived = derive_source(source_records)
-    report["source_records"] = len(source_records)
-    report["source_patch_records"] = len(derived.source_patches)
-    report["mode_groups"] = {f"{k[0]}|{k[1]}": v for k, v in sorted(derived.modes.items())}
-    report["target_planned_rows"] = len(build_target_rows(derived))
-
-    if not args.target_only:
-        report["source_updated_records"] = apply_source_patches(client, source_table, derived.source_patches)
-
-    target_rows = build_target_rows(derived)
-    report["mode_switch_alert_count"] = sum(1 for row in target_rows if row.get(T_MODE_SWITCH_HINT))
-    weather_provider = WeatherSummaryProvider(config.get("weather", {}))
-    if not args.source_only:
-        report["target_field_changes"] = ensure_target_fields(client, target_table)
-        report["target_write"] = upsert_target_rows(client, target_table, target_view, target_rows, weather_provider)
-        report["weather_warning_text"] = weather_provider.warning_text()
-    if weather_provider.error:
-        report["weather_forecast_error"] = weather_provider.error
-    if weather_provider.warning_error:
-        report["weather_warning_error"] = weather_provider.warning_error
-    if weather_provider.nearest_window_count:
-        report["weather_nearest_window_count"] = weather_provider.nearest_window_count
-
-    if args.dry_run:
-        source_after = source_records
-        target_after = []
-    else:
-        source_after = client.record_list(source_table, source_view, SOURCE_FIELDS)
-        target_after = client.record_list(target_table, target_view, TARGET_READ_FIELDS) if not args.source_only else []
-
-    if not args.dry_run and not args.target_only:
-        derived_after = derive_source(source_after)
-        report["source_verify_mismatches"] = verify_source(source_after, derived_after)[:20]
-        report["source_verify_mismatch_count"] = len(verify_source(source_after, derived_after))
-    if not args.dry_run and not args.source_only:
-        report["target_verify_mismatches"] = verify_target(target_after, target_rows)[:20]
-        report["target_verify_mismatch_count"] = len(verify_target(target_after, target_rows))
-
-    notify_config = dict((config.get("notifications") or {}).get("mode_switch_alerts") or {})
-    if args.mode_switch_alert_chat_id:
-        notify_config["chat_id"] = args.mode_switch_alert_chat_id
-    should_send_alerts = bool(notify_config.get("enabled", False) or args.send_mode_switch_alerts)
-    if should_send_alerts and not args.dry_run and not args.source_only:
-        report["mode_switch_alert_push"] = send_mode_switch_alerts(client, target_rows, notify_config)
-    elif should_send_alerts:
-        report["mode_switch_alert_push"] = {
-            "sent": False,
-            "reason": "dry_run_or_source_only",
-            "count": report["mode_switch_alert_count"],
-        }
-
-    if args.json_report:
-        print(json.dumps(report, ensure_ascii=False, indent=2))
-    else:
-        print("暖通运行数据处理完成" if not args.dry_run else "暖通运行数据处理 dry-run 完成")
-        print(f"- 源表记录: {report['source_records']}")
-        print(f"- 源表待/已处理记录: {report['source_patch_records']}")
-        print(f"- 目标表计划记录: {report['target_planned_rows']}")
-        print(f"- 模式切换提醒命中: {report['mode_switch_alert_count']}")
-        if "source_updated_records" in report:
-            print(f"- 源表写入记录: {report['source_updated_records']}")
-        if "target_write" in report:
-            print(f"- 目标表写入: {json.dumps(report['target_write'], ensure_ascii=False)}")
-        if "weather_warning_text" in report:
-            print(f"- 气象预警: {report['weather_warning_text']}")
-        if "mode_switch_alert_push" in report:
-            print(f"- 模式切换提醒推送: {json.dumps(report['mode_switch_alert_push'], ensure_ascii=False)}")
-        if "source_verify_mismatch_count" in report:
-            print(f"- 源表校验不一致: {report['source_verify_mismatch_count']}")
-        if "target_verify_mismatch_count" in report:
-            print(f"- 目标表校验不一致: {report['target_verify_mismatch_count']}")
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:
-        print(f"错误: {exc}", file=sys.stderr)
-        raise SystemExit(1)

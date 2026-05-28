@@ -47,7 +47,7 @@ def start_waiting_bridge_job(
             if isinstance(task, dict):
                 job_service.bind_bridge_task(job_id, str(task.get("task_id", "") or "").strip())
                 return job, task
-        raise RuntimeError("内网端 HTTP 桥接未配置或不可用，已移除共享 bridge.db 任务回退")
+        raise RuntimeError("内网端 HTTP 桥接未配置或不可用，已移除旧共享库任务回退")
     except Exception as exc:
         error_text = str(exc or "").strip() or "内网端 HTTP 桥接派发失败"
         try:

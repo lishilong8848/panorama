@@ -22,7 +22,6 @@ from app.modules.shared_bridge.service.alarm_event_page_export_service import (
     scheduled_bucket_for_time,
     write_alarm_event_json,
 )
-from app.modules.shared_bridge.service.alarm_external_selection import build_alarm_external_selection
 from app.modules.shared_bridge.service.bridge_status_presenter import (
     present_alarm_event_family,
     present_current_hour_refresh_overview,
@@ -35,7 +34,6 @@ from app.modules.shared_bridge.service.bridge_status_presenter import (
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver, build_bitable_url
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
-from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
 from app.shared.utils.atomic_file import atomic_copy_file, validate_excel_workbook_file
@@ -216,7 +214,7 @@ class SharedSourceCacheService:
         self,
         *,
         runtime_config: Dict[str, Any],
-        store: SharedBridgeStore | None,
+        store: Any | None,
         download_browser_pool: Any | None = None,
         emit_log: Callable[[str], None] | None = None,
     ) -> None:
@@ -863,31 +861,26 @@ class SharedSourceCacheService:
         return snapshot
 
     def _build_alarm_external_selection(self, *, building: str = "") -> Dict[str, Any]:
-        if self.store is None or self.shared_root is None:
-            return {
-                "selection_policy": "today_latest_else_yesterday_fallback",
-                "selection_reference_date": _now_dt().date().isoformat(),
-                "used_previous_day_fallback": [],
-                "missing_today_buildings": [],
-                "missing_both_days_buildings": [],
-                "ready_count": 0,
-                "failed_buildings": [],
-                "blocked_buildings": [],
-                "last_success_at": "",
-                "current_bucket": _now_dt().date().isoformat(),
-                "buildings": [],
-                "latest_selection": {},
-                "selected_entries": [],
-                "selected_by_building": {},
-            }
-        self._repair_inaccessible_ready_entries(source_family=FAMILY_ALARM_EVENT)
-        return build_alarm_external_selection(
-            store=self.store,
-            shared_root=self.shared_root,
-            reference_date=_now_dt().date(),
-            enabled_buildings=self.get_enabled_buildings(),
-            building=building,
-        )
+        # 外网端已切换到内网 HTTP source-index；这里保留空快照给旧展示入口使用，
+        # 避免重新引入旧共享库或 UNC 目录扫描。
+        return {
+            "selection_policy": "http_source_index_only",
+            "selection_reference_date": _now_dt().date().isoformat(),
+            "used_previous_day_fallback": [],
+            "missing_today_buildings": [],
+            "missing_both_days_buildings": [],
+            "ready_count": 0,
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "last_success_at": "",
+            "current_bucket": _now_dt().date().isoformat(),
+            "buildings": [],
+            "latest_selection": {},
+            "selected_entries": [],
+            "selected_by_building": {},
+            "transport": "http",
+            "building_filter": str(building or "").strip(),
+        }
 
     def get_alarm_event_upload_selection(self, *, building: str = "") -> Dict[str, Any]:
         return self._build_alarm_external_selection(building=building)

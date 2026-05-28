@@ -55,7 +55,7 @@ class InternalBridgeHttpClient:
             base_url=base_url,
             auth_token=str(cfg.get("auth_token", "") or "").strip(),
             connect_timeout_sec=int(cfg.get("connect_timeout_sec", 3) or 3),
-            read_timeout_sec=int(cfg.get("read_timeout_sec", cfg.get("request_timeout_sec", 15)) or 15),
+            read_timeout_sec=int(cfg.get("read_timeout_sec", cfg.get("request_timeout_sec", 5)) or 5),
         )
 
     def _request(

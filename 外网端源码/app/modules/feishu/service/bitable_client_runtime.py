@@ -203,6 +203,17 @@ class FeishuBitableClient:
                 try:
                     response.raise_for_status()
                 except requests.HTTPError as exc:
+                    error_body: Dict[str, Any] = {}
+                    try:
+                        parsed_body = response.json()
+                        if isinstance(parsed_body, dict):
+                            error_body = parsed_body
+                    except Exception:  # noqa: BLE001
+                        error_body = {}
+                    if auth_attempt == 0 and self._is_token_invalid_code(error_body.get("code")):
+                        self.invalidate_token()
+                        self.refresh_token(force=True)
+                        continue
                     if response.status_code in {401, 403} and auth_attempt == 0:
                         self.invalidate_token()
                         self.refresh_token(force=True)

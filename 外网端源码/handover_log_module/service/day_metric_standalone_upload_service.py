@@ -147,7 +147,7 @@ class DayMetricStandaloneUploadService:
         return True
 
     def _new_shared_source_cache_service(self, *, emit_log: Callable[[str], None]) -> None:
-        emit_log("[12项独立上传] 外网端已改用内网 HTTP source-index，不再打开共享 bridge.db")
+        emit_log("[12项独立上传] 外网端已改用内网 HTTP source-index，不再打开旧共享库")
         return None
 
     def _selected_buildings(self, *, building_scope: str, building: str | None) -> List[str]:

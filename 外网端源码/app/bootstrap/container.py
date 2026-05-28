@@ -2808,6 +2808,91 @@ class AppContainer:
             duration_ms=duration_ms,
         )
 
+    def record_auto_flow_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.scheduler:
+            return
+        self.scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
+    def record_day_metric_upload_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.day_metric_upload_scheduler:
+            return
+        self.day_metric_upload_scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
+    def record_branch_power_upload_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.branch_power_upload_scheduler:
+            return
+        self.branch_power_upload_scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
+    def record_monthly_event_report_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.monthly_event_report_scheduler:
+            return
+        self.monthly_event_report_scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
+    def record_monthly_change_report_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.monthly_change_report_scheduler:
+            return
+        self.monthly_change_report_scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
     def _apply_runtime_config_snapshot(self, settings: Dict[str, Any]) -> None:
         self.config = copy.deepcopy(settings)
         self.runtime_config = adapt_runtime_config(self.config)

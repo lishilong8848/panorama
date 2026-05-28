@@ -292,7 +292,12 @@ class BitableTargetResolver:
             body = body if isinstance(body, dict) else {}
 
             if status_code in {401, 403} and auth_attempt == 0:
+                client.invalidate_token()
                 last_message = f"{context_label} 鉴权失败"
+                continue
+            if auth_attempt == 0 and client._is_token_invalid_code(body.get("code")):  # noqa: SLF001
+                client.invalidate_token()
+                last_message = f"{context_label} token 已失效，刷新后重试"
                 continue
 
             if status_code >= 400:

@@ -327,6 +327,99 @@ def _accepted_waiting_job_response(job, task: Dict[str, Any] | None = None) -> D
     return payload
 
 
+def _alarm_event_upload_waiting_response_if_missing(
+    *,
+    container,
+    service,
+    mode: str,
+    building: str,
+    priority: str,
+    submitted_by: str,
+) -> Dict[str, Any] | None:
+    normalized_mode = str(mode or "").strip().lower() or "full"
+    building_text = str(building or "").strip()
+    target_buildings = [building_text] if normalized_mode == "single_building" and building_text else service.get_source_cache_buildings()
+    target_buildings = [item for item in target_buildings if str(item or "").strip()]
+    selection = service.get_alarm_event_upload_selection(
+        building=building_text if normalized_mode == "single_building" else "",
+    )
+    selected_entries = [
+        item
+        for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
+        if isinstance(item, dict)
+    ]
+    ready_buildings = {
+        str(item.get("building", "") or "").strip()
+        for item in selected_entries
+        if str(item.get("building", "") or "").strip()
+    }
+    missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
+    if not missing_buildings:
+        return None
+
+    target_bucket_key = ""
+    current_alarm_bucket = getattr(service, "current_alarm_event_bucket", None)
+    if callable(current_alarm_bucket):
+        try:
+            target_bucket_key = str(current_alarm_bucket() or "").strip()
+        except Exception:
+            target_bucket_key = ""
+    if not target_bucket_key:
+        target_bucket_key = str(
+            selection.get("target_bucket_key", "")
+            or selection.get("current_bucket", "")
+            or selection.get("selection_reference_date", "")
+            or ""
+        ).strip()
+    waiting_job, waiting_task = start_waiting_bridge_job(
+        job_service=container.job_service,
+        bridge_service=service,
+        name="使用共享文件上传60天-全部楼栋" if normalized_mode == "full" else f"使用共享文件上传60天-{building_text}",
+        worker_handler="alarm_event_upload",
+        worker_payload={
+            "resume_kind": "shared_bridge_alarm_event_upload",
+            "mode": normalized_mode,
+            "building": building_text or None,
+        },
+        resource_keys=["alarm_upload:global"],
+        priority=priority,
+        feature="alarm_event_upload",
+        dedupe_key=":".join(
+            [
+                "alarm_event_upload_wait_shared_bridge",
+                normalized_mode,
+                building_text or "all",
+                target_bucket_key or "-",
+            ]
+        ),
+        submitted_by=submitted_by,
+        bridge_get_or_create_name="get_or_create_alarm_event_upload_task",
+        bridge_create_name="create_alarm_event_upload_task",
+        bridge_kwargs={
+            "mode": normalized_mode,
+            "building": building_text or None,
+            "target_bucket_key": target_bucket_key or None,
+        },
+    )
+    task_id = str(waiting_task.get("task_id", "") or "-").strip() or "-"
+    job_id = str(getattr(waiting_job, "job_id", "") or "-").strip() or "-"
+    container.add_system_log(
+        "[共享桥接] 已受理告警上传共享桥接任务 "
+        f"task_id={task_id}, job_id={job_id}, mode={normalized_mode}, missing={','.join(missing_buildings)}"
+    )
+    payload = _accepted_waiting_job_response(waiting_job, waiting_task)
+    payload.update(
+        {
+            "running": True,
+            "mode": "waiting_shared_bridge",
+            "scope": building_text or "all",
+            "missing_buildings": list(missing_buildings),
+            "message": "告警源文件未齐全，已转入等待内网补采",
+        }
+    )
+    return payload
+
+
 def _run_external_alarm_upload_shared_flow(
     *,
     container,
@@ -1132,6 +1225,16 @@ def bridge_source_cache_alarm_upload_full(request: Request) -> Dict[str, Any]:
     service = getattr(container, "shared_bridge_service", None)
     if service is None:
         raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    waiting_response = _alarm_event_upload_waiting_response_if_missing(
+        container=container,
+        service=service,
+        mode="full",
+        building="",
+        priority="manual",
+        submitted_by="manual",
+    )
+    if waiting_response is not None:
+        return waiting_response
     dedupe_key = "alarm_event_upload:full"
 
     def _run(emit_log) -> Dict[str, Any]:
@@ -1207,6 +1310,16 @@ def bridge_source_cache_alarm_upload_building(
     if service is None:
         raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
     building_text = str(building or "").strip()
+    waiting_response = _alarm_event_upload_waiting_response_if_missing(
+        container=container,
+        service=service,
+        mode="single_building",
+        building=building_text,
+        priority="manual",
+        submitted_by="manual",
+    )
+    if waiting_response is not None:
+        return waiting_response
 
     def _run(emit_log) -> Dict[str, Any]:
         result = _run_external_alarm_upload_shared_flow(
@@ -1328,6 +1441,18 @@ def bridge_task_cancel(task_id: str, request: Request) -> Dict[str, Any]:
     if isinstance(existing_task, dict):
         task_request = existing_task.get("request", {}) if isinstance(existing_task.get("request", {}), dict) else {}
         resume_job_id = str(task_request.get("resume_job_id", "") or "").strip()
+    if not resume_job_id:
+        try:
+            waiting_jobs = container.job_service.list_jobs(limit=300, statuses=["waiting_resource"])
+            task_text = str(task_id or "").strip()
+            for job in waiting_jobs if isinstance(waiting_jobs, list) else []:
+                if not isinstance(job, dict):
+                    continue
+                if str(job.get("bridge_task_id", "") or "").strip() == task_text:
+                    resume_job_id = str(job.get("job_id", "") or "").strip()
+                    break
+        except Exception:
+            resume_job_id = ""
     try:
         cancelled = bool(service and service.cancel_task(task_id))
     except Exception as exc:  # noqa: BLE001
@@ -1363,6 +1488,9 @@ def bridge_task_retry(task_id: str, request: Request) -> Dict[str, Any]:
     _ensure_bridge_write_allowed(request)
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
+    existing_task = _get_visible_bridge_task(service, task_id)
+    if isinstance(existing_task, dict) and str(existing_task.get("transport", "") or "").strip().lower() == "http":
+        raise HTTPException(status_code=409, detail="HTTP桥接任务不支持旧式重试，请重新触发对应功能。")
     try:
         retried = bool(service and service.retry_task(task_id))
     except Exception as exc:  # noqa: BLE001

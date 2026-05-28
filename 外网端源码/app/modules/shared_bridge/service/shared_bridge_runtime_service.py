@@ -1897,6 +1897,35 @@ class SharedBridgeRuntimeService:
         if self._mirror_store is not None:
             self._mirror_store.upsert_task(task_payload)
 
+    def _mark_cached_task_cancelled(self, task_id: str) -> None:
+        task_text = str(task_id or "").strip()
+        if not task_text:
+            return
+        now_text = _now_text()
+        updated = False
+        next_tasks: List[Dict[str, Any]] = []
+        for task in self._cached_task_list:
+            if not isinstance(task, dict):
+                continue
+            item = copy.deepcopy(task)
+            if str(item.get("task_id", "") or "").strip() == task_text:
+                item["status"] = "cancelled"
+                item["updated_at"] = now_text
+                item["transport"] = str(item.get("transport", "") or "http").strip() or "http"
+                updated = True
+            next_tasks.append(item)
+        if updated:
+            self._cached_task_list = next_tasks
+        detail = self._cached_task_details.get(task_text)
+        if isinstance(detail, dict):
+            item = copy.deepcopy(detail)
+            item["status"] = "cancelled"
+            item["updated_at"] = now_text
+            item["transport"] = str(item.get("transport", "") or "http").strip() or "http"
+            self._cached_task_details[task_text] = item
+            if self._mirror_store is not None:
+                self._mirror_store.upsert_task(item)
+
     def _list_http_bridge_tasks(self, *, status: str = "", limit: int = 100) -> List[Dict[str, Any]]:
         if not self._http_bridge_should_try() or self._internal_bridge_http_client is None:
             return []
@@ -1909,11 +1938,12 @@ class SharedBridgeRuntimeService:
                 item = copy.deepcopy(task)
                 item["transport"] = "http"
                 normalized.append(item)
-            if normalized:
-                self._cache_task_list(normalized)
+            self._cache_task_list(normalized)
             return normalized
         except Exception as exc:  # noqa: BLE001
             self._emit_http_bridge_issue_log("读取任务列表", exc)
+            if self._http_bridge_forced():
+                self._cache_task_list([])
             return []
 
     @staticmethod
@@ -2497,7 +2527,7 @@ class SharedBridgeRuntimeService:
 
     def list_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
         http_tasks = self._list_http_bridge_tasks(limit=limit)
-        if http_tasks:
+        if http_tasks or self._http_bridge_forced():
             return http_tasks
         if not self._store:
             return self.get_cached_tasks(limit=limit)
@@ -2520,7 +2550,7 @@ class SharedBridgeRuntimeService:
     def list_active_tasks(self, *, limit: int = 1000) -> list[Dict[str, Any]]:
         safe_limit = max(1, int(limit or 1000))
         http_tasks = self._list_http_bridge_tasks(status="active", limit=safe_limit)
-        if http_tasks:
+        if http_tasks or self._http_bridge_forced():
             return http_tasks[:safe_limit]
         if not self._store:
             return [
@@ -2560,7 +2590,7 @@ class SharedBridgeRuntimeService:
     def list_recent_tasks(self, *, limit: int = 100) -> list[Dict[str, Any]]:
         safe_limit = max(1, int(limit or 100))
         http_tasks = self._list_http_bridge_tasks(limit=safe_limit)
-        if http_tasks:
+        if http_tasks or self._http_bridge_forced():
             cached_active = [
                 task
                 for task in copy.deepcopy(self._cached_task_list)
@@ -2646,7 +2676,10 @@ class SharedBridgeRuntimeService:
         task_text = str(task_id or "").strip()
         if self._http_bridge_should_try() and task_text:
             try:
-                return bool(self._internal_bridge_http_client.cancel_task(task_text)) if self._internal_bridge_http_client else False
+                cancelled = bool(self._internal_bridge_http_client.cancel_task(task_text)) if self._internal_bridge_http_client else False
+                if cancelled:
+                    self._mark_cached_task_cancelled(task_text)
+                return cancelled
             except Exception as exc:  # noqa: BLE001
                 self._emit_http_bridge_issue_log("取消任务", exc)
                 if self._http_bridge_forced():

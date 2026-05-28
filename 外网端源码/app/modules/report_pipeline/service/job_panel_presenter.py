@@ -523,7 +523,8 @@ def present_bridge_task(task: Dict[str, Any]) -> Dict[str, Any]:
         meta_parts.append(f"时间：{time_text}")
     cancel_allowed = bool(task_id) and not _is_bridge_terminal_status(task)
     normalized_status = str(task.get("status", "") or "").strip().lower()
-    retry_allowed = bool(task_id) and normalized_status in {
+    transport = str(task.get("transport", "") or "").strip().lower()
+    retry_allowed = bool(task_id) and transport != "http" and normalized_status in {
         "failed",
         "partial_failed",
         "cancelled",
@@ -560,7 +561,15 @@ def present_bridge_task(task: Dict[str, Any]) -> Dict[str, Any]:
                 "allowed": retry_allowed,
                 "pending": False,
                 "label": "重试任务",
-                "disabled_reason": "" if retry_allowed else "当前状态不可重试",
+                "disabled_reason": (
+                    ""
+                    if retry_allowed
+                    else (
+                        "HTTP桥接任务请重新触发对应功能"
+                        if transport == "http"
+                        else "当前状态不可重试"
+                    )
+                ),
                 "reason_code": "bridge_retry_available" if retry_allowed else "bridge_retry_not_allowed",
                 "target_kind": "bridge",
                 "target_id": task_id,

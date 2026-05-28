@@ -306,6 +306,8 @@ class ApschedulerSchedulerFacade:
             "last_trigger_result": "",
         }
         self._active = False
+        self._dispatch_lock = threading.Lock()
+        self._dispatch_thread: threading.Thread | None = None
         self._diag_lock = threading.Lock()
         self._diag_logs: list[str] = []
         self._max_diag_logs = 200
@@ -540,6 +542,42 @@ class ApschedulerSchedulerFacade:
         )
         self._log("已登记启动补偿检查任务")
 
+    def _schedule_daily_retry_if_needed(self, *, status: str, detail: str, now: datetime) -> None:
+        if self.schedule_kind != "daily":
+            return
+        if not self._active:
+            return
+        if not bool(self.cfg.get("retry_failed_in_same_period", False)):
+            return
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status in {"ok", "success", "accepted", "submitted", "skipped"}:
+            return
+        period = self._period(now)
+        if self.state.get("retry_done_period", "") == period:
+            return
+        if self.state.get("last_success_period", "") == period:
+            return
+        try:
+            delay_sec = int(self.cfg.get("retry_delay_sec", self.cfg.get("check_interval_sec", 300)) or 300)
+        except Exception:  # noqa: BLE001
+            delay_sec = 300
+        delay_sec = max(60, min(delay_sec, 3600))
+        self.orchestrator.remove_jobs_by_prefix(f"{self.scheduler_key}:retry:")
+        job_id = f"{self.scheduler_key}:retry:{period.replace('-', '')}"
+        self.orchestrator.add_date_job(
+            job_id=job_id,
+            name=f"{self.source_name}-失败重试",
+            run_date=now + timedelta(seconds=delay_sec),
+            func=_run_registered_scheduler_job,
+            args=[self.scheduler_key, "retry_failed"],
+            misfire_grace_time=max(60, delay_sec * 2),
+        )
+        detail_text = str(detail or "").strip()
+        self._log(
+            f"已登记本周期失败重试: period={period}, delay_sec={delay_sec}"
+            + (f", reason={detail_text[:120]}" if detail_text else "")
+        )
+
     def is_running(self) -> bool:
         return self._active and self.orchestrator.get_job(self.scheduler_key) is not None
 
@@ -629,32 +667,20 @@ class ApschedulerSchedulerFacade:
                 self.state["retry_done_period"] = period
         self._save_state()
 
-    def _fire(self, *, trigger_source: str) -> None:
-        now = datetime.now()
-        self.runtime["last_check_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
-        self.runtime["last_trigger_at"] = self.runtime["last_check_at"]
+    def _dispatch_in_progress(self) -> bool:
+        thread = self._dispatch_thread
+        return bool(thread is not None and thread.is_alive())
+
+    def _run_fire_dispatch(self, *, trigger_source: str, attempt_at: datetime) -> None:
         started = datetime.now()
         status = "submitted"
         detail = ""
         try:
-            if not self.enabled:
+            if not self._active:
                 status = "skipped"
-                detail = "skip:disabled"
-                self.runtime["last_decision"] = "skip:disabled"
+                detail = "skip:stopped"
+                self.runtime["last_decision"] = "skip:stopped"
                 return
-            allowed, reason_or_period = self._period_allows_fire(now)
-            if not allowed:
-                status = "skipped"
-                detail = f"skip:{reason_or_period}"
-                self.runtime["last_decision"] = detail
-                return
-            if callable(self.is_busy) and self.is_busy():
-                status = "skipped"
-                detail = "skip:busy"
-                self.runtime["last_decision"] = "skip:busy"
-                self._log("本次触发跳过: 当前同功能任务运行中")
-                return
-            self.runtime["last_decision"] = f"run:{trigger_source}"
             ok, callback_detail = self.run_callback(self.source_name)
             detail = str(callback_detail or "").strip()
             if ok:
@@ -683,8 +709,48 @@ class ApschedulerSchedulerFacade:
             )
             if should_record_state:
                 self._record_fire_state(now=finished, status=status, detail=detail, duration_ms=duration_ms)
+                self._schedule_daily_retry_if_needed(status=status, detail=detail, now=finished)
             if self.schedule_kind == "monthly" and self._active:
                 self._schedule_main_job()
+            with self._dispatch_lock:
+                if threading.current_thread() is self._dispatch_thread:
+                    self._dispatch_thread = None
+
+    def _fire(self, *, trigger_source: str) -> None:
+        now = datetime.now()
+        self.runtime["last_check_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        self.runtime["last_trigger_at"] = self.runtime["last_check_at"]
+        if not self.enabled:
+            self.runtime["last_decision"] = "skip:disabled"
+            self.runtime["last_trigger_result"] = "skipped:skip:disabled"
+            return
+        allowed, reason_or_period = self._period_allows_fire(now)
+        if not allowed:
+            detail = f"skip:{reason_or_period}"
+            self.runtime["last_decision"] = detail
+            self.runtime["last_trigger_result"] = f"skipped:{detail}"
+            return
+        if callable(self.is_busy) and self.is_busy():
+            self.runtime["last_decision"] = "skip:busy"
+            self.runtime["last_trigger_result"] = "skipped:skip:busy"
+            self._log("本次触发跳过: 当前同功能任务运行中")
+            return
+        with self._dispatch_lock:
+            if self._dispatch_in_progress():
+                self.runtime["last_decision"] = "skip:dispatch_busy"
+                self.runtime["last_trigger_result"] = "skipped:skip:dispatch_busy"
+                self._log("本次触发跳过: 上一轮调度派发仍在运行")
+                return
+            self.runtime["last_decision"] = f"dispatch:{trigger_source}"
+            self.runtime["last_trigger_result"] = "dispatching"
+            thread = threading.Thread(
+                target=self._run_fire_dispatch,
+                kwargs={"trigger_source": trigger_source, "attempt_at": now},
+                name=f"scheduler-dispatch-{self.scheduler_key[:32]}",
+                daemon=True,
+            )
+            self._dispatch_thread = thread
+            thread.start()
 
     def record_external_run(
         self,
@@ -720,6 +786,7 @@ class ApschedulerSchedulerFacade:
         self._save_state()
         self.runtime["last_trigger_at"] = attempt_text
         self.runtime["last_trigger_result"] = normalized_status
+        self._schedule_daily_retry_if_needed(status=normalized_status, detail=detail, now=attempt)
 
     def reset_today_state_for_run_time_change(self, now: datetime | None = None) -> Dict[str, Any]:
         current = now or datetime.now()

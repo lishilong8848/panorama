@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import sys
 import asyncio
+import json
+import time
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import requests
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
@@ -13,7 +17,19 @@ if str(PROJECT_DIR) not in sys.path:
 
 from app.core.app_state import AppStateRepository  # noqa: E402
 from app.bootstrap.app_factory import create_app  # noqa: E402
-from app.modules.scheduler.service.apscheduler_orchestrator import ApschedulerOrchestrator  # noqa: E402
+from app.config.config_schema_v3 import DEFAULT_CONFIG_V3  # noqa: E402
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient  # noqa: E402
+from app.modules.feishu.service.feishu_token_manager import feishu_token_manager  # noqa: E402
+from app.modules.feishu.service.im_file_message_client import FeishuImFileMessageClient  # noqa: E402
+from app.modules.feishu.service.sheets_client_runtime import FeishuSheetsClientRuntime  # noqa: E402
+from app.modules.report_pipeline.api.routes import _filter_accessible_cached_entries  # noqa: E402
+from app.modules.report_pipeline.service.job_service import JobService, JobState, StageState  # noqa: E402
+from app.shared.runtime_dependency_spec import normalized_runtime_dependency_specs  # noqa: E402
+from app.modules.scheduler.service.apscheduler_orchestrator import (  # noqa: E402
+    ApschedulerOrchestrator,
+    ApschedulerSchedulerFacade,
+)
+from app.modules.shared_bridge.api.routes import _alarm_event_upload_waiting_response_if_missing  # noqa: E402
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService  # noqa: E402
 from app.modules.tasks.api.routes import cancel_task  # noqa: E402
 from handover_log_module.service.review_session_service import ReviewSessionService  # noqa: E402
@@ -159,6 +175,77 @@ def check_task_cancel_bridge_binding() -> None:
     print("[OK] task_cancel_bridge_binding")
 
 
+def check_alarm_upload_missing_source_returns_waiting_job() -> None:
+    class _FakeWaitingJob:
+        job_id = "alarm-wait-job-1"
+
+        def to_dict(self) -> dict:
+            return {"job_id": self.job_id, "status": "waiting_resource", "feature": "alarm_event_upload"}
+
+    class _FakeAlarmJobService:
+        def __init__(self) -> None:
+            self.bound: list[tuple[str, str]] = []
+
+        def create_waiting_worker_job(self, **kwargs):  # noqa: ANN001
+            _assert(kwargs.get("feature") == "alarm_event_upload", "unexpected waiting job feature")
+            _assert(kwargs.get("worker_handler") == "alarm_event_upload", "unexpected waiting job handler")
+            return _FakeWaitingJob()
+
+        def bind_bridge_task(self, job_id: str, task_id: str) -> None:
+            self.bound.append((job_id, task_id))
+
+        def fail_waiting_job(self, job_id: str, *, error_text: str, summary: str = "") -> None:
+            raise AssertionError(f"waiting job should not fail: {job_id} {error_text} {summary}")
+
+    class _FakeAlarmBridgeService:
+        def __init__(self) -> None:
+            self.created_kwargs: dict = {}
+
+        def get_source_cache_buildings(self) -> list[str]:
+            return ["A楼", "B楼"]
+
+        def get_alarm_event_upload_selection(self, building: str = "") -> dict:
+            return {
+                "selected_entries": [{"building": "A楼", "file_path": r"\\172.16.1.2\share\a.json"}],
+                "transport": "http",
+                "target_bucket_key": "2026-05-28 11",
+            }
+
+        def create_http_bridge_task(self, *, get_or_create_name: str, create_name: str, bridge_kwargs: dict) -> dict:
+            self.created_kwargs = {
+                "get_or_create_name": get_or_create_name,
+                "create_name": create_name,
+                "bridge_kwargs": dict(bridge_kwargs or {}),
+            }
+            return {"task_id": "alarm-http-task-1", "status": "queued"}
+
+    logs: list[str] = []
+    bridge_service = _FakeAlarmBridgeService()
+    job_service = _FakeAlarmJobService()
+    container = SimpleNamespace(
+        job_service=job_service,
+        add_system_log=lambda text, **_: logs.append(str(text)),
+    )
+    payload = _alarm_event_upload_waiting_response_if_missing(
+        container=container,
+        service=bridge_service,
+        mode="full",
+        building="",
+        priority="manual",
+        submitted_by="manual",
+    )
+    _assert(isinstance(payload, dict), "missing alarm source should return waiting payload")
+    _assert(payload.get("mode") == "waiting_shared_bridge", "waiting payload mode is wrong")
+    _assert(payload.get("missing_buildings") == ["B楼"], "missing building not surfaced")
+    _assert(payload.get("job", {}).get("job_id") == "alarm-wait-job-1", "response did not expose waiting job")
+    _assert(job_service.bound == [("alarm-wait-job-1", "alarm-http-task-1")], "bridge task not bound to waiting job")
+    _assert(
+        bridge_service.created_kwargs.get("bridge_kwargs", {}).get("target_bucket_key") == "2026-05-28 11",
+        "alarm bridge target bucket was not passed through",
+    )
+    print("[OK] alarm_upload_missing_source_waiting_job")
+
+
 def check_apscheduler_facade() -> None:
     app = create_app(enable_lifespan=False)
     container = app.state.container
@@ -181,6 +268,511 @@ def check_apscheduler_facade() -> None:
     container.stop_branch_power_upload_scheduler(source="baseline_check")
     container.shutdown_scheduler_orchestrator(source="baseline_check")
     print("[OK] apscheduler_facade")
+
+
+def check_runtime_dependencies_include_scheduler_jobstore() -> None:
+    spec_pairs = {
+        (str(item.get("package", "") or "").strip(), str(item.get("import_name", "") or "").strip())
+        for item in normalized_runtime_dependency_specs()
+        if isinstance(item, dict)
+    }
+    _assert(("APScheduler", "apscheduler") in spec_pairs, "APScheduler missing from runtime dependency specs")
+    _assert(("SQLAlchemy", "sqlalchemy") in spec_pairs, "SQLAlchemy missing from runtime dependency specs")
+    lock_path = PROJECT_DIR / "runtime_dependency_lock.json"
+    payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    packages = payload.get("packages", []) if isinstance(payload, dict) else []
+    lock_pairs = {
+        (str(item.get("package", "") or "").strip(), str(item.get("import_name", "") or "").strip())
+        for item in packages
+        if isinstance(item, dict)
+    }
+    _assert(("APScheduler", "apscheduler") in lock_pairs, "APScheduler missing from runtime dependency lock")
+    _assert(("SQLAlchemy", "sqlalchemy") in lock_pairs, "SQLAlchemy missing from runtime dependency lock")
+    print("[OK] runtime_dependencies_scheduler_jobstore")
+
+
+def check_daily_scheduler_failed_run_schedules_retry() -> None:
+    class _FakeOrchestrator:
+        timezone = "Asia/Shanghai"
+
+        def __init__(self) -> None:
+            self.date_jobs: list[dict] = []
+            self.removed_prefixes: list[str] = []
+            self.handlers: dict[str, Any] = {}
+
+        def register_fire_handler(self, scheduler_key: str, handler) -> None:  # noqa: ANN001
+            self.handlers[str(scheduler_key or "")] = handler
+
+        def remove_jobs_by_prefix(self, prefix: str) -> None:
+            self.removed_prefixes.append(str(prefix or ""))
+
+        def add_date_job(self, **kwargs):  # noqa: ANN001
+            self.date_jobs.append(dict(kwargs))
+
+        def get_job(self, job_id: str):  # noqa: ANN001
+            return SimpleNamespace(next_run_time=None)
+
+    calls: list[str] = []
+    fake_orchestrator = _FakeOrchestrator()
+    facade = ApschedulerSchedulerFacade(
+        scheduler_key="baseline_daily_retry",
+        feature="baseline",
+        scheduler_cfg={
+            "enabled": True,
+            "run_time": "00:10:00",
+            "check_interval_sec": 30,
+            "retry_failed_in_same_period": True,
+            "state_file": f".runtime/architecture_baseline_check/baseline_daily_retry_state_{time.time_ns()}.json",
+        },
+        runtime_state_root=".runtime",
+        emit_log=lambda _text: None,
+        run_callback=lambda source: (calls.append(str(source)) is None, "submitted retry"),
+        is_busy=lambda: False,
+        orchestrator=fake_orchestrator,  # type: ignore[arg-type]
+        schedule_kind="daily",
+        source_name="每日失败重试基线",
+    )
+    facade._active = True  # noqa: SLF001
+    facade.record_external_run(status="failed", source="baseline", detail="first failure")
+    period = facade.state.get("last_attempt_period", "")
+    _assert(period, "daily failed external run did not record attempt period")
+    _assert(len(fake_orchestrator.date_jobs) == 1, "daily failed external run did not schedule retry")
+    retry_job = fake_orchestrator.date_jobs[-1]
+    _assert(
+        retry_job.get("args") == ["baseline_daily_retry", "retry_failed"],
+        f"daily retry job args unexpected: {retry_job.get('args')}",
+    )
+    facade._fire(trigger_source="baseline")  # noqa: SLF001
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and facade._dispatch_in_progress():  # noqa: SLF001
+        time.sleep(0.02)
+    _assert(len(calls) == 1, "daily retry trigger did not enter callback")
+    _assert(facade.state.get("retry_done_period") == period, "daily retry did not mark retry_done_period")
+    retry_count_after_dispatch = len(fake_orchestrator.date_jobs)
+    facade.record_external_run(status="failed", source="baseline", detail="second failure")
+    _assert(
+        len(fake_orchestrator.date_jobs) == retry_count_after_dispatch,
+        "daily scheduler scheduled more than one retry in the same period",
+    )
+    print("[OK] daily_scheduler_failed_run_schedules_retry")
+
+
+def check_apscheduler_dispatch_nonblocking() -> None:
+    logs: list[str] = []
+    calls: list[str] = []
+
+    def _emit_log(text: str) -> None:
+        logs.append(str(text))
+
+    def _callback(source: str) -> tuple[bool, str]:
+        calls.append(str(source))
+        time.sleep(0.5)
+        return True, "submitted baseline job"
+
+    orchestrator = ApschedulerOrchestrator(emit_log=_emit_log)
+    facade = ApschedulerSchedulerFacade(
+        scheduler_key="baseline_dispatch_nonblocking",
+        feature="baseline",
+        scheduler_cfg={
+            "enabled": True,
+            "interval_minutes": 10,
+            "state_file": ".runtime/baseline_dispatch_nonblocking_state.json",
+        },
+        runtime_state_root=".runtime",
+        emit_log=_emit_log,
+        run_callback=_callback,
+        is_busy=lambda: False,
+        orchestrator=orchestrator,
+        schedule_kind="interval",
+        source_name="调度非阻塞基线",
+    )
+    facade._active = True  # noqa: SLF001
+    start = time.perf_counter()
+    facade._fire(trigger_source="baseline")  # noqa: SLF001
+    first_ms = int((time.perf_counter() - start) * 1000)
+    second_start = time.perf_counter()
+    facade._fire(trigger_source="baseline")  # noqa: SLF001
+    second_ms = int((time.perf_counter() - second_start) * 1000)
+    time.sleep(0.8)
+    _assert(first_ms < 100, f"scheduler fire blocked too long: {first_ms}ms")
+    _assert(second_ms < 100, f"scheduler busy skip blocked too long: {second_ms}ms")
+    _assert(len(calls) == 1, "scheduler dispatch did not dedupe in-flight trigger")
+    _assert(any("上一轮调度派发仍在运行" in line for line in logs), "missing dispatch_busy diagnostic log")
+    _assert(facade.state.get("last_status") == "submitted", "scheduler dispatch did not record submitted status")
+
+    stopped_calls: list[str] = []
+
+    def _stopped_callback(source: str) -> tuple[bool, str]:
+        stopped_calls.append(str(source))
+        return True, "should not run"
+
+    stopped_facade = ApschedulerSchedulerFacade(
+        scheduler_key="baseline_dispatch_stopped",
+        feature="baseline",
+        scheduler_cfg={
+            "enabled": True,
+            "interval_minutes": 10,
+            "state_file": ".runtime/baseline_dispatch_stopped_state.json",
+        },
+        runtime_state_root=".runtime",
+        emit_log=_emit_log,
+        run_callback=_stopped_callback,
+        is_busy=lambda: False,
+        orchestrator=orchestrator,
+        schedule_kind="interval",
+        source_name="停用调度基线",
+    )
+    stopped_facade._fire(trigger_source="baseline")  # noqa: SLF001
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and stopped_facade._dispatch_in_progress():  # noqa: SLF001
+        time.sleep(0.02)
+    _assert(not stopped_calls, "stopped scheduler dispatch entered callback")
+    _assert(
+        stopped_facade.runtime.get("last_decision") == "skip:stopped",
+        "stopped scheduler did not record skip:stopped",
+    )
+    print("[OK] apscheduler_dispatch_nonblocking")
+
+
+def check_external_cache_filter_does_not_probe_files() -> None:
+    unc_path = r"\\172.16.1.2\share\baseline_missing\missing.xlsx"
+    entries = [{"building": "A楼", "file_path": unc_path}]
+    filtered = _filter_accessible_cached_entries(entries)
+    _assert(len(filtered) == 1, "default source-index filter probed file accessibility")
+    local_missing = PROJECT_DIR / ".runtime" / "architecture_baseline_check" / "missing.xlsx"
+    filtered_with_probe = _filter_accessible_cached_entries(
+        [{"building": "A楼", "file_path": str(local_missing)}],
+        verify_files=True,
+    )
+    _assert(filtered_with_probe == [], "explicit file accessibility probe did not filter missing path")
+    print("[OK] external_cache_filter_no_file_probe")
+
+
+def check_job_failure_notification_policy() -> None:
+    calls: list[tuple[str, float]] = []
+
+    class _FakeResponse:
+        def __enter__(self):  # noqa: ANN001
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def read(self) -> bytes:
+            return b"ok"
+
+    def _fake_urlopen(request, timeout=0):  # noqa: ANN001
+        calls.append((str(getattr(request, "full_url", "") or ""), float(timeout or 0)))
+        return _FakeResponse()
+
+    original_urlopen = urllib.request.urlopen
+    urllib.request.urlopen = _fake_urlopen  # type: ignore[assignment]
+    try:
+        service = JobService()
+        service.set_global_log_sink(lambda _text: None)
+        service._runtime_config = {  # noqa: SLF001
+            "notify": {
+                "task_failure_webhook_enabled": True,
+                "task_failure_webhook_url": "https://example.invalid/baseline-webhook",
+                "task_failure_webhook_timeout": 1,
+            }
+        }
+        cases = {
+            "success": JobState(job_id="success", name="成功任务", status="success", result={"ok": True, "failed": 0}),
+            "cancelled": JobState(job_id="cancelled", name="取消任务", status="cancelled"),
+            "failed": JobState(job_id="failed", name="失败任务", status="failed", error="boom"),
+            "partial": JobState(
+                job_id="partial",
+                name="部分失败任务",
+                status="success",
+                result={"status": "partial_failed", "error": "partial"},
+            ),
+            "count_failed": JobState(
+                job_id="count_failed",
+                name="失败计数任务",
+                status="success",
+                result={"failed_count": 1},
+            ),
+            "interrupted": JobState(job_id="interrupted", name="中断任务", status="interrupted", error="worker stopped"),
+            "blocked": JobState(
+                job_id="blocked_precondition",
+                name="前置条件阻塞任务",
+                status="blocked_precondition",
+                error="missing source",
+            ),
+            "stage_failed": JobState(
+                job_id="stage_failed",
+                name="阶段失败任务",
+                status="success",
+                stages=[StageState(stage_id="main", name="main", status="failed", error="stage boom")],
+            ),
+        }
+        for job in cases.values():
+            service._notify_job_failure_to_feishu_async(job)  # noqa: SLF001
+            service._notify_job_failure_to_feishu_async(job)  # noqa: SLF001
+        time.sleep(0.5)
+    finally:
+        urllib.request.urlopen = original_urlopen  # type: ignore[assignment]
+    _assert(len(calls) == 6, f"unexpected failure notification calls: {len(calls)}")
+    _assert(not cases["success"].failure_notified_at, "success job should not notify")
+    _assert(not cases["cancelled"].failure_notified_at, "cancelled job should not notify")
+    for key in ("failed", "partial", "count_failed", "interrupted", "blocked", "stage_failed"):
+        _assert(bool(cases[key].failure_notified_at), f"{key} job should notify once")
+
+    failed_send_calls: list[str] = []
+
+    def _fake_failed_urlopen(request, timeout=0):  # noqa: ANN001
+        failed_send_calls.append(str(getattr(request, "full_url", "") or ""))
+        raise OSError("temporary webhook outage")
+
+    failing_job = JobState(job_id="webhook_failed", name="机器人失败任务", status="failed", error="boom")
+    original_urlopen = urllib.request.urlopen
+    urllib.request.urlopen = _fake_failed_urlopen  # type: ignore[assignment]
+    try:
+        service = JobService()
+        service.set_global_log_sink(lambda _text: None)
+        service._runtime_config = {  # noqa: SLF001
+            "notify": {
+                "task_failure_webhook_enabled": True,
+                "task_failure_webhook_url": "https://example.invalid/baseline-webhook",
+                "task_failure_webhook_timeout": 1,
+            }
+        }
+        service._notify_job_failure_to_feishu_async(failing_job)  # noqa: SLF001
+        time.sleep(1.8)
+    finally:
+        urllib.request.urlopen = original_urlopen  # type: ignore[assignment]
+    _assert(len(failed_send_calls) == 3, "failed webhook send should retry three times")
+    _assert(not failing_job.failure_notified_at, "failed webhook send must not mark job as notified")
+    print("[OK] job_failure_notification_policy")
+
+
+def check_no_task_success_group_notification_runtime() -> None:
+    job_service_text = (PROJECT_DIR / "app" / "modules" / "report_pipeline" / "service" / "job_service.py").read_text(
+        encoding="utf-8",
+        errors="ignore",
+    )
+    forbidden = [
+        "_notify_job_success",
+        "_job_success_notify",
+        "全景助手控制台任务完成",
+    ]
+    hits = [item for item in forbidden if item in job_service_text]
+    _assert(not hits, "job service still contains task success group notification runtime: " + ", ".join(hits))
+    _assert("_notify_job_failure_to_feishu_async" in job_service_text, "job failure notification runtime missing")
+    print("[OK] no_task_success_group_notification_runtime")
+
+
+def check_scheduler_callbacks_do_not_wait_for_jobs() -> None:
+    paths = [
+        PROJECT_DIR / "app" / "bootstrap" / "app_factory.py",
+        PROJECT_DIR / "app" / "bootstrap" / "container.py",
+        PROJECT_DIR / "app" / "modules" / "scheduler" / "service" / "apscheduler_orchestrator.py",
+    ]
+    wait_hits: list[str] = []
+    blocking_patterns = ("wait_job(", ".result(", "thread.join(")
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for pattern in blocking_patterns:
+            if pattern in text:
+                wait_hits.append(f"{path.relative_to(PROJECT_DIR)}:{pattern}")
+    _assert(not wait_hits, "scheduler path contains blocking job wait patterns: " + ", ".join(wait_hits))
+    app_factory_text = paths[0].read_text(encoding="utf-8", errors="ignore")
+    for callback_name in (
+        "scheduler_callback",
+        "handover_scheduler_callback",
+        "wet_bulb_collection_scheduler_callback",
+        "chiller_mode_upload_scheduler_callback",
+        "day_metric_upload_scheduler_callback",
+        "branch_power_upload_scheduler_callback",
+        "alarm_event_upload_scheduler_callback",
+        "monthly_event_report_scheduler_callback",
+        "monthly_change_report_scheduler_callback",
+    ):
+        _assert(f"def {callback_name}" in app_factory_text, f"scheduler callback missing: {callback_name}")
+    print("[OK] scheduler_callbacks_do_not_wait_for_jobs")
+
+
+def check_feishu_invalid_token_refresh_retry() -> None:
+    class _FakeResponse:
+        def __init__(self, body: dict, status_code: int = 200) -> None:
+            self._body = body
+            self.status_code = status_code
+            self.url = "https://open.feishu.cn/open-apis/baseline"
+            self.text = str(body)
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise requests.HTTPError(response=self)
+
+        def json(self) -> dict:
+            return dict(self._body)
+
+    def _exercise(label: str, client_factory, request_call, expected_token_calls: list[bool]) -> None:  # noqa: ANN001
+        token_calls: list[bool] = []
+        invalidated: list[bool] = []
+        request_tokens: list[str] = []
+
+        def _fake_get_token(*, app_id: str, app_secret: str, timeout: int, force_refresh: bool = False) -> str:
+            token_calls.append(bool(force_refresh))
+            return "fresh-token" if force_refresh else "stale-token"
+
+        def _fake_invalidate(*, app_id: str, app_secret: str) -> None:
+            invalidated.append(True)
+
+        def _fake_request(method: str, url: str, **kwargs):  # noqa: ANN001
+            headers = kwargs.get("headers", {}) if isinstance(kwargs.get("headers", {}), dict) else {}
+            request_tokens.append(str(headers.get("Authorization", "") or ""))
+            if len(request_tokens) == 1:
+                return _FakeResponse({"code": 99991663, "msg": "Invalid access token for authorization."})
+            return _FakeResponse({"code": 0, "data": {"ok": True}})
+
+        original_get_token = feishu_token_manager.get_token
+        original_invalidate = feishu_token_manager.invalidate
+        original_request = requests.request
+        feishu_token_manager.get_token = _fake_get_token  # type: ignore[method-assign]
+        feishu_token_manager.invalidate = _fake_invalidate  # type: ignore[method-assign]
+        requests.request = _fake_request  # type: ignore[assignment]
+        try:
+            client = client_factory()
+            result = request_call(client)
+        finally:
+            feishu_token_manager.get_token = original_get_token  # type: ignore[method-assign]
+            feishu_token_manager.invalidate = original_invalidate  # type: ignore[method-assign]
+            requests.request = original_request  # type: ignore[assignment]
+
+        _assert(result.get("code") == 0, f"{label} client did not recover after invalid token")
+        _assert(invalidated, f"{label} invalid token did not invalidate shared token cache")
+        _assert(token_calls == expected_token_calls, f"{label} unexpected token refresh sequence: {token_calls}")
+        _assert(
+            request_tokens == ["Bearer stale-token", "Bearer fresh-token"],
+            f"{label} unexpected request auth tokens: {request_tokens}",
+        )
+
+    _exercise(
+        "bitable",
+        lambda: FeishuBitableClient(
+            app_id="cli_a",
+            app_secret="secret",
+            app_token="base",
+            calc_table_id="tbl",
+            attachment_table_id="tbl_attach",
+            timeout=1,
+            request_retry_count=0,
+            request_retry_interval_sec=0,
+            date_text_to_timestamp_ms_fn=lambda **_: 0,
+            canonical_metric_name_fn=lambda value: str(value),
+            dimension_mapping={},
+        ),
+        lambda client: client._request_json_with_auth_retry(  # noqa: SLF001
+            "GET",
+            "https://open.feishu.cn/open-apis/baseline",
+        ),
+        [False, True, True],
+    )
+    _exercise(
+        "sheets",
+        lambda: FeishuSheetsClientRuntime(
+            app_id="cli_a",
+            app_secret="secret",
+            timeout=1,
+            request_retry_count=0,
+            request_retry_interval_sec=0,
+        ),
+        lambda client: client._request_json_with_auth_retry(  # noqa: SLF001
+            "GET",
+            "https://open.feishu.cn/open-apis/baseline",
+        ),
+        [False, True, True],
+    )
+    _exercise(
+        "im",
+        lambda: FeishuImFileMessageClient(
+            app_id="cli_a",
+            app_secret="secret",
+            timeout=1,
+            request_retry_count=0,
+            request_retry_interval_sec=0,
+        ),
+        lambda client: client._request_json_with_auth_retry(  # noqa: SLF001
+            "POST",
+            "https://open.feishu.cn/open-apis/baseline",
+            payload={"text": "baseline"},
+            content_type_json=True,
+        ),
+        [False, True],
+    )
+    print("[OK] feishu_invalid_token_refresh_retry")
+
+
+def check_no_legacy_lark_cli_runtime() -> None:
+    roots = [PROJECT_DIR / "app", PROJECT_DIR / "handover_log_module"]
+    legacy_hits: list[str] = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "lark-cli" in text or "lark_cli" in text or "LarkCli" in text:
+                legacy_hits.append(str(path.relative_to(PROJECT_DIR)))
+    _assert(not legacy_hits, "legacy lark-cli runtime references remain: " + ", ".join(legacy_hits[:8]))
+
+    auth_endpoint_hits: list[str] = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "auth/v3/tenant_access_token/internal" in text and path.name != "feishu_token_manager.py":
+                auth_endpoint_hits.append(str(path.relative_to(PROJECT_DIR)))
+    _assert(not auth_endpoint_hits, "Feishu auth endpoint is used outside FeishuTokenManager: " + ", ".join(auth_endpoint_hits[:8]))
+    print("[OK] no_legacy_lark_cli_runtime")
+
+
+def check_legacy_shared_bridge_store_removed() -> None:
+    legacy_paths = [
+        PROJECT_DIR / "app" / "modules" / "shared_bridge" / "service" / "shared_bridge_store.py",
+        PROJECT_DIR / "app" / "modules" / "shared_bridge" / "service" / "shared_source_cache_index_store.py",
+        PROJECT_DIR / "app" / "modules" / "shared_bridge" / "service" / "alarm_external_selection.py",
+    ]
+    remaining = [str(path.relative_to(PROJECT_DIR)) for path in legacy_paths if path.exists()]
+    _assert(not remaining, "legacy shared bridge store modules remain: " + ", ".join(remaining))
+
+    roots = [PROJECT_DIR / "app", PROJECT_DIR / "handover_log_module"]
+    import_hits: list[str] = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "shared_bridge_store" in text or "SharedBridgeStore" in text or "shared_source_cache_index_store" in text:
+                import_hits.append(str(path.relative_to(PROJECT_DIR)))
+    _assert(not import_hits, "legacy shared bridge store imports remain: " + ", ".join(import_hits[:8]))
+    print("[OK] legacy_shared_bridge_store_removed")
+
+
+def check_internal_bridge_http_config_preserved() -> None:
+    default_cfg = DEFAULT_CONFIG_V3.get("common", {}).get("internal_bridge_http", {})
+    _assert(isinstance(default_cfg, dict), "internal_bridge_http defaults missing")
+    _assert(int(default_cfg.get("connect_timeout_sec", 0) or 0) <= 3, "internal bridge connect timeout default is too high")
+    _assert(int(default_cfg.get("read_timeout_sec", 0) or 0) <= 5, "internal bridge read timeout default is too high")
+    for path in (
+        PROJECT_DIR / "config" / "表格计算配置.template.json",
+        PROJECT_DIR / "表格计算配置.json",
+    ):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        common = payload.get("common", {}) if isinstance(payload, dict) else {}
+        cfg = common.get("internal_bridge_http", {}) if isinstance(common, dict) else {}
+        _assert(isinstance(cfg, dict) and cfg, f"internal_bridge_http missing from {path.name}")
+        _assert(int(cfg.get("read_timeout_sec", 0) or 0) <= 5, f"internal bridge read timeout too high in {path.name}")
+    for path in (
+        PROJECT_DIR / "web" / "frontend" / "src" / "config_runtime_convert.js",
+        PROJECT_DIR / "web" / "frontend" / "src" / "config_runtime_defaults.js",
+        PROJECT_DIR / "web" / "frontend" / "src" / "config_save_validation.js",
+    ):
+        text = path.read_text(encoding="utf-8")
+        _assert("internal_bridge_http" in text, f"frontend config does not preserve internal_bridge_http: {path.name}")
+    print("[OK] internal_bridge_http_config_preserved")
 
 
 def check_legacy_scheduler_modules_removed() -> None:
@@ -255,6 +847,31 @@ def check_http_only_shared_bridge() -> None:
     _assert(no_client_service.get_day_metric_by_date_cache_entries(selected_dates=["2026-05-21"], buildings=["A楼"]) == [], "HTTP-only day metric entries did not fail closed")
     _assert(no_client_service.get_monthly_by_date_cache_entries(selected_dates=["2026-05-21"], buildings=["A楼"]) == [], "HTTP-only monthly entries did not fail closed")
     _assert(no_client_service.get_alarm_event_upload_selection().get("transport") == "http", "HTTP-only alarm selection did not fail closed")
+
+    class _EmptyHttpTaskClient:
+        base_url = "http://127.0.0.1:18765"
+
+        def list_tasks(self, *, status: str = "", limit: int = 100) -> list[dict]:
+            return []
+
+        def cancel_task(self, task_id: str) -> bool:
+            return bool(str(task_id or "").strip())
+
+    cached_task_service = SharedBridgeRuntimeService(runtime_config=runtime_config, app_version="baseline")
+    cached_task_service._internal_bridge_http_client = _EmptyHttpTaskClient()  # type: ignore[assignment]
+    cached_task_service._cached_task_list = [{"task_id": "stale-active", "status": "internal_running", "transport": "http"}]  # noqa: SLF001
+    _assert(cached_task_service.list_active_tasks() == [], "HTTP-only active task list fell back to stale cache")
+    _assert(cached_task_service._cached_task_list == [], "HTTP-only empty task list did not clear stale cache")  # noqa: SLF001
+
+    cancel_service = SharedBridgeRuntimeService(runtime_config=runtime_config, app_version="baseline")
+    cancel_service._internal_bridge_http_client = _EmptyHttpTaskClient()  # type: ignore[assignment]
+    cancel_service._cached_task_list = [{"task_id": "cancel-me", "status": "internal_running", "transport": "http"}]  # noqa: SLF001
+    cancel_service._cached_task_details = {"cancel-me": {"task_id": "cancel-me", "status": "internal_running", "transport": "http"}}  # noqa: SLF001
+    _assert(cancel_service.cancel_task("cancel-me") is True, "HTTP task cancel did not return success")
+    _assert(
+        cancel_service._cached_task_details["cancel-me"]["status"] == "cancelled",  # noqa: SLF001
+        "HTTP task cancel did not mark cached task cancelled",
+    )
     print("[OK] http_only_shared_bridge")
 
 
@@ -319,7 +936,19 @@ def main() -> int:
     check_app_state_repository()
     check_generated_file_history_index()
     check_task_cancel_bridge_binding()
+    check_alarm_upload_missing_source_returns_waiting_job()
     check_apscheduler_facade()
+    check_runtime_dependencies_include_scheduler_jobstore()
+    check_daily_scheduler_failed_run_schedules_retry()
+    check_apscheduler_dispatch_nonblocking()
+    check_external_cache_filter_does_not_probe_files()
+    check_job_failure_notification_policy()
+    check_no_task_success_group_notification_runtime()
+    check_scheduler_callbacks_do_not_wait_for_jobs()
+    check_feishu_invalid_token_refresh_retry()
+    check_no_legacy_lark_cli_runtime()
+    check_legacy_shared_bridge_store_removed()
+    check_internal_bridge_http_config_preserved()
     check_legacy_scheduler_modules_removed()
     check_http_only_shared_bridge()
     check_lightweight_routes()

@@ -1159,6 +1159,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     return True, accepted_detail
 
                 def _run_from_cache(emit_log):
+                    started_at = datetime.now()
                     file_items = [
                         {
                             "building": str(item.get("building", "") or "").strip(),
@@ -1171,12 +1172,27 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         }
                         for item in cached_entries
                     ]
-                    return run_monthly_from_file_items(
-                        runtime_config,
-                        file_items=file_items,
-                        emit_log=emit_log,
-                        source_label="月报共享文件",
-                    )
+                    try:
+                        result = run_monthly_from_file_items(
+                            runtime_config,
+                            file_items=file_items,
+                            emit_log=emit_log,
+                            source_label="月报共享文件",
+                        )
+                        container.record_auto_flow_external_run(
+                            status="success",
+                            source="scheduler_job",
+                            duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                        )
+                        return result
+                    except Exception as exc:  # noqa: BLE001
+                        container.record_auto_flow_external_run(
+                            status="failed",
+                            source="scheduler_job",
+                            detail=str(exc),
+                            duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                        )
+                        raise
 
                 job = _start_external_cache_job(
                     name="自动流程调度-月报共享文件",
@@ -1194,12 +1210,24 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         orchestrator = OrchestratorService(runtime_config)
 
         def _run(emit_log):
+            started_at = datetime.now()
             try:
                 auto_result = orchestrator.run_auto_once(emit_log, source=source)
+                container.record_auto_flow_external_run(
+                    status="success",
+                    source="scheduler_job",
+                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                )
                 return {
                     "auto_result": auto_result,
                 }
             except Exception as exc:  # noqa: BLE001
+                container.record_auto_flow_external_run(
+                    status="failed",
+                    source="scheduler_job",
+                    detail=str(exc),
+                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                )
                 notify.send_failure(stage=source, detail=str(exc), emit_log=emit_log)
                 raise
 
@@ -1901,6 +1929,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 return True, accepted_detail
 
             def _run_from_cache(emit_log):
+                started_at = datetime.now()
                 source_units = [
                     {
                         "duty_date": str(item.get("duty_date", "") or "").strip(),
@@ -1910,14 +1939,29 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     for item in cached_entries
                 ]
                 service = DayMetricStandaloneUploadService(container.runtime_config)
-                return service.continue_from_source_files(
-                    selected_dates=[target_date],
-                    buildings=target_buildings,
-                    source_units=source_units,
-                    building_scope="all_enabled",
-                    building=None,
-                    emit_log=emit_log,
-                )
+                try:
+                    result = service.continue_from_source_files(
+                        selected_dates=[target_date],
+                        buildings=target_buildings,
+                        source_units=source_units,
+                        building_scope="all_enabled",
+                        building=None,
+                        emit_log=emit_log,
+                    )
+                    container.record_day_metric_upload_external_run(
+                        status="success",
+                        source="scheduler_job",
+                        duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                    )
+                    return result
+                except Exception as exc:  # noqa: BLE001
+                    container.record_day_metric_upload_external_run(
+                        status="failed",
+                        source="scheduler_job",
+                        detail=str(exc),
+                        duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                    )
+                    raise
 
             dedupe_key = f"day_metric_cache_by_date:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
             job = _start_external_cache_job(
@@ -2036,6 +2080,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 return True, accepted_detail
 
             def _run_from_cache(emit_log):
+                started_at = datetime.now()
+
                 def _entry_map(source_family: str) -> dict[str, dict]:
                     entries = bridge_service.get_latest_source_cache_entries(
                         source_family=source_family,
@@ -2096,12 +2142,26 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         f"开关索引缺失={','.join(missing_switch) or '-'}"
                     )
                 service = BranchPowerUploadService(container.runtime_config)
-                result = service.upload_day_from_source_files(
-                    business_date=target_business_date,
-                    source_units=source_units,
-                    emit_log=emit_log,
-                )
-                return result
+                try:
+                    result = service.upload_day_from_source_files(
+                        business_date=target_business_date,
+                        source_units=source_units,
+                        emit_log=emit_log,
+                    )
+                    container.record_branch_power_upload_external_run(
+                        status="success",
+                        source="scheduler_job",
+                        duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                    )
+                    return result
+                except Exception as exc:  # noqa: BLE001
+                    container.record_branch_power_upload_external_run(
+                        status="failed",
+                        source="scheduler_job",
+                        detail=str(exc),
+                        duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                    )
+                    raise
 
             dedupe_key = f"branch_power_cache:daily:{target_business_date}:{'|'.join(sorted(target_buildings))}"
             job = _start_external_cache_job(
@@ -2184,7 +2244,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     },
                 )
                 task_id = str(waiting_task.get("task_id", "") or "-").strip() or "-"
-                job_id = str(waiting_job.get("job_id", "") or "-").strip() or "-"
+                job_id = str(getattr(waiting_job, "job_id", "") or "-").strip() or "-"
                 detail = (
                     f"已派发内网告警补采等待任务 task_id={task_id}, job_id={job_id}, "
                     f"missing={','.join(missing_buildings)}"
@@ -2261,11 +2321,27 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         dedupe_key = service.dedupe_key("all", target_month=target_month)
 
         def _run(emit_log):
-            return service.run(
-                scope="all",
-                emit_log=emit_log,
-                source=source,
-            )
+            started_at = datetime.now()
+            try:
+                result = service.run(
+                    scope="all",
+                    emit_log=emit_log,
+                    source=source,
+                )
+                container.record_monthly_event_report_external_run(
+                    status="success",
+                    source="scheduler_job",
+                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                container.record_monthly_event_report_external_run(
+                    status="failed",
+                    source="scheduler_job",
+                    detail=str(exc),
+                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                )
+                raise
 
         try:
             job = container.job_service.start_job(
@@ -2295,11 +2371,27 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         dedupe_key = service.dedupe_key("all", target_month=target_month)
 
         def _run(emit_log):
-            return service.run(
-                scope="all",
-                emit_log=emit_log,
-                source=source,
-            )
+            started_at = datetime.now()
+            try:
+                result = service.run(
+                    scope="all",
+                    emit_log=emit_log,
+                    source=source,
+                )
+                container.record_monthly_change_report_external_run(
+                    status="success",
+                    source="scheduler_job",
+                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                container.record_monthly_change_report_external_run(
+                    status="failed",
+                    source="scheduler_job",
+                    detail=str(exc),
+                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
+                )
+                raise
 
         try:
             job = container.job_service.start_job(

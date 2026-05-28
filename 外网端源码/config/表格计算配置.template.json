@@ -6,6 +6,36 @@
       "download_save_dir": "D:\\QLDownload",
       "runtime_state_root": ".runtime"
     },
+    "deployment": {
+      "role_mode": "external",
+      "last_started_role_mode": "external",
+      "node_id": "",
+      "node_label": "外网端"
+    },
+    "shared_bridge": {
+      "enabled": true,
+      "root_dir": "\\\\172.16.1.2\\share",
+      "internal_root_dir": "D:\\share",
+      "external_root_dir": "\\\\172.16.1.2\\share",
+      "bridge_mode": "http",
+      "poll_interval_sec": 2,
+      "heartbeat_interval_sec": 5,
+      "claim_lease_sec": 30,
+      "stale_task_timeout_sec": 1800,
+      "artifact_retention_days": 7,
+      "sqlite_busy_timeout_ms": 15000
+    },
+    "internal_bridge_http": {
+      "enabled": true,
+      "bind_host": "0.0.0.0",
+      "port": 18765,
+      "base_url": "",
+      "auth_token": "",
+      "allowed_client_ips": [],
+      "connect_timeout_sec": 3,
+      "read_timeout_sec": 5,
+      "request_timeout_sec": 5
+    },
     "scheduler": {
       "enabled": true,
       "auto_start_in_gui": false,
@@ -22,7 +52,10 @@
       "timeout": 10,
       "on_download_failure": true,
       "on_wifi_failure": true,
-      "on_upload_failure": true
+      "on_upload_failure": true,
+      "task_failure_webhook_enabled": true,
+      "task_failure_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499",
+      "task_failure_webhook_timeout": 5
     },
     "feishu_auth": {
       "app_id": "cli_a9d1c9fe9d381cee",

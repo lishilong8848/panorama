@@ -1598,6 +1598,7 @@ export function prepareConfigPayloadForSave({
   payload.output.save_json = false;
   const deploymentRoleMode = String(payload.deployment?.role_mode || "").trim().toLowerCase();
   payload.shared_bridge = payload.shared_bridge || {};
+  payload.internal_bridge_http = payload.internal_bridge_http || {};
   payload.shared_bridge.internal_root_dir = String(
     payload.shared_bridge.internal_root_dir || payload.shared_bridge.root_dir || "",
   ).trim();
@@ -1626,6 +1627,23 @@ export function prepareConfigPayloadForSave({
   payload.scheduler.check_interval_sec = Number.parseInt(payload.scheduler.check_interval_sec ?? 30, 10);
   payload.scheduler.catch_up_if_missed = Boolean(payload.scheduler.catch_up_if_missed);
   payload.scheduler.retry_failed_in_same_period = payload.scheduler.retry_failed_in_same_period !== false;
+  payload.internal_bridge_http.enabled = payload.internal_bridge_http.enabled !== false;
+  payload.internal_bridge_http.base_url = String(payload.internal_bridge_http.base_url || "").trim();
+  payload.internal_bridge_http.auth_token = String(payload.internal_bridge_http.auth_token || "").trim();
+  payload.internal_bridge_http.port = Number.parseInt(payload.internal_bridge_http.port ?? 18765, 10) || 18765;
+  payload.internal_bridge_http.connect_timeout_sec = Math.max(
+    1,
+    Number.parseInt(payload.internal_bridge_http.connect_timeout_sec ?? 3, 10) || 3,
+  );
+  payload.internal_bridge_http.read_timeout_sec = Math.max(
+    payload.internal_bridge_http.connect_timeout_sec,
+    Number.parseInt(payload.internal_bridge_http.read_timeout_sec ?? 5, 10) || 5,
+  );
+  payload.internal_bridge_http.request_timeout_sec = Math.max(
+    1,
+    Number.parseInt(payload.internal_bridge_http.request_timeout_sec ?? payload.internal_bridge_http.read_timeout_sec, 10)
+      || payload.internal_bridge_http.read_timeout_sec,
+  );
 
   // 路径收敛：调度状态/续传/告警恢复统一使用内部固定 .runtime 子路径
   payload.scheduler.state_file = "daily_scheduler_state.json";

@@ -27,6 +27,7 @@ export function convertV3ConfigToLegacy(v3) {
       business_root_dir: pathRoot,
     },
     deployment: clone(common.deployment || {}),
+    internal_bridge_http: clone(common.internal_bridge_http || {}),
     shared_bridge: {
       ...clone(common.shared_bridge || {}),
       internal_root_dir: String(common.shared_bridge?.internal_root_dir || common.shared_bridge?.root_dir || "").trim(),
@@ -107,6 +108,7 @@ export function convertLegacyConfigToV3(legacy) {
         business_root_dir: pathRoot,
       },
       deployment: clone(src.deployment || {}),
+      internal_bridge_http: clone(src.internal_bridge_http || {}),
       shared_bridge: {
         ...clone(src.shared_bridge || {}),
         internal_root_dir: String(src.shared_bridge?.internal_root_dir || src.shared_bridge?.root_dir || "").trim(),
