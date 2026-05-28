@@ -99,7 +99,7 @@ _TOKEN_PAIR_PREVIEW_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 _TOKEN_PAIR_PREVIEW_CACHE_LOCK = threading.Lock()
 _TOKEN_PAIR_PREVIEW_CACHE_VERSION = "prefer_wiki_display_v2"
 _SUCCESS_TARGET_KINDS = {"base_token_pair", "wiki_token_pair"}
-_RETRYABLE_PROBE_CODES = {"90217", "1254290", "1255002", "99991661", "99991663", "99991668"}
+_RETRYABLE_PROBE_CODES = {"90217", "1254290", "1255001", "1255002", "99991661", "99991663", "99991668"}
 _PROBE_ERROR_HINTS = (
     "timeout",
     "timed out",

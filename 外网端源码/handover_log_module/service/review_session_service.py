@@ -572,6 +572,53 @@ class ReviewSessionService:
     def _building_to_code(self) -> Dict[str, str]:
         return {item["name"]: item["code"] for item in self._building_defs()}
 
+    def _review_link_open_ids_for_building(self, building: str) -> List[str]:
+        building_text = str(building or "").strip()
+        if not building_text:
+            return []
+        review_cfg = self._review_cfg()
+        by_building = (
+            review_cfg.get("review_link_recipients_by_building", {})
+            if isinstance(review_cfg.get("review_link_recipients_by_building", {}), dict)
+            else {}
+        )
+        rows = by_building.get(building_text, []) if isinstance(by_building, dict) else []
+        output: List[str] = []
+        seen: set[str] = set()
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            enabled = row.get("enabled", True)
+            if isinstance(enabled, bool) and not enabled:
+                continue
+            open_id = str(row.get("open_id", "") or "").strip()
+            if not open_id or open_id in seen:
+                continue
+            seen.add(open_id)
+            output.append(open_id)
+        return output
+
+    @staticmethod
+    def _review_link_delivery_covers_open_ids(delivery: Dict[str, Any], open_ids: List[str]) -> bool:
+        required = {str(item or "").strip() for item in open_ids if str(item or "").strip()}
+        if not required or not isinstance(delivery, dict):
+            return False
+        status = str(delivery.get("status", "") or "").strip().lower()
+        if status not in {"success", "partial_failed"}:
+            return False
+        if not str(delivery.get("last_sent_at", "") or "").strip():
+            return False
+        successful = {
+            str(item or "").strip()
+            for item in (
+                delivery.get("successful_recipients", [])
+                if isinstance(delivery.get("successful_recipients", []), list)
+                else []
+            )
+            if str(item or "").strip()
+        }
+        return required.issubset(successful)
+
     @staticmethod
     def build_session_id(building: str, duty_date: str, duty_shift: str) -> str:
         return f"{building}|{duty_date}|{duty_shift}"
@@ -1455,7 +1502,12 @@ class ReviewSessionService:
                 else {}
             )
             delivery_status = str(delivery.get("status", "") or "").strip().lower()
-            review_link_sent = delivery_status == "success" and bool(str(delivery.get("last_sent_at", "") or "").strip())
+            required_review_link_open_ids = self._review_link_open_ids_for_building(building)
+            review_link_sent = (
+                self._review_link_delivery_covers_open_ids(delivery, required_review_link_open_ids)
+                if required_review_link_open_ids
+                else delivery_status == "success" and bool(str(delivery.get("last_sent_at", "") or "").strip())
+            )
             reason_parts: List[str] = []
             if not has_session:
                 reason_parts.append("no_session")
@@ -1464,7 +1516,11 @@ class ReviewSessionService:
             if not capacity_ready:
                 reason_parts.append("capacity_not_ready")
             if not review_link_sent:
-                reason_parts.append("review_link_not_sent")
+                reason_parts.append(
+                    "review_link_missing_recipients"
+                    if required_review_link_open_ids
+                    else "review_link_not_sent"
+                )
             row = {
                 "building": building,
                 "session_id": str(session.get("session_id", "") or "").strip() if has_session else "",
@@ -1477,6 +1533,18 @@ class ReviewSessionService:
                 "capacity_sync_status": capacity_sync_status,
                 "review_link_delivery_status": delivery_status,
                 "review_link_last_sent_at": str(delivery.get("last_sent_at", "") or "").strip(),
+                "review_link_required_recipients": len(required_review_link_open_ids),
+                "review_link_successful_recipients": len(
+                    {
+                        str(item or "").strip()
+                        for item in (
+                            delivery.get("successful_recipients", [])
+                            if isinstance(delivery.get("successful_recipients", []), list)
+                            else []
+                        )
+                        if str(item or "").strip() in set(required_review_link_open_ids)
+                    }
+                ),
                 "complete": not reason_parts,
                 "reason": ",".join(reason_parts),
             }

@@ -18,6 +18,7 @@ from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.handover_xlsx_write_queue_service import HandoverXlsxWriteQueueService
 from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
+from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
@@ -71,10 +72,18 @@ def handle_handover_from_download(
                         buildings=building_list,
                     )
                     if bool(completion.get("complete", False)):
+                        try:
+                            delivery_results = ReviewLinkDeliveryService(config).dispatch_pending_review_links(
+                                emit_log=emit_log,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            delivery_results = []
+                            emit_log(f"[交接班调度] 本班已完成状态下补查审核链接发送失败: {exc}")
                         emit_log(
                             "[交接班调度] 后台任务恢复前检测到本班已全量完成，跳过执行: "
                             f"duty_date={duty_date}, duty_shift={duty_shift}, "
-                            f"buildings={','.join(completion.get('target_buildings', []) or building_list)}"
+                            f"buildings={','.join(completion.get('target_buildings', []) or building_list)}, "
+                            f"review_link_dispatch={len(delivery_results)}"
                         )
                         return {
                             "status": "skipped",
@@ -83,6 +92,7 @@ def handle_handover_from_download(
                             "duty_shift": duty_shift,
                             "buildings": completion.get("target_buildings", []) or building_list,
                             "completion": completion,
+                            "review_link_dispatch": delivery_results,
                         }
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班调度] 检查本班全量完成状态失败，继续执行: {exc}")

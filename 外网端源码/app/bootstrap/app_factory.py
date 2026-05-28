@@ -1409,10 +1409,21 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         buildings=target_buildings,
                     )
                     if bool(batch_completion.get("complete", False)):
+                        try:
+                            from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
+
+                            delivery_results = ReviewLinkDeliveryService(
+                                runtime_config,
+                                config_path=container.config_path,
+                            ).dispatch_pending_review_links(emit_log=container.add_system_log)
+                        except Exception as exc:  # noqa: BLE001
+                            delivery_results = []
+                            container.add_system_log(f"[交接班调度] 本班已完成状态下补查审核链接发送失败: {exc}")
                         detail = (
                             "本班交接班文件、容量表和审核链接已全量完成，调度跳过："
                             f"duty_date={duty_date}, duty_shift={duty_shift}, "
-                            f"buildings={','.join(batch_completion.get('target_buildings', []) or target_buildings)}"
+                            f"buildings={','.join(batch_completion.get('target_buildings', []) or target_buildings)}, "
+                            f"review_link_dispatch={len(delivery_results)}"
                         )
                         container.add_system_log(f"[交接班调度] {detail}")
                         return True, detail

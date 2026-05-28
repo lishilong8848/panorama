@@ -99,10 +99,10 @@ class FeishuBitableClient:
     @staticmethod
     def _is_retryable_api_error(body: Dict[str, Any]) -> bool:
         code_text = str(body.get("code", "")).strip()
-        if code_text in {"1255002"}:
+        if code_text in {"1255001", "1255002"}:
             return True
         msg = str(body.get("msg", "")).lower()
-        return "something went wrong" in msg
+        return "something went wrong" in msg or "internalerror" in msg or "internal error" in msg
 
     @staticmethod
     def _response_error_detail(response: requests.Response) -> str:

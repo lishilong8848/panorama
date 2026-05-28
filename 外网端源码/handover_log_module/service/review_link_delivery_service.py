@@ -130,6 +130,20 @@ def _delivery_covers_recipients(payload: Dict[str, Any] | None, open_ids: List[s
     return required.issubset(_delivery_successful_recipient_set(payload))
 
 
+def _delivery_missing_recipients(payload: Dict[str, Any] | None, open_ids: List[str]) -> List[str]:
+    sent = _delivery_successful_recipient_set(payload)
+    output: List[str] = []
+    seen: set[str] = set()
+    for item in open_ids:
+        open_id = str(item or "").strip()
+        if not open_id or open_id in seen:
+            continue
+        seen.add(open_id)
+        if open_id not in sent:
+            output.append(open_id)
+    return output
+
+
 def _merge_recipient_ids(*groups: List[str]) -> List[str]:
     output: List[str] = []
     seen: set[str] = set()
@@ -568,11 +582,13 @@ class ReviewLinkDeliveryService:
                 }
 
         automatic_source = _is_automatic_delivery_source(source_text)
-        if automatic_source and _delivery_covers_recipients(delivery_state, recipient_open_ids):
+        missing_recipient_ids = _delivery_missing_recipients(delivery_state, recipient_open_ids)
+        if automatic_source and not force and not missing_recipient_ids and _delivery_covers_recipients(delivery_state, recipient_open_ids):
             emit_log(
                 "[交接班][审核链接发送] 跳过重复自动发送 "
                 f"building={building}, session_id={session_id}, "
-                f"last_sent_at={delivery_state.get('last_sent_at', '-') or '-'}, source={source_text}"
+                f"last_sent_at={delivery_state.get('last_sent_at', '-') or '-'}, source={source_text}, "
+                f"covered_recipients={len(recipient_open_ids)}"
             )
             return {
                 **delivery_state,
@@ -643,7 +659,7 @@ class ReviewLinkDeliveryService:
             for open_id in delivery_state.get("successful_recipients", [])
             if str(open_id or "").strip() in set(recipient_open_ids)
         ]
-        if automatic_source:
+        if automatic_source and not force:
             already_sent = set(previous_successful_recipients)
             recipients_to_send = [
                 recipient
@@ -1011,6 +1027,19 @@ class ReviewLinkDeliveryService:
         return f"{str(duty_date or '').strip()}|{str(duty_shift or '').strip().lower()}"
 
     def _get_sent_station_110_delivery(self, *, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
+        return self._get_sent_station_110_delivery_for_recipients(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            open_ids=[],
+        )
+
+    def _get_sent_station_110_delivery_for_recipients(
+        self,
+        *,
+        duty_date: str,
+        duty_shift: str,
+        open_ids: List[str],
+    ) -> Dict[str, Any] | None:
         key = self._station_110_delivery_key(duty_date, duty_shift)
         if not key.strip("|"):
             return None
@@ -1019,10 +1048,10 @@ class ReviewLinkDeliveryService:
             item = state.get(key)
             if not isinstance(item, dict):
                 return None
-            status = str(item.get("status", "") or "").strip().lower()
-            sent_at = str(item.get("last_sent_at", "") or "").strip()
-            recipients = item.get("successful_recipients", [])
-            if status in {"success", "partial_failed"} and sent_at and isinstance(recipients, list) and recipients:
+            if open_ids:
+                if _delivery_covers_recipients(item, open_ids):
+                    return dict(item)
+            elif _delivery_has_successful_send(item):
                 return dict(item)
         return None
 
@@ -1063,6 +1092,11 @@ class ReviewLinkDeliveryService:
         building_text = STATION_110_BUILDING
         recipient_snapshot = self._recipient_snapshot_for_building(building_text)
         recipients = list(recipient_snapshot.get("recipients", []))
+        recipient_open_ids = [
+            str(item.get("open_id", "") or "").strip()
+            for item in recipients
+            if isinstance(item, dict) and str(item.get("open_id", "") or "").strip()
+        ]
         snapshot = materialize_review_access_snapshot(self.handover_cfg)
         url = self._review_url_for_building(snapshot, building_text) or self._manual_test_review_url_for_building(
             snapshot,
@@ -1070,17 +1104,19 @@ class ReviewLinkDeliveryService:
         )
         url = _strip_url_query_and_fragment(url)
         source_text = str(source or "scheduler").strip().lower() or "scheduler"
+        previous_delivery: Dict[str, Any] | None = None
         if source_text not in {"manual", "manual_test", "test"}:
-            previous_delivery = self._get_sent_station_110_delivery(
+            previous_delivery = self._get_sent_station_110_delivery_for_recipients(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
+                open_ids=recipient_open_ids,
             )
             if previous_delivery is not None:
                 emit_log(
                     "[交接班][110站审核链接发送] 跳过重复发送 "
                     f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, "
                     f"last_sent_at={str(previous_delivery.get('last_sent_at', '') or '-').strip() or '-'}, "
-                    f"source={source_text}"
+                    f"source={source_text}, covered_recipients={len(recipient_open_ids)}"
                 )
                 return {
                     **previous_delivery,
@@ -1093,6 +1129,10 @@ class ReviewLinkDeliveryService:
                     "skipped_duplicate": True,
                     "source": source_text,
                 }
+            previous_delivery = self._get_sent_station_110_delivery(
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+            )
         emit_log(
             "[交接班][110站审核链接发送] 开始发送 "
             f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, "
@@ -1151,8 +1191,27 @@ class ReviewLinkDeliveryService:
         )
         successful_recipients: List[str] = []
         failed_recipients: List[Dict[str, str]] = []
+        previous_successful_recipients = [
+            open_id
+            for open_id in (
+                previous_delivery.get("successful_recipients", [])
+                if isinstance(previous_delivery, dict)
+                and isinstance(previous_delivery.get("successful_recipients", []), list)
+                else []
+            )
+            if str(open_id or "").strip() in set(recipient_open_ids)
+        ]
+        if source_text not in {"manual", "manual_test", "test"}:
+            already_sent = set(previous_successful_recipients)
+            recipients_to_send = [
+                recipient
+                for recipient in recipients
+                if str(recipient.get("open_id", "") or "").strip() not in already_sent
+            ]
+        else:
+            recipients_to_send = recipients
         client = self._build_feishu_client()
-        for recipient in recipients:
+        for recipient in recipients_to_send:
             open_id = recipient["open_id"]
             note = recipient["note"]
             receive_id_type = self._resolve_effective_receive_id_type(open_id, "open_id")
@@ -1180,16 +1239,37 @@ class ReviewLinkDeliveryService:
                     f"open_id={open_id}, receive_id_type={receive_id_type}, note={note or '-'}, error={exc}"
                 )
 
-        if successful_recipients and failed_recipients:
-            status = "partial_failed"
-            error = "部分收件人发送失败"
-        elif successful_recipients:
+        combined_successful_recipients = (
+            _merge_recipient_ids(previous_successful_recipients, successful_recipients)
+            if source_text not in {"manual", "manual_test", "test"}
+            else successful_recipients
+        )
+        current_successful_set = {
+            open_id
+            for open_id in combined_successful_recipients
+            if open_id in set(recipient_open_ids)
+        }
+        if recipient_open_ids and len(current_successful_set) >= len(set(recipient_open_ids)):
             status = "success"
             error = ""
+        elif combined_successful_recipients and failed_recipients:
+            status = "partial_failed"
+            error = "部分收件人发送失败"
+        elif combined_successful_recipients:
+            status = "partial_failed"
+            error = "还有收件人未完成发送"
         else:
             status = "failed"
             error = "全部收件人发送失败"
-        sent_at = _now_text() if successful_recipients else ""
+        sent_at = (
+            _now_text()
+            if successful_recipients
+            else (
+                str(previous_delivery.get("last_sent_at", "") or "").strip()
+                if isinstance(previous_delivery, dict)
+                else ""
+            )
+        )
         emit_log(
             "[交接班][110站审核链接发送] 完成 "
             f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, status={status}, "
@@ -1203,7 +1283,7 @@ class ReviewLinkDeliveryService:
             "duty_shift": duty_shift_text,
             "last_sent_at": sent_at,
             "message_text": message_text,
-            "successful_recipients": successful_recipients,
+            "successful_recipients": combined_successful_recipients,
             "failed_recipients": failed_recipients,
             "review_url": url,
         }
@@ -1256,12 +1336,39 @@ class ReviewLinkDeliveryService:
         snapshot = materialize_review_access_snapshot(self.handover_cfg)
         if not str(snapshot.get("review_base_url_effective", "") or "").strip():
             return []
-        pending_sessions = [
-            session
-            for session in self._review_service.list_sessions()
-            if str(session.get("review_link_delivery", {}).get("status", "") or "").strip().lower() == "pending_access"
-            and not bool(session.get("review_link_delivery", {}).get("auto_attempted", False))
-        ]
+        latest_batch_key = ""
+        try:
+            latest_batch = self._review_service.get_latest_batch_status()
+            if isinstance(latest_batch, dict):
+                latest_batch_key = str(latest_batch.get("batch_key", "") or "").strip()
+        except Exception:  # noqa: BLE001
+            latest_batch_key = ""
+        pending_sessions: List[Dict[str, Any]] = []
+        for session in self._review_service.list_sessions():
+            if not isinstance(session, dict):
+                continue
+            delivery = session.get("review_link_delivery", {}) if isinstance(session.get("review_link_delivery", {}), dict) else {}
+            status = str(delivery.get("status", "") or "").strip().lower()
+            building = str(session.get("building", "") or "").strip()
+            recipient_snapshot = self._recipient_snapshot_for_building(building)
+            open_ids = [
+                str(item or "").strip()
+                for item in recipient_snapshot.get("open_ids", [])
+                if str(item or "").strip()
+            ]
+            if not open_ids:
+                continue
+            if status == "pending_access" and not bool(delivery.get("auto_attempted", False)):
+                pending_sessions.append(session)
+                continue
+            session_batch_key = str(session.get("batch_key", "") or "").strip()
+            if (
+                latest_batch_key
+                and session_batch_key == latest_batch_key
+                and status in {"success", "partial_failed", "failed"}
+                and not _delivery_covers_recipients(delivery, open_ids)
+            ):
+                pending_sessions.append(session)
         results: List[Dict[str, Any]] = []
         for session in pending_sessions:
             try:
