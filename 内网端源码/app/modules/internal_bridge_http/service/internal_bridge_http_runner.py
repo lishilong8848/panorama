@@ -440,7 +440,12 @@ class InternalBridgeHttpTaskRunner:
         try:
             recover = getattr(main_cache, "_existing_latest_refresh_result", None)
             recovered = (
-                recover(source_family=family, building=building_name, bucket_key=target_bucket)
+                recover(
+                    source_family=family,
+                    building=building_name,
+                    bucket_key=target_bucket,
+                    allow_directory_scan=False,
+                )
                 if callable(recover)
                 else None
             )

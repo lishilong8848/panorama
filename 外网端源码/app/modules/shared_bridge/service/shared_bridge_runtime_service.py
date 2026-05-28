@@ -277,8 +277,24 @@ class SharedBridgeRuntimeService:
             if duty_date
         }
 
-    def _require_accessible_cached_file(self, file_path: Any, *, description: str) -> str:
+    def _external_shared_file_path_text(self, file_path: Any, *, relative_path: Any = "", source_family: str = "") -> str:
         file_text = str(file_path or "").strip()
+        relative_text = str(relative_path or "").strip()
+        if self.role_mode == "external":
+            resolved_relative = self._shared_relative_path_from_index_path(
+                relative_text or file_text,
+                source_family=str(source_family or "").strip().lower(),
+            )
+            if resolved_relative and self.shared_bridge_root:
+                return str(Path(self.shared_bridge_root) / resolved_relative.replace("/", "\\"))
+        return file_text
+
+    def _require_accessible_cached_file(self, file_path: Any, *, description: str, relative_path: Any = "", source_family: str = "") -> str:
+        file_text = self._external_shared_file_path_text(
+            file_path,
+            relative_path=relative_path,
+            source_family=source_family,
+        )
         if not file_text:
             raise FileNotFoundError(f"{description}不存在或不可访问: {file_text or '-'}")
         if self.role_mode != "external" and not is_accessible_cached_file_path(file_text):
@@ -300,6 +316,8 @@ class SharedBridgeRuntimeService:
             file_path = self._require_accessible_cached_file(
                 item.get("file_path", ""),
                 description="交接班共享源文件",
+                relative_path=item.get("relative_path", ""),
+                source_family=FAMILY_HANDOVER_LOG,
             ) if building else ""
             if not building or not file_path:
                 continue
@@ -323,6 +341,8 @@ class SharedBridgeRuntimeService:
             file_path = self._require_accessible_cached_file(
                 item.get("file_path", ""),
                 description="交接班容量共享源文件",
+                relative_path=item.get("relative_path", ""),
+                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
             ) if building else ""
             if not building or not file_path:
                 continue
@@ -455,9 +475,21 @@ class SharedBridgeRuntimeService:
                 continue
             building = str(item.get("building", "") or "").strip()
             source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
-            power_file = str(item.get("power_file", "") or source_files.get("power_file", "") or item.get("file_path", "") or item.get("source_file", "") or "").strip()
-            current_file = str(item.get("current_file", "") or source_files.get("current_file", "") or "").strip()
-            switch_file = str(item.get("switch_file", "") or source_files.get("switch_file", "") or "").strip()
+            power_file = self._external_shared_file_path_text(
+                item.get("power_file", "") or source_files.get("power_file", "") or item.get("file_path", "") or item.get("source_file", "") or "",
+                relative_path=item.get("power_relative_path", "") or source_files.get("power_relative_path", "") or item.get("relative_path", ""),
+                source_family=FAMILY_BRANCH_POWER,
+            )
+            current_file = self._external_shared_file_path_text(
+                item.get("current_file", "") or source_files.get("current_file", "") or "",
+                relative_path=item.get("current_relative_path", "") or source_files.get("current_relative_path", ""),
+                source_family=FAMILY_BRANCH_CURRENT,
+            )
+            switch_file = self._external_shared_file_path_text(
+                item.get("switch_file", "") or source_files.get("switch_file", "") or "",
+                relative_path=item.get("switch_relative_path", "") or source_files.get("switch_relative_path", ""),
+                source_family=FAMILY_BRANCH_SWITCH,
+            )
             if not building or not power_file:
                 continue
             for label, file_path in (("支路功率", power_file), ("支路电流", current_file), ("支路开关", switch_file)):
@@ -643,7 +675,12 @@ class SharedBridgeRuntimeService:
             if not isinstance(item, dict):
                 continue
             building = str(item.get("building", "") or "").strip()
-            file_path = str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+            file_path = self._require_accessible_cached_file(
+                item.get("file_path", "") or item.get("source_file", ""),
+                description="湿球温度源文件",
+                relative_path=item.get("relative_path", ""),
+                source_family=FAMILY_HANDOVER_LOG,
+            ) if building else ""
             if building and file_path:
                 source_units.append({"building": building, "file_path": file_path})
         if not source_units:

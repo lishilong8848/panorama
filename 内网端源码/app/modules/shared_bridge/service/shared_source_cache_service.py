@@ -6410,6 +6410,7 @@ class SharedSourceCacheService:
         source_family: str,
         building: str,
         bucket_key: str,
+        allow_directory_scan: bool = True,
     ) -> Dict[str, Any] | None:
         if self.shared_root is None:
             return None
@@ -6444,6 +6445,8 @@ class SharedSourceCacheService:
                     "[共享缓存] 现有源文件登记失败，将继续补采: "
                     f"family={normalized_family} building={building} path={candidate}, error={exc}"
                 )
+        if not allow_directory_scan:
+            return None
         for scanned in self._scan_existing_latest_file_candidates(
             source_family=normalized_family,
             building=building,
@@ -6488,6 +6491,7 @@ class SharedSourceCacheService:
         source_family: str,
         building: str,
         bucket_key: str,
+        allow_directory_scan: bool = True,
     ) -> Dict[str, Any] | None:
         normalized_family = self._normalize_source_family(source_family)
         ready_entry = self._latest_refresh_existing_entry(
@@ -6501,6 +6505,7 @@ class SharedSourceCacheService:
                 source_family=normalized_family,
                 building=building,
                 bucket_key=bucket_key,
+                allow_directory_scan=allow_directory_scan,
             )
             recovered = ready_entry is not None
         if not ready_entry:
@@ -6533,6 +6538,46 @@ class SharedSourceCacheService:
         thread_key: tuple[str, str, str, str],
     ) -> None:
         try:
+            existing_result = self._existing_latest_refresh_result(
+                source_family=source_family,
+                building=building,
+                bucket_key=bucket_key,
+                allow_directory_scan=True,
+            )
+            if existing_result is not None:
+                with self._lock:
+                    self._ensure_light_family_cache_unlocked(
+                        source_family=source_family,
+                        bucket_key=bucket_key,
+                        buildings=[building],
+                    )
+                    self._set_light_building_status_unlocked(
+                        source_family=source_family,
+                        building=building,
+                        bucket_key=bucket_key,
+                        payload={
+                            "status": "ready",
+                            "ready": True,
+                            "downloaded_at": str(existing_result.get("downloaded_at", "") or _now_text()),
+                            "last_error": "",
+                            "relative_path": str(existing_result.get("relative_path", "") or ""),
+                            "resolved_file_path": str(existing_result.get("file_path", "") or ""),
+                            "started_at": "",
+                            "blocked": False,
+                            "blocked_reason": "",
+                            "next_probe_at": "",
+                        },
+                    )
+                    self._recompute_family_status_from_light_unlocked(
+                        source_family=source_family,
+                        bucket_key=bucket_key,
+                    )
+                self._emit(
+                    "[共享缓存] 补采后台跳过，现有源文件已就绪: "
+                    f"family={source_family} building={building} bucket={bucket_key} "
+                    f"path={existing_result.get('relative_path') or existing_result.get('file_path')}"
+                )
+                return
             self._refresh_family_bucket(
                 source_family=source_family,
                 bucket_key=bucket_key,
@@ -6622,6 +6667,7 @@ class SharedSourceCacheService:
             source_family=normalized_family,
             building=building_name,
             bucket_key=bucket_key,
+            allow_directory_scan=False,
         )
         if existing_result is not None:
             with self._lock:
