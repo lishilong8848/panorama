@@ -381,20 +381,15 @@ function applyHandoverDefaults(cfg) {
   setBooleanDefault(download, "debug_step_log", true);
   setStringDefault(download, "export_button_text", "原样导出");
   capacityReport.weather = capacityReport.weather || {};
-  setStringDefault(capacityReport.weather, "provider", "seniverse");
-  setStringDefault(capacityReport.weather, "location", "崇川区");
-  capacityReport.weather.fallback_locations = Array.isArray(capacityReport.weather.fallback_locations)
-    ? capacityReport.weather.fallback_locations.filter((item) => String(item || "").trim())
-    : ["南通"];
-  if (!capacityReport.weather.fallback_locations.length) {
-    capacityReport.weather.fallback_locations = ["南通"];
-  }
-  setStringDefault(capacityReport.weather, "language", "zh-Hans");
-  setStringDefault(capacityReport.weather, "unit", "c");
-  setNumberDefault(capacityReport.weather, "timeout_sec", 8);
-  setStringDefault(capacityReport.weather, "auth_mode", "signed");
-  setStringDefault(capacityReport.weather, "seniverse_public_key", "");
-  setStringDefault(capacityReport.weather, "seniverse_private_key", "");
+  capacityReport.weather.provider = "hvac_open_meteo";
+  delete capacityReport.weather.location;
+  delete capacityReport.weather.fallback_locations;
+  delete capacityReport.weather.language;
+  delete capacityReport.weather.unit;
+  delete capacityReport.weather.timeout_sec;
+  delete capacityReport.weather.auth_mode;
+  delete capacityReport.weather.seniverse_public_key;
+  delete capacityReport.weather.seniverse_private_key;
   const shiftRoster = cfg.handover_log.shift_roster;
   const eventSections = cfg.handover_log.event_sections;
   const changeManagement = cfg.handover_log.change_management_section;

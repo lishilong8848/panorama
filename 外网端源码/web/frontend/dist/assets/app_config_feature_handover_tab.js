@@ -448,24 +448,9 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
         v-if="config.handover_log && config.handover_log.capacity_report && config.handover_log.capacity_report.weather"
       >
         <div class="section-title">容量报表天气</div>
-          <div class="form-row"><label class="label">天气来源</label><input type="text" v-model="config.handover_log.capacity_report.weather.provider" /></div>
-          <div class="form-row"><label class="label">地点</label><input type="text" v-model="config.handover_log.capacity_report.weather.location" /></div>
-          <div class="form-row">
-            <label class="label">备用地点</label>
-            <input
-              type="text"
-              :value="(config.handover_log.capacity_report.weather.fallback_locations || []).join(', ')"
-              @input="config.handover_log.capacity_report.weather.fallback_locations = String($event.target.value || '').split(/[，,]/).map((item) => item.trim()).filter(Boolean)"
-            />
-          </div>
-          <div class="form-row"><label class="label">语言</label><input type="text" v-model="config.handover_log.capacity_report.weather.language" /></div>
-          <div class="form-row"><label class="label">单位</label><input type="text" v-model="config.handover_log.capacity_report.weather.unit" /></div>
-          <div class="form-row"><label class="label">鉴权模式</label><input type="text" v-model="config.handover_log.capacity_report.weather.auth_mode" /></div>
-          <div class="form-row"><label class="label">请求超时（秒）</label><input type="number" min="1" v-model.number="config.handover_log.capacity_report.weather.timeout_sec" /></div>
-          <div class="form-row"><label class="label">心知公钥</label><input type="text" v-model="config.handover_log.capacity_report.weather.seniverse_public_key" autocomplete="off" /></div>
-          <div class="form-row"><label class="label">心知私钥</label><input type="password" v-model="config.handover_log.capacity_report.weather.seniverse_private_key" autocomplete="new-password" /></div>
-          <div class="hint" style="margin-bottom:8px;">当天及未来日期使用心知天气，历史日期继续沿用旧网页抓取逻辑。默认先查崇川区，权限不足时回退到南通。</div>
-          <div class="hint">天气现象写入容量报表 L2，湿度写入 X2；天气失败只影响这两个单元格，不阻断整份容量报表。</div>
+          <div class="form-row"><label class="label">天气来源</label><input type="text" value="暖通运行数据 8h 天气" disabled /></div>
+          <div class="hint" style="margin-bottom:8px;">容量报表天气复用“制冷模式参数上传”的 8 小时天气获取方式，只提取多云、小雨、大雨、晴、暴雨等天气现象写入 L2。</div>
+          <div class="hint">不再使用心知天气密钥；天气获取失败只影响 L2，不阻断整份容量报表。</div>
       </section>
       </div>
     </div>

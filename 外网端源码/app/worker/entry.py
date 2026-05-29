@@ -16,6 +16,9 @@ class WorkerCancelledError(RuntimeError):
     pass
 
 
+_EMIT_LOCK = threading.RLock()
+
+
 class CancellationContext:
     def __init__(self) -> None:
         self._cancelled = threading.Event()
@@ -84,8 +87,9 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 
 def _emit_event(payload: Dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(_json_ready(payload), ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    with _EMIT_LOCK:
+        sys.stdout.write(json.dumps(_json_ready(payload), ensure_ascii=False) + "\n")
+        sys.stdout.flush()
 
 
 def _emit_log(stage_id: str, text: str, *, level: str = "info") -> None:
@@ -162,6 +166,18 @@ def _run_heartbeat(runtime: WorkerRuntime, interval_sec: float) -> None:
             break
 
 
+def _stop_runtime_threads(
+    cancel_context: CancellationContext,
+    *threads: threading.Thread,
+    timeout_sec: float = 2.0,
+) -> None:
+    cancel_context.request_cancel()
+    deadline = max(0.1, float(timeout_sec or 2.0))
+    for thread in threads:
+        if thread.is_alive():
+            thread.join(timeout=deadline)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="QJPT task worker entry")
     parser.add_argument("--job-dir", required=True)
@@ -199,13 +215,13 @@ def main(argv: list[str] | None = None) -> int:
     control_thread = threading.Thread(
         target=_run_control_server,
         args=(int(args.control_port or 0), runtime),
-        daemon=True,
+        daemon=False,
         name=f"worker-control-{stage_id}",
     )
     heartbeat_thread = threading.Thread(
         target=_run_heartbeat,
         args=(runtime, float(args.heartbeat_interval or 5.0)),
-        daemon=True,
+        daemon=False,
         name=f"worker-heartbeat-{stage_id}",
     )
     control_thread.start()
@@ -225,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     def emit_log(text: str) -> None:
         runtime.emit_log(text)
 
+    exit_code = 1
     try:
         runtime.raise_if_cancelled()
         try:
@@ -243,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         cancel_context.run_cleanup()
-        return 0
+        exit_code = 0
     except WorkerCancelledError:
         cancel_context.run_cleanup()
         _emit_event(
@@ -267,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ts": _now_text(),
             }
         )
-        return 130
+        exit_code = 130
     except Exception as exc:  # noqa: BLE001
         detail = str(exc)
         cancel_context.run_cleanup()
@@ -282,7 +299,10 @@ def main(argv: list[str] | None = None) -> int:
                 "ts": _now_text(),
             }
         )
-        return 1
+        exit_code = 1
+    finally:
+        _stop_runtime_threads(cancel_context, control_thread, heartbeat_thread)
+    return exit_code
 
 
 if __name__ == "__main__":

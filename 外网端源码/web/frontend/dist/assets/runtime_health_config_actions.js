@@ -3167,39 +3167,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       && typeof handover.review_ui.review_link_recipients_by_building === "object"
       ? handover.review_ui.review_link_recipients_by_building
       : {};
-    if (!String(handover.capacity_report.weather.provider || "").trim()) {
-      handover.capacity_report.weather.provider = "seniverse";
-    }
-    if (!String(handover.capacity_report.weather.location || "").trim()) {
-      handover.capacity_report.weather.location = "崇川区";
-    }
-    handover.capacity_report.weather.fallback_locations = Array.isArray(handover.capacity_report.weather.fallback_locations)
-      ? handover.capacity_report.weather.fallback_locations
-        .map((item) => String(item || "").trim())
-        .filter(Boolean)
-      : ["南通"];
-    if (!handover.capacity_report.weather.fallback_locations.length) {
-      handover.capacity_report.weather.fallback_locations = ["南通"];
-    }
-    if (!String(handover.capacity_report.weather.language || "").trim()) {
-      handover.capacity_report.weather.language = "zh-Hans";
-    }
-    if (!String(handover.capacity_report.weather.unit || "").trim()) {
-      handover.capacity_report.weather.unit = "c";
-    }
-    if (!String(handover.capacity_report.weather.auth_mode || "").trim()) {
-      handover.capacity_report.weather.auth_mode = "signed";
-    }
-    if (!Number.isInteger(Number.parseInt(String(handover.capacity_report.weather.timeout_sec ?? ""), 10))
-      || Number.parseInt(String(handover.capacity_report.weather.timeout_sec ?? ""), 10) <= 0) {
-      handover.capacity_report.weather.timeout_sec = 8;
-    }
-    if (typeof handover.capacity_report.weather.seniverse_public_key !== "string") {
-      handover.capacity_report.weather.seniverse_public_key = "";
-    }
-    if (typeof handover.capacity_report.weather.seniverse_private_key !== "string") {
-      handover.capacity_report.weather.seniverse_private_key = "";
-    }
+    handover.capacity_report.weather = { provider: "hvac_open_meteo" };
     Object.keys(handover.review_ui.review_link_recipients_by_building).forEach((building) => {
       const rows = Array.isArray(handover.review_ui.review_link_recipients_by_building[building])
         ? handover.review_ui.review_link_recipients_by_building[building]

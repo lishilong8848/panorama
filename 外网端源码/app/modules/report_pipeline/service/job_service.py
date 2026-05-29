@@ -1048,6 +1048,17 @@ class JobService:
         lowered = str(detail or "").strip().lower()
         return bool(lowered and any(token in lowered for token in _WORKER_RUNTIME_REPAIR_TOKENS))
 
+    @staticmethod
+    def _is_worker_stdout_shutdown_artifact(detail: str) -> bool:
+        lowered = " ".join(str(detail or "").strip().lower().split())
+        if not lowered:
+            return False
+        return (
+            "_enter_buffered_busy" in lowered
+            and "bufferedwriter" in lowered
+            and "interpreter shutdown" in lowered
+        )
+
     def _mark_worker_dependency_state(self, job: JobState, stage: StageState, *, worker_status: str, summary: str) -> None:
         now_text = self._now_text()
         with self._lock:
@@ -1437,8 +1448,13 @@ class JobService:
                     stdout_thread.join(timeout=2)
                     stderr_thread.join(timeout=2)
                     stderr_detail = " ".join(line for line in worker_stderr_lines if line).strip()
+                    stdout_shutdown_artifact = (
+                        bool(worker_result.get("ok", False))
+                        and return_code != 0
+                        and self._is_worker_stdout_shutdown_artifact(stderr_detail)
+                    )
                     repairable_crash = (
-                        (return_code != 0 or not worker_result)
+                        ((return_code != 0 and not stdout_shutdown_artifact) or not worker_result)
                         and not repair_retry_used
                         and self._is_worker_runtime_repairable_detail(stderr_detail)
                     )
@@ -1469,7 +1485,7 @@ class JobService:
                             stage.worker_status = (
                                 "cancelled"
                                 if (bool(worker_result.get("cancelled", False)) or force_killed)
-                                else ("success" if return_code == 0 else "failed")
+                                else ("success" if (return_code == 0 or stdout_shutdown_artifact) else "failed")
                             )
                             if bool(worker_result.get("cancelled", False)) or force_killed:
                                 summary = "interrupted_force_killed" if force_killed else "cancelled"
@@ -1479,7 +1495,7 @@ class JobService:
                                 stage.status = "cancelled"
                                 stage.summary = summary
                                 stage.finished_at = job.finished_at
-                            elif return_code != 0 or not worker_result:
+                            elif (return_code != 0 and not stdout_shutdown_artifact) or not worker_result:
                                 detail = (
                                     str(worker_result.get("error", "") or "").strip()
                                     or str(worker_result.get("message", "") or "").strip()
@@ -1511,7 +1527,8 @@ class JobService:
                             stage,
                             {
                                 "pid": 0,
-                                "status": stage.worker_status or ("success" if (return_code == 0 and worker_result) else "failed"),
+                                "status": stage.worker_status
+                                or ("success" if ((return_code == 0 or stdout_shutdown_artifact) and worker_result) else "failed"),
                                 "exit_code": return_code,
                                 "last_heartbeat_at": stage.last_heartbeat_at,
                                 "updated_at": self._now_text(),

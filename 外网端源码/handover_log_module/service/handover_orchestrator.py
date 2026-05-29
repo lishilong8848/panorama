@@ -8,6 +8,7 @@ import re
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
+from handover_log_module.core.formatter import build_metric_text
 from handover_log_module.core.models import BuildingResult, RunSummary
 from handover_log_module.core.shift_window import build_duty_window, format_duty_date_text, parse_duty_date
 from handover_log_module.repository.alarm_json_repository import AlarmJsonRepository
@@ -671,6 +672,89 @@ class HandoverOrchestrator:
             str(duty_date or "").strip() == current_duty_date
             and str(duty_shift or "").strip().lower() == current_duty_shift
         )
+
+    def _extract_outdoor_temperature_cells_from_source(
+        self,
+        *,
+        building: str,
+        data_file: str,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, str]:
+        building_text = str(building or "").strip()
+        data_file_text = str(data_file or "").strip()
+        if not building_text or not data_file_text:
+            return {}
+        try:
+            extracted = self._extract_service.extract(building=building_text, data_file=data_file_text)
+            hits = extracted.get("hits", {}) if isinstance(extracted, dict) else {}
+            effective_config = extracted.get("effective_config", {}) if isinstance(extracted, dict) else {}
+            format_templates = (
+                effective_config.get("format_templates", {})
+                if isinstance(effective_config, dict) and isinstance(effective_config.get("format_templates", {}), dict)
+                else {}
+            )
+            cells = {
+                "B7": build_metric_text(
+                    "outdoor_temp",
+                    hits=hits,
+                    templates=format_templates,
+                    effective_config=effective_config,
+                ),
+                "D7": build_metric_text(
+                    "wet_bulb",
+                    hits=hits,
+                    templates=format_templates,
+                    effective_config=effective_config,
+                ),
+            }
+            return {cell: str(value or "").strip() for cell, value in cells.items() if str(value or "").strip()}
+        except Exception as exc:  # noqa: BLE001
+            try:
+                emit_log(
+                    "[交接班][室外温湿度] 共享值预提取失败 "
+                    f"building={building_text}, file={Path(data_file_text).name}, error={exc}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return {}
+
+    def _resolve_shared_outdoor_temperature_cells(
+        self,
+        success_items: List[Dict[str, Any]],
+        *,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, str]:
+        ordered_items: List[Dict[str, Any]] = []
+        for item in success_items or []:
+            if str(item.get("building", "") or "").strip() == "A楼":
+                ordered_items.append(item)
+        for item in success_items or []:
+            if item not in ordered_items:
+                ordered_items.append(item)
+
+        first_values: Dict[str, str] = {}
+        for item in ordered_items:
+            building = str(item.get("building", "") or "").strip()
+            data_file = str(item.get("file_path", "") or "").strip()
+            cells = self._extract_outdoor_temperature_cells_from_source(
+                building=building,
+                data_file=data_file,
+                emit_log=emit_log,
+            )
+            for cell_name in ("B7", "D7"):
+                if not first_values.get(cell_name) and str(cells.get(cell_name, "") or "").strip():
+                    first_values[cell_name] = str(cells.get(cell_name, "")).strip()
+            if building == "A楼" and all(first_values.get(cell_name) for cell_name in ("B7", "D7")):
+                break
+        if first_values:
+            try:
+                emit_log(
+                    "[交接班][室外温湿度] 已统一本批次共享值 "
+                    f"B7={first_values.get('B7', '-') or '-'}, D7={first_values.get('D7', '-') or '-'}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return first_values
 
     @staticmethod
     def _previous_duty_context(*, duty_date: str, duty_shift: str) -> tuple[str, str]:
@@ -1570,6 +1654,24 @@ class HandoverOrchestrator:
                         alarm_document_cache=alarm_document_cache,
                     )
                     prebuilt_fixed[building] = (fixed_cell_values, date_ref_override, assignment, alarm_summary_payload)
+                shared_outdoor_cells = self._resolve_shared_outdoor_temperature_cells(
+                    success_items,
+                    emit_log=emit_log,
+                )
+                if shared_outdoor_cells:
+                    for building_key, prebuilt in list(prebuilt_fixed.items()):
+                        fixed_values, date_ref_override, assignment, alarm_summary_payload = prebuilt
+                        merged_fixed = dict(fixed_values or {})
+                        for cell_name in ("B7", "D7"):
+                            value = str(shared_outdoor_cells.get(cell_name, "") or "").strip()
+                            if value:
+                                merged_fixed[cell_name] = value
+                        prebuilt_fixed[building_key] = (
+                            merged_fixed,
+                            date_ref_override,
+                            assignment,
+                            alarm_summary_payload,
+                        )
 
             # 内网下载和告警查询完成后优先切回外网，再执行飞书相关填充。
             if success_items:

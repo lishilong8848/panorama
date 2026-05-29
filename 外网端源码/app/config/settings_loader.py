@@ -623,40 +623,8 @@ def _validate_handover_capacity_report_weather(cfg: Dict[str, Any]) -> None:
     if not isinstance(capacity_report, dict):
         raise ValueError("配置错误: features.handover_log.capacity_report 缺失或格式错误")
     weather = capacity_report.get("weather", {})
-    if not isinstance(weather, dict):
+    if weather and not isinstance(weather, dict):
         raise ValueError("配置错误: features.handover_log.capacity_report.weather 缺失或格式错误")
-
-    provider = str(weather.get("provider", "") or "").strip()
-    location = str(weather.get("location", "") or "").strip()
-    language = str(weather.get("language", "") or "").strip()
-    unit = str(weather.get("unit", "") or "").strip()
-    auth_mode = str(weather.get("auth_mode", "") or "").strip()
-    timeout_sec = int(weather.get("timeout_sec", 0) or 0)
-    public_key = str(weather.get("seniverse_public_key", "") or "").strip()
-    private_key = str(weather.get("seniverse_private_key", "") or "").strip()
-    fallback_locations = weather.get("fallback_locations", [])
-
-    if provider and provider != "seniverse":
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.provider 当前仅支持 seniverse")
-    if not location:
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.location 不能为空")
-    if not language:
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.language 不能为空")
-    if not unit:
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.unit 不能为空")
-    if auth_mode and auth_mode != "signed":
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.auth_mode 当前仅支持 signed")
-    if timeout_sec <= 0:
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.timeout_sec 必须大于0")
-    if not public_key:
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.seniverse_public_key 不能为空")
-    if not private_key:
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.seniverse_private_key 不能为空")
-    if fallback_locations and (
-        not isinstance(fallback_locations, list)
-        or any(not str(item or "").strip() for item in fallback_locations)
-    ):
-        raise ValueError("配置错误: features.handover_log.capacity_report.weather.fallback_locations 必须是非空字符串数组")
 
 
 def _validate_handover_shift_roster(cfg: Dict[str, Any]) -> None:

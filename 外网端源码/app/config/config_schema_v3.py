@@ -250,15 +250,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "state_file": "handover_capacity_oil_cache.json",
                 },
                 "weather": {
-                    "provider": "seniverse",
-                    "location": "崇川区",
-                    "fallback_locations": ["南通"],
-                    "language": "zh-Hans",
-                    "unit": "c",
-                    "timeout_sec": 8,
-                    "auth_mode": "signed",
-                    "seniverse_public_key": "Pw-nkmTzcCorv7Dey",
-                    "seniverse_private_key": "SwWfUI324UukiuVs2",
+                    "provider": "hvac_open_meteo",
                 },
             },
             "template": {
