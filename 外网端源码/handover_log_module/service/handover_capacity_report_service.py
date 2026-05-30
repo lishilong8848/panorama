@@ -388,8 +388,7 @@ def _build_fixed_header_cells(building: Any) -> Dict[str, str]:
         "S17": building_floor_text,
         "S18": building_floor_text,
         "A20": building_floor_text,
-        "A65": f"{building_floor_text}容量一览表",
-        "A67": f"{building_floor_text}能耗一览",
+        "A67": f"{building_floor_text}容量一览表",
     }
 
 
