@@ -371,7 +371,7 @@ def _finish_singleflight(
         event.set()
 
 
-def _build_fixed_header_cells(building: Any) -> Dict[str, str]:
+def _build_fixed_header_cells(building: Any, duty_date: Any = "") -> Dict[str, str]:
     building_text = _text(building)
     building_code = _extract_building_code(building_text)
     normalized_code = building_code or building_text.replace("楼", "").replace("栋", "")
@@ -379,6 +379,7 @@ def _build_fixed_header_cells(building: Any) -> Dict[str, str]:
     building_block_text = f"{normalized_code}栋" if normalized_code else building_floor_text.replace("楼", "栋", 1)
     return {
         "A1": f"世纪互联南通数据中心{building_block_text}FM运维交接班重要事项",
+        "A2": _date_only(duty_date),
         "E5": building_floor_text,
         "G16": building_floor_text,
         "G17": building_floor_text,
@@ -2808,7 +2809,7 @@ class HandoverCapacityReportService:
                 "emit_log": emit_log,
             }
             cell_values = builder(context)
-            cell_values.update(_build_fixed_header_cells(building_text))
+            cell_values.update(_build_fixed_header_cells(building_text, duty_date_text))
             cell_values.update(
                 self._build_capacity_overlay_values(
                     building=building_text,
