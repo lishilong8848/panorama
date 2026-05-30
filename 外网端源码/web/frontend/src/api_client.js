@@ -10,26 +10,92 @@ function appendQuery(url, params = {}) {
   return suffix ? `${url}?${suffix}` : url;
 }
 
-function buildTimeoutSignal(timeoutMs) {
+function buildAbortError(message = "请求已取消") {
+  if (typeof DOMException === "function") {
+    return new DOMException(message, "AbortError");
+  }
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+function buildTimeoutError(url) {
+  const message = `请求超时：${url}`;
+  if (typeof DOMException === "function") {
+    return new DOMException(message, "TimeoutError");
+  }
+  const error = new Error(message);
+  error.name = "TimeoutError";
+  return error;
+}
+
+function buildTimeoutSignal(timeoutMs, url = "", parentSignal = undefined) {
   const normalized = Number.parseInt(String(timeoutMs || 0), 10);
-  if (!Number.isFinite(normalized) || normalized <= 0 || typeof AbortController !== "function") {
-    return { signal: undefined, dispose() {} };
+  const hasTimeout = Number.isFinite(normalized) && normalized > 0;
+  if (typeof AbortController !== "function") {
+    return {
+      signal: parentSignal,
+      didTimeout: () => false,
+      dispose() {},
+    };
+  }
+  if (!hasTimeout && !parentSignal) {
+    return {
+      signal: undefined,
+      didTimeout: () => false,
+      dispose() {},
+    };
+  }
+  if (!hasTimeout) {
+    return {
+      signal: parentSignal,
+      didTimeout: () => false,
+      dispose() {},
+    };
   }
   const controller = new AbortController();
-  const timerId = window.setTimeout(() => controller.abort(), normalized);
+  let timedOut = false;
+  const abortFromParent = () => {
+    if (controller.signal.aborted) return;
+    controller.abort(parentSignal?.reason || buildAbortError());
+  };
+  if (parentSignal?.aborted) {
+    abortFromParent();
+  } else if (parentSignal && typeof parentSignal.addEventListener === "function") {
+    parentSignal.addEventListener("abort", abortFromParent, { once: true });
+  }
+  const timerId = window.setTimeout(() => {
+    timedOut = true;
+    if (!controller.signal.aborted) {
+      controller.abort(buildTimeoutError(url));
+    }
+  }, normalized);
   return {
     signal: controller.signal,
+    didTimeout: () => timedOut,
     dispose() {
       window.clearTimeout(timerId);
+      if (parentSignal && typeof parentSignal.removeEventListener === "function") {
+        parentSignal.removeEventListener("abort", abortFromParent);
+      }
     },
   };
 }
 
 async function apiJsonWithTimeout(url, options = {}, timeoutMs = 0) {
-  const timeout = buildTimeoutSignal(timeoutMs);
+  const { signal: parentSignal, ...restOptions } = options || {};
+  const timeout = buildTimeoutSignal(timeoutMs, url, parentSignal);
   try {
-    const requestOptions = timeout.signal ? { ...options, signal: timeout.signal } : options;
+    const requestOptions = timeout.signal ? { ...restOptions, signal: timeout.signal } : restOptions;
     return await apiJson(url, requestOptions);
+  } catch (error) {
+    if (timeout.didTimeout() || error?.name === "TimeoutError") {
+      const timeoutError = new Error(`请求超时：${url}`);
+      timeoutError.code = "request_timeout";
+      timeoutError.requestUrl = String(url || "");
+      throw timeoutError;
+    }
+    throw error;
   } finally {
     timeout.dispose();
   }
@@ -497,11 +563,11 @@ export async function getHandoverReviewBootstrapApi(buildingCode, params = {}, o
 }
 
 export async function getHandoverReviewSnapshotApi(buildingCode, params = {}, options = {}) {
-  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/snapshot`, params), options, 5000);
+  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/snapshot`, params), options, 10000);
 }
 
 export async function getHandoverReviewStatusApi(buildingCode, params = {}, options = {}) {
-  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options, 5000);
+  return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/status`, params), options, 10000);
 }
 
 export async function refreshHandoverReviewEventSectionsApi(buildingCode, payload = {}) {

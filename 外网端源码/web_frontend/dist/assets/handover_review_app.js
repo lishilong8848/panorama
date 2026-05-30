@@ -2332,18 +2332,7 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       function shouldPreferBootstrapLoad({ forceLatest = false } = {}) {
-        if (forceLatest) {
-          return true;
-        }
-        const explicitSessionId = String(activeRouteSelection.value.sessionId || "").trim();
-        const hasExplicitDutyContext = Boolean(
-          activeRouteSelection.value.dutyDate && activeRouteSelection.value.dutyShift,
-        );
-        if (explicitSessionId || hasExplicitDutyContext) {
-          return false;
-        }
-        const backendMode = String(reviewDisplayState.value?.mode?.code || "").trim().toLowerCase();
-        return backendMode !== "history";
+        return true;
       }
 
       function syncRouteToCurrentSelection(nextHistory = historyState.value) {
@@ -2463,6 +2452,11 @@ export function mountHandoverReviewApp(Vue) {
 
       function createRequestController() {
         return typeof AbortController === "function" ? new AbortController() : null;
+      }
+
+      function isRequestAbort(error) {
+        const text = String(error?.message || error || "").trim().toLowerCase();
+        return error?.name === "AbortError" || text.includes("signal is aborted");
       }
 
       function buildRequestOptions(controller = null) {
@@ -3108,7 +3102,7 @@ export function mountHandoverReviewApp(Vue) {
                 loading.value = false;
               }
             } catch (error) {
-              if (error?.name === "AbortError") {
+              if (isRequestAbort(error)) {
                 return false;
               }
             }
@@ -3121,7 +3115,7 @@ export function mountHandoverReviewApp(Vue) {
                 buildRequestOptions(activeLoadController),
               );
             } catch (error) {
-              if (error?.name === "AbortError") {
+              if (isRequestAbort(error)) {
                 return false;
               }
               errorText.value = String(error?.message || error || "交接班正文加载失败");
@@ -3184,7 +3178,7 @@ export function mountHandoverReviewApp(Vue) {
           hydrateFromPayload(payload, { fromBackground: false });
           return true;
         } catch (error) {
-          if (error?.name === "AbortError") {
+          if (isRequestAbort(error)) {
             return false;
           }
           if (!background) {

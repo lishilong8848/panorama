@@ -10,7 +10,8 @@ function normalizeMethod(method) {
 }
 
 function isAbortError(err) {
-  return err?.name === "AbortError";
+  const text = String(err?.message || err || "").trim().toLowerCase();
+  return err?.name === "AbortError" || text.includes("signal is aborted");
 }
 
 function isTransientNetworkFailure(err) {
