@@ -56,7 +56,25 @@ def _batch_lock(batch_key: str) -> threading.RLock:
 def _runtime_root(config: Dict[str, Any]) -> Path:
     global_paths = config.get("_global_paths", {}) if isinstance(config, dict) else {}
     root_text = str(global_paths.get("runtime_state_root", "") if isinstance(global_paths, dict) else "").strip()
-    return Path(root_text) if root_text else get_app_dir() / ".runtime"
+    root = Path(root_text) if root_text else get_app_dir() / ".runtime"
+    if not root.is_absolute():
+        root = get_app_dir() / root
+    return root
+
+
+def _resolve_runtime_file_path(config: Dict[str, Any], value: Any) -> Path:
+    path = Path(str(value or "").strip())
+    if path.is_absolute():
+        return path
+    candidates = [
+        get_app_dir() / path,
+        _runtime_root(config).parent / path,
+        Path.cwd() / path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _normalize_shift(value: Any) -> str:
@@ -469,7 +487,7 @@ class Handover110StationUploadService:
         batch_key = str(state.get("batch_key", "")).strip()
         duty_date = _normalize_duty_date(state.get("duty_date", ""))
         duty_shift = _normalize_shift(state.get("duty_shift", ""))
-        stored_path = Path(str(state.get("stored_path", "")).strip())
+        stored_path = _resolve_runtime_file_path(self.config, state.get("stored_path", ""))
         if not batch_key or not duty_date or not duty_shift:
             raise ValueError("110站上传状态缺少日期/班次")
         if not stored_path.exists():
