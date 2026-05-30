@@ -112,6 +112,22 @@ class FeishuBitableClient:
             or "too many request" in msg
         )
 
+    def _api_retry_attempts(self) -> int:
+        # Feishu Bitable occasionally returns HTTP 400 with code 1254607
+        # ("Data not ready") for freshly-updated or busy tables. The default
+        # retry count is tuned for network glitches and is too short for this.
+        return max(self.request_retry_count + 1, 10)
+
+    def _api_retry_sleep(self, attempt: int, body: Dict[str, Any]) -> None:
+        if self.request_retry_interval_sec <= 0:
+            return
+        code_text = str((body or {}).get("code", "")).strip()
+        if code_text == "1254607":
+            delay = min(12.0, max(2.0, self.request_retry_interval_sec) * max(1, attempt))
+        else:
+            delay = self.request_retry_interval_sec * max(1, attempt)
+        time.sleep(delay)
+
     @staticmethod
     def _response_error_detail(response: requests.Response) -> str:
         try:
@@ -182,7 +198,7 @@ class FeishuBitableClient:
         timeout: Optional[int] = None,
         content_type_json: bool = False,
     ) -> Dict[str, Any]:
-        api_attempts = self.request_retry_count + 1
+        api_attempts = self._api_retry_attempts()
         last_error: Optional[str] = None
         for api_attempt in range(1, api_attempts + 1):
             should_retry_api = False
@@ -226,6 +242,15 @@ class FeishuBitableClient:
                         self.invalidate_token()
                         self.refresh_token(force=True)
                         continue
+                    if self._is_retryable_api_error(error_body) and api_attempt < api_attempts:
+                        detail = self._response_error_detail(response)
+                        last_error = (
+                            "飞书HTTP请求失败(将重试): "
+                            f"status={response.status_code}, url={response.url}, body={detail}"
+                        )
+                        should_retry_api = True
+                        self._api_retry_sleep(api_attempt, error_body)
+                        break
                     detail = self._response_error_detail(response)
                     raise RuntimeError(
                         "飞书HTTP请求失败: "
@@ -248,8 +273,7 @@ class FeishuBitableClient:
                 if self._is_retryable_api_error(body) and api_attempt < api_attempts:
                     last_error = f"飞书接口调用失败(将重试): {body}"
                     should_retry_api = True
-                    if self.request_retry_interval_sec > 0:
-                        time.sleep(self.request_retry_interval_sec * api_attempt)
+                    self._api_retry_sleep(api_attempt, body)
                     break
 
                 raise RuntimeError(f"飞书接口调用失败: {body}")

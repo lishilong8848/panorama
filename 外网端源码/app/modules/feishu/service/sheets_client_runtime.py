@@ -96,6 +96,21 @@ class FeishuSheetsClientRuntime:
             or "too many request" in msg
         )
 
+    def _api_retry_attempts(self) -> int:
+        # Feishu may return HTTP 400 + code 1254607 while table/sheet data is
+        # temporarily not ready. Give those transient API states enough time.
+        return max(self.request_retry_count + 1, 10)
+
+    def _api_retry_sleep(self, attempt: int, body: Dict[str, Any]) -> None:
+        if self.request_retry_interval_sec <= 0:
+            return
+        code_text = str((body or {}).get("code", "")).strip()
+        if code_text == "1254607":
+            delay = min(12.0, max(2.0, self.request_retry_interval_sec) * max(1, attempt))
+        else:
+            delay = self.request_retry_interval_sec * max(1, attempt)
+        time.sleep(delay)
+
     def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         total_attempts = self.request_retry_count + 1
         timeout = kwargs.pop("timeout", self.timeout)
@@ -140,7 +155,7 @@ class FeishuSheetsClientRuntime:
         params: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
-        attempts = self.request_retry_count + 1
+        attempts = self._api_retry_attempts()
         last_error = ""
         last_error_detail = ""
         for api_attempt in range(1, attempts + 1):
@@ -179,6 +194,18 @@ class FeishuSheetsClientRuntime:
                         self.invalidate_token()
                         self.refresh_token(force=True)
                         continue
+                    if self._is_retryable_api_error(error_body) and api_attempt < attempts:
+                        should_retry = True
+                        last_error = str(error_body)
+                        last_error_detail = self._format_api_error_message(
+                            method=method,
+                            url=url,
+                            payload=payload,
+                            params=params,
+                            body=error_body,
+                        )
+                        self._api_retry_sleep(api_attempt, error_body)
+                        break
                     raise RuntimeError(
                         self._format_api_error_message(
                             method=method,
@@ -208,8 +235,7 @@ class FeishuSheetsClientRuntime:
                         params=params,
                         body=body,
                     )
-                    if self.request_retry_interval_sec > 0:
-                        time.sleep(self.request_retry_interval_sec * api_attempt)
+                    self._api_retry_sleep(api_attempt, body)
                     break
                 raise RuntimeError(
                     self._format_api_error_message(
