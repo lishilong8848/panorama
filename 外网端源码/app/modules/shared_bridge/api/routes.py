@@ -629,8 +629,6 @@ def _bridge_artifact_label(kind: Any) -> str:
         return "预处理结果"
     if normalized == "output_file":
         return "输出文件"
-    if normalized == "daily_report_asset":
-        return "日报截图资产"
     if normalized == "resume_state":
         return "续传状态"
     if normalized == "manifest":

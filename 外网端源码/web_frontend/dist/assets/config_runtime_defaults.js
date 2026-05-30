@@ -857,12 +857,6 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(dailyReportExport.fields, "date", "日期");
   setStringDefault(dailyReportExport.fields, "shift", "班次");
   setStringDefault(dailyReportExport.fields, "report_link", "交接班日报");
-  setStringDefault(dailyReportExport.fields, "screenshots", "日报截图");
-  setStringDefault(
-    dailyReportExport,
-    "screenshot_page_url",
-    "https://www.sm.sjhl.online:3001/",
-  );
 
   setBooleanDefault(reviewUi, "enabled", true);
   if (!Array.isArray(reviewUi.buildings) || reviewUi.buildings.length !== 5) {

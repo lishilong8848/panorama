@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import copy
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
@@ -39,9 +38,7 @@ class HandoverDailyReportBitableExportService:
                 "date": "日期",
                 "shift": "班次",
                 "report_link": "交接班日报",
-                "screenshots": "日报截图",
             },
-            "screenshot_page_url": "https://www.sm.sjhl.online:3001/",
         }
 
     @staticmethod
@@ -73,7 +70,6 @@ class HandoverDailyReportBitableExportService:
             ("date", "日期"),
             ("shift", "班次"),
             ("report_link", "交接班日报"),
-            ("screenshots", "日报截图"),
         ):
             fields[key] = str(fields.get(key, default) or default).strip() or default
         cfg["fields"] = fields
@@ -343,16 +339,11 @@ class HandoverDailyReportBitableExportService:
         duty_date: str,
         duty_shift: str,
         spreadsheet_url: str,
-        summary_screenshot_path: str,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
         if not cfg.get("enabled", True):
             return {"status": "skipped", "record_id": "", "record_url": "", "error": "disabled"}
-
-        summary_path = Path(str(summary_screenshot_path or "").strip())
-        if not summary_path.exists():
-            raise FileNotFoundError("daily_report_page.png")
 
         client = self._new_client(cfg)
         target = cfg.get("target", {})
@@ -381,11 +372,6 @@ class HandoverDailyReportBitableExportService:
             )
             emit_log(f"[交接班][日报多维] 删除旧记录 count={len(matched_ids)}, batch={duty_date}|{duty_shift}")
 
-        summary_token = client.upload_attachment_bytes(
-            file_name=summary_path.name,
-            content=summary_path.read_bytes(),
-            mime_type="image/png",
-        )
         fields = cfg.get("fields", {})
         report_field_name = str(fields.get("report_link", "交接班日报") or "交接班日报").strip()
         report_link_ui_type = self._lookup_field_ui_type(fields_meta, report_field_name).lower()
@@ -398,9 +384,6 @@ class HandoverDailyReportBitableExportService:
                 fields_meta=fields_meta,
                 cfg=cfg,
             ),
-            fields["screenshots"]: [
-                {"file_token": summary_token},
-            ],
         }
         responses: List[Dict[str, Any]] = []
         last_url_error = ""

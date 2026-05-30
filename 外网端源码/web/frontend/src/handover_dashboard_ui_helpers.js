@@ -107,42 +107,6 @@ export function createHandoverDashboardUiHelpers(options = {}) {
     return action.disabledReason || "";
   }
 
-  function getHandoverDailyReportAssetAction(asset, actionName, fallbackLabel = "等待后端动作") {
-    const action =
-      asset &&
-      typeof asset === "object" &&
-      asset.actions &&
-      typeof asset.actions === "object" &&
-      asset.actions[actionName] &&
-      typeof asset.actions[actionName] === "object"
-        ? asset.actions[actionName]
-        : null;
-    return action || {
-      id: "",
-      allowed: false,
-      pending: false,
-      label: fallbackLabel,
-      disabledReason: "",
-      reasonCode: "daily_report_asset_state_not_ready",
-    };
-  }
-
-  function isHandoverDailyReportAssetActionDisabled(asset, actionName) {
-    const action = getHandoverDailyReportAssetAction(asset, actionName);
-    return action.pending || action.allowed === false;
-  }
-
-  function getHandoverDailyReportAssetActionButtonText(asset, actionName, fallbackLabel = "等待后端动作") {
-    const action = getHandoverDailyReportAssetAction(asset, actionName, fallbackLabel);
-    return String(action.label || "").trim() || fallbackLabel;
-  }
-
-  function getHandoverDailyReportAssetActionDisabledReason(asset, actionName) {
-    const action = getHandoverDailyReportAssetAction(asset, actionName);
-    if (action.pending) return action.disabledReason || "请求处理中，请稍候";
-    return action.disabledReason || "";
-  }
-
   function getHomeQuickActionState(actionLike) {
     const requestedId = actionLike && typeof actionLike === "object"
       ? String(actionLike?.id || "").trim().toLowerCase()
@@ -251,9 +215,6 @@ export function createHandoverDashboardUiHelpers(options = {}) {
     getHandoverDailyReportActionButtonText,
     getHandoverDailyReportActionDisabledReason,
     isHandoverDailyReportActionDisabled,
-    getHandoverDailyReportAssetActionButtonText,
-    getHandoverDailyReportAssetActionDisabledReason,
-    isHandoverDailyReportAssetActionDisabled,
     getStatusQuickAction,
     runHomeQuickAction,
     isHomeQuickActionLocked,

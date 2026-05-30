@@ -293,56 +293,6 @@ ${DASHBOARD_WET_BULB_COLLECTION_SECTION}
 ${DASHBOARD_CHILLER_MODE_UPLOAD_SECTION}
 ${DASHBOARD_MONTHLY_EVENT_REPORT_SECTION}
 ${DASHBOARD_ALARM_EVENT_UPLOAD_SECTION}
-        <div
-          v-if="handoverDailyReportPreviewModal.open"
-          style="position:fixed; inset:0; background:rgba(15,23,42,.82); z-index:1200; display:flex; align-items:center; justify-content:center; padding:24px;"
-          @click.self="closeHandoverDailyReportPreview"
-        >
-          <div class="content-card" style="width:min(1100px, 96vw); max-height:92vh; overflow:auto; padding:16px;">
-            <div class="btn-line" style="justify-content:space-between; align-items:center; margin-bottom:12px;">
-              <strong>{{ handoverDailyReportPreviewModal.title || '截图预览' }}</strong>
-              <div class="btn-line">
-                <a class="btn btn-secondary" :href="handoverDailyReportPreviewModal.imageUrl" :download="handoverDailyReportPreviewModal.downloadName || '日报截图.png'">下载图片</a>
-                <button class="btn btn-ghost" @click="closeHandoverDailyReportPreview">关闭</button>
-              </div>
-            </div>
-            <img
-              :src="handoverDailyReportPreviewModal.imageUrl"
-              alt="日报截图预览"
-              style="display:block; width:100%; height:auto; border-radius:10px; background:#0f172a;"
-            />
-          </div>
-        </div>
-
-        <div
-          v-if="handoverDailyReportUploadModal.open"
-          style="position:fixed; inset:0; background:rgba(15,23,42,.82); z-index:1200; display:flex; align-items:center; justify-content:center; padding:24px;"
-          @click.self="closeHandoverDailyReportUploadDialog"
-        >
-          <div class="content-card" style="width:min(560px, 94vw); padding:16px;">
-            <div class="btn-line" style="justify-content:space-between; align-items:center; margin-bottom:12px;">
-              <strong>{{ handoverDailyReportUploadModal.title || '上传截图' }}</strong>
-              <button class="btn btn-ghost" @click="closeHandoverDailyReportUploadDialog">关闭</button>
-            </div>
-            <div class="hint">{{ handoverDailyReportUploadModal.hint }}</div>
-            <div class="form-row" style="margin-top:12px;">
-              <label class="label">选择图片文件</label>
-              <input
-                type="file"
-                accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp"
-                @change="onHandoverDailyReportAssetFileChange(handoverDailyReportUploadModal.target, $event)"
-              />
-            </div>
-            <div
-              tabindex="0"
-              class="readonly-inline-card"
-              style="margin-top:12px; min-height:120px; display:flex; align-items:center; justify-content:center; text-align:center; white-space:normal; cursor:text;"
-              @paste="onHandoverDailyReportUploadPaste"
-            >
-              点击此处后按 Ctrl+V，可直接粘贴剪贴板图片
-            </div>
-          </div>
-        </div>
       </div>
     </section>`;
 

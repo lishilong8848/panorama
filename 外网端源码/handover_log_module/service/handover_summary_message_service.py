@@ -215,6 +215,16 @@ class HandoverSummaryMessageService:
         finally:
             workbook.close()
 
+    def extract_work_items_from_output_file(self, output_file: str | Path) -> List[str]:
+        path = Path(str(output_file or "").strip())
+        if not path.exists() or not path.is_file():
+            return []
+        output = self._read_output_context(path)
+        items = output.get("work_items", [])
+        if not isinstance(items, list):
+            return []
+        return [item for item in (_text(item) for item in items) if item]
+
     @staticmethod
     def _calc_unpowered_cabinets(planned: Any, powered: Any) -> str:
         try:

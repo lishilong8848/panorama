@@ -86,10 +86,12 @@ class FeishuSheetsClientRuntime:
         code = str(body.get("code", "")).strip()
         msg = str(body.get("msg", "")).strip().lower()
         return (
-            code in {"90217", "1254290", "1255001", "1255002"}
+            code in {"90217", "1254290", "1254607", "1255001", "1255002"}
             or "something went wrong" in msg
             or "internalerror" in msg
             or "internal error" in msg
+            or "data not ready" in msg
+            or "try again later" in msg
             or "too many requests" in msg
             or "too many request" in msg
         )

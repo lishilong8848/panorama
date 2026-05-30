@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
 from typing import Any, Callable, Dict, List
@@ -8,12 +8,8 @@ from typing import Any, Callable, Dict, List
 from handover_log_module.core.shift_window import format_duty_date_text
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
-from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
 from handover_log_module.service.handover_daily_report_bitable_export_service import (
     HandoverDailyReportBitableExportService,
-)
-from handover_log_module.service.handover_daily_report_screenshot_service import (
-    HandoverDailyReportScreenshotService,
 )
 from handover_log_module.service.handover_cabinet_shift_record_bitable_export_service import (
     HandoverCabinetShiftRecordBitableExportService,
@@ -21,6 +17,7 @@ from handover_log_module.service.handover_cabinet_shift_record_bitable_export_se
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
+from handover_log_module.service.handover_summary_message_service import HandoverSummaryMessageService
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateError,
     ReviewDocumentStateService,
@@ -86,8 +83,6 @@ def _normalize_daily_report_export_state(raw: Dict[str, Any] | None) -> Dict[str
         "record_id": str(payload.get("record_id", "")).strip(),
         "record_url": str(payload.get("record_url", "")).strip(),
         "spreadsheet_url": str(payload.get("spreadsheet_url", "")).strip(),
-        "summary_screenshot_path": str(payload.get("summary_screenshot_path", "")).strip(),
-        "summary_screenshot_source_used": str(payload.get("summary_screenshot_source_used", "")).strip().lower(),
         "updated_at": str(payload.get("updated_at", "")).strip(),
         "error": str(payload.get("error", "")).strip(),
         "error_code": str(payload.get("error_code", "")).strip(),
@@ -111,16 +106,8 @@ def _followup_status_text(value: Any) -> str:
         "skipped": "已跳过",
         "failed": "失败",
         "partial_failed": "部分失败",
-        "login_required": "需要重新登录",
-        "missing_login": "登录未就绪",
-        "browser_unavailable": "浏览器不可用",
-        "browser_not_started": "浏览器未启动",
-        "capture_failed": "截图失败",
         "idle": "未执行",
         "skipped_due_to_cloud_sync_not_ok": "云表未成功，已跳过",
-        "target_page_not_open": "目标页面未打开",
-        "target_page_mismatch": "目标页面不匹配",
-        "summary_sheet_not_found": "未找到日报截图页面",
         "ready": "已就绪",
     }
     return mapping.get(text, text or "-")
@@ -167,11 +154,10 @@ class ReviewFollowupTriggerService:
         self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(self.config)
         self._station_110_upload_service = Handover110StationUploadService(self.config)
         self._daily_report_state_service = HandoverDailyReportStateService(self.config)
-        self._daily_report_asset_service = HandoverDailyReportAssetService(self.config)
-        self._daily_report_screenshot_service = HandoverDailyReportScreenshotService(self.config)
         self._daily_report_bitable_export_service = HandoverDailyReportBitableExportService(self.config)
         self._cabinet_shift_record_export_service = HandoverCabinetShiftRecordBitableExportService(self.config)
         self._review_document_state_service = ReviewDocumentStateService(self.config)
+        self._summary_message_service = HandoverSummaryMessageService(self.config)
 
     def evaluate(self, batch_status: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = batch_status if isinstance(batch_status, dict) else {}
@@ -901,7 +887,7 @@ class ReviewFollowupTriggerService:
             daily_report_status = str(daily_report_state.get("status", "")).strip().lower() or "idle"
             if all_cloud_synced and daily_report_status not in {"success", "skipped"}:
                 daily_report_pending = 1
-            if all_cloud_synced and daily_report_status in {"failed", "capture_failed", "login_required"}:
+            if all_cloud_synced and daily_report_status == "failed":
                 daily_report_failed = 1
 
         attachment_pending_count = 0
@@ -1722,6 +1708,181 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
 
+    @staticmethod
+    def _previous_abcdeh_work_content_duty(*, duty_date: str, duty_shift: str) -> tuple[str, str]:
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        if duty_shift_text == "night":
+            return duty_date_text, "day"
+        try:
+            previous_day = datetime.strptime(duty_date_text, "%Y-%m-%d") - timedelta(days=1)
+            return previous_day.strftime("%Y-%m-%d"), "night"
+        except Exception:  # noqa: BLE001
+            return "", ""
+
+    @staticmethod
+    def _format_abcdeh_work_items(items: List[Any]) -> str:
+        normalized = [str(item or "").strip() for item in items if str(item or "").strip()]
+        if not normalized:
+            return "/"
+        return "\n".join(f"{index}、{item}" for index, item in enumerate(normalized, 1))
+
+    def _abcdeh_work_items_for_session(self, session: Dict[str, Any] | None) -> List[str]:
+        payload = session if isinstance(session, dict) else {}
+        output_file = str(payload.get("output_file", "") or "").strip()
+        if not output_file:
+            return []
+        try:
+            return self._summary_message_service.extract_work_items_from_output_file(output_file)
+        except Exception:
+            return []
+
+    def _build_abcdeh_work_content(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        duty_date, duty_shift = self._review_service.parse_batch_key(batch_key)
+        if not duty_date or duty_shift not in {"day", "night"}:
+            return {"ok": False, "status": "skipped", "reason": "missing_duty_context", "error": "缺少日期/班次"}
+        previous_date, previous_shift = self._previous_abcdeh_work_content_duty(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+        )
+        if not previous_date or previous_shift not in {"day", "night"}:
+            return {"ok": False, "status": "skipped", "reason": "missing_previous_duty_context", "error": "缺少上班次日期/班次"}
+
+        current_by_building = {
+            str(session.get("building", "")).strip(): session
+            for session in sessions
+            if isinstance(session, dict)
+        }
+        work_content: Dict[str, Dict[str, str]] = {}
+        missing_current: List[str] = []
+        missing_previous: List[str] = []
+        for building in HandoverCloudSheetSyncService.MANAGED_BUILDINGS:
+            current_session = current_by_building.get(building, {})
+            current_items = self._abcdeh_work_items_for_session(current_session)
+            if not current_items:
+                missing_current.append(building)
+
+            previous_session = self._review_service.get_session_for_building_duty_fast(
+                building,
+                previous_date,
+                previous_shift,
+            )
+            previous_items = self._abcdeh_work_items_for_session(previous_session)
+            if not previous_items:
+                missing_previous.append(building)
+
+            work_content[building] = {
+                "previous": self._format_abcdeh_work_items(previous_items),
+                "current": self._format_abcdeh_work_items(current_items),
+            }
+        return {
+            "ok": True,
+            "work_content": work_content,
+            "previous_batch_key": self._review_service.build_batch_key(previous_date, previous_shift),
+            "missing_current": missing_current,
+            "missing_previous": missing_previous,
+        }
+
+    def _persist_abcdeh_work_content_sync_result(self, *, batch_key: str, sync_result: Dict[str, Any]) -> None:
+        payload = dict(sync_result) if isinstance(sync_result, dict) else {}
+        payload["updated_at"] = self._now_text()
+        self._review_service.update_cloud_batch_extra_state(
+            batch_key=batch_key,
+            field="abcdeh_work_content_sync",
+            value=payload,
+        )
+
+    def _attach_abcdeh_work_content_sync_result_after_final_building_upload(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        cloud_result: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        result = cloud_result if isinstance(cloud_result, dict) else {}
+        token = str(result.get("spreadsheet_token", "")).strip()
+        if not token:
+            result["abcdeh_work_content_sync"] = {"status": "skipped", "reason": "missing_spreadsheet_token"}
+            return result
+        cloud_status = str(result.get("status", "")).strip().lower()
+        if cloud_status == "failed":
+            result["abcdeh_work_content_sync"] = {"status": "skipped", "reason": "cloud_upload_failed"}
+            return result
+        if cloud_status not in {"ok", "skipped"}:
+            result["abcdeh_work_content_sync"] = {"status": "skipped", "reason": "cloud_upload_not_complete"}
+            return result
+
+        batch_meta = self._review_service.get_cloud_batch(batch_key) or {}
+        existing = batch_meta.get("abcdeh_work_content_sync", {}) if isinstance(batch_meta, dict) else {}
+        if isinstance(existing, dict) and str(existing.get("status", "")).strip().lower() == "success":
+            result["abcdeh_work_content_sync"] = {**existing, "reason": "already_synced_once"}
+            return result
+
+        uploaded_buildings = [
+            str(item or "").strip()
+            for item in list(result.get("uploaded_buildings", []) or [])
+            if str(item or "").strip()
+        ]
+        if not uploaded_buildings:
+            result["abcdeh_work_content_sync"] = {"status": "skipped", "reason": "no_new_building_upload"}
+            return result
+
+        batch_sessions = self._review_service.list_batch_sessions(batch_key)
+        gaps = self._managed_building_cloud_sync_gaps(batch_sessions)
+        if gaps:
+            result["abcdeh_work_content_sync"] = {
+                "status": "skipped",
+                "reason": "waiting_final_building_upload",
+                "pending": gaps,
+            }
+            emit_log(
+                f"[交接班][ABCDEH工作内容云表] 等待最后楼栋云文档上传完成 batch={batch_key}, "
+                f"pending={','.join(gaps)}"
+            )
+            return result
+
+        content_result = self._build_abcdeh_work_content(
+            batch_key=batch_key,
+            sessions=batch_sessions or sessions,
+        )
+        if not bool(content_result.get("ok", False)):
+            sync_result = {
+                "status": str(content_result.get("status", "failed") or "failed").strip().lower(),
+                "reason": str(content_result.get("reason", "") or "").strip(),
+                "error": str(content_result.get("error", "") or "").strip(),
+            }
+            result["abcdeh_work_content_sync"] = sync_result
+            if sync_result["status"] != "skipped":
+                self._persist_abcdeh_work_content_sync_result(batch_key=batch_key, sync_result=sync_result)
+            return result
+
+        try:
+            latest_batch_meta = self._review_service.get_cloud_batch(batch_key) or batch_meta
+            sync_result = self._cloud_sheet_sync_service.sync_abcdeh_work_content_sheet(
+                batch_meta=latest_batch_meta,
+                work_content=content_result.get("work_content", {}),
+                emit_log=emit_log,
+            )
+            sync_result["previous_batch_key"] = str(content_result.get("previous_batch_key", "") or "").strip()
+            sync_result["missing_current"] = list(content_result.get("missing_current", []) or [])
+            sync_result["missing_previous"] = list(content_result.get("missing_previous", []) or [])
+        except Exception as exc:  # noqa: BLE001
+            sync_result = {"status": "failed", "error": str(exc)}
+            emit_log(f"[交接班][ABCDEH工作内容云表] 同步异常 batch={batch_key}, error={exc}")
+        result["abcdeh_work_content_sync"] = sync_result
+        status = str(sync_result.get("status", "")).strip().lower()
+        if status in {"success", "failed"}:
+            self._persist_abcdeh_work_content_sync_result(batch_key=batch_key, sync_result=sync_result)
+        if status and status != "skipped":
+            emit_log(f"[交接班][ABCDEH工作内容云表] 跟随云文档上传完成 batch={batch_key}, status={status}")
+        return result
+
     def _attach_station_110_sync_result(
         self,
         *,
@@ -1760,6 +1921,12 @@ class ReviewFollowupTriggerService:
             batch_key=batch_key,
             sessions=sessions,
             cloud_result=cloud_result,
+            emit_log=emit_log,
+        )
+        result = self._attach_abcdeh_work_content_sync_result_after_final_building_upload(
+            batch_key=batch_key,
+            sessions=sessions,
+            cloud_result=result,
             emit_log=emit_log,
         )
         return self._attach_station_110_sync_result(
@@ -1929,8 +2096,6 @@ class ReviewFollowupTriggerService:
         *,
         status: str,
         spreadsheet_url: str = "",
-        summary_screenshot_path: str = "",
-        summary_screenshot_source_used: str = "",
         record_id: str = "",
         record_url: str = "",
         error: str = "",
@@ -1943,8 +2108,6 @@ class ReviewFollowupTriggerService:
                 "record_id": str(record_id or "").strip(),
                 "record_url": str(record_url or "").strip(),
                 "spreadsheet_url": str(spreadsheet_url or "").strip(),
-                "summary_screenshot_path": str(summary_screenshot_path or "").strip(),
-                "summary_screenshot_source_used": str(summary_screenshot_source_used or "").strip().lower(),
                 "updated_at": self._now_text(),
                 "error": str(error or "").strip(),
                 "error_code": str(error_code or "").strip(),
@@ -1952,22 +2115,7 @@ class ReviewFollowupTriggerService:
             }
         )
 
-    def _resolve_daily_report_effective_assets(
-        self,
-        *,
-        duty_date: str,
-        duty_shift: str,
-    ) -> Dict[str, Dict[str, Any]]:
-        capture_assets = self._daily_report_asset_service.get_capture_assets_context(
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-        )
-        summary = capture_assets.get("summary_sheet_image", {}) if isinstance(capture_assets, dict) else {}
-        return {
-            "summary_sheet_image": summary if isinstance(summary, dict) else {},
-        }
-
-    def _build_daily_report_export_from_effective_assets(
+    def _build_daily_report_export_record(
         self,
         *,
         duty_date: str,
@@ -1975,36 +2123,16 @@ class ReviewFollowupTriggerService:
         spreadsheet_url: str,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
-        effective_assets = self._resolve_daily_report_effective_assets(
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-        )
-        summary = effective_assets["summary_sheet_image"]
-        summary_path = str(summary.get("stored_path", "")).strip()
-        summary_source = str(summary.get("source", "")).strip().lower()
-        if not summary_path:
-            return self._daily_report_export_state(
-                status="failed",
-                spreadsheet_url=spreadsheet_url,
-                summary_screenshot_path=summary_path,
-                summary_screenshot_source_used=summary_source,
-                error="当前最终生效日报截图不完整，无法重写日报记录。",
-                error_code="missing_effective_asset",
-                error_detail="missing_effective_asset:summary_sheet",
-            )
         try:
             export_result = self._daily_report_bitable_export_service.export_record(
                 duty_date=duty_date,
                 duty_shift=duty_shift,
                 spreadsheet_url=spreadsheet_url,
-                summary_screenshot_path=summary_path,
                 emit_log=emit_log,
             )
             return self._daily_report_export_state(
                 status=str(export_result.get("status", "")).strip().lower() or "success",
                 spreadsheet_url=spreadsheet_url,
-                summary_screenshot_path=summary_path,
-                summary_screenshot_source_used=summary_source,
                 record_id=str(export_result.get("record_id", "")).strip(),
                 record_url=str(export_result.get("record_url", "")).strip(),
                 error=str(export_result.get("error", "")).strip(),
@@ -2018,8 +2146,6 @@ class ReviewFollowupTriggerService:
             return self._daily_report_export_state(
                 status="failed",
                 spreadsheet_url=spreadsheet_url,
-                summary_screenshot_path=summary_path,
-                summary_screenshot_source_used=summary_source,
                 error=error,
                 error_code=error_code,
                 error_detail=error_detail,
@@ -2070,28 +2196,7 @@ class ReviewFollowupTriggerService:
                 daily_report_record_export=state,
             )
 
-        self._daily_report_asset_service.prune_stale_assets()
-        summary_result = self._daily_report_screenshot_service.capture_daily_report_page(
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            emit_log=emit_log,
-        )
-        if str(summary_result.get("status", "")).strip().lower() != "ok":
-            summary_error = str(summary_result.get("error", "")).strip() or _followup_status_text(
-                summary_result.get("status", "")
-            )
-            emit_log(f"[交接班][日报多维] 跳过: 日报截图失败，原因={summary_error}")
-            state = self._daily_report_export_state(
-                status="capture_failed",
-                spreadsheet_url=spreadsheet_url,
-                error=summary_error,
-            )
-            return self._daily_report_state_service.update_export_state(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                daily_report_record_export=state,
-            )
-        state = self._build_daily_report_export_from_effective_assets(
+        state = self._build_daily_report_export_record(
             duty_date=duty_date,
             duty_shift=duty_shift,
             spreadsheet_url=spreadsheet_url,
@@ -2136,7 +2241,7 @@ class ReviewFollowupTriggerService:
                 duty_shift=duty_shift_text,
                 daily_report_record_export=state,
             )
-        state = self._build_daily_report_export_from_effective_assets(
+        state = self._build_daily_report_export_record(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             spreadsheet_url=spreadsheet_url,

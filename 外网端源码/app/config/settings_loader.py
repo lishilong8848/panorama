@@ -1545,13 +1545,9 @@ def _validate_handover_daily_report_bitable_export(cfg: Dict[str, Any]) -> None:
     fields = export_cfg.get("fields", {})
     if not isinstance(fields, dict):
         raise ValueError("配置错误: features.handover_log.daily_report_bitable_export.fields 必须是对象")
-    for key in ("year", "date", "shift", "report_link", "screenshots"):
+    for key in ("year", "date", "shift", "report_link"):
         if not str(fields.get(key, "") or "").strip():
             raise ValueError(f"配置错误: features.handover_log.daily_report_bitable_export.fields.{key} 不能为空")
-
-    screenshot_url = str(export_cfg.get("screenshot_page_url", "") or "").strip()
-    if not screenshot_url:
-        raise ValueError("配置错误: features.handover_log.daily_report_bitable_export.screenshot_page_url 不能为空")
 
 
 def _validate_handover_cabinet_shift_record_bitable_export(cfg: Dict[str, Any]) -> None:

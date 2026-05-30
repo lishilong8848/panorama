@@ -715,106 +715,6 @@ def handle_handover_confirm_all(
     }
 
 
-def handle_daily_report_auth_open(
-    config: Dict[str, Any],
-    payload: Dict[str, Any],
-    emit_log: Callable[[str], None],
-    runtime: Any = None,  # noqa: ANN401
-) -> Dict[str, Any]:
-    duty_date = str(payload.get("duty_date", "") or "").strip()
-    duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
-    if runtime is not None:
-        runtime.raise_if_cancelled()
-    emit_log("[交接班][日报截图] 单截图公开页面模式，无需初始化飞书截图登录态")
-    return {
-        "ok": True,
-        "status": "skipped",
-        "message": "单截图公开页面模式，无需初始化飞书截图登录态",
-        "profile_dir": "",
-        "duty_date": duty_date,
-        "duty_shift": duty_shift,
-    }
-
-
-def handle_daily_report_screenshot_test(
-    config: Dict[str, Any],
-    payload: Dict[str, Any],
-    emit_log: Callable[[str], None],
-    runtime: Any = None,  # noqa: ANN401
-) -> Dict[str, Any]:
-    routes = _review_routes()
-    container = _review_container(config, emit_log)
-    duty_date = str(payload.get("duty_date", "") or "").strip()
-    duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
-    batch_key = f"{duty_date}|{duty_shift}"
-    if runtime is not None:
-        runtime.raise_if_cancelled()
-    review_service, _state_service, asset_service, screenshot_service = routes._build_daily_report_services(container)
-    cloud_batch = review_service.get_cloud_batch(batch_key) or {}
-    spreadsheet_url = str(cloud_batch.get("spreadsheet_url", "")).strip() if isinstance(cloud_batch, dict) else ""
-    summary_result = screenshot_service.capture_daily_report_page(
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-        emit_log=emit_log,
-    )
-    overall_status = "ok" if str(summary_result.get("status", "")).strip().lower() in {"ok", "skipped"} else "failed"
-    return {
-        "ok": overall_status != "failed",
-        "status": overall_status,
-        "batch_key": batch_key,
-        "spreadsheet_url": spreadsheet_url,
-        "summary_sheet_image": summary_result,
-        "capture_assets": asset_service.get_capture_assets_context(duty_date=duty_date, duty_shift=duty_shift),
-    }
-
-
-def handle_daily_report_recapture(
-    config: Dict[str, Any],
-    payload: Dict[str, Any],
-    emit_log: Callable[[str], None],
-    runtime: Any = None,  # noqa: ANN401
-) -> Dict[str, Any]:
-    routes = _review_routes()
-    container = _review_container(config, emit_log)
-    duty_date = str(payload.get("duty_date", "") or "").strip()
-    duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
-    target = str(payload.get("target", "") or "").strip().lower()
-    if runtime is not None:
-        runtime.raise_if_cancelled()
-    review_service, state_service, asset_service, screenshot_service = routes._build_daily_report_services(container)
-    try:
-        result = routes._daily_report_capture_result_payload(
-            screenshot_service.capture_daily_report_page(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                emit_log=emit_log,
-            )
-        )
-    except Exception as exc:  # noqa: BLE001
-        result = routes._daily_report_capture_result_payload(fallback_stage="unknown", fallback_detail=str(exc))
-        emit_log(
-            f"[交接班][日报截图] 失败 batch={duty_date}|{duty_shift}, target={target}, "
-            f"stage={result['stage']}, status={result['status']}, error={result['error_detail'] or result['error']}"
-        )
-    if str(result.get("status", "")).strip().lower() == "ok":
-        routes._touch_daily_report_asset_rewrite_state(state_service, duty_date=duty_date, duty_shift=duty_shift)
-    context = routes._build_daily_report_context_payload(
-        review_service=review_service,
-        state_service=state_service,
-        asset_service=asset_service,
-        screenshot_service=screenshot_service,
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-    )
-    return {
-        "ok": str(result.get("status", "")).strip().lower() == "ok",
-        "target": target,
-        "result": result,
-        "capture_assets": context.get("capture_assets", {}),
-        "daily_report_record_export": context.get("daily_report_record_export", {}),
-    }
-
-
 def handle_daily_report_record_rewrite(
     config: Dict[str, Any],
     payload: Dict[str, Any],
@@ -827,7 +727,7 @@ def handle_daily_report_record_rewrite(
     duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
     if runtime is not None:
         runtime.raise_if_cancelled()
-    review_service, state_service, asset_service, screenshot_service = routes._build_daily_report_services(container)
+    review_service, state_service = routes._build_daily_report_services(container)
     followup = routes.ReviewFollowupTriggerService(routes._handover_cfg(container))
     logged_failure = False
     try:
@@ -862,8 +762,6 @@ def handle_daily_report_record_rewrite(
     context = routes._build_daily_report_context_payload(
         review_service=review_service,
         state_service=state_service,
-        asset_service=asset_service,
-        screenshot_service=screenshot_service,
         duty_date=duty_date,
         duty_shift=duty_shift,
     )
@@ -873,7 +771,6 @@ def handle_daily_report_record_rewrite(
         "error_code": failure["error_code"],
         "error_detail": failure["error_detail"],
         "daily_report_record_export": context.get("daily_report_record_export", {}),
-        "capture_assets": context.get("capture_assets", {}),
     }
 
 
@@ -984,9 +881,6 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "day_metric_retry_failed": handle_day_metric_retry_failed,
     "handover_followup_continue": handle_handover_followup_continue,
     "handover_confirm_all": handle_handover_confirm_all,
-    "daily_report_auth_open": handle_daily_report_auth_open,
-    "daily_report_screenshot_test": handle_daily_report_screenshot_test,
-    "daily_report_recapture": handle_daily_report_recapture,
     "daily_report_record_rewrite": handle_daily_report_record_rewrite,
     "handover_cloud_retry_single": handle_handover_cloud_retry_single,
     "handover_cloud_retry_batch": handle_handover_cloud_retry_batch,

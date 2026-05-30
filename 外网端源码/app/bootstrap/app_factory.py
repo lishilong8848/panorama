@@ -206,25 +206,6 @@ def _register_external_role_routes(app: FastAPI) -> None:
 def _default_role_route(role_mode: str) -> str:
     return "/external/dashboard"
 
-def _initialize_handover_daily_report_auth(container) -> None:
-    try:
-        from handover_log_module.api.facade import load_handover_config
-        from handover_log_module.service.handover_daily_report_screenshot_service import (
-            HandoverDailyReportScreenshotService,
-        )
-
-        runtime_config = getattr(container, "runtime_config", {})
-        handover_cfg = load_handover_config(runtime_config if isinstance(runtime_config, dict) else {})
-        screenshot_service = HandoverDailyReportScreenshotService(handover_cfg)
-        screenshot_service.open_daily_report_screenshot_page(emit_log=lambda text: container.add_system_log(str(text)))
-        container.add_system_log("[交接班][日报截图] 单截图公开页面模式，无需初始化飞书截图登录态")
-    except Exception as exc:  # noqa: BLE001
-        try:
-            container.add_system_log(f"[交接班][日报截图] 启动预打开日报截图页面异常，已跳过: {exc}")
-        except Exception:  # noqa: BLE001
-            pass
-
-
 def _ensure_capacity_report_image_runtime(container) -> None:
     try:
         from handover_log_module.api.facade import load_handover_config
@@ -734,8 +715,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             if role_mode != "internal":
                 app.state.runtime_activation_step = "installing_capacity_report_image_runtime"
                 _ensure_capacity_report_image_runtime(container)
-                app.state.runtime_activation_step = "initializing_handover_daily_report_screenshot"
-                _initialize_handover_daily_report_auth(container)
                 app.state.runtime_activation_step = "probing_handover_review_access"
                 schedule_handover_review_access_startup_probe(container)
             app.state.runtime_services_activated = True

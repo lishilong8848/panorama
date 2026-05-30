@@ -746,10 +746,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "date": "日期",
                     "shift": "班次",
                     "report_link": "交接班日报",
-                    "screenshots": "日报截图",
                 },
-                "screenshot_page_url": "https://www.sm.sjhl.online:3001/",
-                "browser_profile_directory": "",
             },
             "cabinet_shift_record_bitable_export": {
                 "enabled": True,

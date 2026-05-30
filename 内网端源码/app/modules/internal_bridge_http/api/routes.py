@@ -89,6 +89,8 @@ def create_internal_bridge_task(
         return _runner(request).create_task(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -104,6 +106,8 @@ def list_internal_bridge_tasks(
     try:
         tasks = _runner(request).list_tasks(status=status, limit=limit)
         return {"ok": True, "tasks": tasks}
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -187,5 +191,7 @@ def refresh_internal_latest_source_cache(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc

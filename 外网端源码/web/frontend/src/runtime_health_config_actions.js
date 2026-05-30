@@ -20,7 +20,6 @@ import {
   restartAppApi,
   getBridgeTaskApi,
   getBridgeTasksApi,
-  buildHandoverDailyReportCaptureAssetUrl,
   getBootstrapHealthApi,
   getConfigApi,
   getExternalRuntimeBootstrapApi,
@@ -41,14 +40,9 @@ import {
   getJobsApi,
   getRuntimeResourcesApi,
   reprobeHandoverReviewAccessApi,
-  openHandoverDailyReportScreenshotAuthApi,
-  recaptureHandoverDailyReportAssetApi,
   refreshCurrentHourSourceCacheApi,
-  restoreHandoverDailyReportManualAssetApi,
   retryBridgeTaskApi,
   rewriteHandoverDailyReportRecordApi,
-  runHandoverDailyReportScreenshotTestApi,
-  uploadHandoverDailyReportAssetApi,
   putConfigApi,
   repairDayMetricUploadConfigApi,
   putHandoverBuildingConfigSegmentApi,
@@ -70,11 +64,6 @@ const ACTION_KEY_UPDATER_APPLY = "updater:apply";
 const ACTION_KEY_UPDATER_RESTART = "updater:restart";
 const ACTION_KEY_HANDOVER_CONFIRM_ALL = "handover_review:confirm_all";
 const ACTION_KEY_HANDOVER_CLOUD_RETRY_ALL = "handover_review:cloud_retry_all";
-const ACTION_KEY_HANDOVER_DAILY_REPORT_AUTH_OPEN = "handover_daily_report:auth_open";
-const ACTION_KEY_HANDOVER_DAILY_REPORT_SCREENSHOT_TEST = "handover_daily_report:screenshot_test";
-const ACTION_KEY_HANDOVER_DAILY_REPORT_RECAPTURE_PREFIX = "handover_daily_report:recapture:";
-const ACTION_KEY_HANDOVER_DAILY_REPORT_UPLOAD_PREFIX = "handover_daily_report:upload:";
-const ACTION_KEY_HANDOVER_DAILY_REPORT_RESTORE_PREFIX = "handover_daily_report:restore:";
 const ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE = "handover_daily_report:record_rewrite";
 const ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE = "handover_review:access_reprobe";
 const ACTION_KEY_HANDOVER_REVIEW_BASE_URL_SAVE = "handover_review:base_url_save";
@@ -128,10 +117,6 @@ export function createRuntimeHealthConfigActions(ctx) {
     handoverEngineerDirectory,
     handoverEngineerLoading,
     handoverDailyReportContext,
-    handoverDailyReportCaptureAssets,
-    handoverDailyReportLastScreenshotTest,
-    handoverDailyReportPreviewModal,
-    handoverDailyReportUploadModal,
     handoverConfigBuilding,
     handoverRuleScope,
     handoverConfigCommonRevision,
@@ -817,15 +802,6 @@ export function createRuntimeHealthConfigActions(ctx) {
     return { id: 0, line, level: "info", source: "system" };
   }
 
-  function emptyDailyReportScreenshotTestState(batchKey = "") {
-    return {
-      batch_key: String(batchKey || "").trim(),
-      status: "",
-      tested_at: "",
-      summary_sheet_image: { status: "", error: "", path: "" },
-    };
-  }
-
   function isAbortError(err) {
     const text = String(err || "").trim().toLowerCase();
     return err?.name === "AbortError" || text.includes("abort");
@@ -956,18 +932,6 @@ export function createRuntimeHealthConfigActions(ctx) {
     const error = String(data?.error || "").trim();
     if (error) return error;
     return data?.ok ? "日报多维记录已重写" : "日报多维记录重写失败";
-  }
-
-  function resolveDailyReportCaptureFailureMessage(label, result) {
-    const errorMessage = String(result?.error_message || "").trim();
-    if (errorMessage) return `${label}重新截图失败：${errorMessage}`;
-    const error = String(result?.error || "").trim();
-    if (error) return `${label}重新截图失败：${error}`;
-    return `${label}重新截图失败，请查看系统错误日志`;
-  }
-
-  function getDailyReportTargetLabel(target) {
-    return "日报截图";
   }
 
   function buildPreparedSavePayload() {
@@ -2792,69 +2756,15 @@ export function createRuntimeHealthConfigActions(ctx) {
               record_url: "",
               spreadsheet_url: "",
               error: "",
-              summary_screenshot_path: "",
-            },
-      screenshot_auth:
-        data?.screenshot_auth && typeof data.screenshot_auth === "object"
-          ? { ...data.screenshot_auth }
-          : {
-              status: "missing_login",
-              profile_dir: "",
-              last_checked_at: "",
-              error: "",
-              browser_kind: "",
-              browser_label: "",
-              browser_executable: "",
-            },
-      capture_assets:
-        data?.capture_assets && typeof data.capture_assets === "object"
-          ? { ...data.capture_assets }
-          : {
-              summary_sheet_image: {
-                exists: false,
-                source: "none",
-                stored_path: "",
-                captured_at: "",
-                preview_url: "",
-                thumbnail_url: "",
-                full_image_url: "",
-                auto: {
-                  exists: false,
-                  stored_path: "",
-                  captured_at: "",
-                  preview_url: "",
-                  thumbnail_url: "",
-                  full_image_url: "",
-                },
-                manual: {
-                  exists: false,
-                  stored_path: "",
-                  captured_at: "",
-                  preview_url: "",
-                  thumbnail_url: "",
-                  full_image_url: "",
-                },
-              },
             },
       display:
         data?.display && typeof data.display === "object"
           ? { ...data.display }
           : {
-              auth: null,
               export: null,
               actions: {},
-              capture_assets: null,
             },
     };
-    if (handoverDailyReportLastScreenshotTest) {
-      const currentBatchKey = String(handoverDailyReportLastScreenshotTest.value?.batch_key || "").trim();
-      if (currentBatchKey && currentBatchKey !== nextBatchKey) {
-        handoverDailyReportLastScreenshotTest.value = emptyDailyReportScreenshotTestState(nextBatchKey);
-      }
-      if (!nextBatchKey && currentBatchKey) {
-        handoverDailyReportLastScreenshotTest.value = emptyDailyReportScreenshotTestState("");
-      }
-    }
   }
 
   async function fetchHandoverDailyReportContext(options = {}) {
@@ -2935,13 +2845,6 @@ export function createRuntimeHealthConfigActions(ctx) {
               status: "failed",
               error: String(err || ""),
             },
-            screenshot_auth: {
-              status: "expired",
-              error: String(err || ""),
-              browser_kind: "",
-              browser_label: "",
-              browser_executable: "",
-            },
           });
         }
         if (!silentMessage) {
@@ -2953,65 +2856,6 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
     })();
     return dailyReportContextRequestInFlight;
-  }
-
-  function openHandoverDailyReportPreview(target) {
-    if (!handoverDailyReportPreviewModal || !handoverDailyReportCaptureAssets) return;
-    const targetText = "summary_sheet";
-    const assets = handoverDailyReportCaptureAssets.value || {};
-    const asset = assets.summarySheetImage || {};
-    const fullImageUrl = String(asset?.full_image_url || asset?.preview_url || "").trim();
-    if (!fullImageUrl) {
-      message.value = "当前还没有可预览的截图";
-      return;
-    }
-    handoverDailyReportPreviewModal.value = {
-      open: true,
-      title: `${getDailyReportTargetLabel(targetText)}预览`,
-      imageUrl: fullImageUrl,
-      downloadName: String(asset?.downloadName || "").trim(),
-    };
-  }
-
-  function closeHandoverDailyReportPreview() {
-    if (!handoverDailyReportPreviewModal) return;
-    handoverDailyReportPreviewModal.value = { open: false, title: "", imageUrl: "", downloadName: "" };
-  }
-
-  function openHandoverDailyReportUploadDialog(target) {
-    if (!handoverDailyReportUploadModal) return;
-    const targetText = "summary_sheet";
-    handoverDailyReportUploadModal.value = {
-      open: true,
-      target: targetText,
-      title: `上传/粘贴替换${getDailyReportTargetLabel(targetText)}`,
-      hint: "点击弹层后按 Ctrl+V，可直接粘贴剪贴板图片。",
-    };
-  }
-
-  function closeHandoverDailyReportUploadDialog() {
-    if (!handoverDailyReportUploadModal) return;
-    handoverDailyReportUploadModal.value = { open: false, target: "", title: "", hint: "" };
-  }
-
-  function buildDailyReportAssetActionPayload(target) {
-    return {
-      duty_date: String(handoverDutyDate?.value || "").trim(),
-      duty_shift: String(handoverDutyShift?.value || "").trim().toLowerCase(),
-      target: "summary_sheet",
-    };
-  }
-
-  function getHandoverDailyReportRecaptureActionKey(target) {
-    return `${ACTION_KEY_HANDOVER_DAILY_REPORT_RECAPTURE_PREFIX}${String(target || "").trim().toLowerCase()}`;
-  }
-
-  function getHandoverDailyReportUploadActionKey(target) {
-    return `${ACTION_KEY_HANDOVER_DAILY_REPORT_UPLOAD_PREFIX}${String(target || "").trim().toLowerCase()}`;
-  }
-
-  function getHandoverDailyReportRestoreActionKey(target) {
-    return `${ACTION_KEY_HANDOVER_DAILY_REPORT_RESTORE_PREFIX}${String(target || "").trim().toLowerCase()}`;
   }
 
   async function fetchHandoverEngineerDirectory(options = {}) {
@@ -4341,249 +4185,6 @@ export function createRuntimeHealthConfigActions(ctx) {
     return runner();
   }
 
-  async function waitForDailyReportScreenshotAuthReady(options = {}) {
-    const timeoutMs = Math.max(1000, Number.parseInt(String(options?.timeoutMs || 15000), 10) || 15000);
-    const intervalMs = Math.max(300, Number.parseInt(String(options?.intervalMs || 1500), 10) || 1500);
-    const startedAt = Date.now();
-    while (Date.now() - startedAt <= timeoutMs) {
-      await fetchHandoverDailyReportContext({
-        silentTransientNetworkError: true,
-        silentMessage: true,
-      });
-      const status = String(handoverDailyReportContext?.value?.screenshot_auth?.status || "")
-        .trim()
-        .toLowerCase();
-      if (status === "ready" || status === "ready_without_target_page") return true;
-      await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
-    }
-    return false;
-  }
-
-  async function openHandoverDailyReportScreenshotAuth() {
-    const runner = async () => {
-      const dutyDate = String(handoverDutyDate?.value || "").trim();
-      const dutyShift = String(handoverDutyShift?.value || "").trim().toLowerCase();
-      if (!dutyDate || !["day", "night"].includes(dutyShift)) {
-        message.value = "请先选择有效的交接班日期和班次。";
-        return { ok: false, reason: "invalid_duty_context" };
-      }
-      try {
-        const data = await openHandoverDailyReportScreenshotAuthApi({
-          duty_date: dutyDate,
-          duty_shift: dutyShift,
-        });
-        const jobId = await focusAcceptedJob(data, "飞书截图登录态初始化任务已提交，请在任务与资源面板查看进度。");
-        if (jobId) {
-          void (async () => {
-            const job = await waitForAcceptedJobCompletion(jobId, { timeoutMs: 60 * 1000 });
-            await fetchHandoverDailyReportContext({
-              silentTransientNetworkError: true,
-              silentMessage: true,
-            });
-            const ready = await waitForDailyReportScreenshotAuthReady({ timeoutMs: 15000, intervalMs: 1500 });
-            if (!shouldPublishAcceptedJobResult(jobId)) return;
-            if (ready) {
-              message.value = "飞书截图登录态已就绪";
-            } else if (job?.status === "failed") {
-              message.value = `飞书截图登录态初始化失败: ${String(job?.error || "请查看系统错误日志").trim() || "请查看系统错误日志"}`;
-            } else {
-              message.value = String(job?.result?.message || "").trim() || "已打开飞书截图登录浏览器，请完成登录。";
-            }
-          })();
-        }
-        return data;
-      } catch (err) {
-        message.value = `打开飞书截图登录浏览器失败: ${err}`;
-        return { ok: false, reason: "error", error: String(err) };
-      }
-    };
-    if (typeof runSingleFlight === "function") {
-      return runSingleFlight(ACTION_KEY_HANDOVER_DAILY_REPORT_AUTH_OPEN, runner, { cooldownMs: 500 });
-    }
-    return runner();
-  }
-
-  async function runHandoverDailyReportScreenshotTest() {
-    const runner = async () => {
-      const dutyDate = String(handoverDutyDate?.value || "").trim();
-      const dutyShift = String(handoverDutyShift?.value || "").trim().toLowerCase();
-      if (!dutyDate || !["day", "night"].includes(dutyShift)) {
-        message.value = "请先选择有效的交接班日期和班次。";
-        return { ok: false, reason: "invalid_duty_context" };
-      }
-      try {
-        const data = await runHandoverDailyReportScreenshotTestApi({
-          duty_date: dutyDate,
-          duty_shift: dutyShift,
-        });
-        if (handoverDailyReportLastScreenshotTest) {
-          handoverDailyReportLastScreenshotTest.value = {
-            batch_key: `${dutyDate}|${dutyShift}`,
-            status: "queued",
-            tested_at: new Date().toISOString(),
-            summary_sheet_image: { status: "", error: "", path: "" },
-          };
-        }
-        const jobId = await focusAcceptedJob(data, "截图测试任务已提交，请在任务与资源面板查看进度。");
-        if (jobId) {
-          void (async () => {
-            const job = await waitForAcceptedJobCompletion(jobId, { timeoutMs: 2 * 60 * 1000 });
-            if (!job) return;
-            const result = job?.result && typeof job.result === "object" ? job.result : {};
-            if (handoverDailyReportLastScreenshotTest) {
-              handoverDailyReportLastScreenshotTest.value = {
-                batch_key: String(result?.batch_key || `${dutyDate}|${dutyShift}`).trim(),
-                status: String(result?.status || (job.status === "failed" ? "failed" : "")).trim().toLowerCase(),
-                tested_at: new Date().toISOString(),
-                summary_sheet_image:
-                  result?.summary_sheet_image && typeof result.summary_sheet_image === "object"
-                    ? { ...result.summary_sheet_image }
-                    : { status: job.status === "failed" ? "failed" : "", error: String(job?.error || ""), path: "" },
-              };
-            }
-            await fetchHandoverDailyReportContext({ silentTransientNetworkError: true, silentMessage: true });
-            if (!shouldPublishAcceptedJobResult(jobId)) return;
-            const status = String(result?.status || "").trim().toLowerCase();
-            if (job.status === "failed") {
-              message.value = "截图测试失败，请查看系统错误日志后重试。";
-            } else if (status === "ok") {
-              message.value = "截图测试完成";
-            } else if (status === "partial_failed") {
-              message.value = "截图测试部分成功，请查看截图状态和系统日志";
-            } else {
-              message.value = "截图测试失败，请查看系统日志";
-            }
-          })();
-        }
-        return data;
-      } catch (err) {
-        if (handoverDailyReportLastScreenshotTest) {
-          handoverDailyReportLastScreenshotTest.value = {
-            batch_key: `${dutyDate}|${dutyShift}`,
-            status: "failed",
-            tested_at: new Date().toISOString(),
-            summary_sheet_image: {
-              status: "failed",
-              error: String(err || ""),
-              path: "",
-            },
-          };
-        }
-        message.value = isAbortError(err)
-          ? "截图测试超时，请查看系统错误日志后重试。"
-          : "截图测试失败，请查看系统错误日志后重试。";
-        return { ok: false, reason: "error", error: String(err) };
-      }
-    };
-    if (typeof runSingleFlight === "function") {
-      return runSingleFlight(ACTION_KEY_HANDOVER_DAILY_REPORT_SCREENSHOT_TEST, runner, { cooldownMs: 500 });
-    }
-    return runner();
-  }
-
-  async function recaptureHandoverDailyReportAsset(target) {
-    const targetText = String(target || "").trim().toLowerCase();
-    const runner = async () => {
-      const payload = buildDailyReportAssetActionPayload(targetText);
-      if (!payload.duty_date || !["day", "night"].includes(payload.duty_shift)) {
-        message.value = "请先选择有效的交接班日期和班次。";
-        return { ok: false, reason: "invalid_duty_context" };
-      }
-      try {
-        const data = await recaptureHandoverDailyReportAssetApi(payload);
-        const resultStatus = String(data?.result?.status || "").trim().toLowerCase();
-        const label = getDailyReportTargetLabel(targetText);
-        const jobId = await focusAcceptedJob(data, `${label}重新截图任务已提交，请在任务与资源面板查看进度。`);
-        if (jobId) {
-          void (async () => {
-            const job = await waitForAcceptedJobCompletion(jobId, { timeoutMs: 2 * 60 * 1000 });
-            if (!job) return;
-            await fetchHandoverDailyReportContext({ silentTransientNetworkError: true, silentMessage: true });
-            if (!shouldPublishAcceptedJobResult(jobId)) return;
-            const jobResult = job?.result && typeof job.result === "object" ? job.result : {};
-            const finalStatus = String(jobResult?.result?.status || resultStatus || "").trim().toLowerCase();
-            if (job.status === "failed") {
-              message.value = `${label}重新截图失败，请查看系统错误日志后重试。`;
-            } else if (finalStatus === "ok") {
-              message.value = `${label}已重新截图`;
-            } else {
-              message.value = resolveDailyReportCaptureFailureMessage(label, jobResult?.result || {});
-            }
-          })();
-        }
-        return data;
-      } catch (err) {
-        const label = getDailyReportTargetLabel(targetText);
-        message.value = isAbortError(err)
-          ? `${label}重新截图超时，请查看系统错误日志后重试。`
-          : `${label}重新截图失败，请查看系统错误日志后重试。`;
-        return { ok: false, reason: "error", error: String(err) };
-      }
-    };
-    if (typeof runSingleFlight === "function") {
-      return runSingleFlight(`${ACTION_KEY_HANDOVER_DAILY_REPORT_RECAPTURE_PREFIX}${targetText}`, runner, { cooldownMs: 500 });
-    }
-    return runner();
-  }
-
-  async function uploadHandoverDailyReportAsset(target, fileLike, fileName = "") {
-    const targetText = String(target || "").trim().toLowerCase();
-    const runner = async () => {
-      const payload = buildDailyReportAssetActionPayload(targetText);
-      if (!payload.duty_date || !["day", "night"].includes(payload.duty_shift)) {
-        message.value = "请先选择有效的交接班日期和班次。";
-        return { ok: false, reason: "invalid_duty_context" };
-      }
-      if (!(fileLike instanceof Blob)) {
-        message.value = "未检测到可上传的图片";
-        return { ok: false, reason: "missing_file" };
-      }
-      const form = new FormData();
-      form.append("duty_date", payload.duty_date);
-      form.append("duty_shift", payload.duty_shift);
-      form.append("target", payload.target);
-      form.append("file", fileLike, fileName || "clipboard.png");
-      try {
-        const data = await uploadHandoverDailyReportAssetApi(form);
-        await fetchHandoverDailyReportContext();
-        closeHandoverDailyReportUploadDialog();
-        message.value = `${getDailyReportTargetLabel(targetText)}已替换为手工图`;
-        return data;
-      } catch (err) {
-        message.value = `上传截图失败: ${err}`;
-        return { ok: false, reason: "error", error: String(err) };
-      }
-    };
-    if (typeof runSingleFlight === "function") {
-      return runSingleFlight(`${ACTION_KEY_HANDOVER_DAILY_REPORT_UPLOAD_PREFIX}${targetText}`, runner, { cooldownMs: 300 });
-    }
-    return runner();
-  }
-
-  async function restoreHandoverDailyReportAutoAsset(target) {
-    const targetText = String(target || "").trim().toLowerCase();
-    const runner = async () => {
-      const payload = buildDailyReportAssetActionPayload(targetText);
-      if (!payload.duty_date || !["day", "night"].includes(payload.duty_shift)) {
-        message.value = "请先选择有效的交接班日期和班次。";
-        return { ok: false, reason: "invalid_duty_context" };
-      }
-      try {
-        const data = await restoreHandoverDailyReportManualAssetApi(payload);
-        await fetchHandoverDailyReportContext();
-        message.value = `${getDailyReportTargetLabel(targetText)}已恢复自动图`;
-        return data;
-      } catch (err) {
-        message.value = `恢复自动图失败: ${err}`;
-        return { ok: false, reason: "error", error: String(err) };
-      }
-    };
-    if (typeof runSingleFlight === "function") {
-      return runSingleFlight(`${ACTION_KEY_HANDOVER_DAILY_REPORT_RESTORE_PREFIX}${targetText}`, runner, { cooldownMs: 300 });
-    }
-    return runner();
-  }
-
   async function rewriteHandoverDailyReportRecord() {
     const runner = async () => {
       const dutyDate = String(handoverDutyDate?.value || "").trim();
@@ -4700,27 +4301,13 @@ export function createRuntimeHealthConfigActions(ctx) {
     resumeUpdaterRecoveryIfNeeded,
     confirmAllHandoverReview,
     retryAllFailedHandoverCloudSync,
-    openHandoverDailyReportScreenshotAuth,
-    runHandoverDailyReportScreenshotTest,
-    openHandoverDailyReportPreview,
-    closeHandoverDailyReportPreview,
-    openHandoverDailyReportUploadDialog,
-    closeHandoverDailyReportUploadDialog,
-    uploadHandoverDailyReportAsset,
-    recaptureHandoverDailyReportAsset,
-    restoreHandoverDailyReportAutoAsset,
     rewriteHandoverDailyReportRecord,
     reprobeHandoverReviewAccess,
     sendHandoverReviewLink,
-    buildHandoverDailyReportCaptureAssetUrl,
     getBridgeTaskCancelActionKey,
     getBridgeTaskRetryActionKey,
-    getHandoverDailyReportRecaptureActionKey,
-    getHandoverDailyReportUploadActionKey,
-    getHandoverDailyReportRestoreActionKey,
     ACTION_KEY_HANDOVER_CONFIRM_ALL,
     ACTION_KEY_HANDOVER_CLOUD_RETRY_ALL,
-    ACTION_KEY_HANDOVER_DAILY_REPORT_AUTH_OPEN,
     ACTION_KEY_SOURCE_CACHE_REFRESH_ALARM_MANUAL,
     ACTION_KEY_SOURCE_CACHE_DELETE_ALARM_MANUAL,
     ACTION_KEY_SOURCE_CACHE_UPLOAD_ALARM_FULL,
@@ -4730,7 +4317,6 @@ export function createRuntimeHealthConfigActions(ctx) {
     ACTION_KEY_DAY_METRIC_CONFIG_REPAIR,
     ACTION_KEY_HANDOVER_REVIEW_BASE_URL_SAVE,
     ACTION_KEY_HANDOVER_REVIEW_LINK_SEND_PREFIX,
-    ACTION_KEY_HANDOVER_DAILY_REPORT_SCREENSHOT_TEST,
     ACTION_KEY_HANDOVER_DAILY_REPORT_RECORD_REWRITE,
     ACTION_KEY_HANDOVER_REVIEW_ACCESS_REPROBE,
   };

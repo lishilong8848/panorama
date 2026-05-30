@@ -207,12 +207,6 @@ export function createStartupRoleUiHelpers(options = {}) {
     if (step === "starting_runtime_services") {
       return "正在启动调度、共享桥接和后台运行组件。";
     }
-    if (step === "initializing_handover_daily_report_auth") {
-      return "正在初始化交接班日报截图登录态。";
-    }
-    if (step === "initializing_handover_daily_report_screenshot") {
-      return "正在准备交接班日报单截图。";
-    }
     if (step === "probing_handover_review_access") {
       return "正在检查审核页访问地址与审核链接补发状态。";
     }

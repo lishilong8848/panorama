@@ -64,7 +64,6 @@ export const APP_ACTION_KEYS = Object.freeze({
   actionKeyHandoverCloudRetryAll: "handover_review:cloud_retry_all",
   actionKeyHandoverFollowupContinue: "job:handover_followup_continue",
   actionKeyHandoverDailyReportAuthOpen: "handover_daily_report:auth_open",
-  actionKeyHandoverDailyReportScreenshotTest: "handover_daily_report:screenshot_test",
   actionKeyHandoverReviewAccessReprobe: "handover_review:access_reprobe",
   actionKeyHandoverReviewLinkSendPrefix: "handover_review:link_send:",
 });

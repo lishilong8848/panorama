@@ -29,13 +29,8 @@ import {
   resolveBackendOverviewCard,
 } from "./dashboard_overview_display_helpers.js";
 import {
-  emptyDailyReportAssetVariant,
   formatInternalDownloadPoolError,
   formatSharedBridgeRuntimeError,
-  getDailyReportBrowserLabel,
-  mapBackendDailyReportAssetCard,
-  mapDailyReportScreenshotTestVm,
-  normalizeDailyReportAssetCard,
 } from "./daily_report_display_helpers.js";
 
 function buildDashboardModules(menuGroups) {
@@ -824,55 +819,11 @@ export function createAppState(vueApi) {
       record_url: "",
       spreadsheet_url: "",
       error: "",
-      summary_screenshot_path: "",
-      summary_screenshot_source_used: "",
-    },
-    screenshot_auth: {
-      status: "missing_login",
-      profile_dir: "",
-      last_checked_at: "",
-      error: "",
-      browser_kind: "",
-      browser_label: "",
-      browser_executable: "",
-    },
-    capture_assets: {
-      summary_sheet_image: {
-        exists: false,
-        source: "none",
-        stored_path: "",
-        captured_at: "",
-        preview_url: "",
-        thumbnail_url: "",
-        full_image_url: "",
-        auto: emptyDailyReportAssetVariant(),
-        manual: emptyDailyReportAssetVariant(),
-      },
     },
     display: {
-      auth: null,
       export: null,
       actions: {},
-      capture_assets: null,
     },
-  });
-  const handoverDailyReportLastScreenshotTest = ref({
-    batch_key: "",
-    status: "",
-    tested_at: "",
-    summary_sheet_image: { status: "", error: "", path: "" },
-  });
-  const handoverDailyReportPreviewModal = ref({
-    open: false,
-    title: "",
-    imageUrl: "",
-    downloadName: "",
-  });
-  const handoverDailyReportUploadModal = ref({
-    open: false,
-    target: "",
-    title: "",
-    hint: "",
   });
   const handoverConfigBuilding = ref("A楼");
   const handoverConfigCommonRevision = ref(0);
@@ -1827,23 +1778,6 @@ export function createAppState(vueApi) {
       summaryText: "已清空",
     };
   });
-  const handoverDailyReportAuthVm = computed(() =>
-    handoverDailyReportContext.value?.display?.auth && typeof handoverDailyReportContext.value.display.auth === "object"
-      ? {
-        text: String(handoverDailyReportContext.value.display.auth.text || "").trim(),
-        tone: String(handoverDailyReportContext.value.display.auth.tone || "").trim() || "neutral",
-        error: String(handoverDailyReportContext.value.display.auth.error || "").trim(),
-        profileText: String(handoverDailyReportContext.value.display.auth.profile_text || handoverDailyReportContext.value.display.auth.profileText || "").trim(),
-        profileLabel: String(handoverDailyReportContext.value.display.auth.profile_label || handoverDailyReportContext.value.display.auth.profileLabel || "").trim(),
-      }
-      : {
-        text: "等待后端状态",
-        tone: "neutral",
-        error: "",
-        profileText: "",
-        profileLabel: "当前目标浏览器",
-      },
-  );
   const handoverDailyReportExportVm = computed(() =>
     handoverDailyReportContext.value?.display?.export && typeof handoverDailyReportContext.value.display.export === "object"
       ? {
@@ -1863,18 +1797,6 @@ export function createAppState(vueApi) {
       return mapBackendActionsState(backendActions);
     }
     return {
-      open_auth: mapBackendActionState({
-        allowed: false,
-        label: "等待后端动作",
-        disabled_reason: "",
-        reason_code: "daily_report_state_not_ready",
-      }),
-      screenshot_test: mapBackendActionState({
-        allowed: false,
-        label: "等待后端动作",
-        disabled_reason: "",
-        reason_code: "daily_report_state_not_ready",
-      }),
       rewrite_record: mapBackendActionState({
         allowed: false,
         label: "等待后端动作",
@@ -1890,51 +1812,6 @@ export function createAppState(vueApi) {
         "",
     ).trim(),
   );
-  const handoverDailyReportCaptureAssets = computed(() => {
-    const dutyDate = String(handoverDailyReportContext.value?.duty_date || "").trim();
-    const dutyShift = String(handoverDailyReportContext.value?.duty_shift || "").trim().toLowerCase();
-    const rawAssets = handoverDailyReportContext.value?.capture_assets;
-    const summaryLastWrittenSource = String(
-      handoverDailyReportContext.value?.daily_report_record_export?.summary_screenshot_source_used || "",
-    ).trim();
-    const backendDisplay = handoverDailyReportContext.value?.display?.capture_assets;
-    if (backendDisplay && typeof backendDisplay === "object") {
-      return {
-        summarySheetImage: backendDisplay.summary_sheet_image && typeof backendDisplay.summary_sheet_image === "object"
-          ? mapBackendDailyReportAssetCard(backendDisplay.summary_sheet_image, "日报截图")
-          : normalizeDailyReportAssetCard({}, "日报截图"),
-      };
-    }
-    if (rawAssets && typeof rawAssets === "object") {
-      return {
-        summarySheetImage: normalizeDailyReportAssetCard(
-          rawAssets.summary_sheet_image || {},
-          "日报截图",
-          {
-            dutyDate,
-            dutyShift,
-            lastWrittenSource: summaryLastWrittenSource,
-          },
-        ),
-      };
-    }
-    return {
-      summarySheetImage: normalizeDailyReportAssetCard({}, "日报截图"),
-    };
-  });
-  const handoverDailyReportSummaryTestVm = computed(() => {
-    const currentBatchKey = String(handoverDailyReportContext.value?.batch_key || "").trim();
-    const testState = handoverDailyReportLastScreenshotTest.value || {};
-    const raw =
-      String(testState.batch_key || "").trim() === currentBatchKey ? testState.summary_sheet_image || {} : {};
-    return mapDailyReportScreenshotTestVm(raw, {
-      fallbackExists: Boolean(handoverDailyReportCaptureAssets.value.summarySheetImage.exists),
-      fallbackPath: String(handoverDailyReportCaptureAssets.value.summarySheetImage.stored_path || ""),
-      fallbackCapturedAt: String(handoverDailyReportCaptureAssets.value.summarySheetImage.captured_at || ""),
-      skippedText: "本次测试已跳过",
-      browserLabel: getDailyReportBrowserLabel(handoverDailyReportContext.value?.screenshot_auth || {}),
-    });
-  });
   const canRewriteHandoverDailyReportRecord = computed(() =>
     handoverDailyReportActions.value?.rewrite_record?.allowed !== false,
   );
@@ -2153,9 +2030,6 @@ export function createAppState(vueApi) {
     handoverEngineerDirectory,
     handoverEngineerLoading,
     handoverDailyReportContext,
-    handoverDailyReportLastScreenshotTest,
-    handoverDailyReportPreviewModal,
-    handoverDailyReportUploadModal,
     handoverConfigBuilding,
     handoverConfigCommonRevision,
     handoverConfigCommonUpdatedAt,
@@ -2249,12 +2123,9 @@ export function createAppState(vueApi) {
     dashboardScheduleStatusItems,
     handoverReviewOverview,
     handoverFollowupProgress,
-    handoverDailyReportAuthVm,
     handoverDailyReportExportVm,
     handoverDailyReportSpreadsheetUrl,
     handoverDailyReportActions,
-    handoverDailyReportCaptureAssets,
-    handoverDailyReportSummaryTestVm,
     canRewriteHandoverDailyReportRecord,
     handoverConfiguredBuildings,
     handoverSelectedBuildings,

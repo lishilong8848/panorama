@@ -26,16 +26,12 @@ from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
-from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
 from handover_log_module.service.handover_xlsx_write_queue_service import (
     HandoverXlsxWriteQueueService,
     HandoverXlsxWriteQueueTimeoutError,
 )
 from handover_log_module.service.capacity_report_image_delivery_service import CapacityReportImageDeliveryService
-from handover_log_module.service.handover_daily_report_screenshot_service import (
-    HandoverDailyReportScreenshotService,
-)
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
 from handover_log_module.service.event_category_payload_builder import EventCategoryPayloadBuilder
@@ -1317,15 +1313,6 @@ def _maybe_start_handover_followup_job_after_review_save(
         return _build_followup_failure_result(followup, batch_key=target_batch, error=str(exc))
 
 
-def _daily_report_stage_text(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    mapping = {
-        "summary_sheet": "日报截图",
-        "unknown": "未知阶段",
-    }
-    return mapping.get(text, text or "-")
-
-
 def _accepted_job_response(job) -> Dict[str, Any]:
     payload = job.to_dict() if hasattr(job, "to_dict") else dict(job or {})
     return {
@@ -1383,21 +1370,12 @@ def _start_handover_background_job(
 
 def _build_daily_report_services(
     container,
-) -> tuple[ReviewSessionService, HandoverDailyReportStateService, HandoverDailyReportAssetService, HandoverDailyReportScreenshotService]:
+) -> tuple[ReviewSessionService, HandoverDailyReportStateService]:
     handover_cfg = _handover_cfg(container)
     return (
         ReviewSessionService(handover_cfg),
         HandoverDailyReportStateService(handover_cfg),
-        HandoverDailyReportAssetService(handover_cfg),
-        HandoverDailyReportScreenshotService(handover_cfg),
     )
-
-
-def _validate_daily_report_target_or_400(target: str) -> str:
-    target_text = str(target or "").strip().lower()
-    if target_text != "summary_sheet":
-        raise HTTPException(status_code=400, detail="target 参数错误")
-    return target_text
 
 
 def _load_daily_report_spreadsheet_url(
@@ -1420,8 +1398,6 @@ def _build_daily_report_context_payload(
     *,
     review_service: ReviewSessionService,
     state_service: HandoverDailyReportStateService,
-    asset_service: HandoverDailyReportAssetService,
-    screenshot_service: HandoverDailyReportScreenshotService,
     duty_date: str,
     duty_shift: str,
 ) -> Dict[str, Any]:
@@ -1431,61 +1407,11 @@ def _build_daily_report_context_payload(
         duty_date=duty_date,
         duty_shift=duty_shift,
     )
-    screenshot_auth = state_service.get_screenshot_auth_state()
-    capture_assets = asset_service.get_capture_assets_context(
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-    )
     return state_service.get_context(
         duty_date=duty_date,
         duty_shift=duty_shift,
-        screenshot_auth=screenshot_auth,
-        capture_assets=capture_assets,
         spreadsheet_url=spreadsheet_url,
     )
-
-
-
-async def _build_daily_report_context_payload_async(
-    *,
-    review_service: ReviewSessionService,
-    state_service: HandoverDailyReportStateService,
-    asset_service: HandoverDailyReportAssetService,
-    screenshot_service: HandoverDailyReportScreenshotService,
-    duty_date: str,
-    duty_shift: str,
-) -> Dict[str, Any]:
-    spreadsheet_url = _load_daily_report_spreadsheet_url(
-        review_service,
-        state_service,
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-    )
-    screenshot_auth = state_service.get_screenshot_auth_state()
-    capture_assets = asset_service.get_capture_assets_context(
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-    )
-    return state_service.get_context(
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-        screenshot_auth=screenshot_auth,
-        capture_assets=capture_assets,
-        spreadsheet_url=spreadsheet_url,
-    )
-
-
-def _touch_daily_report_asset_rewrite_state(
-    state_service: HandoverDailyReportStateService,
-    *,
-    duty_date: str,
-    duty_shift: str,
-) -> Dict[str, Any]:
-    export_state = state_service.get_export_state(duty_date=duty_date, duty_shift=duty_shift)
-    status = str(export_state.get("status", "")).strip().lower()
-    if status in {"success", "pending_asset_rewrite"}:
-        return state_service.mark_pending_asset_rewrite(duty_date=duty_date, duty_shift=duty_shift)
-    return export_state
 
 
 def _daily_report_error_message(error_code: str, *, fallback: str = "") -> str:
@@ -1494,20 +1420,6 @@ def _daily_report_error_message(error_code: str, *, fallback: str = "") -> str:
         return "日报链接字段写入失败，请检查飞书多维表“交接班日报”字段类型。"
     if code == "missing_spreadsheet_url":
         return "当前批次缺少云文档链接，无法重写日报记录。"
-    if code == "missing_effective_asset":
-        return "当前最终生效截图不完整，无法重写日报记录。"
-    if code == "login_required":
-        return "飞书截图登录态未就绪，请先完成登录。"
-    if code == "target_page_not_open":
-        return "目标网页当前没有在系统 Edge 中打开，请先打开对应页面后再重试。"
-    if code == "summary_sheet_not_found":
-        return "未找到日报截图页面，请确认页面可正常访问。"
-    if code == "target_page_mismatch":
-        return "当前打开页面与目标页面不一致，请重新打开对应飞书页面后重试。"
-    if code == "capture_dom_unavailable":
-        return "截图页面当前不可用，请稍后重试。"
-    if code == "timeout":
-        return "截图操作超时，请查看系统错误日志后重试。"
     return str(fallback or "").strip() or "操作失败，请查看系统错误日志。"
 
 
@@ -1522,30 +1434,6 @@ def _daily_report_failure_payload(raw: Dict[str, Any] | None = None, *, fallback
         "error": error,
         "error_code": error_code,
         "error_detail": error_detail,
-    }
-
-
-def _daily_report_capture_result_payload(raw: Dict[str, Any] | None = None, *, fallback_stage: str = "unknown", fallback_detail: str = "") -> Dict[str, Any]:
-    payload = raw if isinstance(raw, dict) else {}
-    error_code = str(payload.get("error", "") or "").strip()
-    error_detail = str(payload.get("error_detail", "") or fallback_detail or "").strip()
-    error_message = str(payload.get("error_message", "") or "").strip()
-    if not error_message:
-        error_message = (
-            _daily_report_error_message(error_code, fallback="")
-            if error_code
-            else "操作失败，请查看系统错误日志。"
-        )
-    return {
-        "status": str(payload.get("status", "") or "failed").strip().lower() or "failed",
-        "stage": str(payload.get("stage", "") or fallback_stage).strip().lower() or fallback_stage,
-        "error": error_code,
-        "error_detail": error_detail,
-        "error_message": error_message,
-        "path": str(payload.get("path", "") or "").strip(),
-        "resolved_url": str(payload.get("resolved_url", "") or "").strip(),
-        "resolved_page_id": str(payload.get("resolved_page_id", "") or "").strip(),
-        "matched_mode": str(payload.get("matched_mode", "") or "").strip().lower(),
     }
 
 
@@ -3771,314 +3659,13 @@ def handover_daily_report_context(
         raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
 
     container = request.app.state.container
-    review_service, state_service, asset_service, screenshot_service = _build_daily_report_services(container)
+    review_service, state_service = _build_daily_report_services(container)
     return _build_daily_report_context_payload(
         review_service=review_service,
         state_service=state_service,
-        asset_service=asset_service,
-        screenshot_service=screenshot_service,
         duty_date=duty_date_text,
         duty_shift=duty_shift_text,
     )
-
-
-@router.post("/api/handover/daily-report/screenshot-auth/open")
-def handover_daily_report_open_screenshot_auth(
-    request: Request,
-    payload: Dict[str, Any] = Body(default={}),
-) -> Dict[str, Any]:
-    duty_date_text, duty_shift_text = _normalize_duty_context(
-        str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",
-        str(payload.get("duty_shift", "")).strip() if isinstance(payload, dict) else "",
-    )
-    if not duty_date_text or not duty_shift_text:
-        raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
-
-    container = request.app.state.container
-    batch_key = f"{duty_date_text}|{duty_shift_text}"
-
-    def _run(emit_log) -> Dict[str, Any]:
-        emit_log("[交接班][日报截图] 单截图公开页面模式，无需初始化飞书截图登录态")
-        return {
-            "ok": True,
-            "status": "skipped",
-            "message": "单截图公开页面模式，无需初始化飞书截图登录态",
-            "profile_dir": "",
-        }
-
-    job = _start_handover_background_job(
-        container,
-        name=f"日报截图登录态跳过-{batch_key}",
-        run_func=_run,
-        worker_handler="daily_report_auth_open",
-        worker_payload={"duty_date": duty_date_text, "duty_shift": duty_shift_text},
-        resource_keys=_handover_resource_keys("browser:controlled", batch_key=batch_key),
-        priority="manual",
-        feature="daily_report_auth_open",
-        submitted_by="manual",
-    )
-    container.add_system_log(f"[任务] 已提交: 日报截图登录态跳过 batch={batch_key} ({job.job_id})")
-    return _accepted_job_response(job)
-
-
-@router.post("/api/handover/daily-report/screenshot-test")
-def handover_daily_report_screenshot_test(
-    request: Request,
-    payload: Dict[str, Any] = Body(default={}),
-) -> Dict[str, Any]:
-    duty_date_text, duty_shift_text = _normalize_duty_context(
-        str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",
-        str(payload.get("duty_shift", "")).strip() if isinstance(payload, dict) else "",
-    )
-    if not duty_date_text or duty_shift_text not in {"day", "night"}:
-        raise HTTPException(status_code=400, detail="invalid duty context")
-
-    container = request.app.state.container
-    batch_key = f"{duty_date_text}|{duty_shift_text}"
-
-    def _run(emit_log) -> Dict[str, Any]:
-        review_service, _state_service, asset_service, screenshot_service = _build_daily_report_services(container)
-        cloud_batch = review_service.get_cloud_batch(batch_key) or {}
-        spreadsheet_url = str(cloud_batch.get("spreadsheet_url", "")).strip() if isinstance(cloud_batch, dict) else ""
-        summary_result = screenshot_service.capture_daily_report_page(
-            duty_date=duty_date_text,
-            duty_shift=duty_shift_text,
-            emit_log=emit_log,
-        )
-        overall_status = "ok" if str(summary_result.get("status", "")).strip().lower() in {"ok", "skipped"} else "failed"
-
-        return {
-            "ok": overall_status != "failed",
-            "status": overall_status,
-            "batch_key": batch_key,
-            "spreadsheet_url": spreadsheet_url,
-            "summary_sheet_image": summary_result,
-            "capture_assets": asset_service.get_capture_assets_context(
-                duty_date=duty_date_text,
-                duty_shift=duty_shift_text,
-            ),
-        }
-
-    job = _start_handover_background_job(
-        container,
-        name=f"日报截图测试-{batch_key}",
-        run_func=_run,
-        worker_handler="daily_report_screenshot_test",
-        worker_payload={"duty_date": duty_date_text, "duty_shift": duty_shift_text},
-        resource_keys=_handover_resource_keys("browser:controlled", batch_key=batch_key),
-        priority="manual",
-        feature="daily_report_screenshot_test",
-        submitted_by="manual",
-    )
-    container.add_system_log(f"[任务] 已提交: 日报截图测试 batch={batch_key} ({job.job_id})")
-    return _accepted_job_response(job)
-
-
-@router.get("/api/handover/daily-report/capture-assets/file")
-def handover_daily_report_capture_asset_file(
-    request: Request,
-    duty_date: str = "",
-    duty_shift: str = "",
-    target: str = "",
-    variant: str = "effective",
-    view: str = "full",
-):
-    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
-    if not duty_date_text or not duty_shift_text:
-        raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
-    target_text = _validate_daily_report_target_or_400(target)
-    variant_text = str(variant or "").strip().lower()
-    if variant_text not in {"effective", "auto", "manual"}:
-        raise HTTPException(status_code=400, detail="variant 参数错误")
-    view_text = str(view or "").strip().lower() or "full"
-    if view_text not in {"full", "thumb"}:
-        raise HTTPException(status_code=400, detail="view 参数错误")
-
-    container = request.app.state.container
-    _, _, asset_service, _ = _build_daily_report_services(container)
-    path = asset_service.get_asset_file_path(
-        duty_date=duty_date_text,
-        duty_shift=duty_shift_text,
-        target=target_text,
-        variant=variant_text,
-        view=view_text,
-    )
-    if path is None or not path.exists():
-        raise HTTPException(status_code=404, detail="截图文件不存在")
-    suffix = str(path.suffix or "").strip().lower()
-    media_type = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
-    return FileResponse(path=path, media_type=media_type, filename=path.name)
-
-
-@router.post("/api/handover/daily-report/capture-assets/recapture")
-def handover_daily_report_recapture_asset(
-    request: Request,
-    payload: Dict[str, Any] = Body(default={}),
-) -> Dict[str, Any]:
-    duty_date_text, duty_shift_text = _normalize_duty_context(
-        str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",
-        str(payload.get("duty_shift", "")).strip() if isinstance(payload, dict) else "",
-    )
-    if not duty_date_text or not duty_shift_text:
-        raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
-    target_text = _validate_daily_report_target_or_400(payload.get("target", "") if isinstance(payload, dict) else "")
-
-    container = request.app.state.container
-    batch_key = f"{duty_date_text}|{duty_shift_text}"
-
-    def _run(emit_log) -> Dict[str, Any]:
-        review_service, state_service, asset_service, screenshot_service = _build_daily_report_services(container)
-        try:
-            result = _daily_report_capture_result_payload(
-                screenshot_service.capture_daily_report_page(
-                    duty_date=duty_date_text,
-                    duty_shift=duty_shift_text,
-                    emit_log=emit_log,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            result = _daily_report_capture_result_payload(
-                fallback_stage="unknown",
-                fallback_detail=str(exc),
-            )
-            emit_log(
-                f"[交接班][日报截图] 失败 batch={duty_date_text}|{duty_shift_text}, target={target_text}, "
-                f"阶段={_daily_report_stage_text(result['stage'])}, 状态={_followup_status_text(result['status'])}, "
-                f"错误={result['error_detail'] or result['error']}"
-            )
-
-        if str(result.get("status", "")).strip().lower() == "ok":
-            _touch_daily_report_asset_rewrite_state(
-                state_service,
-                duty_date=duty_date_text,
-                duty_shift=duty_shift_text,
-            )
-        context = _build_daily_report_context_payload(
-            review_service=review_service,
-            state_service=state_service,
-            asset_service=asset_service,
-            screenshot_service=screenshot_service,
-            duty_date=duty_date_text,
-            duty_shift=duty_shift_text,
-        )
-        return {
-            "ok": str(result.get("status", "")).strip().lower() == "ok",
-            "target": target_text,
-            "result": result,
-            "capture_assets": context.get("capture_assets", {}),
-            "daily_report_record_export": context.get("daily_report_record_export", {}),
-        }
-
-    job = _start_handover_background_job(
-        container,
-        name=f"日报截图重截-{target_text}-{batch_key}",
-        run_func=_run,
-        worker_handler="daily_report_recapture",
-        worker_payload={"duty_date": duty_date_text, "duty_shift": duty_shift_text, "target": target_text},
-        resource_keys=_handover_resource_keys("browser:controlled", batch_key=batch_key),
-        priority="manual",
-        feature=f"daily_report_recapture_{target_text}",
-        submitted_by="manual",
-    )
-    container.add_system_log(f"[任务] 已提交: 日报截图重截 target={target_text} batch={batch_key} ({job.job_id})")
-    return _accepted_job_response(job)
-
-
-@router.post("/api/handover/daily-report/capture-assets/upload")
-async def handover_daily_report_upload_asset(
-    request: Request,
-    duty_date: str = Form(default=""),
-    duty_shift: str = Form(default=""),
-    target: str = Form(default=""),
-    file: UploadFile = File(...),
-) -> Dict[str, Any]:
-    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
-    if not duty_date_text or not duty_shift_text:
-        raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
-    target_text = _validate_daily_report_target_or_400(target)
-    content_type = str(file.content_type or "").strip().lower()
-    allowed_types = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
-    if content_type and content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="仅支持 png/jpg/jpeg/webp 图片")
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="上传文件为空")
-
-    container = request.app.state.container
-    review_service, state_service, asset_service, screenshot_service = _build_daily_report_services(container)
-    try:
-        path = asset_service.save_manual_image(
-            duty_date=duty_date_text,
-            duty_shift=duty_shift_text,
-            target=target_text,
-            content=content,
-            mime_type=content_type,
-            original_name=str(file.filename or "").strip(),
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"图片处理失败: {exc}") from exc
-    _touch_daily_report_asset_rewrite_state(
-        state_service,
-        duty_date=duty_date_text,
-        duty_shift=duty_shift_text,
-    )
-    context = await _build_daily_report_context_payload_async(
-        review_service=review_service,
-        state_service=state_service,
-        asset_service=asset_service,
-        screenshot_service=screenshot_service,
-        duty_date=duty_date_text,
-        duty_shift=duty_shift_text,
-    )
-    return {
-        "ok": True,
-        "target": target_text,
-        "result": {"status": "ok", "error": "", "path": str(path)},
-        "capture_assets": context.get("capture_assets", {}),
-        "daily_report_record_export": context.get("daily_report_record_export", {}),
-    }
-
-
-@router.delete("/api/handover/daily-report/capture-assets/manual")
-def handover_daily_report_delete_manual_asset(
-    request: Request,
-    duty_date: str = "",
-    duty_shift: str = "",
-    target: str = "",
-) -> Dict[str, Any]:
-    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
-    if not duty_date_text or not duty_shift_text:
-        raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
-    target_text = _validate_daily_report_target_or_400(target)
-
-    container = request.app.state.container
-    review_service, state_service, asset_service, screenshot_service = _build_daily_report_services(container)
-    removed = asset_service.delete_manual_image(
-        duty_date=duty_date_text,
-        duty_shift=duty_shift_text,
-        target=target_text,
-    )
-    if removed:
-        _touch_daily_report_asset_rewrite_state(
-            state_service,
-            duty_date=duty_date_text,
-            duty_shift=duty_shift_text,
-        )
-    context = _build_daily_report_context_payload(
-        review_service=review_service,
-        state_service=state_service,
-        asset_service=asset_service,
-        screenshot_service=screenshot_service,
-        duty_date=duty_date_text,
-        duty_shift=duty_shift_text,
-    )
-    return {
-        "ok": True,
-        "target": target_text,
-        "removed": removed,
-        "capture_assets": context.get("capture_assets", {}),
-        "daily_report_record_export": context.get("daily_report_record_export", {}),
-    }
 
 
 @router.post("/api/handover/daily-report/record/rewrite")
@@ -4097,7 +3684,7 @@ def handover_daily_report_rewrite_record(
     batch_key = f"{duty_date_text}|{duty_shift_text}"
 
     def _run(emit_log) -> Dict[str, Any]:
-        review_service, state_service, asset_service, screenshot_service = _build_daily_report_services(container)
+        review_service, state_service = _build_daily_report_services(container)
         followup = ReviewFollowupTriggerService(_handover_cfg(container))
         logged_failure = False
         try:
@@ -4140,8 +3727,6 @@ def handover_daily_report_rewrite_record(
         context = _build_daily_report_context_payload(
             review_service=review_service,
             state_service=state_service,
-            asset_service=asset_service,
-            screenshot_service=screenshot_service,
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
         )
@@ -4151,7 +3736,6 @@ def handover_daily_report_rewrite_record(
             "error_code": failure["error_code"],
             "error_detail": failure["error_detail"],
             "daily_report_record_export": context.get("daily_report_record_export", {}),
-            "capture_assets": context.get("capture_assets", {}),
         }
 
     job = _start_handover_background_job(

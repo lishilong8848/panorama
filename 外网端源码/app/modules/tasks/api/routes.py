@@ -19,8 +19,6 @@ _ACTION_WORKER_ALIASES = {
     "alarm_event_upload": "alarm_event_upload",
     "branch_power_daily": "branch_power_from_download",
     "branch_power_from_download": "branch_power_from_download",
-    "daily_report_auth_open": "daily_report_auth_open",
-    "daily_report_recapture": "daily_report_recapture",
     "day_metric_from_download": "day_metric_from_download",
     "handover_cloud_retry_batch": "handover_cloud_retry_batch",
     "handover_cloud_retry_single": "handover_cloud_retry_single",

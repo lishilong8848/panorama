@@ -654,43 +654,6 @@ export async function reprobeHandoverReviewAccessApi() {
   }, 30000);
 }
 
-export async function openHandoverDailyReportScreenshotAuthApi(payload = {}) {
-  return apiJson("/api/handover/daily-report/screenshot-auth/open", {
-    method: "POST",
-    body: JSON.stringify(payload || {}),
-  });
-}
-
-export async function runHandoverDailyReportScreenshotTestApi(payload = {}) {
-  return apiJsonWithTimeout("/api/handover/daily-report/screenshot-test", {
-    method: "POST",
-    body: JSON.stringify(payload || {}),
-  }, 90000);
-}
-
-export function buildHandoverDailyReportCaptureAssetUrl(params = {}) {
-  return appendQuery("/api/handover/daily-report/capture-assets/file", params);
-}
-
-export async function recaptureHandoverDailyReportAssetApi(payload = {}) {
-  return apiJsonWithTimeout("/api/handover/daily-report/capture-assets/recapture", {
-    method: "POST",
-    body: JSON.stringify(payload || {}),
-  }, 90000);
-}
-
-export async function uploadHandoverDailyReportAssetApi(form) {
-  return postFormJob("/api/handover/daily-report/capture-assets/upload", form);
-}
-
-export async function restoreHandoverDailyReportManualAssetApi(params = {}) {
-  const resp = await fetch(appendQuery("/api/handover/daily-report/capture-assets/manual", params), {
-    method: "DELETE",
-  });
-  if (!resp.ok) throw new Error(await resp.text());
-  return resp.json();
-}
-
 export async function rewriteHandoverDailyReportRecordApi(payload = {}) {
   return apiJson("/api/handover/daily-report/record/rewrite", {
     method: "POST",
