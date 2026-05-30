@@ -12,6 +12,10 @@ from app.modules.report_pipeline.service.monthly_cache_continue_service import r
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.sheet_import.service.sheet_import_service import SheetImportService
 from app.modules.shared_bridge.service import shared_bridge_runtime_service as shared_bridge_runtime_module
+from app.modules.shared_bridge.service.shared_source_cache_service import (
+    FAMILY_BRANCH_POWER,
+    FAMILY_HANDOVER_CAPACITY_REPORT,
+)
 from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.api.facade import load_handover_config
@@ -21,6 +25,7 @@ from handover_log_module.service.branch_power_upload_service import BranchPowerU
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.top5_power_report_service import Top5PowerReportService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 from pipeline_utils import get_app_dir
 
@@ -324,6 +329,80 @@ def handle_alarm_event_upload(
     finally:
         try:
             runtime.stop()
+        except Exception:
+            pass
+
+
+def _top5_index_entries_by_building(entries: Any) -> List[Dict[str, Any]]:
+    output: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in entries if isinstance(entries, list) else []:
+        if not isinstance(item, dict):
+            continue
+        building = str(item.get("building", "") or "").strip()
+        file_path = str(item.get("file_path", "") or "").strip()
+        if not building or not file_path or building in seen:
+            continue
+        output.append({**item, "building": building, "file_path": file_path})
+        seen.add(building)
+    return output
+
+
+def handle_top5_power_report(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+    runtime: Any = None,  # noqa: ANN401
+) -> Dict[str, Any]:
+    notify = WebhookNotifyService(config)
+    service = Top5PowerReportService(config)
+    payload_buildings = [
+        str(item or "").strip()
+        for item in (payload.get("buildings") if isinstance(payload.get("buildings"), list) else [])
+        if str(item or "").strip()
+    ]
+    buildings = payload_buildings or service.all_buildings()
+    bridge_runtime = shared_bridge_runtime_module.SharedBridgeRuntimeService(
+        runtime_config=config,
+        app_version="worker",
+        emit_log=emit_log,
+    )
+    try:
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        emit_log("[TOP5功率文件生成] 读取内网 HTTP source-index: 交接班容量报表源文件")
+        capacity_entries = _top5_index_entries_by_building(
+            bridge_runtime.get_latest_source_cache_entries(
+                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+                buildings=buildings,
+            )
+        )
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        emit_log("[TOP5功率文件生成] 读取内网 HTTP source-index: 支路功率源文件")
+        branch_entries = _top5_index_entries_by_building(
+            bridge_runtime.get_latest_source_cache_entries(
+                source_family=FAMILY_BRANCH_POWER,
+                buildings=buildings,
+            )
+        )
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        emit_log(
+            "[TOP5功率文件生成] source-index 读取完成: "
+            f"capacity={len(capacity_entries)}/{len(buildings)}, branch={len(branch_entries)}/{len(buildings)}"
+        )
+        return service.run(
+            capacity_entries=capacity_entries,
+            branch_entries=branch_entries,
+            emit_log=emit_log,
+        )
+    except Exception as exc:  # noqa: BLE001
+        notify.send_failure(stage="TOP5功率文件生成", detail=str(exc), emit_log=emit_log)
+        raise
+    finally:
+        try:
+            bridge_runtime.stop()
         except Exception:
             pass
 
@@ -870,6 +949,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "auto_once": handle_auto_once,
     "multi_date": handle_multi_date,
     "alarm_event_upload": handle_alarm_event_upload,
+    "top5_power_report": handle_top5_power_report,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,
     "handover_from_file": handle_handover_from_file,

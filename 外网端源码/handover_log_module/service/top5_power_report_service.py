@@ -386,13 +386,6 @@ class Top5PowerReportService:
         missing = [building for building in _ALL_BUILDINGS if building not in result]
         if missing:
             raise RuntimeError(f"缺少{label}最新源文件: {', '.join(missing)}")
-        inaccessible = [
-            f"{building}({result[building]['file_path']})"
-            for building in _ALL_BUILDINGS
-            if not Path(result[building]["file_path"]).exists()
-        ]
-        if inaccessible:
-            raise RuntimeError(f"{label}源文件不可访问: {'; '.join(inaccessible)}")
         return result
 
     @staticmethod

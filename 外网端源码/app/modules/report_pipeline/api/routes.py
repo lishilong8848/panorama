@@ -4525,39 +4525,18 @@ def job_top5_power_report_run(payload: Dict[str, Any], request: Request) -> Dict
     if role_mode == "internal":
         raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起TOP5功率文件生成")
 
-    bridge_service = _shared_bridge_service_or_raise(container)
+    _shared_bridge_service_or_raise(container)
     service = Top5PowerReportService(config)
     buildings = service.all_buildings()
-
-    def _run(emit_log):
-        capacity_entries = _filter_accessible_cached_entries(
-            bridge_service.get_latest_ready_entries(
-                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
-                buildings=buildings,
-            ),
-            verify_files=True,
-        )
-        branch_entries = _filter_accessible_cached_entries(
-            bridge_service.get_latest_ready_entries(
-                source_family=FAMILY_BRANCH_POWER,
-                buildings=buildings,
-            ),
-            verify_files=True,
-        )
-        return service.run(
-            capacity_entries=capacity_entries,
-            branch_entries=branch_entries,
-            emit_log=emit_log,
-        )
 
     try:
         job = _start_background_job(
             container,
             name="TOP5功率文件生成",
-            run_func=_run,
-            worker_handler="",
-            worker_payload={},
-            resource_keys=_job_resource_keys("shared_bridge:top5_power_report"),
+            run_func=None,
+            worker_handler="top5_power_report",
+            worker_payload={"buildings": buildings},
+            resource_keys=_job_resource_keys("top5_power_report:global"),
             priority="manual",
             feature="top5_power_report",
             dedupe_key=_job_dedupe_key("top5_power_report", source="manual"),
