@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
 from app.config.config_compat_cleanup import sanitize_wet_bulb_collection_config
@@ -63,6 +64,7 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_BRANCH_POWER,
     FAMILY_BRANCH_SWITCH,
     FAMILY_CHILLER_MODE_SWITCH,
+    FAMILY_HANDOVER_CAPACITY_REPORT,
     SharedSourceCacheService,
     is_accessible_cached_file_path,
 )
@@ -106,6 +108,7 @@ from handover_log_module.service.review_document_state_service import ReviewDocu
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.top5_power_report_service import Top5PowerReportService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 from pipeline_utils import get_app_dir
 
@@ -4512,6 +4515,87 @@ def job_monthly_event_report_run(payload: Dict[str, Any], request: Request) -> D
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/jobs/top5-power-report/run")
+def job_top5_power_report_run(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    config = _runtime_config(container)
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端发起TOP5功率文件生成")
+
+    bridge_service = _shared_bridge_service_or_raise(container)
+    service = Top5PowerReportService(config)
+    buildings = service.all_buildings()
+
+    def _run(emit_log):
+        capacity_entries = _filter_accessible_cached_entries(
+            bridge_service.get_latest_ready_entries(
+                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+                buildings=buildings,
+            ),
+            verify_files=True,
+        )
+        branch_entries = _filter_accessible_cached_entries(
+            bridge_service.get_latest_ready_entries(
+                source_family=FAMILY_BRANCH_POWER,
+                buildings=buildings,
+            ),
+            verify_files=True,
+        )
+        return service.run(
+            capacity_entries=capacity_entries,
+            branch_entries=branch_entries,
+            emit_log=emit_log,
+        )
+
+    try:
+        job = _start_background_job(
+            container,
+            name="TOP5功率文件生成",
+            run_func=_run,
+            worker_handler="",
+            worker_payload={},
+            resource_keys=_job_resource_keys("shared_bridge:top5_power_report"),
+            priority="manual",
+            feature="top5_power_report",
+            dedupe_key=_job_dedupe_key("top5_power_report", source="manual"),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: TOP5功率文件生成 ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/api/jobs/top5-power-report/{job_id}/download")
+def download_top5_power_report(job_id: str, request: Request):
+    container = request.app.state.container
+    try:
+        job = container.job_service.get_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TaskEngineUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if str(job.get("feature", "") or "").strip() != "top5_power_report":
+        raise HTTPException(status_code=404, detail="该任务不是TOP5功率文件生成任务")
+    if str(job.get("status", "") or "").strip().lower() != "success":
+        raise HTTPException(status_code=409, detail="TOP5功率文件尚未生成成功，暂不能下载")
+    result = job.get("result", {}) if isinstance(job.get("result", {}), dict) else {}
+    output_file = str(result.get("output_file", "") or "").strip()
+    if not output_file:
+        raise HTTPException(status_code=404, detail="任务结果缺少输出文件路径")
+    output_path = Path(output_file)
+    if not output_path.exists() or not output_path.is_file():
+        raise HTTPException(status_code=404, detail=f"输出文件不存在: {output_path}")
+    file_name = str(result.get("file_name", "") or "").strip() or output_path.name
+    return FileResponse(
+        path=output_path,
+        filename=file_name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @router.post("/api/jobs/monthly-change-report/run")

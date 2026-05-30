@@ -1,4 +1,5 @@
 import {
+  buildTop5PowerReportDownloadUrl,
   cancelJobApi,
   getJobApi,
   postHandoverFromFilesJob,
@@ -13,6 +14,7 @@ import {
   submitHandoverFollowupContinueJob,
   submitDayMetricRetryFailedJob,
   submitDayMetricRetryUnitJob,
+  submitTop5PowerReportJob,
 } from "./api_client.js";
 import { expandDateRange, formatDateObj, parseDateText } from "./config_helpers.js";
 
@@ -26,6 +28,7 @@ const ACTION_KEYS = {
   dayMetricFromDownload: "job:day_metric_from_download",
   branchPowerFromDownload: "job:branch_power_from_download",
   branchPowerPowerAlertSync: "job:branch_power_power_alert_sync",
+  top5PowerReport: "job:top5_power_report",
   dayMetricFromFile: "job:day_metric_from_file",
   dayMetricRetryUnit: "job:day_metric_retry_unit",
   dayMetricRetryFailed: "job:day_metric_retry_failed",
@@ -619,6 +622,83 @@ if (!canRun.value) return;
     );
   }
 
+  function getTop5PowerReportJob() {
+    const job = currentJob?.value && typeof currentJob.value === "object" ? currentJob.value : null;
+    if (!job || String(job.feature || "").trim() !== "top5_power_report") return null;
+    return job;
+  }
+
+  function getTop5PowerReportResult() {
+    const job = getTop5PowerReportJob();
+    const result = job?.result && typeof job.result === "object" ? job.result : {};
+    return result && typeof result === "object" ? result : {};
+  }
+
+  function getTop5PowerReportStatusText() {
+    const job = getTop5PowerReportJob();
+    if (!job) return "尚未执行";
+    const status = String(job.status || "").trim().toLowerCase();
+    if (status === "success") return "已生成";
+    if (status === "failed") return "生成失败";
+    if (status === "running") return "生成中";
+    if (status === "queued") return "排队中";
+    if (status === "waiting_resource") return "等待资源";
+    if (status === "cancelled") return "已取消";
+    return job.status || "处理中";
+  }
+
+  function getTop5PowerReportStatusTone() {
+    const job = getTop5PowerReportJob();
+    const status = String(job?.status || "").trim().toLowerCase();
+    if (status === "success") return "success";
+    if (status === "failed") return "danger";
+    if (status === "running" || status === "queued" || status === "waiting_resource") return "info";
+    if (status === "cancelled") return "neutral";
+    return "neutral";
+  }
+
+  function canDownloadTop5PowerReport() {
+    const job = getTop5PowerReportJob();
+    const result = getTop5PowerReportResult();
+    return (
+      Boolean(job?.job_id)
+      && String(job?.status || "").trim().toLowerCase() === "success"
+      && Boolean(String(result.output_file || "").trim())
+    );
+  }
+
+  async function runTop5PowerReport() {
+    if (!canRun.value) return;
+    return guardedRun(
+      ACTION_KEYS.top5PowerReport,
+      async () => {
+        try {
+          message.value = "TOP5功率文件生成任务已提交";
+          const response = await submitTop5PowerReportJob({});
+          await applyAcceptedExecutionResponse(response, "TOP5功率文件生成");
+        } catch (err) {
+          message.value = `TOP5功率文件生成提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  function downloadTop5PowerReportCurrentJob() {
+    const job = getTop5PowerReportJob();
+    if (!job?.job_id || !canDownloadTop5PowerReport()) {
+      message.value = "TOP5功率文件尚未生成成功，暂不能下载";
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = buildTop5PowerReportDownloadUrl(job.job_id);
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    message.value = "TOP5功率文件下载已开始";
+  }
+
   async function runDayMetricFromFile() {
     const building = String(dayMetricLocalBuilding.value || "").trim();
     const dutyDate = String(dayMetricLocalDate.value || "").trim();
@@ -772,6 +852,12 @@ if (!canRun.value) return;
     runDayMetricFromDownload,
     runBranchPowerFromDownload,
     runBranchPowerPowerAlertSync,
+    runTop5PowerReport,
+    downloadTop5PowerReportCurrentJob,
+    canDownloadTop5PowerReport,
+    getTop5PowerReportResult,
+    getTop5PowerReportStatusText,
+    getTop5PowerReportStatusTone,
     runDayMetricFromFile,
     retryDayMetricUnit,
     retryFailedDayMetricUnits,

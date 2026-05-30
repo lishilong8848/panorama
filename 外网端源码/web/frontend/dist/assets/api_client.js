@@ -113,6 +113,10 @@ export async function retryJobApi(jobId) {
   return apiJson(`/api/jobs/${jobId}/retry`, { method: "POST", body: "{}" });
 }
 
+export function buildTop5PowerReportDownloadUrl(jobId) {
+  return `/api/jobs/top5-power-report/${encodeURIComponent(String(jobId || "").trim())}/download`;
+}
+
 export async function getJobsApi(params = {}) {
   return apiJson(appendQuery("/api/jobs", params));
 }
@@ -739,6 +743,10 @@ export async function submitBranchPowerFromDownloadJob(payload = {}) {
 
 export async function submitBranchPowerPowerAlertSyncJob(payload = {}) {
   return startJsonJobApi("/api/jobs/branch-power/power-alert-sync", payload || {});
+}
+
+export async function submitTop5PowerReportJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/top5-power-report/run", payload || {});
 }
 
 export async function submitDayMetricFromFileJob(form) {

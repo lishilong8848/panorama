@@ -61,6 +61,11 @@ const SPECIAL_GROUP = {
       desc: '每天读取支路功率、电流、开关整日源文件，解析 24 小时后直接上传多维表。',
     },
     {
+      id: 'top5_power_report',
+      title: 'TOP5功率文件生成',
+      desc: '读取容量和支路功率最新共享源文件，生成高功率设备TOP5报表。',
+    },
+    {
       id: 'wet_bulb_collection',
       title: '湿球温度定时采集',
       desc: '复用交接班日志源文件提取湿球温度和冷源运行模式，并写入多维表。',
