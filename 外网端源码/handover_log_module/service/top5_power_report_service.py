@@ -20,6 +20,8 @@ _ALL_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"]
 _BUILDING_CODES = {"A楼": "A", "B楼": "B", "C楼": "C", "D楼": "D", "E楼": "E"}
 _SUMMARY_SHEET_NAME = "汇总信息表"
 _TOP_N = 5
+_DEFAULT_TEMPLATE_SOURCE_PATH = "阿里月报高功率TOP5报表模板.xlsx"
+_LEGACY_TEMPLATE_SOURCE_PATHS = {"", "TOP5功率报表空模板.xlsx"}
 _HEADERS = [
     "序号",
     "楼栋",
@@ -236,7 +238,7 @@ class Top5PowerReportService:
         return {
             "enabled": True,
             "template": {
-                "source_path": "TOP5功率报表空模板.xlsx",
+                "source_path": _DEFAULT_TEMPLATE_SOURCE_PATH,
                 "output_dir": r"D:\QLDownload\TOP5功率文件生成",
                 "file_name_pattern": "TOP5功率文件_{timestamp}.xlsx",
             },
@@ -250,7 +252,10 @@ class Top5PowerReportService:
         cfg = _deep_merge(self._defaults(), raw_cfg if isinstance(raw_cfg, dict) else {})
         cfg["enabled"] = bool(cfg.get("enabled", True))
         template = cfg.get("template", {}) if isinstance(cfg.get("template", {}), dict) else {}
-        template["source_path"] = str(template.get("source_path", "") or "").strip() or "TOP5功率报表空模板.xlsx"
+        source_path = str(template.get("source_path", "") or "").strip()
+        if source_path in _LEGACY_TEMPLATE_SOURCE_PATHS:
+            source_path = _DEFAULT_TEMPLATE_SOURCE_PATH
+        template["source_path"] = source_path
         template["output_dir"] = (
             str(template.get("output_dir", "") or "").strip() or r"D:\QLDownload\TOP5功率文件生成"
         )
