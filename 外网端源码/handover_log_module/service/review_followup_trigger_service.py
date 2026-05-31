@@ -1798,10 +1798,20 @@ class ReviewFollowupTriggerService:
 
     @staticmethod
     def _format_abcdeh_work_items(items: List[Any]) -> str:
-        normalized = [str(item or "").strip() for item in items if str(item or "").strip()]
-        if not normalized:
-            return "/"
-        return "\n".join(f"{index}、{item}" for index, item in enumerate(normalized, 1))
+        default_item = "值班巡检"
+        normalized: List[str] = []
+        for item in items:
+            text = str(item or "").strip()
+            if not text or text == "/":
+                continue
+            text = re.sub(r"^\s*\d+\s*[、.．]\s*", "", text).strip()
+            if not text or text == "/" or text == default_item:
+                continue
+            normalized.append(text)
+        return "\n".join(
+            f"{index}、{item}"
+            for index, item in enumerate([default_item, *normalized], 1)
+        )
 
     def _abcdeh_work_items_for_session(self, session: Dict[str, Any] | None) -> List[str]:
         payload = session if isinstance(session, dict) else {}
