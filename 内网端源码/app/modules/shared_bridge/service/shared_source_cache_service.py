@@ -2065,6 +2065,14 @@ class SharedSourceCacheService:
         bucket_segment = self._bucket_path_segment(bucket_key, bucket_kind=normalized_kind)
         return self._tmp_root / "alarm_event_latest" / bucket_segment / building
 
+    def _alarm_handover_window_temp_root(self, *, duty_date: str, duty_shift: str, building: str) -> Path:
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        date_segment = "".join(ch for ch in str(duty_date or "").strip() if ch.isdigit())[:8] or datetime.now().strftime("%Y%m%d")
+        shift_segment = "".join(ch for ch in str(duty_shift or "").strip().lower() if ch.isalnum()) or "shift"
+        building_segment = "".join(ch for ch in str(building or "").strip() if ch.isalnum() or ch in {"_", "-"}) or "building"
+        return self._tmp_root / "alarm_event_handover_window" / f"{date_segment}_{shift_segment}" / building_segment
+
     def _chiller_mode_switch_temp_root(self, *, bucket_key: str, building: str) -> Path:
         if self._tmp_root is None:
             raise RuntimeError("共享缓存临时目录未配置")
@@ -4097,6 +4105,87 @@ class SharedSourceCacheService:
                 "query_end": str(payload.get("query_end", "") or "").strip(),
                 "count_summary": payload.get("count_summary", {}) if isinstance(payload.get("count_summary", {}), dict) else {},
                 "manual": True,
+            },
+        )
+
+    def fill_alarm_event_handover_window(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        query_start: str,
+        query_end: str,
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        self._ensure_internal_source_writer("交接班告警窗口源文件补采")
+        if self.download_browser_pool is None or not hasattr(self.download_browser_pool, "submit_building_alarm_job"):
+            raise RuntimeError("内网下载浏览器池未启动")
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        if not duty_date_text or not duty_shift_text:
+            raise ValueError("交接班告警窗口补采缺少 duty_date/duty_shift")
+        query_start_text = str(query_start or "").strip()
+        query_end_text = str(query_end or "").strip()
+        if not query_start_text or not query_end_text:
+            raise ValueError("交接班告警窗口补采缺少 query_start/query_end")
+
+        temp_root = self._alarm_handover_window_temp_root(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            building=building,
+        )
+        temp_root.mkdir(parents=True, exist_ok=True)
+        json_path = temp_root / f"{building}.json"
+        bucket_key = duty_date_text
+
+        async def _runner(api_context, base_url):  # noqa: ANN001
+            return await stream_alarm_event_json_document(
+                api_context,
+                base_url=base_url,
+                output_path=json_path,
+                source_family=FAMILY_ALARM_EVENT,
+                building=building,
+                bucket_kind="handover_window",
+                bucket_key=bucket_key,
+                query_start=query_start_text,
+                query_end=query_end_text,
+                emit_log=emit_log,
+                log_prefix=f"[共享缓存][交接班告警API][{building}] ",
+            )
+
+        future = self.download_browser_pool.submit_building_alarm_job(building, _runner)
+        result = future.result(timeout=self.history_fill_timeout_sec)
+        payload = result if isinstance(result, dict) else {}
+        rows = payload.get("rows", []) if isinstance(payload.get("rows", []), list) else []
+        if not json_path.exists():
+            document = build_alarm_event_json_document(
+                source_family=FAMILY_ALARM_EVENT,
+                building=building,
+                bucket_kind="handover_window",
+                bucket_key=bucket_key,
+                payload=payload,
+            )
+            write_alarm_event_json(json_path, document)
+        return self._store_entry(
+            source_family=FAMILY_ALARM_EVENT,
+            building=building,
+            bucket_kind="handover_window",
+            bucket_key=bucket_key,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            source_path=json_path,
+            status="ready",
+            metadata={
+                "family": FAMILY_ALARM_EVENT,
+                "building": building,
+                "purpose": "handover_alarm_window",
+                "row_count": int(payload.get("row_count", len(rows)) or 0),
+                "query_start": str(payload.get("query_start", "") or "").strip() or query_start_text,
+                "query_end": str(payload.get("query_end", "") or "").strip() or query_end_text,
+                "duty_date": duty_date_text,
+                "duty_shift": duty_shift_text,
+                "count_summary": payload.get("count_summary", {}) if isinstance(payload.get("count_summary", {}), dict) else {},
             },
         )
 

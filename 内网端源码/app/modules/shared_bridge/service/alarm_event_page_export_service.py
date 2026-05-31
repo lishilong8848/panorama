@@ -78,6 +78,38 @@ def query_window_start_text(when: datetime | None = None) -> str:
     return query_window_start(when).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_query_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip().replace("/", "-")
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"告警查询时间格式无效: {value}")
+
+
+def _resolve_alarm_query_window(
+    *,
+    now: datetime | None = None,
+    query_start: Any = None,
+    query_end: Any = None,
+) -> tuple[datetime, datetime]:
+    end_dt = _parse_query_datetime(query_end) or now or datetime.now()
+    start_dt = _parse_query_datetime(query_start) or query_window_start(end_dt)
+    if end_dt <= start_dt:
+        raise ValueError(
+            f"告警查询时间窗无效: start={start_dt.strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"end={end_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    return start_dt, end_dt
+
+
 def scheduled_bucket_for_time(when: datetime | None = None) -> str:
     now = when or datetime.now()
     return now.strftime("%Y-%m-%d %H")
@@ -267,15 +299,20 @@ async def collect_alarm_event_rows(
     *,
     base_url: str,
     now: datetime | None = None,
+    query_start: Any = None,
+    query_end: Any = None,
     emit_log: Callable[[str], None] | None = None,
     log_prefix: str = "",
 ) -> Dict[str, Any]:
-    target_now = now or datetime.now()
-    query_start_dt = query_window_start(target_now)
-    query_start_text_value = query_window_start_text(target_now)
-    query_end_text = target_now.strftime("%Y-%m-%d %H:%M:%S")
+    query_start_dt, query_end_dt = _resolve_alarm_query_window(
+        now=now,
+        query_start=query_start,
+        query_end=query_end,
+    )
+    query_start_text_value = query_start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    query_end_text = query_end_dt.strftime("%Y-%m-%d %H:%M:%S")
     start_ts = int(query_start_dt.timestamp())
-    end_ts = int(target_now.timestamp())
+    end_ts = int(query_end_dt.timestamp())
     normalized_base_url = _resolve_alarm_api_base_url(base_url)
     query_filter = _build_alarm_query_filter(start_ts=start_ts, end_ts=end_ts)
     event_url = f"{normalized_base_url}/api/v2/tsdb/status/event"
@@ -389,16 +426,21 @@ async def stream_alarm_event_json_document(
     bucket_kind: str,
     bucket_key: str,
     now: datetime | None = None,
+    query_start: Any = None,
+    query_end: Any = None,
     emit_log: Callable[[str], None] | None = None,
     log_prefix: str = "",
 ) -> Dict[str, Any]:
-    target_now = now or datetime.now()
-    generated_text = target_now.strftime("%Y-%m-%d %H:%M:%S")
-    query_start_dt = query_window_start(target_now)
-    query_start_text_value = query_window_start_text(target_now)
-    query_end_text = target_now.strftime("%Y-%m-%d %H:%M:%S")
+    generated_text = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    query_start_dt, query_end_dt = _resolve_alarm_query_window(
+        now=now,
+        query_start=query_start,
+        query_end=query_end,
+    )
+    query_start_text_value = query_start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    query_end_text = query_end_dt.strftime("%Y-%m-%d %H:%M:%S")
     start_ts = int(query_start_dt.timestamp())
-    end_ts = int(target_now.timestamp())
+    end_ts = int(query_end_dt.timestamp())
     normalized_base_url = _resolve_alarm_api_base_url(base_url)
     query_filter = _build_alarm_query_filter(start_ts=start_ts, end_ts=end_ts)
     event_url = f"{normalized_base_url}/api/v2/tsdb/status/event"
@@ -720,7 +762,7 @@ def load_alarm_event_json(path: Path) -> Dict[str, Any]:
     if not building:
         raise RuntimeError("告警 JSON 缺少 building")
     bucket_kind = str(data.get("bucket_kind", "") or "").strip().lower()
-    if bucket_kind not in {"latest", "manual"}:
+    if bucket_kind not in {"latest", "manual", "handover_window"}:
         raise RuntimeError(f"告警 JSON bucket_kind 非法: {bucket_kind or '<empty>'}")
     rows = data.get("rows")
     if not isinstance(rows, list):

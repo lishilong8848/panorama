@@ -70,6 +70,10 @@ _ATTENTION_HANDOVER_DEFAULT_ITEMS = (
     "各班的重要事件和注意项交接在交接班记录保存四个班",
     "每周日夜班清点工具包，对讲机及仪表设备，周一早班检查",
 )
+_ALARM_DUTY_SHIFT_WINDOWS = {
+    "day": {"start": "09:00:00", "end": "18:00:00"},
+    "night": {"start": "18:00:00", "end_next_day": "09:00:00"},
+}
 
 
 @dataclass
@@ -122,6 +126,13 @@ class HandoverOrchestrator:
         if text in {"internal", "external"}:
             return text
         return ""
+
+    def _build_alarm_duty_window(self, *, duty_date: str, duty_shift: str):
+        return build_duty_window(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            shift_windows=_ALARM_DUTY_SHIFT_WINDOWS,
+        )
 
     def _managed_source_cache_service(self) -> HandoverSourceFileCacheService:
         service = getattr(self, "_source_file_cache_service", None)
@@ -868,15 +879,9 @@ class HandoverOrchestrator:
 
         if fixed_cell_values is None and duty_date_text and duty_shift_text:
             if not start_time_text or not end_time_text:
-                download_cfg = self.config.get("download", {})
-                shift_windows = {}
-                if isinstance(download_cfg, dict):
-                    raw_windows = download_cfg.get("shift_windows", {})
-                    shift_windows = raw_windows if isinstance(raw_windows, dict) else {}
-                duty_window = build_duty_window(
+                duty_window = self._build_alarm_duty_window(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
-                    shift_windows=shift_windows,
                 )
                 start_time_text = duty_window.start_time
                 end_time_text = duty_window.end_time
@@ -1095,20 +1100,13 @@ class HandoverOrchestrator:
             if duty_date_text and duty_shift_text and result.output_file:
                 if capacity_source_file_text:
                     try:
-                        download_cfg = self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
-                        shift_windows = (
-                            download_cfg.get("shift_windows", {})
-                            if isinstance(download_cfg.get("shift_windows", {}), dict)
-                            else {}
-                        )
                         previous_date, previous_shift = self._previous_duty_context(
                             duty_date=duty_date_text,
                             duty_shift=duty_shift_text,
                         )
-                        previous_window = build_duty_window(
+                        previous_window = self._build_alarm_duty_window(
                             duty_date=previous_date,
                             duty_shift=previous_shift,
-                            shift_windows=shift_windows,
                         )
                         previous_alarm_summary = self._build_alarm_summary_for_window(
                             building=building,
@@ -1429,11 +1427,20 @@ class HandoverOrchestrator:
         alarm_document_cache: Dict[str, Dict[str, Any]] | None = None
         if self._deployment_role_mode() == "external" and query_context.duty_date and query_context.duty_shift and selected_buildings:
             try:
-                alarm_selection_snapshot = self._alarm_json_repo.build_selection_snapshot(
-                    buildings=selected_buildings,
-                    reference_date=parse_duty_date(query_context.duty_date),
+                duty_window = self._build_alarm_duty_window(
+                    duty_date=query_context.duty_date,
+                    duty_shift=query_context.duty_shift,
                 )
                 alarm_document_cache = {}
+                alarm_selection_snapshot = self._alarm_json_repo.ensure_window_coverage(
+                    buildings=selected_buildings,
+                    start_time=duty_window.start_time,
+                    end_time=duty_window.end_time,
+                    duty_date=query_context.duty_date,
+                    duty_shift=query_context.duty_shift,
+                    emit_log=emit_log,
+                    document_cache=alarm_document_cache,
+                )
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][告警JSON] 批量选源快照构建失败，后续按单楼兜底: {exc}")
 
@@ -1616,24 +1623,27 @@ class HandoverOrchestrator:
             alarm_document_cache: Dict[str, Dict[str, Any]] | None = None
             if self._deployment_role_mode() == "external" and duty_date_text and duty_shift_text and success_buildings:
                 try:
-                    alarm_selection_snapshot = self._alarm_json_repo.build_selection_snapshot(
-                        buildings=success_buildings,
-                        reference_date=parse_duty_date(duty_date_text),
+                    duty_window = self._build_alarm_duty_window(
+                        duty_date=duty_date_text,
+                        duty_shift=duty_shift_text,
                     )
                     alarm_document_cache = {}
+                    alarm_selection_snapshot = self._alarm_json_repo.ensure_window_coverage(
+                        buildings=success_buildings,
+                        start_time=duty_window.start_time,
+                        end_time=duty_window.end_time,
+                        duty_date=duty_date_text,
+                        duty_shift=duty_shift_text,
+                        emit_log=emit_log,
+                        document_cache=alarm_document_cache,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班][告警JSON] 选源快照构建失败，后续按单楼兜底: {exc}")
             prebuilt_fixed: Dict[str, tuple[Dict[str, str], datetime, ShiftRosterAssignment | None, Dict[str, Any]]] = {}
             if duty_date_text and duty_shift_text:
-                download_cfg = self.config.get("download", {})
-                shift_windows = {}
-                if isinstance(download_cfg, dict):
-                    raw_windows = download_cfg.get("shift_windows", {})
-                    shift_windows = raw_windows if isinstance(raw_windows, dict) else {}
-                duty_window = build_duty_window(
+                duty_window = self._build_alarm_duty_window(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
-                    shift_windows=shift_windows,
                 )
                 for item in success_items:
                     building = str(item.get("building", "")).strip()

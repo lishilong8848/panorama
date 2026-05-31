@@ -2545,6 +2545,8 @@ class SharedBridgeRuntimeService:
         building: str | None = None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        required_query_start: str | None = None,
+        required_query_end: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -2555,6 +2557,8 @@ class SharedBridgeRuntimeService:
             building=building,
             resume_job_id=resume_job_id,
             target_bucket_key=target_bucket_key,
+            required_query_start=required_query_start,
+            required_query_end=required_query_end,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -2663,6 +2667,8 @@ class SharedBridgeRuntimeService:
         building: str | None = None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        required_query_start: str | None = None,
+        required_query_end: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -2677,6 +2683,7 @@ class SharedBridgeRuntimeService:
                 normalized_mode,
                 normalized_building or "all",
                 resolved_bucket_key or _now_text()[:13],
+                str(required_query_end or "").strip() or "-",
             ]
         )
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
@@ -2687,6 +2694,76 @@ class SharedBridgeRuntimeService:
             building=normalized_building or None,
             resume_job_id=resume_job_id,
             target_bucket_key=resolved_bucket_key,
+            required_query_start=required_query_start,
+            required_query_end=required_query_end,
+            requested_by=requested_by,
+        )
+
+    def create_alarm_event_window_query_task(
+        self,
+        *,
+        buildings: List[str] | None,
+        query_start: str,
+        query_end: str,
+        duty_date: str,
+        duty_shift: str,
+        requested_by: str = "handover_alarm_window",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        return self._store.create_alarm_event_window_query_task(
+            buildings=buildings,
+            query_start=query_start,
+            query_end=query_end,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            created_by_role=self.role_mode,
+            created_by_node_id=self.node_id,
+            requested_by=requested_by,
+        )
+
+    def get_or_create_alarm_event_window_query_task(
+        self,
+        *,
+        buildings: List[str] | None,
+        query_start: str,
+        query_end: str,
+        duty_date: str,
+        duty_shift: str,
+        requested_by: str = "handover_alarm_window",
+    ) -> Dict[str, Any]:
+        if not self._store:
+            raise RuntimeError("共享桥接未配置")
+        self._store.ensure_ready()
+        normalized_buildings = [
+            str(item or "").strip()
+            for item in (buildings or [])
+            if str(item or "").strip()
+        ]
+        query_start_text = str(query_start or "").strip()
+        query_end_text = str(query_end or "").strip()
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        dedupe_key = "|".join(
+            [
+                "alarm_event_window_query",
+                duty_date_text or "-",
+                duty_shift_text or "-",
+                query_start_text or "-",
+                query_end_text or "-",
+                ",".join(normalized_buildings) or "all",
+            ]
+        )
+        existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
+        if existing:
+            return existing
+        return self.create_alarm_event_window_query_task(
+            buildings=normalized_buildings,
+            query_start=query_start_text,
+            query_end=query_end_text,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
             requested_by=requested_by,
         )
 
@@ -5468,6 +5545,117 @@ class SharedBridgeRuntimeService:
             self._emit_system_log(f"[共享桥接][外网端] 任务={task_id} 湿球温度外网继续失败: {error_text}")
 
 
+    def _run_alarm_event_window_query_internal(self, task: Dict[str, Any]) -> None:
+        if not self._store or self._source_cache_service is None:
+            return
+        task_id = str(task.get("task_id", "") or "").strip()
+        stage_id = "internal_fill"
+        claim_token = self._stage_claim_token(task, stage_id)
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="internal", claim_token=claim_token)
+        try:
+            requested_buildings = [
+                str(item or "").strip()
+                for item in (request.get("buildings", []) if isinstance(request.get("buildings", []), list) else [])
+                if str(item or "").strip()
+            ]
+            target_buildings = requested_buildings or self._source_cache_service.get_enabled_buildings()
+            target_buildings = [item for item in target_buildings if item]
+            query_start = str(request.get("query_start", "") or "").strip()
+            query_end = str(request.get("query_end", "") or "").strip()
+            duty_date = str(request.get("duty_date", "") or "").strip()
+            duty_shift = str(request.get("duty_shift", "") or "").strip().lower()
+            query_start_dt = self._parse_datetime_text(query_start)
+            query_end_dt = self._parse_datetime_text(query_end)
+            if not target_buildings:
+                raise RuntimeError("交接班告警窗口补采缺少楼栋")
+            if query_start_dt is None or query_end_dt is None or query_end_dt <= query_start_dt:
+                raise RuntimeError(f"交接班告警窗口无效: {query_start or '-'}~{query_end or '-'}")
+            if not duty_date or duty_shift not in {"day", "night"}:
+                raise RuntimeError(f"交接班告警窗口缺少日期/班次: duty_date={duty_date or '-'}, duty_shift={duty_shift or '-'}")
+
+            emit_log(
+                "[共享桥接][交接班告警][内网] 开始精确窗口补采: "
+                f"buildings={','.join(target_buildings)}, window={query_start}~{query_end}, "
+                f"duty={duty_date}/{duty_shift}"
+            )
+            filled_entries: List[Dict[str, Any]] = []
+            failed_entries: List[Dict[str, Any]] = []
+            for building in target_buildings:
+                self._raise_if_task_cancelled(task_id)
+                try:
+                    filled = self._source_cache_service.fill_alarm_event_handover_window(
+                        building=building,
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        query_start=query_start,
+                        query_end=query_end,
+                        emit_log=emit_log,
+                    )
+                    self._raise_if_task_cancelled(task_id)
+                    if isinstance(filled, dict):
+                        filled_entries.append(dict(filled))
+                except SharedBridgeTaskCancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    error_text = str(exc)
+                    failed_entries.append({"building": building, "error": error_text})
+                    emit_log(f"[共享桥接][交接班告警][内网] 补采失败 building={building}, error={error_text}")
+            if failed_entries and not filled_entries:
+                status = "failed"
+                stage_status = "failed"
+            elif failed_entries:
+                status = "partial_failed"
+                stage_status = "partial_failed"
+            else:
+                status = "success"
+                stage_status = "success"
+            error_text = "; ".join(
+                f"{item.get('building', '-')}: {item.get('error', '-')}" for item in failed_entries
+            )
+            stage_result = {
+                "status": status,
+                "source_family": FAMILY_ALARM_EVENT,
+                "bucket_kind": "handover_window",
+                "duty_date": duty_date,
+                "duty_shift": duty_shift,
+                "query_start": query_start,
+                "query_end": query_end,
+                "requested_buildings": list(target_buildings),
+                "source_units": filled_entries,
+                "failed_buildings": failed_entries,
+            }
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="internal",
+                stage_result=stage_result,
+                stage_error=error_text,
+                next_task_status=status,
+                task_error=error_text,
+                stage_status=stage_status,
+                task_result=stage_result,
+                record_event=True,
+                sync_mailbox=False,
+            )
+            self._request_runtime_status_refresh(reason=f"alarm_event_window_query_completed:{task_id}")
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._store.complete_stage(
+                task_id=task_id,
+                stage_id=stage_id,
+                claim_token=claim_token,
+                side="internal",
+                stage_result={"status": "failed", "error": error_text},
+                stage_error=error_text,
+                next_task_status="failed",
+                task_error=error_text,
+                stage_status="failed",
+                task_result={"status": "failed", "error": error_text},
+            )
+            self._request_runtime_status_refresh(reason=f"alarm_event_window_query_exception:{task_id}")
+
     def _run_alarm_event_upload_internal_fill(self, task: Dict[str, Any]) -> None:
         if not self._store or self._source_cache_service is None:
             return
@@ -5481,6 +5669,21 @@ class SharedBridgeRuntimeService:
         try:
             target_buildings = [building] if mode == "single_building" and building else self._source_cache_service.get_enabled_buildings()
             target_buildings = [item for item in target_buildings if item]
+            required_query_start_dt = self._parse_datetime_text(request.get("required_query_start", ""))
+            required_query_end_dt = self._parse_datetime_text(request.get("required_query_end", ""))
+
+            def _entry_covers_required_window(entry: Dict[str, Any]) -> bool:
+                if required_query_end_dt is None:
+                    return True
+                metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+                query_start_dt = self._parse_datetime_text(metadata.get("query_start", ""))
+                query_end_dt = self._parse_datetime_text(metadata.get("query_end", ""))
+                if query_end_dt is None or query_end_dt < required_query_end_dt:
+                    return False
+                if required_query_start_dt is not None and (query_start_dt is None or query_start_dt > required_query_start_dt):
+                    return False
+                return True
+
             selection = self._source_cache_service.get_alarm_event_upload_selection(
                 building=building if mode == "single_building" else "",
             )
@@ -5493,6 +5696,7 @@ class SharedBridgeRuntimeService:
                 str(item.get("building", "") or "").strip()
                 for item in selected_entries
                 if str(item.get("building", "") or "").strip()
+                and _entry_covers_required_window(item)
             }
             missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
             target_bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self.current_alarm_event_bucket()
@@ -5522,6 +5726,7 @@ class SharedBridgeRuntimeService:
                     str(item.get("building", "") or "").strip()
                     for item in selected_entries
                     if str(item.get("building", "") or "").strip()
+                    and _entry_covers_required_window(item)
                 }
                 missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
             if missing_buildings:
@@ -6605,6 +6810,10 @@ class SharedBridgeRuntimeService:
                     return
                 if self.role_mode == "external":
                     self._run_alarm_event_upload_external(task)
+                    return
+            if feature == "alarm_event_window_query":
+                if self.role_mode == "internal":
+                    self._run_alarm_event_window_query_internal(task)
                     return
             if feature == "handover_cache_fill":
                 if self.role_mode == "internal":

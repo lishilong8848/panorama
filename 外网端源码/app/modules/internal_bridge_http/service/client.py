@@ -129,6 +129,29 @@ class InternalBridgeHttpClient:
             },
         )
 
+    def create_alarm_event_window_query_task(
+        self,
+        *,
+        buildings: List[str],
+        query_start: str,
+        query_end: str,
+        duty_date: str,
+        duty_shift: str,
+        requested_by: str = "handover_alarm_window",
+    ) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/internal-bridge/alarm-events/window-query",
+            payload={
+                "buildings": [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()],
+                "query_start": str(query_start or "").strip(),
+                "query_end": str(query_end or "").strip(),
+                "duty_date": str(duty_date or "").strip(),
+                "duty_shift": str(duty_shift or "").strip().lower(),
+                "requested_by": str(requested_by or "").strip() or "handover_alarm_window",
+            },
+        )
+
     def get_task(self, task_id: str) -> Dict[str, Any] | None:
         task_text = str(task_id or "").strip()
         if not task_text:

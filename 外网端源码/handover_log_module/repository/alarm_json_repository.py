@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
+import time
 from typing import Any, Callable, Dict, List
 
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
@@ -158,6 +159,47 @@ class AlarmJsonRepository:
                     continue
                 item = dict(entry)
                 item.setdefault("building", name)
+                rows.append(item)
+        return rows
+
+    def _http_alarm_window_entries(
+        self,
+        *,
+        buildings: List[str],
+        duty_date: str,
+        duty_shift: str,
+    ) -> List[Dict[str, Any]]:
+        client = self._http_client()
+        if client is None:
+            return []
+        target_buildings = self._target_buildings(buildings)
+        if not target_buildings:
+            return []
+        queries = [
+            {
+                "source_family": FAMILY_ALARM_EVENT,
+                "bucket_kind": "handover_window",
+                "bucket_or_date": str(duty_date or "").strip(),
+                "duty_shift": str(duty_shift or "").strip().lower(),
+                "building": name,
+                "limit": 20,
+            }
+            for name in target_buildings
+        ]
+        rows: List[Dict[str, Any]] = []
+        try:
+            results = client.source_index_batch(queries, default_limit=20)
+        except Exception:
+            results = []
+        for index, result in enumerate(results if isinstance(results, list) else []):
+            if not isinstance(result, dict) or not bool(result.get("ok", False)):
+                continue
+            fallback_building = target_buildings[index] if 0 <= index < len(target_buildings) else ""
+            for entry in result.get("entries", []) if isinstance(result.get("entries", []), list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                item = dict(entry)
+                item.setdefault("building", fallback_building)
                 rows.append(item)
         return rows
 
@@ -358,6 +400,277 @@ class AlarmJsonRepository:
             "transport": "http",
         }
 
+    def build_window_selection_snapshot(
+        self,
+        *,
+        buildings: List[str],
+        duty_date: str,
+        duty_shift: str,
+    ) -> Dict[str, Any]:
+        target_buildings = self._target_buildings(buildings)
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        rows = self._http_alarm_window_entries(
+            buildings=target_buildings,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+        )
+        grouped: Dict[str, List[Dict[str, Any]]] = {name: [] for name in target_buildings}
+        for row in rows:
+            row_building = str(row.get("building", "") or "").strip()
+            if row_building not in grouped:
+                continue
+            bucket_kind = str(row.get("bucket_kind", "") or "").strip().lower()
+            if bucket_kind != "handover_window":
+                continue
+            file_path = self._entry_file_path(row)
+            if not file_path:
+                continue
+            item = dict(row)
+            item["file_path"] = file_path
+            grouped[row_building].append(item)
+
+        selected_entries: List[Dict[str, Any]] = []
+        selected_by_building: Dict[str, Dict[str, Any]] = {}
+        building_rows: List[Dict[str, Any]] = []
+        missing_buildings: List[str] = []
+        for name in target_buildings:
+            candidates = sorted(
+                grouped.get(name, []),
+                key=lambda item: (
+                    str(item.get("updated_at", "") or "").strip(),
+                    str(item.get("downloaded_at", "") or "").strip(),
+                    str(item.get("entry_id", "") or "").strip(),
+                ),
+                reverse=True,
+            )
+            selected = candidates[0] if candidates else None
+            if not isinstance(selected, dict):
+                missing_buildings.append(name)
+                building_rows.append(
+                    {
+                        "building": name,
+                        "bucket_key": duty_date_text,
+                        "status": "waiting",
+                        "ready": False,
+                        "downloaded_at": "",
+                        "selected_downloaded_at": "",
+                        "last_error": "交接班告警窗口 JSON 尚未登记",
+                        "relative_path": "",
+                        "resolved_file_path": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                        "source_kind": "handover_window",
+                        "selection_scope": "missing",
+                    }
+                )
+                continue
+            normalized_selected = dict(selected)
+            normalized_selected["selection_scope"] = "handover_window"
+            normalized_selected["source_kind"] = "handover_window"
+            selected_entries.append(normalized_selected)
+            selected_by_building[name] = normalized_selected
+            downloaded_at_text = str(selected.get("downloaded_at", "") or "").strip()
+            building_rows.append(
+                {
+                    "building": name,
+                    "bucket_key": str(selected.get("bucket_key", "") or duty_date_text).strip(),
+                    "status": "ready",
+                    "ready": True,
+                    "downloaded_at": downloaded_at_text,
+                    "selected_downloaded_at": downloaded_at_text,
+                    "last_error": "",
+                    "relative_path": str(selected.get("relative_path", "") or "").strip(),
+                    "resolved_file_path": str(selected.get("file_path", "") or "").strip(),
+                    "blocked": False,
+                    "blocked_reason": "",
+                    "next_probe_at": "",
+                    "source_kind": "handover_window",
+                    "selection_scope": "handover_window",
+                }
+            )
+        return {
+            "selection_policy": "handover_window_exact",
+            "selection_reference_date": duty_date_text,
+            "duty_date": duty_date_text,
+            "duty_shift": duty_shift_text,
+            "missing_today_buildings": list(missing_buildings),
+            "missing_both_days_buildings": list(missing_buildings),
+            "ready_count": len(selected_entries),
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "last_success_at": max(
+                [str(item.get("selected_downloaded_at", "") or "").strip() for item in building_rows if str(item.get("selected_downloaded_at", "") or "").strip()],
+                default="",
+            ),
+            "current_bucket": duty_date_text,
+            "buildings": building_rows,
+            "latest_selection": {},
+            "selected_entries": selected_entries,
+            "selected_by_building": selected_by_building,
+            "transport": "http",
+        }
+
+    @staticmethod
+    def _format_window_time(value: datetime) -> str:
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _infer_duty_shift(start_dt: datetime, end_dt: datetime) -> str:
+        if start_dt.hour == 9 and end_dt.hour == 18 and start_dt.date() == end_dt.date():
+            return "day"
+        if start_dt.hour == 18 and end_dt.date() >= start_dt.date():
+            return "night"
+        return "night" if end_dt.date() > start_dt.date() else "day"
+
+    def _request_alarm_refresh_for_window(
+        self,
+        *,
+        buildings: List[str],
+        start_dt: datetime,
+        end_dt: datetime,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None],
+    ) -> bool:
+        client = self._http_client()
+        if client is None:
+            return False
+        target_buildings = self._target_buildings(buildings)
+        if not target_buildings:
+            return False
+        try:
+            task = client.create_alarm_event_window_query_task(
+                buildings=target_buildings,
+                query_start=self._format_window_time(start_dt),
+                query_end=self._format_window_time(end_dt),
+                duty_date=str(duty_date or "").strip(),
+                duty_shift=str(duty_shift or "").strip().lower(),
+                requested_by="handover_alarm_coverage",
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][告警JSON] buildings={','.join(target_buildings)} 触发内网窗口补采失败: {exc}")
+            return False
+        task_id = str(task.get("task_id", "") or "").strip()
+        if not task_id:
+            emit_log(f"[交接班][告警JSON] buildings={','.join(target_buildings)} 内网窗口补采未返回任务ID")
+            return False
+        emit_log(
+            "[交接班][告警JSON] "
+            f"buildings={','.join(target_buildings)} 已触发内网窗口补采 task_id={task_id}, "
+            f"duty={duty_date}/{duty_shift}, window={self._format_window_time(start_dt)}~{self._format_window_time(end_dt)}"
+        )
+        deadline = time.monotonic() + 600.0
+        last_status = str(task.get("status", "") or "").strip().lower()
+        while time.monotonic() < deadline:
+            if last_status in {"success", "partial_failed", "failed", "cancelled"}:
+                break
+            time.sleep(2.0)
+            try:
+                current = client.get_task(task_id)
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][告警JSON] task_id={task_id} 查询内网窗口补采状态失败: {exc}")
+                return False
+            if isinstance(current, dict):
+                last_status = str(current.get("status", "") or "").strip().lower()
+        if last_status in {"success", "partial_failed"}:
+            emit_log(f"[交接班][告警JSON] 内网窗口补采完成 task_id={task_id}, status={last_status}")
+            return True
+        emit_log(f"[交接班][告警JSON] 内网窗口补采未完成 task_id={task_id}, status={last_status or 'timeout'}")
+        return False
+
+    def _load_selected_payload(
+        self,
+        *,
+        selected: Dict[str, Any],
+        building_text: str,
+        cache: Dict[str, Dict[str, Any]],
+    ) -> tuple[Path, Dict[str, Any], str, str]:
+        file_path = Path(str(selected.get("file_path", "") or "").strip())
+        if not str(file_path).strip() or not file_path.exists():
+            raise RuntimeError("选中的告警 JSON 文件不存在")
+
+        cache_key = str(file_path.resolve())
+        payload = cache.get(cache_key)
+        if not isinstance(payload, dict):
+            payload = load_alarm_event_json(file_path)
+            cache[cache_key] = payload
+
+        payload_building = str(payload.get("building", "") or "").strip()
+        if payload_building and payload_building != building_text:
+            raise RuntimeError(f"告警 JSON building 不匹配: payload={payload_building}, building={building_text}")
+        selection_scope = str(selected.get("selection_scope", "") or "").strip()
+        source_kind = str(selected.get("source_kind", "") or selected.get("bucket_kind", "") or "").strip().lower()
+        return file_path, payload, selection_scope, source_kind
+
+    def ensure_window_coverage(
+        self,
+        *,
+        buildings: List[str],
+        start_time: str,
+        end_time: str,
+        emit_log: Callable[[str], None] = print,
+        time_format: str = "%Y-%m-%d %H:%M:%S",
+        document_cache: Dict[str, Dict[str, Any]] | None = None,
+        duty_date: str = "",
+        duty_shift: str = "",
+    ) -> Dict[str, Any]:
+        start_dt = datetime.strptime(str(start_time).strip(), time_format)
+        end_dt = datetime.strptime(str(end_time).strip(), time_format)
+        duty_date_text = str(duty_date or "").strip() or start_dt.date().isoformat()
+        duty_shift_text = str(duty_shift or "").strip().lower() or self._infer_duty_shift(start_dt, end_dt)
+        target_buildings = self._target_buildings(buildings)
+        cache = document_cache if isinstance(document_cache, dict) else {}
+        snapshot = self.build_window_selection_snapshot(
+            buildings=target_buildings,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+        )
+        selected_by_building = snapshot.get("selected_by_building", {}) if isinstance(snapshot, dict) else {}
+        missing_or_stale: List[str] = []
+        for building in target_buildings:
+            selected = selected_by_building.get(building) if isinstance(selected_by_building, dict) else None
+            if not isinstance(selected, dict):
+                missing_or_stale.append(building)
+                continue
+            try:
+                _file_path, payload, selection_scope, source_kind = self._load_selected_payload(
+                    selected=selected,
+                    building_text=building,
+                    cache=cache,
+                )
+                coverage = self._coverage_result(
+                    payload,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    source_kind=source_kind,
+                    selection_scope=selection_scope,
+                )
+                if not bool(coverage.get("ok", False)):
+                    missing_or_stale.append(building)
+            except Exception:
+                missing_or_stale.append(building)
+        if missing_or_stale:
+            emit_log(
+                "[交接班][告警JSON] 当前交接班告警窗口 JSON 未覆盖班次窗口，准备内网补采: "
+                f"buildings={','.join(missing_or_stale)}, window={start_time}~{end_time}"
+            )
+            self._request_alarm_refresh_for_window(
+                buildings=missing_or_stale,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                emit_log=emit_log,
+            )
+            snapshot = self.build_window_selection_snapshot(
+                buildings=target_buildings,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+            )
+        return snapshot
+
     @staticmethod
     def _coverage_result(
         payload: Dict[str, Any],
@@ -391,6 +704,13 @@ class AlarmJsonRepository:
             }
         source_kind_text = str(source_kind or "").strip().lower()
         selection_scope_text = str(selection_scope or "").strip().lower()
+        if source_kind_text == "handover_window" or selection_scope_text == "handover_window":
+            return {
+                "ok": False,
+                "full": False,
+                "mode": "insufficient",
+                "available_end": query_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            }
         current_now = now_dt or datetime.now()
         is_latest_like = source_kind_text == "latest" or selection_scope_text in {"today", "latest"}
         is_current_shift = start_dt <= current_now < end_dt
@@ -438,37 +758,47 @@ class AlarmJsonRepository:
         building_text = str(building or "").strip()
         if not building_text:
             raise ValueError("building 不能为空")
+        duty_date_text = start_dt.date().isoformat()
+        duty_shift_text = self._infer_duty_shift(start_dt, end_dt)
 
         if isinstance(selection_snapshot, dict):
             snapshot = selection_snapshot
         else:
-            snapshot = self.build_selection_snapshot(
+            snapshot = self.build_window_selection_snapshot(
                 buildings=[building_text],
-                reference_date=start_dt.date(),
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
             )
         if not isinstance(snapshot, dict):
             snapshot = {}
         selected_by_building = snapshot.get("selected_by_building", {}) if isinstance(snapshot, dict) else {}
         selected = selected_by_building.get(building_text) if isinstance(selected_by_building, dict) else None
         if not isinstance(selected, dict):
-            raise RuntimeError("未找到当天最新或昨天回退的告警 JSON")
-
-        file_path = Path(str(selected.get("file_path", "") or "").strip())
-        if not str(file_path).strip() or not file_path.exists():
-            raise RuntimeError("选中的告警 JSON 文件不存在")
+            refreshed = self._request_alarm_refresh_for_window(
+                buildings=[building_text],
+                start_dt=start_dt,
+                end_dt=end_dt,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                emit_log=emit_log,
+            )
+            if refreshed:
+                snapshot = self.build_window_selection_snapshot(
+                    buildings=[building_text],
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
+                )
+                selected_by_building = snapshot.get("selected_by_building", {}) if isinstance(snapshot, dict) else {}
+                selected = selected_by_building.get(building_text) if isinstance(selected_by_building, dict) else None
+        if not isinstance(selected, dict):
+            raise RuntimeError("未找到覆盖当前班次的告警 JSON")
 
         cache = document_cache if isinstance(document_cache, dict) else {}
-        cache_key = str(file_path.resolve())
-        payload = cache.get(cache_key)
-        if not isinstance(payload, dict):
-            payload = load_alarm_event_json(file_path)
-            cache[cache_key] = payload
-
-        payload_building = str(payload.get("building", "") or "").strip()
-        if payload_building and payload_building != building_text:
-            raise RuntimeError(f"告警 JSON building 不匹配: payload={payload_building}, building={building_text}")
-        selection_scope = str(selected.get("selection_scope", "") or "").strip()
-        source_kind = str(selected.get("source_kind", "") or selected.get("bucket_kind", "") or "").strip().lower()
+        file_path, payload, selection_scope, source_kind = self._load_selected_payload(
+            selected=selected,
+            building_text=building_text,
+            cache=cache,
+        )
         coverage = self._coverage_result(
             payload,
             start_dt=start_dt,
@@ -476,6 +806,37 @@ class AlarmJsonRepository:
             source_kind=source_kind,
             selection_scope=selection_scope,
         )
+        if not coverage["ok"]:
+            refreshed = self._request_alarm_refresh_for_window(
+                buildings=[building_text],
+                start_dt=start_dt,
+                end_dt=end_dt,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                emit_log=emit_log,
+            )
+            if refreshed:
+                snapshot = self.build_window_selection_snapshot(
+                    buildings=[building_text],
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
+                )
+                selected_by_building = snapshot.get("selected_by_building", {}) if isinstance(snapshot, dict) else {}
+                refreshed_selected = selected_by_building.get(building_text) if isinstance(selected_by_building, dict) else None
+                if isinstance(refreshed_selected, dict):
+                    selected = refreshed_selected
+                    file_path, payload, selection_scope, source_kind = self._load_selected_payload(
+                        selected=selected,
+                        building_text=building_text,
+                        cache=cache,
+                    )
+                    coverage = self._coverage_result(
+                        payload,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        source_kind=source_kind,
+                        selection_scope=selection_scope,
+                    )
         if not coverage["ok"]:
             raise RuntimeError(
                 "告警 JSON coverage 不足: "

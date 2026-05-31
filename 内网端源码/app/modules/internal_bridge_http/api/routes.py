@@ -95,6 +95,39 @@ def create_internal_bridge_task(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/alarm-events/window-query")
+def create_alarm_event_window_query_task(
+    request: Request,
+    payload: Dict[str, Any],
+    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
+) -> Dict[str, Any]:
+    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        return _runner(request).create_task(
+            {
+                "task_type": "create_alarm_event_window_query_task",
+                "get_or_create_name": "get_or_create_alarm_event_window_query_task",
+                "create_name": "create_alarm_event_window_query_task",
+                "payload": {
+                    "buildings": body.get("buildings", []),
+                    "query_start": str(body.get("query_start", "") or "").strip(),
+                    "query_end": str(body.get("query_end", "") or "").strip(),
+                    "duty_date": str(body.get("duty_date", "") or "").strip(),
+                    "duty_shift": str(body.get("duty_shift", "") or "").strip().lower(),
+                    "requested_by": str(body.get("requested_by", "") or "").strip() or "handover_alarm_window",
+                },
+                "requested_by": str(body.get("requested_by", "") or "").strip() or "handover_alarm_window",
+            }
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/tasks")
 def list_internal_bridge_tasks(
     request: Request,

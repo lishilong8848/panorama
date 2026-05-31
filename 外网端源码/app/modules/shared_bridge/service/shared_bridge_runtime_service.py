@@ -3683,6 +3683,8 @@ class SharedBridgeRuntimeService:
         building: str | None = None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        required_query_start: str | None = None,
+        required_query_end: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -3693,6 +3695,8 @@ class SharedBridgeRuntimeService:
             building=building,
             resume_job_id=resume_job_id,
             target_bucket_key=target_bucket_key,
+            required_query_start=required_query_start,
+            required_query_end=required_query_end,
             created_by_role=self.role_mode,
             created_by_node_id=self.node_id,
             requested_by=requested_by,
@@ -3812,6 +3816,8 @@ class SharedBridgeRuntimeService:
         building: str | None = None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
+        required_query_start: str | None = None,
+        required_query_end: str | None = None,
         requested_by: str = "manual",
     ) -> Dict[str, Any]:
         if not self._store:
@@ -3826,6 +3832,7 @@ class SharedBridgeRuntimeService:
                 normalized_mode,
                 normalized_building or "all",
                 resolved_bucket_key or _now_text()[:13],
+                str(required_query_end or "").strip() or "-",
             ]
         )
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
@@ -3836,6 +3843,8 @@ class SharedBridgeRuntimeService:
             building=normalized_building or None,
             resume_job_id=resume_job_id,
             target_bucket_key=resolved_bucket_key,
+            required_query_start=required_query_start,
+            required_query_end=required_query_end,
             requested_by=requested_by,
         )
 

@@ -155,6 +155,8 @@ def source_bucket_segment(
         return f"{duty_digits}--{handover_shift_text(duty_shift)}"
     if normalized_family == FAMILY_MONTHLY_REPORT:
         return f"{duty_digits}--月报"
+    if normalized_family == FAMILY_ALARM_EVENT and normalized_kind == "handover_window":
+        return f"{duty_digits}--{handover_shift_text(duty_shift)}--交接班告警"
     if normalized_family == FAMILY_ALARM_EVENT:
         return duty_digits
     if normalized_family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} and normalized_kind in {"day", "daily"}:
