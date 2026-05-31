@@ -720,6 +720,13 @@ class ReviewFollowupTriggerService:
                 cloud_summary.get("failed_buildings", []) or []
             )
             cloud_summary = self._refresh_cloud_result_status(cloud_summary)
+            if self._all_sessions_cloud_synced_current_revision(sessions):
+                cloud_summary = self._attach_extra_cloud_sheet_sync_results(
+                    batch_key=target_batch,
+                    sessions=sessions,
+                    cloud_result=cloud_summary,
+                    emit_log=emit_log,
+                )
             return self._compose_followup_result(
                 batch_key=target_batch,
                 export_result=self._empty_export_result(),
@@ -919,6 +926,8 @@ class ReviewFollowupTriggerService:
         daily_report_status = "idle"
         daily_report_pending = 0
         daily_report_failed = 0
+        extra_sheet_pending = 0
+        extra_sheet_failed = 0
         if sessions:
             first = sessions[0]
             duty_date = str(first.get("duty_date", "")).strip()
@@ -932,12 +941,27 @@ class ReviewFollowupTriggerService:
                 daily_report_pending = 1
             if all_cloud_synced and daily_report_status == "failed":
                 daily_report_failed = 1
+            if all_cloud_synced:
+                batch_meta = self._review_service.get_cloud_batch(batch_key) or {}
+                for extra_field in ("station_h_sync", "abcdeh_work_content_sync"):
+                    extra_state = batch_meta.get(extra_field, {}) if isinstance(batch_meta, dict) else {}
+                    extra_status = (
+                        str(extra_state.get("status", "")).strip().lower()
+                        if isinstance(extra_state, dict)
+                        else ""
+                    )
+                    if extra_status == "success":
+                        continue
+                    if extra_status == "failed":
+                        extra_sheet_failed += 1
+                    else:
+                        extra_sheet_pending += 1
 
         attachment_pending_count = 0
         cabinet_pending_count = 0
         cabinet_failed_count = 0
         cloud_pending_count = 0
-        failed_count = daily_report_failed
+        failed_count = daily_report_failed + extra_sheet_failed
         for session in confirmed_sessions:
             revision = int(session.get("revision", 0) or 0)
             attachment_state = _normalize_export_state(session.get("source_data_attachment_export", {}))
@@ -967,7 +991,13 @@ class ReviewFollowupTriggerService:
             if self._is_cloud_sync_failed(cloud_state):
                 failed_count += 1
 
-        pending_count = attachment_pending_count + cloud_pending_count + cabinet_pending_count + daily_report_pending
+        pending_count = (
+            attachment_pending_count
+            + cloud_pending_count
+            + cabinet_pending_count
+            + daily_report_pending
+            + extra_sheet_pending
+        )
         if pending_count <= 0 and failed_count <= 0:
             status = "complete"
         elif pending_count > 0 and failed_count > 0:
@@ -991,6 +1021,8 @@ class ReviewFollowupTriggerService:
             "cabinet_shift_record_failed_count": cabinet_failed_count,
             "cloud_pending_count": cloud_pending_count,
             "daily_report_status": daily_report_status,
+            "extra_sheet_pending_count": extra_sheet_pending,
+            "extra_sheet_failed_count": extra_sheet_failed,
         }
 
     def get_followup_progress(self, batch_key: str) -> Dict[str, Any]:
@@ -1721,15 +1753,6 @@ class ReviewFollowupTriggerService:
             result["station_h_sync"] = {**existing, "reason": "already_synced_once"}
             return result
 
-        uploaded_buildings = [
-            str(item or "").strip()
-            for item in list(result.get("uploaded_buildings", []) or [])
-            if str(item or "").strip()
-        ]
-        if not uploaded_buildings:
-            result["station_h_sync"] = {"status": "skipped", "reason": "no_new_building_upload"}
-            return result
-
         batch_sessions = self._review_service.list_batch_sessions(batch_key)
         gaps = self._managed_building_cloud_sync_gaps(batch_sessions)
         if gaps:
@@ -1744,6 +1767,16 @@ class ReviewFollowupTriggerService:
             )
             return result
 
+        uploaded_buildings = [
+            str(item or "").strip()
+            for item in list(result.get("uploaded_buildings", []) or [])
+            if str(item or "").strip()
+        ]
+        if not uploaded_buildings:
+            emit_log(
+                f"[交接班][H楼云表] 本次无新楼栋上传，但五楼云文档已齐全，"
+                f"继续补同步 batch={batch_key}"
+            )
         return self._attach_station_h_sync_result(
             batch_key=batch_key,
             sessions=batch_sessions or sessions,
@@ -1867,15 +1900,6 @@ class ReviewFollowupTriggerService:
             result["abcdeh_work_content_sync"] = {**existing, "reason": "already_synced_once"}
             return result
 
-        uploaded_buildings = [
-            str(item or "").strip()
-            for item in list(result.get("uploaded_buildings", []) or [])
-            if str(item or "").strip()
-        ]
-        if not uploaded_buildings:
-            result["abcdeh_work_content_sync"] = {"status": "skipped", "reason": "no_new_building_upload"}
-            return result
-
         batch_sessions = self._review_service.list_batch_sessions(batch_key)
         gaps = self._managed_building_cloud_sync_gaps(batch_sessions)
         if gaps:
@@ -1890,6 +1914,16 @@ class ReviewFollowupTriggerService:
             )
             return result
 
+        uploaded_buildings = [
+            str(item or "").strip()
+            for item in list(result.get("uploaded_buildings", []) or [])
+            if str(item or "").strip()
+        ]
+        if not uploaded_buildings:
+            emit_log(
+                f"[交接班][ABCDEH工作内容云表] 本次无新楼栋上传，但五楼云文档已齐全，"
+                f"继续补同步 batch={batch_key}"
+            )
         content_result = self._build_abcdeh_work_content(
             batch_key=batch_key,
             sessions=batch_sessions or sessions,
@@ -2899,6 +2933,13 @@ class ReviewFollowupTriggerService:
             batch_key=target_batch,
             sessions=refreshed_sessions,
         )
+        if self._all_sessions_cloud_synced_current_revision(refreshed_sessions):
+            cloud_result = self._attach_extra_cloud_sheet_sync_results(
+                batch_key=target_batch,
+                sessions=refreshed_sessions,
+                cloud_result=cloud_result,
+                emit_log=emit_log,
+            )
         self._maybe_mark_first_full_cloud_sync_completed(
             batch_key=target_batch,
             sessions=refreshed_sessions,

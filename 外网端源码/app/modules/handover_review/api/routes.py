@@ -3887,7 +3887,9 @@ def handover_review_snapshot(
         client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
         include_concurrency=False,
-        include_shared_blocks=True,
+        # 首屏快照只读本楼 SQLite 会话/文档，避免同步读取 110KV/室外温湿度共享状态
+        # 拖慢页面打开；共享块状态由后续 status/共享块接口刷新。
+        include_shared_blocks=False,
         include_outdoor_temperature=False,
     )
 
@@ -3942,7 +3944,9 @@ def handover_review_bootstrap(
         client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
         include_concurrency=False,
-        include_shared_blocks=True,
+        # bootstrap 是审核页首屏关键路径，只返回本楼 SQLite 快照。
+        # 共享块锁状态不参与首屏加载，避免局域网访问时触发前端超时。
+        include_shared_blocks=False,
         include_outdoor_temperature=False,
     )
 
