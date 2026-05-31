@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import math
 import re
 from typing import Any, Dict, Iterable, List, Sequence
 
@@ -193,6 +194,59 @@ _IT_PLANNED_LOAD_BY_BUILDING = {
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _first_float(value: Any) -> float | None:
+    text = _text(value).replace(",", "")
+    if not text:
+        return None
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    try:
+        number = float(match.group(0))
+    except ValueError:
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def calculate_relative_humidity_from_dry_wet(
+    dry_bulb: Any,
+    wet_bulb: Any,
+    *,
+    pressure_hpa: float = 1013.25,
+) -> float | None:
+    dry = _first_float(dry_bulb)
+    wet = _first_float(wet_bulb)
+    if dry is None or wet is None:
+        return None
+    if wet > dry:
+        if wet - dry <= 2:
+            wet = dry
+        else:
+            return None
+    pressure = float(pressure_hpa or 1013.25)
+
+    def saturation_vapor_pressure(temp_c: float) -> float:
+        return 6.112 * math.exp((17.62 * temp_c) / (243.12 + temp_c))
+
+    saturation_dry = saturation_vapor_pressure(dry)
+    saturation_wet = saturation_vapor_pressure(wet)
+    psychrometric = 0.00066 * (1 + 0.00115 * wet) * pressure
+    vapor_pressure = saturation_wet - psychrometric * (dry - wet)
+    if saturation_dry <= 0:
+        return None
+    relative_humidity = vapor_pressure / saturation_dry * 100
+    return max(0.0, min(100.0, relative_humidity))
+
+
+def format_relative_humidity_from_dry_wet(dry_bulb: Any, wet_bulb: Any) -> str:
+    value = calculate_relative_humidity_from_dry_wet(dry_bulb, wet_bulb)
+    if value is None:
+        return ""
+    return f"{format_number(value, 2)}%"
 
 
 def _casefold(value: Any) -> str:
@@ -803,6 +857,13 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
         "AC25": _text(water_summary.get("month_total")),
         "R59": _text(water_summary.get("month_total")),
     }
+    if not cell_values.get("X2"):
+        calculated_humidity = format_relative_humidity_from_dry_wet(
+            outdoor_handover_cells.get("B7"),
+            outdoor_handover_cells.get("D7"),
+        )
+        if calculated_humidity:
+            cell_values["X2"] = calculated_humidity
     planned_load = _text(_IT_PLANNED_LOAD_BY_BUILDING.get(building))
     if planned_load:
         cell_values["AB62"] = planned_load

@@ -31,6 +31,7 @@ from handover_log_module.service.capacity_report_common import (
     _secondary_pump_display_number_from_row,
     _secondary_pump_frequency_value,
     build_capacity_template_snapshot,
+    format_relative_humidity_from_dry_wet,
 )
 from handover_log_module.service.handover_capacity_oil_cache_service import HandoverCapacityOilCacheService
 from handover_log_module.service.capacity_room_inputs_service import CapacityRoomInputsService
@@ -1723,6 +1724,11 @@ class HandoverCapacityReportService:
         )
         weather_text = _text(weather_payload.get("text"))
         weather_humidity = _text(weather_payload.get("humidity"))
+        if not weather_humidity:
+            weather_humidity = format_relative_humidity_from_dry_wet(
+                outdoor_handover_cells.get("B7"),
+                outdoor_handover_cells.get("D7"),
+            )
         west_tank, east_tank = self._derive_tank_pair_from_f8(handover.get("F8"))
         h16_left, h16_right = self._split_metric_pair(handover.get("B10"))
         h18_left, h18_right = self._split_metric_pair(handover.get("D10"))
@@ -2783,6 +2789,11 @@ class HandoverCapacityReportService:
                 handover_cells=handover_cells,
                 emit_log=emit_log,
             )
+            if not weather_humidity:
+                weather_humidity = format_relative_humidity_from_dry_wet(
+                    outdoor_handover_cells.get("B7"),
+                    outdoor_handover_cells.get("D7"),
+                )
             context = {
                 "building": building_text,
                 "duty_date": duty_date_text,
