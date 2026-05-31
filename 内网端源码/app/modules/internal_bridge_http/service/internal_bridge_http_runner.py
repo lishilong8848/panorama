@@ -283,7 +283,8 @@ class InternalBridgeHttpTaskRunner:
         if kind_text == "date" or (len(bucket_text) == 10 and bucket_text.count("-") == 2):
             duty_date = bucket_text
             bucket_key = ""
-        entries = store.list_source_cache_entries(
+        entries = self._list_source_cache_entries_fast(
+            store,
             source_family=source_family,
             building=building,
             bucket_kind=kind_text,
@@ -325,6 +326,45 @@ class InternalBridgeHttpTaskRunner:
                 item.setdefault("file_path", str(shared_root / relative.replace("/", "\\")))
             output.append(item)
         return output
+
+    def _list_source_cache_entries_fast(
+        self,
+        store: Any,
+        *,
+        source_family: str = "",
+        building: str = "",
+        bucket_kind: str = "",
+        bucket_key: str = "",
+        duty_date: str = "",
+        duty_shift: str = "",
+        status: str = "",
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Read source-index from the lightweight JSON index only.
+
+        HTTP source-index is a request path used by the external UI and
+        schedulers. It must not wait behind internal SQLite writers because
+        downloads can hold the local store busy long enough for the external
+        side to time out. The JSON index is written together with ready source
+        entries and is safe to read without the SQLite lock.
+        """
+        index_store = getattr(store, "_source_cache_index_store", None)
+        if index_store is None:
+            return []
+        try:
+            return index_store.list_entries(
+                source_family=source_family,
+                building=building,
+                bucket_kind=bucket_kind,
+                bucket_key=bucket_key,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                status=status,
+                limit=max(1, int(limit or 50)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit(f"[内网HTTP桥接] 读取轻量源文件索引失败: {exc}")
+            return []
 
     def _merge_main_source_cache_entries(
         self,
@@ -373,7 +413,8 @@ class InternalBridgeHttpTaskRunner:
         main_store = getattr(main_cache, "store", None)
         if main_store is not None:
             try:
-                rows = main_store.list_source_cache_entries(
+                rows = self._list_source_cache_entries_fast(
+                    main_store,
                     source_family=source_family,
                     building=building,
                     bucket_kind=bucket_kind,
@@ -438,16 +479,11 @@ class InternalBridgeHttpTaskRunner:
         if not target_bucket:
             return entries
         try:
-            recover = getattr(main_cache, "_existing_latest_refresh_result", None)
-            recovered = (
-                recover(
-                    source_family=family,
-                    building=building_name,
-                    bucket_key=target_bucket,
-                    allow_directory_scan=False,
-                )
-                if callable(recover)
-                else None
+            recovered = self._recover_exact_existing_source_file_to_index(
+                main_cache=main_cache,
+                source_family=family,
+                building=building_name,
+                bucket_key=target_bucket,
             )
             if recovered:
                 self._emit(
@@ -465,7 +501,8 @@ class InternalBridgeHttpTaskRunner:
         if main_store is None:
             return entries
         try:
-            rows = main_store.list_source_cache_entries(
+            rows = self._list_source_cache_entries_fast(
+                main_store,
                 source_family=family,
                 building=building_name,
                 bucket_kind=bucket_kind,
@@ -479,7 +516,8 @@ class InternalBridgeHttpTaskRunner:
                 return rows
             if bucket_key or duty_date:
                 return entries
-            return main_store.list_source_cache_entries(
+            return self._list_source_cache_entries_fast(
+                main_store,
                 source_family=family,
                 building=building_name,
                 status="ready",
@@ -491,6 +529,83 @@ class InternalBridgeHttpTaskRunner:
                 f"family={family}, building={building_name}, error={exc}"
             )
             return entries
+
+    def _recover_exact_existing_source_file_to_index(
+        self,
+        *,
+        main_cache: Any,
+        source_family: str,
+        building: str,
+        bucket_key: str,
+    ) -> Dict[str, Any] | None:
+        candidate_builder = getattr(main_cache, "_candidate_existing_latest_paths", None)
+        resolver = getattr(main_cache, "_resolve_relative_path_under_shared_root", None)
+        store = getattr(main_cache, "store", None)
+        index_store = getattr(store, "_source_cache_index_store", None)
+        if not callable(candidate_builder) or not callable(resolver) or index_store is None:
+            return None
+        now_text = time.strftime("%Y-%m-%d %H:%M:%S")
+        for context in candidate_builder(source_family=source_family, building=building, bucket_key=bucket_key) or []:
+            if not isinstance(context, dict):
+                continue
+            relative_path = str(context.get("relative_path", "") or "").replace("\\", "/").strip()
+            if not relative_path:
+                continue
+            candidate = resolver(relative_path)
+            if candidate is None:
+                continue
+            try:
+                candidate_path = Path(candidate)
+                if not candidate_path.is_file():
+                    continue
+                size_bytes = int(candidate_path.stat().st_size)
+            except OSError:
+                continue
+            bucket_kind = str(context.get("bucket_kind", "") or "").strip().lower()
+            context_bucket = str(context.get("bucket_key", "") or bucket_key).strip()
+            duty_date = str(context.get("duty_date", "") or "").strip()
+            duty_shift = str(context.get("duty_shift", "") or "").strip().lower()
+            entry = {
+                "entry_id": "|".join(
+                    [
+                        str(source_family or "").strip().lower(),
+                        bucket_kind,
+                        context_bucket,
+                        duty_date or "-",
+                        duty_shift or "-",
+                        str(building or "").strip(),
+                    ]
+                ),
+                "source_family": str(source_family or "").strip().lower(),
+                "building": str(building or "").strip(),
+                "bucket_kind": bucket_kind,
+                "bucket_key": context_bucket,
+                "duty_date": duty_date,
+                "duty_shift": duty_shift,
+                "downloaded_at": now_text,
+                "relative_path": relative_path,
+                "status": "ready",
+                "file_hash": "",
+                "size_bytes": size_bytes,
+                "metadata": {
+                    "family": str(source_family or "").strip().lower(),
+                    "building": str(building or "").strip(),
+                    "recovered_from_existing_file": True,
+                    "recovered_by_http_source_index": True,
+                    "recovered_at": now_text,
+                },
+                "created_at": now_text,
+                "updated_at": now_text,
+            }
+            try:
+                return index_store.upsert_entry(entry)
+            except Exception as exc:  # noqa: BLE001
+                self._emit(
+                    "[内网HTTP桥接] 现有源文件轻量索引补登记失败: "
+                    f"family={source_family}, building={building}, path={relative_path}, error={exc}"
+                )
+                return None
+        return None
 
     def refresh_latest_source_cache(
         self,
@@ -504,40 +619,49 @@ class InternalBridgeHttpTaskRunner:
             raise ValueError("source_family 不能为空")
         if not target_buildings:
             raise ValueError("buildings 不能为空")
-        results: List[Dict[str, Any]] = []
-        accepted = 0
-        already_ready = 0
-        for building in target_buildings:
+        accepted = len(target_buildings)
+        results: List[Dict[str, Any]] = [
+            {
+                "building": building,
+                "source_family": family,
+                "accepted": True,
+                "running": True,
+                "reason": "queued",
+            }
+            for building in target_buildings
+        ]
+
+        def _start_one(building: str) -> None:
             try:
                 result = self._main_service.start_building_latest_source_cache_refresh(
                     source_family=family,
                     building=building,
                 )
-                item = dict(result if isinstance(result, dict) else {})
-                item["building"] = building
-                item["source_family"] = family
-                if bool(item.get("accepted", False)) or bool(item.get("running", False)):
-                    accepted += 1
-                elif str(item.get("reason", "") or "").strip().lower() == "already_ready":
-                    already_ready += 1
-                results.append(item)
-            except Exception as exc:  # noqa: BLE001
-                results.append(
-                    {
-                        "building": building,
-                        "source_family": family,
-                        "accepted": False,
-                        "running": False,
-                        "reason": "failed",
-                        "error": str(exc),
-                    }
+                reason = str(result.get("reason", "") or "").strip() if isinstance(result, dict) else ""
+                self._emit(
+                    "[内网HTTP桥接] 源文件补采启动结果: "
+                    f"family={family}, building={building}, reason={reason or '-'}"
                 )
+            except Exception as exc:  # noqa: BLE001
+                self._emit(
+                    "[内网HTTP桥接] 源文件补采后台启动失败: "
+                    f"family={family}, building={building}, error={exc}"
+                )
+
+        for building in target_buildings:
+            thread = threading.Thread(
+                target=_start_one,
+                args=(building,),
+                name=f"internal-http-source-refresh-{family}-{building}",
+                daemon=True,
+            )
+            thread.start()
         return {
-            "ok": (accepted + already_ready) > 0,
+            "ok": accepted > 0,
             "source_family": family,
             "requested_buildings": target_buildings,
             "accepted_count": accepted,
-            "already_ready_count": already_ready,
+            "already_ready_count": 0,
             "results": results,
         }
 

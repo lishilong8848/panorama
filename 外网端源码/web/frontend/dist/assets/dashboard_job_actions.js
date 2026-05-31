@@ -1,4 +1,5 @@
 import {
+  buildTop5OverPowerAttachmentDownloadUrl,
   buildTop5PowerReportDownloadUrl,
   cancelJobApi,
   getJobApi,
@@ -14,6 +15,7 @@ import {
   submitHandoverFollowupContinueJob,
   submitDayMetricRetryFailedJob,
   submitDayMetricRetryUnitJob,
+  submitTop5OverPowerAttachmentJob,
   submitTop5PowerReportJob,
 } from "./api_client.js";
 import { expandDateRange, formatDateObj, parseDateText } from "./config_helpers.js";
@@ -29,6 +31,7 @@ const ACTION_KEYS = {
   branchPowerFromDownload: "job:branch_power_from_download",
   branchPowerPowerAlertSync: "job:branch_power_power_alert_sync",
   top5PowerReport: "job:top5_power_report",
+  top5OverPowerAttachment: "job:top5_over_power_attachment",
   dayMetricFromFile: "job:day_metric_from_file",
   dayMetricRetryUnit: "job:day_metric_retry_unit",
   dayMetricRetryFailed: "job:day_metric_retry_failed",
@@ -66,6 +69,8 @@ export function createDashboardJobActions(ctx) {
     branchPowerBusinessDate,
     branchPowerBusinessDateEnd,
     branchPowerBusinessDatesText,
+    top5OverPowerYear,
+    top5OverPowerMonth,
     streamController,
     fetchHealth,
     fetchJobs,
@@ -628,6 +633,12 @@ if (!canRun.value) return;
     return job;
   }
 
+  function getTop5OverPowerAttachmentJob() {
+    const job = currentJob?.value && typeof currentJob.value === "object" ? currentJob.value : null;
+    if (!job || String(job.feature || "").trim() !== "top5_over_power_attachment") return null;
+    return job;
+  }
+
   function getTop5PowerReportResult() {
     const job = getTop5PowerReportJob();
     const result = job?.result && typeof job.result === "object" ? job.result : {};
@@ -657,6 +668,35 @@ if (!canRun.value) return;
     return "neutral";
   }
 
+  function getTop5OverPowerAttachmentResult() {
+    const job = getTop5OverPowerAttachmentJob();
+    const result = job?.result && typeof job.result === "object" ? job.result : {};
+    return result && typeof result === "object" ? result : {};
+  }
+
+  function getTop5OverPowerAttachmentStatusText() {
+    const job = getTop5OverPowerAttachmentJob();
+    if (!job) return "尚未执行";
+    const status = String(job.status || "").trim().toLowerCase();
+    if (status === "success") return "已获取";
+    if (status === "failed") return "获取失败";
+    if (status === "running") return "获取中";
+    if (status === "queued") return "排队中";
+    if (status === "waiting_resource") return "等待资源";
+    if (status === "cancelled") return "已取消";
+    return job.status || "处理中";
+  }
+
+  function getTop5OverPowerAttachmentStatusTone() {
+    const job = getTop5OverPowerAttachmentJob();
+    const status = String(job?.status || "").trim().toLowerCase();
+    if (status === "success") return "success";
+    if (status === "failed") return "danger";
+    if (status === "running" || status === "queued" || status === "waiting_resource") return "info";
+    if (status === "cancelled") return "neutral";
+    return "neutral";
+  }
+
   function canDownloadTop5PowerReport() {
     const job = getTop5PowerReportJob();
     const result = getTop5PowerReportResult();
@@ -664,6 +704,16 @@ if (!canRun.value) return;
       Boolean(job?.job_id)
       && String(job?.status || "").trim().toLowerCase() === "success"
       && Boolean(String(result.output_file || "").trim())
+    );
+  }
+
+  function canDownloadTop5OverPowerAttachment() {
+    const job = getTop5OverPowerAttachmentJob();
+    const result = getTop5OverPowerAttachmentResult();
+    return (
+      Boolean(job?.job_id)
+      && String(job?.status || "").trim().toLowerCase() === "success"
+      && Boolean(String(result.zip_file || "").trim())
     );
   }
 
@@ -697,6 +747,48 @@ if (!canRun.value) return;
     link.click();
     link.remove();
     message.value = "TOP5功率文件下载已开始";
+  }
+
+  async function runTop5OverPowerAttachment() {
+    if (!canRun.value) return;
+    const yearText = String(top5OverPowerYear?.value || new Date().getFullYear()).trim();
+    const monthNumber = Number.parseInt(String(top5OverPowerMonth?.value || new Date().getMonth() + 1), 10);
+    if (!/^20\d{2}$/.test(yearText)) {
+      message.value = "年份格式错误，请填写四位年份";
+      return;
+    }
+    if (!Number.isFinite(monthNumber) || monthNumber < 1 || monthNumber > 12) {
+      message.value = "月份必须在 1-12 之间";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.top5OverPowerAttachment,
+      async () => {
+        try {
+          message.value = `月度超功率/超功耗附件获取任务已提交: ${yearText}-${String(monthNumber).padStart(2, "0")}`;
+          const response = await submitTop5OverPowerAttachmentJob({ year: yearText, month: monthNumber });
+          await applyAcceptedExecutionResponse(response, "月度超功率/超功耗附件获取");
+        } catch (err) {
+          message.value = `月度超功率/超功耗附件获取提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
+  function downloadTop5OverPowerAttachmentCurrentJob() {
+    const job = getTop5OverPowerAttachmentJob();
+    if (!job?.job_id || !canDownloadTop5OverPowerAttachment()) {
+      message.value = "月度超功率附件尚未获取成功，暂不能下载";
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = buildTop5OverPowerAttachmentDownloadUrl(job.job_id);
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    message.value = "月度超功率附件下载已开始";
   }
 
   async function runDayMetricFromFile() {
@@ -858,6 +950,12 @@ if (!canRun.value) return;
     getTop5PowerReportResult,
     getTop5PowerReportStatusText,
     getTop5PowerReportStatusTone,
+    runTop5OverPowerAttachment,
+    downloadTop5OverPowerAttachmentCurrentJob,
+    canDownloadTop5OverPowerAttachment,
+    getTop5OverPowerAttachmentResult,
+    getTop5OverPowerAttachmentStatusText,
+    getTop5OverPowerAttachmentStatusTone,
     runDayMetricFromFile,
     retryDayMetricUnit,
     retryFailedDayMetricUnits,

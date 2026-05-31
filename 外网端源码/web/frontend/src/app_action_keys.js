@@ -9,6 +9,7 @@ export const APP_ACTION_KEYS = Object.freeze({
   actionKeyBranchPowerFromDownload: "job:branch_power_from_download",
   actionKeyBranchPowerPowerAlertSync: "job:branch_power_power_alert_sync",
   actionKeyTop5PowerReportRun: "job:top5_power_report",
+  actionKeyTop5OverPowerAttachmentRun: "job:top5_over_power_attachment",
   actionKeyDayMetricFromFile: "job:day_metric_from_file",
   actionKeyDayMetricRetryUnit: "job:day_metric_retry_unit",
   actionKeyDayMetricRetryFailed: "job:day_metric_retry_failed",

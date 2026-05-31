@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import copy
 from datetime import datetime
+import time
 from typing import Any, Callable, Dict, List
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
@@ -176,10 +177,11 @@ class HandoverDailyReportBitableExportService:
         if not url:
             return [""]
         object_payload = {"text": url, "link": url}
+        url_payload = {"text": url, "url": url}
         # The report field is a Feishu "超链接" field. Always write the URL
         # object shape so the value is persisted as a clickable link instead
         # of being accepted as plain text by a mis-detected field type.
-        return [object_payload]
+        return [object_payload, url_payload]
 
     def _build_report_link_payload(
         self,
@@ -231,49 +233,58 @@ class HandoverDailyReportBitableExportService:
     ) -> None:
         record_text = str(record_id or "").strip()
         url = str(spreadsheet_url or "").strip()
-        if not record_text or not url:
-            return
-        try:
-            record = client.get_record_by_id(table_id=table_id, record_id=record_text)
-        except Exception as exc:  # noqa: BLE001
-            raise self._build_url_field_error(
-                f"日报链接字段写入后校验读取失败: record_id={record_text}, error={exc}"
-            ) from exc
-        fields = record.get("fields", {}) if isinstance(record, dict) else {}
-        actual_value = fields.get(report_field_name) if isinstance(fields, dict) else None
-        if self._is_same_report_link(actual_value, url):
-            return
+        if not record_text:
+            raise self._build_url_field_error("日报链接字段校验缺少 record_id")
+        if not url:
+            raise self._build_url_field_error("日报链接字段校验缺少 spreadsheet_url")
+
+        for read_attempt in range(3):
+            try:
+                record = client.get_record_by_id(table_id=table_id, record_id=record_text)
+            except Exception as exc:  # noqa: BLE001
+                raise self._build_url_field_error(
+                    f"日报链接字段写入后校验读取失败: record_id={record_text}, error={exc}"
+                ) from exc
+            fields = record.get("fields", {}) if isinstance(record, dict) else {}
+            actual_value = fields.get(report_field_name) if isinstance(fields, dict) else None
+            if self._is_same_report_link(actual_value, url):
+                return
+            if read_attempt < 2:
+                time.sleep(0.5)
         emit_log(
             "[交接班][日报多维] 检测到日报链接未落表，开始补写 "
             f"record_id={record_text}, field={report_field_name}"
         )
         last_error = ""
-        for payload_value in self._report_link_payload_candidates(url, ui_type="url"):
-            payload = {report_field_name: payload_value}
-            try:
-                client.update_record(table_id=table_id, record_id=record_text, fields=payload)
-                last_error = ""
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_error = str(exc)
-                if self._is_url_field_conv_fail(exc):
-                    continue
-                raise
-        if last_error:
-            raise self._build_url_field_error(last_error)
-        try:
-            record = client.get_record_by_id(table_id=table_id, record_id=record_text)
-            fields = record.get("fields", {}) if isinstance(record, dict) else {}
-            actual_value = fields.get(report_field_name) if isinstance(fields, dict) else None
-        except Exception as exc:  # noqa: BLE001
-            raise self._build_url_field_error(
-                f"日报链接字段补写后校验读取失败: record_id={record_text}, error={exc}"
-            ) from exc
-        if not self._is_same_report_link(actual_value, url):
-            raise self._build_url_field_error(
-                f"日报链接字段补写后仍未生效: record_id={record_text}, field={report_field_name}"
-            )
-        emit_log(f"[交接班][日报多维] 日报链接补写成功 record_id={record_text}")
+        for write_attempt in range(1, 4):
+            for payload_value in self._report_link_payload_candidates(url, ui_type="url"):
+                payload = {report_field_name: payload_value}
+                try:
+                    client.update_record(table_id=table_id, record_id=record_text, fields=payload)
+                    last_error = ""
+                except Exception as exc:  # noqa: BLE001
+                    last_error = str(exc)
+                    if self._is_url_field_conv_fail(exc):
+                        continue
+                    raise
+                try:
+                    time.sleep(0.5)
+                    record = client.get_record_by_id(table_id=table_id, record_id=record_text)
+                    fields = record.get("fields", {}) if isinstance(record, dict) else {}
+                    actual_value = fields.get(report_field_name) if isinstance(fields, dict) else None
+                except Exception as exc:  # noqa: BLE001
+                    raise self._build_url_field_error(
+                        f"日报链接字段补写后校验读取失败: record_id={record_text}, error={exc}"
+                    ) from exc
+                if self._is_same_report_link(actual_value, url):
+                    emit_log(f"[交接班][日报多维] 日报链接补写成功 record_id={record_text}, attempt={write_attempt}")
+                    return
+            if write_attempt < 3:
+                time.sleep(1)
+        raise self._build_url_field_error(
+            last_error
+            or f"日报链接字段补写后仍未生效: record_id={record_text}, field={report_field_name}"
+        )
 
     @staticmethod
     def _extract_feishu_error_payload(error_text: str) -> Dict[str, Any]:
@@ -344,6 +355,12 @@ class HandoverDailyReportBitableExportService:
         cfg = self._normalize_cfg()
         if not cfg.get("enabled", True):
             return {"status": "skipped", "record_id": "", "record_url": "", "error": "disabled"}
+        if not str(spreadsheet_url or "").strip():
+            raise DailyReportBitableExportError(
+                error_code="missing_spreadsheet_url",
+                user_message="缺少云表链接，已阻止创建空链接日报记录。",
+                error_detail=f"batch={duty_date}|{duty_shift}",
+            )
 
         client = self._new_client(cfg)
         target = cfg.get("target", {})
@@ -364,13 +381,6 @@ class HandoverDailyReportBitableExportService:
             duty_shift=duty_shift,
             cfg=cfg,
         )
-        if matched_ids and bool(target.get("replace_existing", True)):
-            client.batch_delete_records(
-                table_id=table_id,
-                record_ids=matched_ids,
-                batch_size=int(target.get("delete_batch_size", 200) or 200),
-            )
-            emit_log(f"[交接班][日报多维] 删除旧记录 count={len(matched_ids)}, batch={duty_date}|{duty_shift}")
 
         fields = cfg.get("fields", {})
         report_field_name = str(fields.get("report_link", "交接班日报") or "交接班日报").strip()
@@ -385,6 +395,54 @@ class HandoverDailyReportBitableExportService:
                 cfg=cfg,
             ),
         }
+        if matched_ids:
+            for record_id in matched_ids:
+                last_update_error = ""
+                for index, link_payload in enumerate(
+                    self._report_link_payload_candidates(spreadsheet_url, ui_type=report_link_ui_type),
+                    start=1,
+                ):
+                    candidate_fields = dict(payload_fields)
+                    candidate_fields[fields["report_link"]] = link_payload
+                    try:
+                        client.update_record(table_id=table_id, record_id=record_id, fields=candidate_fields)
+                        last_update_error = ""
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        if not self._is_url_field_conv_fail(exc):
+                            raise
+                        last_update_error = str(exc)
+                        emit_log(
+                            "[交接班][日报多维] URL 字段更新失败 "
+                            f"field={report_field_name}, ui_type={report_link_ui_type or '-'}, attempt={index}, "
+                            f"batch={duty_date}|{duty_shift}, record_id={record_id}"
+                        )
+                if last_update_error:
+                    raise self._build_url_field_error(last_update_error)
+                self._ensure_report_link_written(
+                    client=client,
+                    table_id=table_id,
+                    record_id=record_id,
+                    report_field_name=report_field_name,
+                    spreadsheet_url=spreadsheet_url,
+                    emit_log=emit_log,
+                )
+            if len(matched_ids) > 1:
+                emit_log(
+                    f"[交接班][日报多维] 检测到重复旧记录并已全部补写链接 count={len(matched_ids)}, "
+                    f"batch={duty_date}|{duty_shift}"
+                )
+            record_id = matched_ids[0]
+            emit_log(f"[交接班][日报多维] 更新成功 batch={duty_date}|{duty_shift}, record_id={record_id}")
+            return {
+                "status": "success",
+                "record_id": record_id,
+                "record_url": "",
+                "error": "",
+                "error_code": "",
+                "error_detail": "",
+            }
+
         responses: List[Dict[str, Any]] = []
         last_url_error = ""
         for index, link_payload in enumerate(
@@ -412,6 +470,12 @@ class HandoverDailyReportBitableExportService:
             records = responses[0].get("data", {}).get("records", []) if isinstance(responses[0].get("data", {}), dict) else []
             if isinstance(records, list) and records and isinstance(records[0], dict):
                 record_id = str(records[0].get("record_id", "") or "").strip()
+        if not record_id:
+            raise DailyReportBitableExportError(
+                error_code="daily_report_record_id_missing",
+                user_message="日报多维记录已提交但未返回记录 ID，无法校验云文档链接是否写入。",
+                error_detail=f"batch={duty_date}|{duty_shift}, table_id={table_id}",
+            )
         self._ensure_report_link_written(
             client=client,
             table_id=table_id,

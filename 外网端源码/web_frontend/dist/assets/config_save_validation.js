@@ -1430,6 +1430,58 @@ function validateAndNormalizeMonthlyChangeReport(payload) {
   return { ok: true };
 }
 
+function validateAndNormalizeTop5PowerReport(payload) {
+  payload.handover_log = payload.handover_log || {};
+  const handover = payload.handover_log;
+  handover.top5_power_report =
+    handover.top5_power_report && typeof handover.top5_power_report === "object"
+      ? handover.top5_power_report
+      : {};
+  const top5 = handover.top5_power_report;
+  top5.template = top5.template && typeof top5.template === "object" ? top5.template : {};
+  top5.over_power_attachment =
+    top5.over_power_attachment && typeof top5.over_power_attachment === "object"
+      ? top5.over_power_attachment
+      : {};
+
+  top5.template.source_path = String(top5.template.source_path || "").trim();
+  top5.template.output_dir = String(top5.template.output_dir || "").trim();
+  top5.template.file_name_pattern = String(top5.template.file_name_pattern || "").trim();
+  top5.over_power_attachment.enabled = top5.over_power_attachment.enabled !== false;
+  top5.over_power_attachment.app_token = String(top5.over_power_attachment.app_token || "").trim();
+  top5.over_power_attachment.table_id = String(top5.over_power_attachment.table_id || "").trim();
+  top5.over_power_attachment.view_id = String(top5.over_power_attachment.view_id || "").trim();
+  top5.over_power_attachment.output_dir = String(top5.over_power_attachment.output_dir || "").trim();
+  top5.over_power_attachment.zip_file_name_pattern = String(
+    top5.over_power_attachment.zip_file_name_pattern || "",
+  ).trim();
+
+  if (!top5.template.output_dir) {
+    return { ok: false, error: "TOP5功率文件输出目录不能为空" };
+  }
+  if (!top5.template.file_name_pattern) {
+    return { ok: false, error: "TOP5功率文件命名规则不能为空" };
+  }
+  if (top5.over_power_attachment.enabled) {
+    if (!top5.over_power_attachment.app_token) {
+      return { ok: false, error: "月度超功率附件 App Token 不能为空" };
+    }
+    if (!top5.over_power_attachment.table_id) {
+      return { ok: false, error: "月度超功率附件 Table ID 不能为空" };
+    }
+    if (!top5.over_power_attachment.view_id) {
+      return { ok: false, error: "月度超功率附件 View ID 不能为空" };
+    }
+    if (!top5.over_power_attachment.output_dir) {
+      return { ok: false, error: "月度超功率附件输出目录不能为空" };
+    }
+    if (!top5.over_power_attachment.zip_file_name_pattern) {
+      return { ok: false, error: "月度超功率附件压缩包命名规则不能为空" };
+    }
+  }
+  return { ok: true };
+}
+
 function validateAndNormalizeWetBulbCollection(payload) {
   payload.wet_bulb_collection = payload.wet_bulb_collection || {};
   const wet = cleanupWetBulbCollectionCompat(payload.wet_bulb_collection);
@@ -1879,6 +1931,10 @@ export function prepareConfigPayloadForSave({
   const monthlyChangeReportValidation = validateAndNormalizeMonthlyChangeReport(payload);
   if (!monthlyChangeReportValidation.ok) {
     return monthlyChangeReportValidation;
+  }
+  const top5PowerReportValidation = validateAndNormalizeTop5PowerReport(payload);
+  if (!top5PowerReportValidation.ok) {
+    return top5PowerReportValidation;
   }
   const handoverChangeManagementValidation = validateAndNormalizeHandoverChangeManagementSection(payload);
   if (!handoverChangeManagementValidation.ok) {

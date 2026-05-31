@@ -793,6 +793,8 @@ export function createAppState(vueApi) {
   const branchPowerBusinessDate = ref(yesterdayText());
   const branchPowerBusinessDateEnd = ref(yesterdayText());
   const branchPowerBusinessDatesText = ref("");
+  const top5OverPowerYear = ref(String(new Date().getFullYear()));
+  const top5OverPowerMonth = ref(new Date().getMonth() + 1);
   const handoverFile = ref(null);
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
@@ -2022,6 +2024,8 @@ export function createAppState(vueApi) {
     branchPowerBusinessDate,
     branchPowerBusinessDateEnd,
     branchPowerBusinessDatesText,
+    top5OverPowerYear,
+    top5OverPowerMonth,
     handoverFile,
     handoverFilesByBuilding,
     handoverDutyDate,

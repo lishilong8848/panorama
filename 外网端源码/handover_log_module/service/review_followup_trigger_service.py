@@ -303,6 +303,45 @@ class ReviewFollowupTriggerService:
             "details": details,
         }
 
+    def _expand_cabinet_shift_record_sessions(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        target_batch = str(batch_key or "").strip()
+        normalized_sessions = [session for session in sessions if isinstance(session, dict)]
+        if not target_batch:
+            return normalized_sessions
+        try:
+            batch_sessions = [
+                session
+                for session in self._review_service.list_batch_sessions(target_batch)
+                if isinstance(session, dict)
+            ]
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][机柜班次多维] 批次会话读取失败，按当前会话处理: batch={target_batch}, error={exc}")
+            return normalized_sessions
+        if not batch_sessions:
+            return normalized_sessions
+
+        merged: Dict[str, Dict[str, Any]] = {}
+        for session in normalized_sessions + batch_sessions:
+            building = str(session.get("building", "")).strip()
+            session_id = str(session.get("session_id", "")).strip()
+            key = session_id or building
+            if not key:
+                continue
+            merged[key] = session
+        expanded = list(merged.values())
+        if len(expanded) > len(normalized_sessions):
+            emit_log(
+                "[交接班][机柜班次多维] 已按批次补齐候选楼栋 "
+                f"batch={target_batch}, input={len(normalized_sessions)}, expanded={len(expanded)}"
+            )
+        return expanded
+
     def _run_cabinet_shift_record_export(
         self,
         *,
@@ -312,7 +351,11 @@ class ReviewFollowupTriggerService:
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
         target_batch = str(batch_key or "").strip()
-        normalized_sessions = [session for session in sessions if isinstance(session, dict)]
+        normalized_sessions = self._expand_cabinet_shift_record_sessions(
+            batch_key=target_batch,
+            sessions=sessions,
+            emit_log=emit_log,
+        )
         if not normalized_sessions:
             return self._empty_cabinet_shift_record_export(status="skipped", reason="missing_sessions")
         cloud_status = str(cloud_result.get("status", "")).strip().lower()

@@ -169,6 +169,7 @@ function ensureRoot(cfg) {
   cfg.handover_log.event_sections = cfg.handover_log.event_sections || {};
   cfg.handover_log.monthly_event_report = cfg.handover_log.monthly_event_report || {};
   cfg.handover_log.monthly_change_report = cfg.handover_log.monthly_change_report || {};
+  cfg.handover_log.top5_power_report = cfg.handover_log.top5_power_report || {};
   cfg.handover_log.source_data_attachment_export = cfg.handover_log.source_data_attachment_export || {};
   cfg.handover_log.cloud_sheet_sync = cfg.handover_log.cloud_sheet_sync || {};
   cfg.handover_log.daily_report_bitable_export = cfg.handover_log.daily_report_bitable_export || {};
@@ -192,6 +193,9 @@ function ensureRoot(cfg) {
   cfg.handover_log.monthly_event_report.test_delivery = cfg.handover_log.monthly_event_report.test_delivery || {};
   cfg.handover_log.monthly_change_report.template = cfg.handover_log.monthly_change_report.template || {};
   cfg.handover_log.monthly_change_report.scheduler = cfg.handover_log.monthly_change_report.scheduler || {};
+  cfg.handover_log.top5_power_report.template = cfg.handover_log.top5_power_report.template || {};
+  cfg.handover_log.top5_power_report.over_power_attachment =
+    cfg.handover_log.top5_power_report.over_power_attachment || {};
   cfg.handover_log.source_data_attachment_export.source = cfg.handover_log.source_data_attachment_export.source || {};
   cfg.handover_log.source_data_attachment_export.fields = cfg.handover_log.source_data_attachment_export.fields || {};
   cfg.handover_log.source_data_attachment_export.fixed_values = cfg.handover_log.source_data_attachment_export.fixed_values || {};
@@ -347,11 +351,13 @@ function applyHandoverDefaults(cfg) {
   cfg.handover_log.exercise_management_section = cfg.handover_log.exercise_management_section || {};
   cfg.handover_log.maintenance_management_section = cfg.handover_log.maintenance_management_section || {};
   cfg.handover_log.other_important_work_section = cfg.handover_log.other_important_work_section || {};
+  cfg.handover_log.top5_power_report = cfg.handover_log.top5_power_report || {};
   const chillerMode = cfg.handover_log.chiller_mode;
   const scheduler = cfg.handover_log.scheduler;
   const capacityReport = cfg.handover_log.capacity_report;
   const download = cfg.handover_log.download;
   const template = cfg.handover_log.template;
+  const top5PowerReport = cfg.handover_log.top5_power_report;
   const businessRoot = String(cfg.download.save_dir || cfg.input.excel_dir || "").trim() || "D:\\QLDownload";
   const shiftWindows = download.shift_windows || {};
   shiftWindows.day = shiftWindows.day || {};
@@ -380,6 +386,21 @@ function applyHandoverDefaults(cfg) {
   setNumberDefault(download, "site_start_delay_sec", 1);
   setBooleanDefault(download, "debug_step_log", true);
   setStringDefault(download, "export_button_text", "原样导出");
+  top5PowerReport.template = top5PowerReport.template || {};
+  top5PowerReport.over_power_attachment = top5PowerReport.over_power_attachment || {};
+  setStringDefault(top5PowerReport.template, "source_path", "");
+  setStringDefault(top5PowerReport.template, "output_dir", `${businessRoot}\\TOP5功率文件`);
+  setStringDefault(top5PowerReport.template, "file_name_pattern", "TOP5功率文件_{timestamp}.xlsx");
+  setBooleanDefault(top5PowerReport.over_power_attachment, "enabled", true);
+  setStringDefault(top5PowerReport.over_power_attachment, "app_token", "MliKbC3fXa8PXrsndKscmxjdn1g");
+  setStringDefault(top5PowerReport.over_power_attachment, "table_id", "tblkh6YCMYtS8nHa");
+  setStringDefault(top5PowerReport.over_power_attachment, "view_id", "vewrHJHl3v");
+  setStringDefault(top5PowerReport.over_power_attachment, "output_dir", `${businessRoot}\\月度超功率附件`);
+  setStringDefault(
+    top5PowerReport.over_power_attachment,
+    "zip_file_name_pattern",
+    "月度超功率附件_{year}{month}_{timestamp}.zip",
+  );
   capacityReport.weather = capacityReport.weather || {};
   capacityReport.weather.provider = "hvac_open_meteo";
   delete capacityReport.weather.location;

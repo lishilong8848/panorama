@@ -423,6 +423,19 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card">
+        <div class="section-title">TOP5 与月度超功率附件</div>
+          <div class="form-row"><label class="label">TOP5 输出目录</label><input type="text" v-model="config.handover_log.top5_power_report.template.output_dir" /></div>
+          <div class="form-row"><label class="label">TOP5 文件命名规则</label><input type="text" v-model="config.handover_log.top5_power_report.template.file_name_pattern" /></div>
+          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.top5_power_report.over_power_attachment.enabled" /> 启用月度超功率/超功耗附件获取</label></div>
+          <div class="form-row"><label class="label">多维 App Token</label><input type="text" v-model="config.handover_log.top5_power_report.over_power_attachment.app_token" /></div>
+          <div class="form-row"><label class="label">Table ID</label><input type="text" v-model="config.handover_log.top5_power_report.over_power_attachment.table_id" /></div>
+          <div class="form-row"><label class="label">View ID（可空）</label><input type="text" v-model="config.handover_log.top5_power_report.over_power_attachment.view_id" /></div>
+          <div class="form-row"><label class="label">附件输出目录</label><input type="text" v-model="config.handover_log.top5_power_report.over_power_attachment.output_dir" /></div>
+          <div class="form-row"><label class="label">压缩包命名规则</label><input type="text" v-model="config.handover_log.top5_power_report.over_power_attachment.zip_file_name_pattern" /></div>
+          <div class="hint" style="margin-bottom:8px;">附件获取使用现有 common.feishu_auth 应用凭证和统一 FeishuTokenManager，不在此处单独保存 app_id/app_secret。</div>
+      </section>
+
+      <section class="content-card config-panel-card config-subgroup-card">
         <div class="section-title">云文档同步</div>
           <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.cloud_sheet_sync.enabled" /> 启用云文档同步</label></div>
           <div class="form-row"><label class="label">根 Wiki URL</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.root_wiki_url" /></div>

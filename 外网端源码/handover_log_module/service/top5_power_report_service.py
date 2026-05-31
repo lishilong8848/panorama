@@ -242,6 +242,14 @@ class Top5PowerReportService:
                 "output_dir": r"D:\QLDownload\TOP5功率文件生成",
                 "file_name_pattern": "TOP5功率文件_{timestamp}.xlsx",
             },
+            "over_power_attachment": {
+                "enabled": True,
+                "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
+                "table_id": "tblkh6YCMYtS8nHa",
+                "view_id": "vewrHJHl3v",
+                "output_dir": r"D:\QLDownload\月度超功率附件",
+                "zip_file_name_pattern": "月度超功率附件_{year}{month}_{timestamp}.zip",
+            },
         }
 
     def _normalize_cfg(self) -> Dict[str, Any]:

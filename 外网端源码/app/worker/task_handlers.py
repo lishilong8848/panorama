@@ -25,6 +25,7 @@ from handover_log_module.service.branch_power_upload_service import BranchPowerU
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.ali_monthly_over_power_attachment_service import AliMonthlyOverPowerAttachmentService
 from handover_log_module.service.top5_power_report_service import Top5PowerReportService
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 from pipeline_utils import get_app_dir
@@ -405,6 +406,29 @@ def handle_top5_power_report(
             bridge_runtime.stop()
         except Exception:
             pass
+
+
+def handle_top5_over_power_attachment(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+    runtime: Any = None,  # noqa: ANN401
+) -> Dict[str, Any]:
+    notify = WebhookNotifyService(config)
+    now = datetime.now()
+    year = str(payload.get("year", "") or now.year).strip()
+    month = int(payload.get("month", 0) or now.month)
+    try:
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        service = AliMonthlyOverPowerAttachmentService(config)
+        result = service.run(year=year, month=month, emit_log=emit_log)
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        notify.send_failure(stage="月度超功率/超功耗附件", detail=str(exc), emit_log=emit_log)
+        raise
 
 
 def handle_resume_upload(
@@ -950,6 +974,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "multi_date": handle_multi_date,
     "alarm_event_upload": handle_alarm_event_upload,
     "top5_power_report": handle_top5_power_report,
+    "top5_over_power_attachment": handle_top5_over_power_attachment,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,
     "handover_from_file": handle_handover_from_file,

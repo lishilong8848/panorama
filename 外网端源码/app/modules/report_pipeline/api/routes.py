@@ -4577,6 +4577,72 @@ def download_top5_power_report(job_id: str, request: Request):
     )
 
 
+@router.post("/api/jobs/top5-power-report/over-power/run")
+def job_top5_over_power_attachment_run(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端获取月度超功率附件")
+
+    now = datetime.now()
+    year = str(payload.get("year", "") or now.year).strip()
+    try:
+        month = int(payload.get("month", 0) or now.month)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="月份必须为 1-12 的数字") from exc
+    if not re.fullmatch(r"20\d{2}", year):
+        raise HTTPException(status_code=400, detail="年份必须为四位年份")
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="月份必须在 1-12 之间")
+
+    try:
+        job = _start_background_job(
+            container,
+            name=f"月度超功率/超功耗附件获取 {year}-{month:02d}",
+            run_func=None,
+            worker_handler="top5_over_power_attachment",
+            worker_payload={"year": year, "month": month},
+            resource_keys=_job_resource_keys(f"top5_over_power_attachment:{year}-{month:02d}"),
+            priority="manual",
+            feature="top5_over_power_attachment",
+            dedupe_key=_job_dedupe_key("top5_over_power_attachment", year=year, month=f"{month:02d}"),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: 月度超功率/超功耗附件获取 {year}-{month:02d} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/api/jobs/top5-power-report/over-power/{job_id}/download")
+def download_top5_over_power_attachment(job_id: str, request: Request):
+    container = request.app.state.container
+    try:
+        job = container.job_service.get_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TaskEngineUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if str(job.get("feature", "") or "").strip() != "top5_over_power_attachment":
+        raise HTTPException(status_code=404, detail="该任务不是月度超功率/超功耗附件获取任务")
+    if str(job.get("status", "") or "").strip().lower() != "success":
+        raise HTTPException(status_code=409, detail="月度超功率附件尚未获取成功，暂不能下载")
+    result = job.get("result", {}) if isinstance(job.get("result", {}), dict) else {}
+    zip_file = str(result.get("zip_file", "") or "").strip()
+    if not zip_file:
+        raise HTTPException(status_code=404, detail="任务结果缺少附件压缩包路径")
+    zip_path = Path(zip_file)
+    if not zip_path.exists() or not zip_path.is_file():
+        raise HTTPException(status_code=404, detail=f"附件压缩包不存在: {zip_path}")
+    file_name = str(result.get("zip_file_name", "") or "").strip() or zip_path.name
+    return FileResponse(
+        path=zip_path,
+        filename=file_name,
+        media_type="application/zip",
+    )
+
+
 @router.post("/api/jobs/monthly-change-report/run")
 def job_monthly_change_report_run(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     container = request.app.state.container
