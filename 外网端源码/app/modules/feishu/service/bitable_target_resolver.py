@@ -97,7 +97,7 @@ def has_bitable_target_input(target: Dict[str, Any] | None) -> bool:
 
 _TOKEN_PAIR_PREVIEW_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 _TOKEN_PAIR_PREVIEW_CACHE_LOCK = threading.Lock()
-_TOKEN_PAIR_PREVIEW_CACHE_VERSION = "prefer_wiki_display_v2"
+_TOKEN_PAIR_PREVIEW_CACHE_VERSION = "prefer_base_token_pair_v3"
 _SUCCESS_TARGET_KINDS = {"base_token_pair", "wiki_token_pair"}
 _RETRYABLE_PROBE_CODES = {
     "90217",
@@ -427,8 +427,52 @@ class BitableTargetResolver:
                 message=str(exc),
             )
         else:
-            wiki_probe = self._probe_wiki_node(client, node_token=configured_text)
-            if wiki_probe.get("ok"):
+            base_probe = self._probe_bitable_fields(
+                client,
+                app_token=configured_text,
+                table_id=table_text,
+                context_label="Base 多维表",
+            )
+            if base_probe.get("ok"):
+                preview = self._new_preview(
+                    configured_app_token=configured_text,
+                    operation_app_token=configured_text,
+                    table_id=table_text,
+                    target_kind="base_token_pair",
+                    display_url=build_bitable_url(configured_text, table_text),
+                )
+            else:
+                wiki_probe = self._probe_wiki_node(client, node_token=configured_text)
+                if not wiki_probe.get("ok"):
+                    base_kind = str(base_probe.get("kind", "")).strip()
+                    wiki_kind = str(wiki_probe.get("kind", "")).strip()
+                    if "probe_error" in {base_kind, wiki_kind}:
+                        preview = self._new_preview(
+                            configured_app_token=configured_text,
+                            operation_app_token="",
+                            table_id=table_text,
+                            target_kind="probe_error",
+                            message=str(base_probe.get("message", "")).strip()
+                            or str(wiki_probe.get("message", "")).strip()
+                            or "目标探测失败",
+                        )
+                    else:
+                        preview = self._new_preview(
+                            configured_app_token=configured_text,
+                            operation_app_token="",
+                            table_id=table_text,
+                            target_kind="invalid",
+                            message=str(base_probe.get("message", "")).strip()
+                            or str(wiki_probe.get("message", "")).strip()
+                            or "目标既不是可访问的 Base，也不是可解析的 Wiki 多维表",
+                        )
+                    ttl_sec = self._preview_ttl_sec(str(preview.get("target_kind", "")).strip())
+                    with _TOKEN_PAIR_PREVIEW_CACHE_LOCK:
+                        _TOKEN_PAIR_PREVIEW_CACHE[cache_key] = {
+                            "preview": dict(preview),
+                            "expires_at": now + ttl_sec,
+                        }
+                    return dict(preview)
                 node = wiki_probe.get("node", {})
                 operation_app_token = str(node.get("obj_token", "") or "").strip()
                 wiki_obj_type = str(node.get("obj_type", "") or "").strip()
@@ -466,44 +510,6 @@ class BitableTargetResolver:
                         target_kind="invalid",
                         message="Wiki 节点未解析出可操作的多维表 Token",
                     )
-            else:
-                base_probe = self._probe_bitable_fields(
-                    client,
-                    app_token=configured_text,
-                    table_id=table_text,
-                    context_label="Base 多维表",
-                )
-                if base_probe.get("ok"):
-                    preview = self._new_preview(
-                        configured_app_token=configured_text,
-                        operation_app_token=configured_text,
-                        table_id=table_text,
-                        target_kind="base_token_pair",
-                        display_url=build_bitable_url(configured_text, table_text),
-                    )
-                else:
-                    base_kind = str(base_probe.get("kind", "")).strip()
-                    wiki_kind = str(wiki_probe.get("kind", "")).strip()
-                    if "probe_error" in {base_kind, wiki_kind}:
-                        preview = self._new_preview(
-                            configured_app_token=configured_text,
-                            operation_app_token="",
-                            table_id=table_text,
-                            target_kind="probe_error",
-                            message=str(wiki_probe.get("message", "")).strip()
-                            or str(base_probe.get("message", "")).strip()
-                            or "目标探测失败",
-                        )
-                    else:
-                        preview = self._new_preview(
-                            configured_app_token=configured_text,
-                            operation_app_token="",
-                            table_id=table_text,
-                            target_kind="invalid",
-                            message=str(wiki_probe.get("message", "")).strip()
-                            or str(base_probe.get("message", "")).strip()
-                            or "目标既不是可访问的 Base，也不是可解析的 Wiki 多维表",
-                        )
 
         ttl_sec = self._preview_ttl_sec(str(preview.get("target_kind", "")).strip())
         with _TOKEN_PAIR_PREVIEW_CACHE_LOCK:

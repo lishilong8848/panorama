@@ -230,10 +230,16 @@ def handle_wet_bulb_collection_run(
     try:
         if str(payload.get("resume_kind", "") or "").strip() == "shared_bridge_wet_bulb":
             service = WetBulbCollectionService(config)
-            return service.continue_from_source_units(
+            result = service.continue_from_source_units(
                 source_units=list(payload.get("source_units") or []),
                 emit_log=emit_log,
             )
+            if str((result or {}).get("status", "") or "").strip().lower() == "skipped":
+                normalized = dict(result or {})
+                normalized["status"] = "ok"
+                normalized["summary"] = str(normalized.get("summary", "") or "本次无可上传湿球温度结果，已保留目标表现有数据")
+                return normalized
+            return result
         orchestrator = OrchestratorService(config)
         source = str(payload.get("source", "") or "").strip() or "湿球温度定时采集"
         return orchestrator.run_wet_bulb_collection(emit_log=emit_log, source=source)

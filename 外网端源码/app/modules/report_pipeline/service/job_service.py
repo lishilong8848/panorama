@@ -833,7 +833,9 @@ class JobService:
                 if error_text:
                     break
         if not error_text:
-            error_text = str(job.summary or "").strip()
+            summary_text = str(job.summary or "").strip()
+            if summary_text.lower() not in {"ok", "success"}:
+                error_text = summary_text
         if not error_text:
             for line in reversed(list(job.logs or [])):
                 line_text = str(line or "").strip()

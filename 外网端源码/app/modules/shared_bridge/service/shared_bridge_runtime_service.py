@@ -302,8 +302,6 @@ class SharedBridgeRuntimeService:
         return file_text
 
     def _build_handover_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        if not self._store:
-            raise RuntimeError("共享桥接存储未初始化")
         task_id = str(task.get("task_id", "") or "").strip()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
@@ -323,6 +321,8 @@ class SharedBridgeRuntimeService:
                 continue
             building_files.append({"building": building, "file_path": file_path})
         if not building_files:
+            if not self._store:
+                raise RuntimeError("共享桥接 HTTP 结果缺少交接班源文件列表")
             artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
             for item in artifacts:
                 relative_path = str(item.get("relative_path", "") or "").strip()
@@ -348,6 +348,8 @@ class SharedBridgeRuntimeService:
                 continue
             capacity_items.append({"building": building, "file_path": file_path})
         if not capacity_items:
+            if not self._store:
+                raise RuntimeError("共享桥接 HTTP 结果缺少交接班容量源文件列表")
             capacity_artifacts = self._store.get_artifacts(task_id, artifact_kind="capacity_source_file", status="ready")
             for item in capacity_artifacts:
                 relative_path = str(item.get("relative_path", "") or "").strip()
@@ -384,25 +386,54 @@ class SharedBridgeRuntimeService:
         }
 
     def _build_day_metric_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        if not self._store:
-            raise RuntimeError("共享桥接存储未初始化")
         task_id = str(task.get("task_id", "") or "").strip()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         prior_result = task.get("result", {}) if isinstance(task.get("result", {}), dict) else {}
         internal_result = prior_result.get("internal", {}) if isinstance(prior_result.get("internal", {}), dict) else {}
-        artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
         source_units: List[Dict[str, str]] = []
-        for item in artifacts:
-            relative_path = str(item.get("relative_path", "") or "").strip()
-            building = str(item.get("building", "") or "").strip()
-            metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
-            duty_date = str(metadata.get("duty_date", "") or "").strip()
-            if not relative_path or not building or not duty_date:
+        for item in internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []:
+            if not isinstance(item, dict):
                 continue
-            file_path = self._resolve_ready_artifact_file_path(item)
-            if file_path is None:
-                raise FileNotFoundError(f"共享目录中的12项源文件不存在或不可访问: {relative_path}")
-            source_units.append({"duty_date": duty_date, "building": building, "source_file": str(file_path)})
+            duty_date = str(item.get("duty_date", "") or item.get("business_date", "") or "").strip()
+            building = str(item.get("building", "") or "").strip()
+            file_path = self._require_accessible_cached_file(
+                item.get("file_path", "") or item.get("source_file", ""),
+                description="12项共享源文件",
+                relative_path=item.get("relative_path", ""),
+                source_family=FAMILY_HANDOVER_LOG,
+            ) if duty_date and building else ""
+            if duty_date and building and file_path:
+                source_units.append({"duty_date": duty_date, "building": building, "source_file": file_path})
+        for item in internal_result.get("downloaded_files", []) if isinstance(internal_result.get("downloaded_files", []), list) else []:
+            if not isinstance(item, dict):
+                continue
+            duty_date = str(item.get("duty_date", "") or item.get("business_date", "") or "").strip()
+            building = str(item.get("building", "") or "").strip()
+            file_path = self._require_accessible_cached_file(
+                item.get("file_path", "") or item.get("source_file", ""),
+                description="12项共享源文件",
+                relative_path=item.get("relative_path", ""),
+                source_family=FAMILY_HANDOVER_LOG,
+            ) if duty_date and building else ""
+            if duty_date and building and file_path:
+                unit_key = (duty_date, building)
+                if not any((row.get("duty_date"), row.get("building")) == unit_key for row in source_units):
+                    source_units.append({"duty_date": duty_date, "building": building, "source_file": file_path})
+        if not source_units:
+            if not self._store:
+                raise RuntimeError("共享桥接 HTTP 结果缺少可继续上传的12项源文件")
+            artifacts = self._store.get_artifacts(task_id, artifact_kind="source_file", status="ready")
+            for item in artifacts:
+                relative_path = str(item.get("relative_path", "") or "").strip()
+                building = str(item.get("building", "") or "").strip()
+                metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+                duty_date = str(metadata.get("duty_date", "") or "").strip()
+                if not relative_path or not building or not duty_date:
+                    continue
+                file_path = self._resolve_ready_artifact_file_path(item)
+                if file_path is None:
+                    raise FileNotFoundError(f"共享目录中的12项源文件不存在或不可访问: {relative_path}")
+                source_units.append({"duty_date": duty_date, "building": building, "source_file": str(file_path)})
         if not source_units:
             raise RuntimeError("共享目录中没有可继续上传的12项源文件")
         selected_dates = self._normalize_text_list(internal_result.get("selected_dates", []))
