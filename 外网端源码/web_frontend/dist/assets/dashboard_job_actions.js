@@ -69,6 +69,8 @@ export function createDashboardJobActions(ctx) {
     branchPowerBusinessDate,
     branchPowerBusinessDateEnd,
     branchPowerBusinessDatesText,
+    top5PowerReportYear,
+    top5PowerReportMonth,
     top5OverPowerYear,
     top5OverPowerMonth,
     streamController,
@@ -719,12 +721,22 @@ if (!canRun.value) return;
 
   async function runTop5PowerReport() {
     if (!canRun.value) return;
+    const yearText = String(top5PowerReportYear?.value || new Date().getFullYear()).trim();
+    const monthNumber = Number.parseInt(String(top5PowerReportMonth?.value || new Date().getMonth() + 1), 10);
+    if (!/^20\d{2}$/.test(yearText)) {
+      message.value = "TOP5上传年份格式错误，请填写四位年份";
+      return;
+    }
+    if (!Number.isFinite(monthNumber) || monthNumber < 1 || monthNumber > 12) {
+      message.value = "TOP5上传月份必须在 1-12 之间";
+      return;
+    }
     return guardedRun(
       ACTION_KEYS.top5PowerReport,
       async () => {
         try {
-          message.value = "TOP5功率文件生成任务已提交";
-          const response = await submitTop5PowerReportJob({});
+          message.value = `TOP5功率文件生成任务已提交: ${yearText}-${String(monthNumber).padStart(2, "0")}`;
+          const response = await submitTop5PowerReportJob({ year: yearText, month: monthNumber });
           await applyAcceptedExecutionResponse(response, "TOP5功率文件生成");
         } catch (err) {
           message.value = `TOP5功率文件生成提交失败: ${err}`;

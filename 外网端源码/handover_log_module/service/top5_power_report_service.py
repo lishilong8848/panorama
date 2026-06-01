@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +12,9 @@ from typing import Any, Callable, Dict, Iterable, List
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
+from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from pipeline_utils import get_app_dir
@@ -249,6 +253,19 @@ class Top5PowerReportService:
                 "view_id": "vewrHJHl3v",
                 "output_dir": r"D:\QLDownload\月度超功率附件",
                 "zip_file_name_pattern": "月度超功率附件_{year}{month}_{timestamp}.zip",
+            },
+            "report_upload": {
+                "enabled": True,
+                "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
+                "table_id": "tblkh6YCMYtS8nHa",
+                "sub_category": "高功率TOP5",
+                "fields": {
+                    "sub_category": "子分类",
+                    "year": "年度",
+                    "month": "月份",
+                    "attachment": "上传文件",
+                    "link": "链接",
+                },
             },
         }
 
@@ -495,7 +512,7 @@ class Top5PowerReportService:
                     cell = sheet.cell(row=row_index, column=column_index, value=value)
                     self._style_cell(cell, is_data_fill=column_index >= 3)
                     if column_index in {4, 6, 8, 10}:
-                        cell.number_format = "0.##"
+                        cell.number_format = "0.00"
                 row_index += 1
                 sequence += 1
 
@@ -603,3 +620,230 @@ class Top5PowerReportService:
             f"output={output_path}, summary_rows={result['summary_row_count']}, source_sheets=10"
         )
         return result
+
+
+def _upload_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float)):
+        return str(value).strip()
+    if isinstance(value, dict):
+        for key in ("text", "name", "value", "label"):
+            text = _upload_text(value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(value, list):
+        parts = [_upload_text(item) for item in value]
+        return " ".join(part for part in parts if part).strip()
+    return str(value).strip()
+
+
+class Top5PowerReportBitableUploadService:
+    """Upload the generated TOP5 workbook to the monthly report attachment table."""
+
+    def __init__(self, runtime_config: Dict[str, Any]) -> None:
+        self.runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
+
+    @staticmethod
+    def _defaults() -> Dict[str, Any]:
+        return Top5PowerReportService._defaults()["report_upload"]
+
+    def _normalize_cfg(self) -> Dict[str, Any]:
+        handover_cfg = self.runtime_config.get("handover_log", {})
+        if not isinstance(handover_cfg, dict):
+            handover_cfg = {}
+        top5_cfg = handover_cfg.get("top5_power_report", {})
+        if not isinstance(top5_cfg, dict):
+            top5_cfg = {}
+        raw_cfg = top5_cfg.get("report_upload", {})
+        cfg = _deep_merge(self._defaults(), raw_cfg if isinstance(raw_cfg, dict) else {})
+
+        # Keep compatibility with the previously-added over_power_attachment
+        # config so existing deployments do not need another manual table setup.
+        over_power_cfg = top5_cfg.get("over_power_attachment", {})
+        if isinstance(over_power_cfg, dict):
+            for key in ("app_token", "table_id"):
+                if not str(cfg.get(key, "") or "").strip() and str(over_power_cfg.get(key, "") or "").strip():
+                    cfg[key] = str(over_power_cfg.get(key, "") or "").strip()
+
+        cfg["enabled"] = bool(cfg.get("enabled", True))
+        for key in ("app_token", "table_id", "sub_category"):
+            cfg[key] = str(cfg.get(key, "") or "").strip()
+        fields = cfg.get("fields", {}) if isinstance(cfg.get("fields", {}), dict) else {}
+        defaults = self._defaults()["fields"]
+        cfg["fields"] = {
+            key: str(fields.get(key, "") or defaults.get(key, "")).strip()
+            for key in defaults
+        }
+        return cfg
+
+    def _client(self, cfg: Dict[str, Any], emit_log: Callable[[str], None]) -> FeishuBitableClient:
+        auth = require_feishu_auth_settings(self.runtime_config)
+        return FeishuBitableClient(
+            app_id=str(auth.get("app_id", "") or "").strip(),
+            app_secret=str(auth.get("app_secret", "") or "").strip(),
+            app_token=str(cfg.get("app_token", "") or "").strip(),
+            calc_table_id=str(cfg.get("table_id", "") or "").strip(),
+            attachment_table_id=str(cfg.get("table_id", "") or "").strip(),
+            timeout=int(auth.get("timeout", 30) or 30),
+            request_retry_count=int(auth.get("request_retry_count", 3) or 3),
+            request_retry_interval_sec=float(auth.get("request_retry_interval_sec", 2) or 2),
+            date_text_to_timestamp_ms_fn=date_text_to_timestamp_ms,
+            canonical_metric_name_fn=lambda value: str(value or "").strip(),
+            dimension_mapping={},
+            emit_log=emit_log,
+        )
+
+    @staticmethod
+    def _validate_year_month(year: Any, month: Any) -> tuple[str, str]:
+        year_text = str(year or "").strip()
+        if not re.fullmatch(r"20\d{2}", year_text):
+            raise ValueError("TOP5上传年度必须为四位年份")
+        try:
+            month_number = int(month)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("TOP5上传月份必须为 1-12 的数字") from exc
+        if month_number < 1 or month_number > 12:
+            raise ValueError("TOP5上传月份必须在 1-12 之间")
+        return year_text, f"{month_number:02d}"
+
+    @staticmethod
+    def _extract_attachment_link(record: Dict[str, Any], attachment_field: str) -> str:
+        fields = record.get("fields", {}) if isinstance(record.get("fields", {}), dict) else {}
+        attachments = fields.get(attachment_field)
+        if not isinstance(attachments, list):
+            return ""
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            for key in ("url", "tmp_url", "download_url"):
+                text = str(item.get(key, "") or "").strip()
+                if text:
+                    return text
+        return ""
+
+    @staticmethod
+    def _matching_record_ids(
+        records: List[Dict[str, Any]],
+        *,
+        fields: Dict[str, str],
+        sub_category: str,
+        year: str,
+        month: str,
+    ) -> List[str]:
+        output: List[str] = []
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            record_fields = record.get("fields", {}) if isinstance(record.get("fields", {}), dict) else {}
+            record_category = _upload_text(record_fields.get(fields["sub_category"]))
+            record_year = _upload_text(record_fields.get(fields["year"]))
+            record_month = _upload_text(record_fields.get(fields["month"]))
+            if record_category != sub_category:
+                continue
+            if record_year != year:
+                continue
+            if record_month.zfill(2) != month:
+                continue
+            record_id = str(record.get("record_id", "") or "").strip()
+            if record_id:
+                output.append(record_id)
+        return output
+
+    def upload_report(
+        self,
+        *,
+        file_path: str | Path,
+        year: Any,
+        month: Any,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        cfg = self._normalize_cfg()
+        if not cfg["enabled"]:
+            return {"status": "skipped", "reason": "disabled"}
+        missing = [key for key in ("app_token", "table_id", "sub_category") if not str(cfg.get(key, "") or "").strip()]
+        if missing:
+            raise RuntimeError(f"TOP5上传多维配置缺失: {', '.join(missing)}")
+
+        output_path = Path(file_path)
+        if not output_path.exists() or not output_path.is_file():
+            raise FileNotFoundError(str(output_path))
+
+        target_year, target_month = self._validate_year_month(year, month)
+        fields = cfg["fields"]
+        client = self._client(cfg, emit_log)
+        table_id = str(cfg["table_id"])
+        sub_category = str(cfg["sub_category"])
+
+        emit_log(f"[TOP5功率文件生成] 开始上传多维附件: year={target_year}, month={target_month}, file={output_path.name}")
+        existing_records = client.list_records(
+            table_id=table_id,
+            field_names=[fields["sub_category"], fields["year"], fields["month"]],
+        )
+        delete_ids = self._matching_record_ids(
+            existing_records,
+            fields=fields,
+            sub_category=sub_category,
+            year=target_year,
+            month=target_month,
+        )
+        file_token = client.upload_attachment(str(output_path))
+        create_fields = {
+            fields["sub_category"]: sub_category,
+            fields["year"]: target_year,
+            fields["month"]: target_month,
+            fields["attachment"]: [{"file_token": file_token}],
+        }
+        responses = client.batch_create_records(table_id=table_id, fields_list=[create_fields], batch_size=1)
+        record_id = ""
+        if responses:
+            data = responses[0].get("data") if isinstance(responses[0], dict) else {}
+            records = data.get("records") if isinstance(data, dict) else []
+            if isinstance(records, list) and records:
+                record_id = str(records[0].get("record_id", "") or "").strip()
+        link = ""
+        if record_id:
+            for attempt in range(1, 4):
+                record = client.get_record_by_id(table_id=table_id, record_id=record_id)
+                link = self._extract_attachment_link(record, fields["attachment"])
+                if link:
+                    break
+                if attempt < 3:
+                    time.sleep(attempt)
+            if link and fields.get("link"):
+                try:
+                    client.update_record(table_id=table_id, record_id=record_id, fields={fields["link"]: link})
+                except Exception:
+                    try:
+                        client.batch_delete_records(table_id=table_id, record_ids=[record_id], batch_size=1)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise
+        if not link:
+            if record_id:
+                try:
+                    client.batch_delete_records(table_id=table_id, record_ids=[record_id], batch_size=1)
+                except Exception:  # noqa: BLE001
+                    pass
+            raise RuntimeError("TOP5多维附件已创建，但未读取到附件链接，未更新“链接”字段")
+        deleted = 0
+        if delete_ids:
+            deleted = client.batch_delete_records(table_id=table_id, record_ids=delete_ids, batch_size=200)
+            emit_log(f"[TOP5功率文件生成] 已删除旧多维记录: year={target_year}, month={target_month}, count={deleted}")
+        emit_log(
+            "[TOP5功率文件生成] 多维附件上传完成: "
+            f"year={target_year}, month={target_month}, record_id={record_id or '-'}, link={'yes' if link else 'no'}"
+        )
+        return {
+            "status": "ok",
+            "app_token": str(cfg["app_token"]),
+            "table_id": table_id,
+            "sub_category": sub_category,
+            "year": target_year,
+            "month": target_month,
+            "record_id": record_id,
+            "deleted_count": int(deleted or 0),
+            "file_token": file_token,
+            "link": link,
+        }

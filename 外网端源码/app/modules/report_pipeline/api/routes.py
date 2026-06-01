@@ -4528,21 +4528,31 @@ def job_top5_power_report_run(payload: Dict[str, Any], request: Request) -> Dict
     _shared_bridge_service_or_raise(container)
     service = Top5PowerReportService(config)
     buildings = service.all_buildings()
+    now = datetime.now()
+    year = str(payload.get("year", "") or now.year).strip()
+    try:
+        month = int(payload.get("month", 0) or now.month)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="月份必须为 1-12 的数字") from exc
+    if not re.fullmatch(r"20\d{2}", year):
+        raise HTTPException(status_code=400, detail="年份必须为四位年份")
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="月份必须在 1-12 之间")
 
     try:
         job = _start_background_job(
             container,
-            name="TOP5功率文件生成",
+            name=f"TOP5功率文件生成 {year}-{month:02d}",
             run_func=None,
             worker_handler="top5_power_report",
-            worker_payload={"buildings": buildings},
+            worker_payload={"buildings": buildings, "year": year, "month": month},
             resource_keys=_job_resource_keys("top5_power_report:global"),
             priority="manual",
             feature="top5_power_report",
-            dedupe_key=_job_dedupe_key("top5_power_report", source="manual"),
+            dedupe_key=_job_dedupe_key("top5_power_report", source="manual", year=year, month=f"{month:02d}"),
             submitted_by="manual",
         )
-        container.add_system_log(f"[任务] 已提交: TOP5功率文件生成 ({job.job_id})")
+        container.add_system_log(f"[任务] 已提交: TOP5功率文件生成 {year}-{month:02d} ({job.job_id})")
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

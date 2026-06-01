@@ -3,10 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 import openpyxl
 
-from handover_log_module.service.top5_power_report_service import Top5PowerReportService
+from handover_log_module.service.top5_power_report_service import (
+    Top5PowerReportBitableUploadService,
+    Top5PowerReportService,
+)
 
 
 BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"]
@@ -137,10 +141,82 @@ class Top5PowerReportServiceTest(unittest.TestCase):
                 self.assertEqual(summary["A3"].value, 1)
                 self.assertEqual(summary["B3"].value, "A")
                 self.assertTrue(summary["E23"].value.startswith("E-"))
+                self.assertEqual(summary["D3"].number_format, "0.00")
+                self.assertEqual(summary["F3"].number_format, "0.00")
+                self.assertEqual(summary["H3"].number_format, "0.00")
+                self.assertEqual(summary["J3"].number_format, "0.00")
                 self.assertIn("容量_A", workbook.sheetnames)
                 self.assertIn("支路功率_E", workbook.sheetnames)
             finally:
                 workbook.close()
+
+
+class _FakeBitableClient:
+    def __init__(self) -> None:
+        self.deleted_ids: list[str] = []
+        self.created_fields: list[dict] = []
+        self.updated: list[tuple[str, dict]] = []
+
+    def list_records(self, table_id: str, field_names: list[str] | None = None) -> list[dict]:
+        return [
+            {
+                "record_id": "old_top5",
+                "fields": {"子分类": "高功率TOP5", "年度": "2026", "月份": "04"},
+            },
+            {
+                "record_id": "other_category",
+                "fields": {"子分类": "机柜超功耗", "年度": "2026", "月份": "04"},
+            },
+        ]
+
+    def batch_delete_records(self, table_id: str, record_ids: list[str], batch_size: int = 500, progress_callback=None) -> int:
+        self.deleted_ids.extend(record_ids)
+        return len(record_ids)
+
+    def upload_attachment(self, file_path: str) -> str:
+        return "file_token_1"
+
+    def batch_create_records(self, table_id: str, fields_list: list[dict], batch_size: int = 200, progress_callback=None) -> list[dict]:
+        self.created_fields.extend(fields_list)
+        return [{"data": {"records": [{"record_id": "new_top5"}]}}]
+
+    def get_record_by_id(self, table_id: str, record_id: str) -> dict:
+        return {"record_id": record_id, "fields": {"上传文件": [{"url": "https://example.test/top5.xlsx"}]}}
+
+    def update_record(self, table_id: str, record_id: str, fields: dict) -> dict:
+        self.updated.append((record_id, fields))
+        return {"code": 0}
+
+
+class _UploadServiceForTest(Top5PowerReportBitableUploadService):
+    def __init__(self, runtime_config: dict[str, Any], client: _FakeBitableClient) -> None:
+        super().__init__(runtime_config)
+        self.client = client
+
+    def _client(self, cfg: dict[str, Any], emit_log):  # noqa: ANN001
+        return self.client
+
+
+class Top5PowerReportBitableUploadServiceTest(unittest.TestCase):
+    def test_upload_report_replaces_same_month_top5_record_and_keeps_other_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "top5.xlsx"
+            workbook = openpyxl.Workbook()
+            workbook.save(path)
+            client = _FakeBitableClient()
+            service = _UploadServiceForTest({}, client)
+
+            result = service.upload_report(file_path=path, year="2026", month=4, emit_log=lambda _: None)
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["year"], "2026")
+            self.assertEqual(result["month"], "04")
+            self.assertEqual(client.deleted_ids, ["old_top5"])
+            self.assertEqual(client.created_fields[0]["子分类"], "高功率TOP5")
+            self.assertEqual(client.created_fields[0]["年度"], "2026")
+            self.assertEqual(client.created_fields[0]["月份"], "04")
+            self.assertEqual(client.created_fields[0]["上传文件"], [{"file_token": "file_token_1"}])
+            self.assertEqual(client.updated, [("new_top5", {"链接": "https://example.test/top5.xlsx"})])
 
 
 if __name__ == "__main__":

@@ -31,7 +31,19 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                 <div class="ops-focus-card">
                   <div class="ops-focus-card-label">数据来源</div>
                   <div class="ops-focus-card-title">交接班容量报表源文件、支路功率源文件</div>
-                  <div class="ops-focus-card-meta">通过现有共享缓存读取最新 ready 文件。</div>
+                  <div class="ops-focus-card-meta">通过现有共享缓存读取最新 ready 文件，生成后按下方年月覆盖上传到高功率 TOP5 多维附件记录。</div>
+                </div>
+                <div class="config-form-grid config-form-grid-compact">
+                  <div class="form-row">
+                    <label class="label">上传年份</label>
+                    <input type="text" v-model="top5PowerReportYear" placeholder="2026" />
+                  </div>
+                  <div class="form-row">
+                    <label class="label">上传月份</label>
+                    <select v-model.number="top5PowerReportMonth">
+                      <option v-for="month in 12" :key="'top5-power-report-month-' + month" :value="month">{{ month }}月</option>
+                    </select>
+                  </div>
                 </div>
                 <div class="btn-line" style="flex-wrap:wrap;">
                   <button
@@ -120,6 +132,7 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                 </div>
                 <div class="hint">输出文件：{{ getTop5PowerReportResult().file_name || '-' }}</div>
                 <div class="hint">输出目录：{{ getTop5PowerReportResult().output_dir || '-' }}</div>
+                <div class="hint">多维上传：{{ getTop5PowerReportResult().bitable_upload ? ((getTop5PowerReportResult().bitable_upload.year || '-') + '-' + (getTop5PowerReportResult().bitable_upload.month || '-') + ' / ' + (getTop5PowerReportResult().bitable_upload.record_id || '-')) : '-' }}</div>
                 <div class="hint">当前任务：{{ currentJob && currentJob.feature === 'top5_power_report' ? (currentJob.job_id || '-') : '-' }}</div>
               </article>
 

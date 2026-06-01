@@ -26,7 +26,10 @@ from handover_log_module.service.review_link_delivery_service import ReviewLinkD
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from handover_log_module.service.ali_monthly_over_power_attachment_service import AliMonthlyOverPowerAttachmentService
-from handover_log_module.service.top5_power_report_service import Top5PowerReportService
+from handover_log_module.service.top5_power_report_service import (
+    Top5PowerReportBitableUploadService,
+    Top5PowerReportService,
+)
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 from pipeline_utils import get_app_dir
 
@@ -399,11 +402,24 @@ def handle_top5_power_report(
             "[TOP5功率文件生成] source-index 读取完成: "
             f"capacity={len(capacity_entries)}/{len(buildings)}, branch={len(branch_entries)}/{len(buildings)}"
         )
-        return service.run(
+        result = service.run(
             capacity_entries=capacity_entries,
             branch_entries=branch_entries,
             emit_log=emit_log,
         )
+        now = datetime.now()
+        upload_year = str(payload.get("year", "") or now.year).strip()
+        upload_month = int(payload.get("month", 0) or now.month)
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        upload_result = Top5PowerReportBitableUploadService(config).upload_report(
+            file_path=str(result.get("output_file", "") or ""),
+            year=upload_year,
+            month=upload_month,
+            emit_log=emit_log,
+        )
+        result["bitable_upload"] = upload_result
+        return result
     except Exception as exc:  # noqa: BLE001
         notify.send_failure(stage="TOP5功率文件生成", detail=str(exc), emit_log=emit_log)
         raise
