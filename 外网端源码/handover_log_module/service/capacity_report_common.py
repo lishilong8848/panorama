@@ -1109,6 +1109,25 @@ def _cooling_mode_plate_pressure_cells(block: Dict[str, str]) -> set[str]:
     return {f"{column}{int(row) + offset}" for offset in (0, 1, 3, 4, 5)}
 
 
+def _is_mode(unit_info: Dict[str, Any], *, code: str, text: str) -> bool:
+    mode_code = _text(unit_info.get("mode_code"))
+    if mode_code == str(code):
+        return True
+    mode_text = _text(unit_info.get("mode_text"))
+    if not mode_text:
+        return False
+    compact = re.sub(r"\s+", "", mode_text).casefold()
+    expected = _text(text).casefold()
+    if compact == expected:
+        return True
+    if code == "1":
+        # 兼容“制冷模式”“冷机制冷”等文本，但不要把“预冷”误判为制冷。
+        return "制冷" in compact and "预冷" not in compact
+    if code == "3":
+        return "板换" in compact
+    return False
+
+
 def _fan_values(query: CapacitySourceQuery, *, zone: str, unit: int) -> Dict[int, str]:
     matched_rows = query.rows_by_d_regexes(
         [
@@ -1155,8 +1174,8 @@ def _build_zone_unit_values(query: CapacitySourceQuery, *, zone: str, running_un
         block = _block_cell_map(zone, position)
         mode_text = _text(unit_info.get("mode_text"))
         results[block["title"]] = f"{unit_number}号制冷单元→{mode_text}"
-        skip_chiller_values = building == "E楼" and mode_text == "板换"
-        skip_plate_values = mode_text == "制冷"
+        skip_chiller_values = building == "E楼" and _is_mode(unit_info, code="3", text="板换")
+        skip_plate_values = _is_mode(unit_info, code="1", text="制冷")
         plate_pressure_skip_cells = _cooling_mode_plate_pressure_cells(block) if skip_plate_values else set()
         if skip_plate_values:
             for target_cell in plate_pressure_skip_cells:

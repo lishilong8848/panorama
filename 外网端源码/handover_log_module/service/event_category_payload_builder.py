@@ -78,7 +78,12 @@ class EventCategoryPayloadBuilder:
         }
 
     @staticmethod
-    def _make_pending_snapshot(*, row: EventRow) -> Dict[str, Any]:
+    def _make_pending_snapshot(
+        *,
+        row: EventRow,
+        progress_text: str | None = None,
+        work_window_text: str | None = None,
+    ) -> Dict[str, Any]:
         return {
             "record_id": row.record_id,
             "event_level": row.event_level,
@@ -90,6 +95,8 @@ class EventCategoryPayloadBuilder:
             "to_maint": bool(row.to_maint),
             "maint_done_time": _fmt_dt(row.maint_done_time),
             "event_done_time": _fmt_dt(row.event_done_time),
+            "progress_text": str(progress_text or "").strip(),
+            "work_window_text": str(work_window_text or "").strip(),
         }
 
     @staticmethod
@@ -301,7 +308,11 @@ class EventCategoryPayloadBuilder:
             new_rows_payload.append(payload)
             queried_ids.append(row.record_id)
             if is_current_duty_context and progress_text == todo_text:
-                pending_next_by_id[row.record_id] = self._make_pending_snapshot(row=row)
+                pending_next_by_id[row.record_id] = self._make_pending_snapshot(
+                    row=row,
+                    progress_text=progress_text,
+                    work_window_text="/",
+                )
 
         if is_current_duty_context:
             for row in query_result.outside_shift_ongoing_rows:
@@ -316,11 +327,19 @@ class EventCategoryPayloadBuilder:
                     follower_text=follower_text,
                 )
                 queried_ids.append(row.record_id)
-                pending_next_by_id[row.record_id] = self._make_pending_snapshot(row=row)
+                pending_next_by_id[row.record_id] = self._make_pending_snapshot(
+                    row=row,
+                    progress_text=todo_text,
+                    work_window_text="/",
+                )
                 history_rows_map[row.record_id] = _HistoryRow(
                     record_id=row.record_id,
                     payload=payload,
-                    unresolved_snapshot=self._make_pending_snapshot(row=row),
+                    unresolved_snapshot=self._make_pending_snapshot(
+                        row=row,
+                        progress_text=todo_text,
+                        work_window_text="/",
+                    ),
                 )
 
             outside_ongoing_ids = set(history_rows_map.keys())
@@ -343,11 +362,16 @@ class EventCategoryPayloadBuilder:
                     if resolved is None:
                         cache_from_snapshot_count += 1
                         resolved = self._row_from_snapshot(snap)
+                        progress_text = str(snap.get("progress_text", "") or "").strip() or done_text
+                        work_window_text = str(snap.get("work_window_text", "") or "").strip() or "/"
+                    else:
+                        progress_text = self.repo.get_progress_text(resolved, progress_cfg)
+                        work_window_text = str(snap.get("work_window_text", "") or "").strip() or "/"
 
                     payload = self._build_base_row_payload(
                         row=resolved,
-                        progress_text=done_text,
-                        work_window_text="/",
+                        progress_text=progress_text,
+                        work_window_text=work_window_text,
                         follower_text=follower_text,
                     )
                     history_rows_map[record_id] = _HistoryRow(
@@ -355,7 +379,13 @@ class EventCategoryPayloadBuilder:
                         payload=payload,
                         unresolved_snapshot=None,
                     )
-                    pending_next_by_id.pop(record_id, None)
+                    # 历史事件跟进要求逐班完整延续：上一班已经展示在“历史事件跟进”的记录，
+                    # 即使当前回查后已完成，也继续带入下一班；用 record_id 去重，避免重复行。
+                    pending_next_by_id[record_id] = self._make_pending_snapshot(
+                        row=resolved,
+                        progress_text=progress_text,
+                        work_window_text=work_window_text,
+                    )
                     cache_completed_count += 1
 
                 try:
@@ -375,7 +405,7 @@ class EventCategoryPayloadBuilder:
                     )
                     emit_log(
                         "[交接班][事件分类] 缓存更新: "
-                        f"before={cache_before_count}, after={len(pending_next_by_id)}, removed={cache_completed_count}"
+                        f"before={cache_before_count}, after={len(pending_next_by_id)}, carried={cache_completed_count}"
                     )
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班][事件分类] 缓存更新失败: {exc}")
