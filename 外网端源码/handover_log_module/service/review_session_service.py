@@ -312,6 +312,11 @@ class ReviewSessionService:
         except Exception:  # noqa: BLE001
             return 0.0
 
+    @staticmethod
+    def _is_shared_filesystem_path(path: Path | str) -> bool:
+        text = str(path or "").strip().replace("/", "\\")
+        return bool(text.startswith("\\\\"))
+
     def _formal_output_patterns(self, building: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
         return handover_log_output_patterns(building)
 
@@ -325,7 +330,7 @@ class ReviewSessionService:
 
     def _list_formal_output_files(self, building: str) -> List[Path]:
         output_dir = self._template_output_dir()
-        if output_dir is None or not output_dir.exists():
+        if output_dir is None or self._is_shared_filesystem_path(output_dir) or not output_dir.exists():
             return []
         candidates: List[tuple[str, int, float, Path]] = []
         for path in output_dir.rglob("*.xlsx"):
@@ -1429,6 +1434,52 @@ class ReviewSessionService:
             ],
         }
 
+    def get_batch_status_fast(self, batch_key: str) -> Dict[str, Any]:
+        key = str(batch_key or "").strip()
+        direct_getter = getattr(self._review_state_store, "list_sessions_for_batch", None)
+        if not callable(direct_getter):
+            return self.get_batch_status(key)
+        try:
+            sessions = direct_getter(key)
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        state = {
+            "review_sessions": {
+                str(session.get("session_id", "") or "").strip(): session
+                for session in sessions
+                if isinstance(session, dict) and str(session.get("session_id", "") or "").strip()
+            },
+            "review_batch_status": {},
+        }
+        self._rebuild_batch_status(state)
+        batch_status = state.get("review_batch_status", {})
+        if isinstance(batch_status, dict) and isinstance(batch_status.get(key), dict):
+            return dict(batch_status[key])
+        building_defs = self._building_defs()
+        duty_date, duty_shift = self.parse_batch_key(key)
+        return {
+            "batch_key": key,
+            "duty_date": duty_date,
+            "duty_shift": duty_shift,
+            "has_any_session": False,
+            "confirmed_count": 0,
+            "required_count": len(building_defs),
+            "all_confirmed": False,
+            "ready_for_followup_upload": False,
+            "buildings": [
+                {
+                    "building": item["name"],
+                    "has_session": False,
+                    "confirmed": False,
+                    "session_id": "",
+                    "revision": 0,
+                    "updated_at": "",
+                    "cloud_sheet_sync": self._normalize_cloud_sheet_sync({}),
+                }
+                for item in building_defs
+            ],
+        }
+
     def get_batch_status_for_duty(self, duty_date: str, duty_shift: str) -> Dict[str, Any]:
         duty_date_text = str(duty_date or "").strip()
         duty_shift_text = str(duty_shift or "").strip().lower()
@@ -1594,6 +1645,16 @@ class ReviewSessionService:
         building_name = str(building or "").strip()
         if not building_name:
             return None
+        if not allow_recover:
+            direct_latest_id = getattr(self._review_state_store, "get_latest_session_id", None)
+            direct_getter = getattr(self._review_state_store, "get_session_by_id", None)
+            if callable(direct_latest_id) and callable(direct_getter):
+                try:
+                    session_id = str(direct_latest_id(building_name) or "").strip()
+                    raw_session = direct_getter(session_id) if session_id else None
+                    return self._normalize_session(raw_session) if isinstance(raw_session, dict) else None
+                except Exception as exc:  # noqa: BLE001
+                    _reraise_review_store_error(exc)
         state = self._load_state()
         return self._get_latest_session_from_state(
             state,
@@ -2430,6 +2491,16 @@ class ReviewSessionService:
             return None
         if not duty_date_text or not duty_shift_text:
             return self._get_latest_session(building_name, allow_recover=allow_recover)
+        direct_getter = getattr(self._review_state_store, "get_session_for_building_duty", None)
+        if callable(direct_getter):
+            try:
+                raw_session = direct_getter(building_name, duty_date_text, duty_shift_text)
+                if isinstance(raw_session, dict):
+                    return self._normalize_session(raw_session)
+                if not allow_recover:
+                    return None
+            except Exception as exc:  # noqa: BLE001
+                _reraise_review_store_error(exc)
         target_session_id = self.build_session_id(building_name, duty_date_text, duty_shift_text)
         session = self.get_session_by_id(target_session_id)
         if isinstance(session, dict):
@@ -2455,6 +2526,12 @@ class ReviewSessionService:
         building_name = str(building or "").strip()
         if not building_name:
             return ""
+        direct_getter = getattr(self._review_state_store, "get_latest_session_id", None)
+        if callable(direct_getter):
+            try:
+                return str(direct_getter(building_name) or "").strip()
+            except Exception as exc:  # noqa: BLE001
+                _reraise_review_store_error(exc)
         state = self._load_state()
         return self._latest_session_id_from_state(state, building_name)
 
@@ -2506,6 +2583,8 @@ class ReviewSessionService:
         text = str(path_text or "").strip()
         if not text:
             return False
+        if ReviewSessionService._is_shared_filesystem_path(text):
+            return True
         try:
             return Path(text).is_file()
         except Exception:  # noqa: BLE001

@@ -217,6 +217,9 @@ def _get_batch_status_safe(
     emit_log=None,
 ) -> Dict[str, Any]:
     try:
+        fast_getter = getattr(service, "get_batch_status_fast", None)
+        if callable(fast_getter):
+            return fast_getter(batch_key)
         return service.get_batch_status(batch_key)
     except ReviewSessionStoreUnavailableError as exc:
         if callable(emit_log):
@@ -269,20 +272,6 @@ def _review_document_signature(
     revision_override: int | None = None,
 ) -> Dict[str, Any]:
     output_file = str(session.get("output_file", "") or "").strip()
-    source_excel_mtime = ""
-    source_excel_size = 0
-    if output_file:
-        try:
-            output_path = Path(output_file)
-            if output_path.exists() and output_path.is_file():
-                stat = output_path.stat()
-                source_excel_mtime = str(
-                    getattr(stat, "st_mtime_ns", None) or int(getattr(stat, "st_mtime", 0) or 0)
-                )
-                source_excel_size = int(getattr(stat, "st_size", 0) or 0)
-        except Exception:  # noqa: BLE001
-            source_excel_mtime = ""
-            source_excel_size = 0
     return {
         "session_id": str(session.get("session_id", "") or "").strip(),
         "revision": int(
@@ -291,8 +280,6 @@ def _review_document_signature(
             else int(session.get("revision", 0) or 0)
         ),
         "output_file": output_file,
-        "source_excel_mtime": source_excel_mtime,
-        "source_excel_size": source_excel_size,
     }
 
 

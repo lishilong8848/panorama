@@ -537,6 +537,93 @@ class ReviewSessionStateStore:
             )
         return sessions
 
+    def get_session_by_id(self, session_id: str) -> Dict[str, Any] | None:
+        session_id_text = str(session_id or "").strip()
+        if not session_id_text:
+            return None
+        self.ensure_read_ready()
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM review_sessions WHERE session_id=?",
+                (session_id_text,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(str(row["payload_json"] or ""))
+        except Exception:  # noqa: BLE001
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def get_session_for_building_duty(self, building: str, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
+        building_name = str(building or "").strip()
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        if not building_name or not duty_date_text or duty_shift_text not in {"day", "night"}:
+            return None
+        self.ensure_read_ready()
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM review_sessions
+                WHERE building=? AND duty_date=? AND duty_shift=?
+                ORDER BY updated_at DESC, session_id DESC
+                LIMIT 1
+                """,
+                (building_name, duty_date_text, duty_shift_text),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(str(row["payload_json"] or ""))
+        except Exception:  # noqa: BLE001
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def get_latest_session_id(self, building: str) -> str:
+        building_name = str(building or "").strip()
+        if not building_name:
+            return ""
+        self.ensure_read_ready()
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                """
+                SELECT latest.session_id AS session_id
+                FROM review_latest_by_building latest
+                JOIN review_sessions sessions ON sessions.session_id = latest.session_id
+                WHERE latest.building=? AND sessions.building=?
+                LIMIT 1
+                """,
+                (building_name, building_name),
+            ).fetchone()
+        return str(row["session_id"] or "").strip() if row is not None else ""
+
+    def list_sessions_for_batch(self, batch_key: str) -> list[Dict[str, Any]]:
+        batch_key_text = str(batch_key or "").strip()
+        if not batch_key_text:
+            return []
+        self.ensure_read_ready()
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json
+                FROM review_sessions
+                WHERE batch_key=?
+                ORDER BY building ASC, updated_at DESC, session_id DESC
+                """,
+                (batch_key_text,),
+            ).fetchall()
+        sessions: list[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"] or ""))
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(payload, dict):
+                sessions.append(payload)
+        return sessions
+
     def save_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.ensure_ready()
         state = self._normalize_state(payload)
