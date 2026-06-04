@@ -5753,9 +5753,11 @@ def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request)
             "status": "success",
             "business_dates": list(business_date_keys),
             "uploaded_dates": [],
+            "waiting_dates": [],
             "failed_dates": [],
         }
         last_result: Dict[str, Any] | None = None
+        single_waiting_result: Dict[str, Any] | None = None
         for business_date_key in business_date_keys:
             try:
                 collect_result = _collect_indexed_branch_source_units(
@@ -5767,7 +5769,69 @@ def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request)
                 source_units = collect_result.get("bucket_source_units", {}).get(business_date_key, [])
                 missing_items = collect_result.get("missing_by_bucket", {}).get(business_date_key, [])
                 if missing_items:
-                    raise RuntimeError(f"{business_date_key} 缺少共享源文件: {','.join(missing_items[:12])}")
+                    missing_buildings: List[str] = []
+                    for item in missing_items if isinstance(missing_items, list) else []:
+                        building = str(item or "").split("/", 1)[0].strip()
+                        if building and building not in missing_buildings:
+                            missing_buildings.append(building)
+                    bridge_buildings = missing_buildings or buildings
+                    waiting_job, waiting_task = start_waiting_bridge_job(
+                        job_service=container.job_service,
+                        bridge_service=bridge_service,
+                        name="动环功率统计同步-内网整日补采",
+                        worker_handler="branch_power_from_download",
+                        worker_payload={
+                            "mode": "daily_branch_sources",
+                            "target_bucket_key": business_date_key,
+                            "target_business_date": business_date_key,
+                            "buildings": buildings,
+                            "download_buildings": bridge_buildings,
+                            "upload_buildings": buildings,
+                            "skip_main_table": True,
+                            "requested_by": submitted_by,
+                            "submitted_by": submitted_by,
+                        },
+                        resource_keys=_job_resource_keys("shared_bridge:branch_power"),
+                        priority=priority,
+                        feature="branch_power_power_alert_sync",
+                        dedupe_key=_job_dedupe_key(
+                            "branch_power_power_alert_wait_shared_bridge_daily",
+                            business_date=business_date_key,
+                            buildings=bridge_buildings,
+                        ),
+                        submitted_by=submitted_by,
+                        bridge_get_or_create_name="get_or_create_branch_power_upload_task",
+                        bridge_create_name="create_branch_power_upload_task",
+                        bridge_kwargs={
+                            "target_bucket_key": business_date_key,
+                            "buildings": bridge_buildings,
+                            "upload_buildings": buildings,
+                            "skip_main_table": True,
+                            "requested_by": submitted_by,
+                            "mode": "daily_branch_sources",
+                            "target_business_date": business_date_key,
+                        },
+                    )
+                    missing_preview = ",".join(missing_items[:8])
+                    if len(missing_items) > 8:
+                        missing_preview += f" 等{len(missing_items)}项"
+                    emit_log(
+                        "[共享桥接] 已受理动环功率统计同步整日补采任务 "
+                        f"task_id={str(waiting_task.get('task_id', '') or '-').strip() or '-'}, "
+                        f"business_date={business_date_key}, download_buildings={','.join(bridge_buildings)}, "
+                        f"missing={missing_preview or '-'}"
+                    )
+                    waiting_result = {
+                        "ok": True,
+                        "mode": "waiting_shared_bridge_daily",
+                        "business_date": business_date_key,
+                        "missing_buildings": bridge_buildings,
+                        "missing_items": missing_items,
+                        "waiting": _accepted_waiting_job_response(waiting_job, waiting_task),
+                    }
+                    summary["waiting_dates"].append(waiting_result)
+                    single_waiting_result = waiting_result
+                    continue
                 result = service.upload_day_from_source_files(
                     business_date=business_date_key,
                     source_units=source_units,
@@ -5796,11 +5860,14 @@ def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request)
             )
             suffix = f" 等{len(summary['failed_dates'])}项" if len(summary["failed_dates"]) > 8 else ""
             raise RuntimeError(f"动环功率统计同步存在失败: {failed_preview}{suffix}")
+        if len(business_date_keys) == 1 and single_waiting_result is not None:
+            return single_waiting_result
         if len(business_date_keys) == 1 and last_result is not None:
             return last_result
         emit_log(
             "[动环功率统计同步] 多日期处理完成 "
-            f"uploaded={len(summary['uploaded_dates'])}, failed={len(summary['failed_dates'])}"
+            f"uploaded={len(summary['uploaded_dates'])}, waiting={len(summary['waiting_dates'])}, "
+            f"failed={len(summary['failed_dates'])}"
         )
         return summary
 
