@@ -11,7 +11,11 @@ from typing import Any, Awaitable, Callable, Dict
 from playwright.async_api import APIRequestContext, Browser, BrowserContext, Page, Playwright, async_playwright
 
 from pipeline_utils import configure_playwright_environment
-from app.shared.utils.playwright_page_reuse import prepare_reusable_page
+from app.shared.utils.playwright_page_reuse import (
+    DEFAULT_REPORT_DEVICE_SCALE_FACTOR,
+    apply_report_page_view,
+    prepare_reusable_page,
+)
 
 
 def _now_text() -> str:
@@ -121,6 +125,9 @@ class InternalDownloadBrowserPool:
             "args": [
                 "--no-sandbox",
                 "--disable-gpu",
+                f"--force-device-scale-factor={DEFAULT_REPORT_DEVICE_SCALE_FACTOR}",
+                "--high-dpi-support=1",
+                "--window-size=1600,1000",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
@@ -844,8 +851,13 @@ class InternalDownloadBrowserPool:
                 browser = await self._playwright.chromium.launch(**launch_kwargs)
             else:
                 raise
-        context = await browser.new_context(accept_downloads=True)
+        context = await browser.new_context(
+            accept_downloads=True,
+            viewport={"width": 1600, "height": 1000},
+            device_scale_factor=DEFAULT_REPORT_DEVICE_SCALE_FACTOR,
+        )
         page = await context.new_page()
+        await apply_report_page_view(page)
         self._browser_slots[building] = {
             "browser": browser,
             "context": context,
@@ -900,6 +912,7 @@ class InternalDownloadBrowserPool:
                     continue
                 if await self._probe_page_usable(candidate):
                     slot["page"] = candidate
+                    await apply_report_page_view(candidate)
                     self._update_slot(
                         building,
                         page_ready=True,
@@ -910,6 +923,7 @@ class InternalDownloadBrowserPool:
                     return candidate
             try:
                 new_page = await context.new_page()
+                await apply_report_page_view(new_page)
                 slot["page"] = new_page
                 self._update_slot(
                     building,

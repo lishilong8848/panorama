@@ -125,6 +125,8 @@ class SharedBridgeRuntimeService:
     TASK_RETENTION_DAYS = 14
     NODE_RETENTION_DAYS = 2
     STORE_ERROR_LOG_INTERVAL_SEC = 60
+    HTTP_BRIDGE_FAILURE_LOG_INTERVAL_SEC = 300
+    HTTP_BRIDGE_COOLDOWN_SEC = 60
     BACKGROUND_TASK_BUSY_RETRY_SEC = 30
 
     def __init__(
@@ -159,6 +161,8 @@ class SharedBridgeRuntimeService:
         self._internal_bridge_http_enabled = False
         self._bridge_mode = "http"
         self._http_bridge_failure_log_markers: Dict[str, float] = {}
+        self._http_bridge_unavailable_until_monotonic = 0.0
+        self._http_bridge_last_error = ""
         self._internal_download_pool: InternalDownloadBrowserPool | None = None
         self._source_cache_service: SharedSourceCacheService | None = None
         self._startup_logged = False
@@ -723,6 +727,59 @@ class SharedBridgeRuntimeService:
             )
         return True
 
+    def _retry_stale_branch_power_waiting_job(self, *, job_id: str, task: Dict[str, Any], status: str) -> bool:
+        if self._job_service is None:
+            return False
+        if str(status or "").strip().lower() != "stale":
+            return False
+        if str(task.get("feature", "") or "").strip().lower() != "branch_power_upload":
+            return False
+        old_task_id = str(task.get("task_id", "") or "").strip()
+        marker = f"branch_power_stale_retry:{job_id}:{old_task_id}"
+        now_monotonic = time.monotonic()
+        previous = float(self._waiting_job_cache_probe_log_markers.get(marker, 0.0) or 0.0)
+        if previous and now_monotonic - previous < 300:
+            return False
+        self._waiting_job_cache_probe_log_markers[marker] = now_monotonic
+
+        request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
+        business_date = self._branch_power_business_date_from_task(task)
+        buildings = self._branch_power_expected_buildings_from_task(task)
+        if not business_date:
+            self._emit_system_log(f"[共享桥接] 任务={old_task_id or '-'} 支路补采已过期，但缺少业务日期，无法自动重派")
+            return False
+        bridge_kwargs = {
+            "buildings": buildings,
+            "resume_job_id": job_id,
+            "target_bucket_key": business_date,
+            "target_business_date": business_date,
+            "upload_buildings": request.get("upload_buildings") if isinstance(request.get("upload_buildings"), list) else buildings,
+            "skip_main_table": bool(request.get("skip_main_table", False)),
+            "mode": str(request.get("mode", "") or "daily_branch_sources").strip() or "daily_branch_sources",
+            "requested_by": str(request.get("requested_by", "") or "stale_retry").strip() or "stale_retry",
+        }
+        try:
+            new_task = self.create_http_bridge_task(
+                get_or_create_name="get_or_create_branch_power_upload_task",
+                create_name="create_branch_power_upload_task",
+                bridge_kwargs=bridge_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit_system_log(
+                f"[共享桥接] 任务={old_task_id or '-'} 支路补采已过期，重新派发内网补采失败: {exc}"
+            )
+            return False
+        new_task_id = str((new_task or {}).get("task_id", "") or "").strip()
+        if not new_task_id:
+            self._emit_system_log(f"[共享桥接] 任务={old_task_id or '-'} 支路补采已过期，但新补采任务未返回 task_id")
+            return False
+        self._job_service.bind_bridge_task(job_id, new_task_id)
+        self._emit_system_log(
+            f"[共享桥接] 任务={old_task_id or '-'} 支路补采已过期，已重新派发内网补采 "
+            f"new_task_id={new_task_id}, business_date={business_date}, buildings={','.join(buildings) or '-'}"
+        )
+        return True
+
     def _build_wet_bulb_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(task.get("task_id", "") or "").strip()
         source_units: List[Dict[str, str]] = []
@@ -1088,24 +1145,62 @@ class SharedBridgeRuntimeService:
         return ""
 
     def _http_bridge_should_try(self) -> bool:
+        now_monotonic = time.monotonic()
         return (
             self.role_mode == "external"
             and bool(self._internal_bridge_http_enabled)
             and self._bridge_mode == "http"
             and self._internal_bridge_http_client is not None
+            and now_monotonic >= float(self._http_bridge_unavailable_until_monotonic or 0.0)
         )
 
     def _http_bridge_forced(self) -> bool:
         return self.role_mode == "external" and self._bridge_mode == "http"
 
+    def _http_bridge_cooldown_error_text(self) -> str:
+        remaining = max(0.0, float(self._http_bridge_unavailable_until_monotonic or 0.0) - time.monotonic())
+        error_text = str(self._http_bridge_last_error or "").strip()
+        if remaining > 0:
+            return f"内网端 HTTP 桥接短暂不可用，约 {int(remaining)} 秒后自动重试；最近错误: {error_text or '-'}"
+        return error_text
+
+    @staticmethod
+    def _http_bridge_error_is_transient(exc: Exception) -> bool:
+        text = str(exc or "").strip().lower()
+        return any(
+            token in text
+            for token in (
+                "timed out",
+                "timeout",
+                "urlopen error",
+                "connection refused",
+                "connection reset",
+                "remote end closed",
+                "temporarily unavailable",
+            )
+        )
+
+    def _mark_http_bridge_success(self) -> None:
+        self._http_bridge_unavailable_until_monotonic = 0.0
+        self._http_bridge_last_error = ""
+
     def _emit_http_bridge_issue_log(self, scope: str, exc: Exception) -> None:
-        marker = f"{scope}|{type(exc).__name__}|{str(exc).strip().lower()}"
+        error_text = str(exc or "").strip()
+        if self._http_bridge_error_is_transient(exc):
+            self._http_bridge_unavailable_until_monotonic = max(
+                float(self._http_bridge_unavailable_until_monotonic or 0.0),
+                time.monotonic() + self.HTTP_BRIDGE_COOLDOWN_SEC,
+            )
+            self._http_bridge_last_error = error_text
+        marker = f"{scope}|{type(exc).__name__}|{'transient' if self._http_bridge_error_is_transient(exc) else error_text.lower()}"
         now_monotonic = time.monotonic()
         previous = float(self._http_bridge_failure_log_markers.get(marker, 0.0) or 0.0)
-        if previous and now_monotonic - previous < self.STORE_ERROR_LOG_INTERVAL_SEC:
+        if previous and now_monotonic - previous < self.HTTP_BRIDGE_FAILURE_LOG_INTERVAL_SEC:
             return
         self._http_bridge_failure_log_markers[marker] = now_monotonic
-        self._emit_system_log(f"[共享桥接][HTTP] {scope}失败: {exc}")
+        cooldown_text = self._http_bridge_cooldown_error_text()
+        suffix = f"，已进入短冷却: {cooldown_text}" if cooldown_text else ""
+        self._emit_system_log(f"[共享桥接][HTTP] {scope}失败: {error_text or exc}{suffix}")
 
     @staticmethod
     def _http_source_bucket_dt(bucket_key: Any) -> datetime | None:
@@ -1404,6 +1499,7 @@ class SharedBridgeRuntimeService:
             if self._http_bridge_forced():
                 return []
             return None
+        self._mark_http_bridge_success()
         return output
 
     def _http_latest_source_cache_selection(
@@ -2102,6 +2198,9 @@ class SharedBridgeRuntimeService:
     ) -> Dict[str, Any] | None:
         if not self._http_bridge_should_try():
             if self._http_bridge_forced():
+                cooldown_error = self._http_bridge_cooldown_error_text()
+                if cooldown_error:
+                    raise RuntimeError(cooldown_error)
                 raise RuntimeError("内网端 HTTP 桥接未配置或 base_url 无法解析")
             return None
         client = self._internal_bridge_http_client
@@ -2121,6 +2220,7 @@ class SharedBridgeRuntimeService:
             if isinstance(task, dict):
                 task["transport"] = "http"
                 self._cache_task_detail(task)
+                self._mark_http_bridge_success()
                 return task
         except Exception as exc:  # noqa: BLE001
             self._emit_http_bridge_issue_log("派发任务", exc)
@@ -2224,6 +2324,7 @@ class SharedBridgeRuntimeService:
                 item["transport"] = "http"
                 normalized.append(item)
             self._cache_task_list(normalized)
+            self._mark_http_bridge_success()
             return normalized
         except Exception as exc:  # noqa: BLE001
             self._emit_http_bridge_issue_log("读取任务列表", exc)
@@ -4655,6 +4756,7 @@ class SharedBridgeRuntimeService:
                     source_family=family,
                     buildings=target_buildings,
                 )
+                self._mark_http_bridge_success()
                 return result if isinstance(result, dict) else {"ok": False, "accepted_count": 0, "results": []}
             except Exception as exc:  # noqa: BLE001
                 self._emit_http_bridge_issue_log("请求源文件补采", exc)
@@ -7989,6 +8091,8 @@ class SharedBridgeRuntimeService:
                     )
                 continue
             if self._try_resume_branch_power_waiting_job_from_cache(job_id=job_id, task=task, status=status):
+                continue
+            if self._retry_stale_branch_power_waiting_job(job_id=job_id, task=task, status=status):
                 continue
             if status in {"failed", "partial_failed", "cancelled"}:
                 error_text = str(task.get("error", "") or "").strip() or f"绑定补采任务已{status}"

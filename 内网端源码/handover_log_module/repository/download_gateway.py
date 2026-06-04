@@ -18,7 +18,12 @@ from pipeline_utils import configure_playwright_environment
 from app.shared.runtime.internal_download_browser_pool_runtime import (
     get_internal_download_browser_pool,
 )
-from app.shared.utils.playwright_page_reuse import prepare_reusable_page
+from app.shared.utils.playwright_page_reuse import (
+    DEFAULT_REPORT_DEVICE_SCALE_FACTOR,
+    DEFAULT_REPORT_PAGE_ZOOM,
+    apply_report_page_view,
+    prepare_reusable_page,
+)
 
 
 _RUNTIME_CONFIG: Optional[Dict[str, Any]] = None
@@ -385,7 +390,13 @@ class DownloadGateway:
         selectors = [
             'li.page-next:not(.disabled):not(.ui-state-disabled) a',
             'li.page-next:not(.disabled):not(.ui-state-disabled)',
+            'li.page-next a',
+            'li.page-next',
             '.page-next:not(.disabled):not(.ui-state-disabled) a',
+            '.page-next a',
+            '.page-next',
+            'xpath=//li[contains(concat(" ", normalize-space(@class), " "), " page-next ")]//a[normalize-space(.)="›" or normalize-space(.)=">" or contains(normalize-space(.),"›")]',
+            'xpath=//*[contains(concat(" ", normalize-space(@class), " "), " page-next ") and not(contains(@class,"disabled"))]',
             'button[title="下一页"]:not([disabled])',
             'a[title="下一页"]',
             '.x-tbar-page-next:not(.x-item-disabled)',
@@ -401,8 +412,21 @@ class DownloadGateway:
                 await locator.wait_for(state="visible", timeout=300)
                 await locator.scroll_into_view_if_needed()
                 before_signature = await self._template_page_signature(frame1)
-                await locator.click(force=True)
-                await self._wait_active_template_page_number(
+                click_errors: List[str] = []
+                for strategy in ("force", "js", "dispatch"):
+                    try:
+                        if strategy == "force":
+                            await locator.click(force=True, timeout=1000)
+                        elif strategy == "js":
+                            await locator.evaluate("(el) => el.click()")
+                        else:
+                            await locator.dispatch_event("click")
+                        break
+                    except Exception as click_exc:  # noqa: BLE001
+                        click_errors.append(f"{strategy}: {click_exc}")
+                else:
+                    raise RuntimeError("; ".join(click_errors))
+                active_ok = await self._wait_active_template_page_number(
                     frame1,
                     expected_page_number=page_number + 1,
                     timeout_ms=3500,
@@ -410,15 +434,16 @@ class DownloadGateway:
                 await self._wait_template_page_settled(
                     frame1,
                     previous_signature=before_signature,
-                    timeout_ms=4000,
+                    timeout_ms=6000,
                 )
-                await self._click_active_template_page_number(
-                    frame1,
-                    debug_step_log=debug_step_log,
-                    building=building,
-                    template_name=template_name,
-                    page_number=page_number + 1,
-                )
+                after_signature = await self._template_page_signature(frame1)
+                if before_signature and after_signature == before_signature and not active_ok:
+                    self._debug_log(
+                        debug_step_log,
+                        building,
+                        f"下一页点击后列表未变化，继续尝试其他翻页按钮 selector={selector}, template={template_name}",
+                    )
+                    continue
                 self._debug_log(
                     debug_step_log,
                     building,
@@ -674,6 +699,13 @@ class DownloadGateway:
         building: str = "",
     ):
         frame_timeout = max(1000, int(iframe_timeout_ms))
+        slow_report = (
+            self._is_branch_source_download(template_name=template_name, sheet_name="")
+            or self._is_building_full_cabinet_power_download(template_name=template_name, sheet_name="")
+            or self._is_top5_monthly_report_download(template_name=template_name, sheet_name="")
+        )
+        if slow_report:
+            frame_timeout = max(frame_timeout, 45000)
         _ = force_iframe_reopen_each_task
         names = _template_name_candidates(template_name)
         try:
@@ -694,25 +726,75 @@ class DownloadGateway:
             if report_locator is None:
                 raise StepError("iframe", f"未找到报表模板: {template_name}")
 
-            await report_locator.scroll_into_view_if_needed()
-            await report_locator.hover()
-            await asyncio.sleep(0.2)
-            await report_locator.click(force=True)
+            last_open_error = ""
+            open_attempts = 2 if slow_report else 1
+            for open_attempt in range(1, open_attempts + 1):
+                if open_attempt > 1:
+                    level1 = await page.wait_for_selector(
+                        "iframe#right-content", state="attached", timeout=frame_timeout
+                    )
+                    frame1 = await level1.content_frame()
+                    if frame1 is None:
+                        raise StepError("iframe", "重试模板点击前未获取到 right-content iframe")
+                    report_locator = await self._find_report_template_locator(
+                        frame1,
+                        template_name=template_name,
+                        timeout_ms=min(frame_timeout, 20000),
+                        debug_step_log=debug_step_log,
+                        building=building,
+                    )
+                    if report_locator is None:
+                        raise StepError("iframe", f"重试模板点击时未找到报表模板: {template_name}")
 
-            level1 = await page.wait_for_selector(
-                "iframe#right-content", state="attached", timeout=frame_timeout
-            )
-            frame1 = await level1.content_frame()
-            if frame1 is None:
-                raise StepError("iframe", "模板点击后未获取到 right-content iframe")
+                await report_locator.scroll_into_view_if_needed()
+                click_errors: List[str] = []
+                for strategy in ("force", "js", "dispatch"):
+                    try:
+                        if strategy == "force":
+                            await report_locator.click(force=True, timeout=5000)
+                        elif strategy == "js":
+                            await report_locator.evaluate(
+                                """(el) => {
+                                    el.scrollIntoView({block: 'center', inline: 'center'});
+                                    el.click();
+                                }"""
+                            )
+                        else:
+                            await report_locator.dispatch_event("click")
+                        break
+                    except Exception as click_exc:  # noqa: BLE001
+                        click_errors.append(f"{strategy}: {click_exc}")
+                else:
+                    raise StepError("iframe", "模板点击失败: " + "; ".join(click_errors))
+                await asyncio.sleep(0.5 if slow_report else 0.2)
 
-            level2 = await frame1.wait_for_selector(
-                "iframe#laminationFrame", state="attached", timeout=frame_timeout
-            )
-            frame2 = await level2.content_frame()
-            if frame2 is None:
-                raise StepError("iframe", "未获取到laminationFrame iframe")
-            return frame2
+                try:
+                    level1 = await page.wait_for_selector(
+                        "iframe#right-content", state="attached", timeout=frame_timeout
+                    )
+                    frame1 = await level1.content_frame()
+                    if frame1 is None:
+                        raise StepError("iframe", "模板点击后未获取到 right-content iframe")
+                    level2 = await frame1.wait_for_selector(
+                        "iframe#laminationFrame", state="attached", timeout=frame_timeout
+                    )
+                    frame2 = await level2.content_frame()
+                    if frame2 is None:
+                        raise StepError("iframe", "未获取到laminationFrame iframe")
+                    return frame2
+                except Exception as open_exc:  # noqa: BLE001
+                    last_open_error = str(open_exc)
+                    self._debug_log(
+                        debug_step_log,
+                        building,
+                        f"模板点击后等待报表iframe失败 attempt={open_attempt}/{open_attempts}, "
+                        f"template={template_name}, error={open_exc}",
+                    )
+                    if open_attempt < open_attempts:
+                        await asyncio.sleep(1.0)
+                        continue
+                    raise
+            raise StepError("iframe", f"模板点击后未获取到laminationFrame iframe: {last_open_error}")
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, StepError):
                 raise exc
@@ -934,7 +1016,13 @@ class DownloadGateway:
         start_end_visible_timeout_ms: int,
     ) -> None:
         try:
-            is_chiller_mode_switch = "制冷单元模式切换参数" in f"{template_name or ''} {sheet_name or ''}"
+            report_text = f"{template_name or ''} {sheet_name or ''}"
+            is_chiller_mode_switch = "制冷单元模式切换参数" in report_text
+            is_building_full_cabinet_power = self._is_building_full_cabinet_power_download(
+                template_name=template_name,
+                sheet_name=sheet_name,
+            )
+            needs_sheet_name = not (is_chiller_mode_switch or is_building_full_cabinet_power)
             await self._fill_text_input_by_widget_or_label(
                 frame2,
                 label_text="开始时间",
@@ -949,7 +1037,7 @@ class DownloadGateway:
                 timeout_ms=start_end_visible_timeout_ms,
             )
 
-            if not is_chiller_mode_switch:
+            if needs_sheet_name:
                 await self._fill_optional_sheet_name(
                     frame2,
                     sheet_name=sheet_name,
@@ -1032,14 +1120,32 @@ class DownloadGateway:
             f" state={last_state if isinstance(last_state, dict) else {}}",
         )
 
-    async def _wait_query_ready(self, frame2, timeout_ms: int) -> None:
+    async def _wait_query_ready(self, frame2, timeout_ms: int, *, allow_initial_blank_ms: int = 0) -> None:
         min_rows = max(1, _as_int(self.handover_cfg.get("query_ready_min_rows", 8), 8))
         min_cells = max(1, _as_int(self.handover_cfg.get("query_ready_min_cells", 40), 40))
         effective_timeout_ms = 180000
+        blank_grace_ms = max(0, int(allow_initial_blank_ms or 0))
+        started = time.perf_counter()
         deadline = time.perf_counter() + max(1.0, effective_timeout_ms / 1000.0)
         last_state: Dict[str, Any] = {}
         while time.perf_counter() < deadline:
             try:
+                if blank_grace_ms:
+                    try:
+                        await frame2.evaluate(
+                            """(nextZoom) => {
+                                const root = document.documentElement;
+                                if (root) root.style.zoom = `${Math.round(Number(nextZoom || 1) * 100)}%`;
+                                try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+                                const container = document.getElementById('content-container') || document.body;
+                                if (container) {
+                                    try { container.scrollTop = 0; container.scrollLeft = 0; } catch (_) {}
+                                }
+                            }""",
+                            DEFAULT_REPORT_PAGE_ZOOM,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 last_state = await self._query_page_state(
                     frame2,
                     min_rows=min_rows,
@@ -1053,6 +1159,10 @@ class DownloadGateway:
                 await asyncio.sleep(0.2)
                 continue
             if not bool(last_state.get("loading", False)):
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                if elapsed_ms < blank_grace_ms:
+                    await asyncio.sleep(0.5)
+                    continue
                 raise StepError(
                     "查询",
                     "查询加载已结束但未检测到有效数据 "
@@ -1249,7 +1359,7 @@ class DownloadGateway:
                 template_name=template_name,
                 sheet_name=sheet_name,
             )
-            query_session_attempts = 3 if (is_branch_source or is_building_full_cabinet_power) else 1
+            query_session_attempts = 3 if (is_branch_source or is_building_full_cabinet_power or is_top5_monthly_report) else 1
             query_wait_timeout_ms = (
                 int(query_result_timeout_ms)
                 if (is_building_full_cabinet_power or is_top5_monthly_report)
@@ -1293,6 +1403,7 @@ class DownloadGateway:
                             building=building,
                         ),
                     )
+                    await apply_report_page_view(page)
                     if is_top5_monthly_report:
                         self._debug_log(
                             debug_step_log,
@@ -1317,6 +1428,7 @@ class DownloadGateway:
                         lambda: self._wait_query_ready(
                             frame2,
                             timeout_ms=query_wait_timeout_ms,
+                            allow_initial_blank_ms=60000 if is_top5_monthly_report else 0,
                         ),
                     )
                     break
@@ -1495,6 +1607,9 @@ class DownloadGateway:
             "args": [
                 "--no-sandbox",
                 "--disable-gpu",
+                f"--force-device-scale-factor={DEFAULT_REPORT_DEVICE_SCALE_FACTOR}",
+                "--high-dpi-support=1",
+                "--window-size=1600,1000",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
@@ -1608,7 +1723,11 @@ class DownloadGateway:
                     raise
 
             try:
-                context = await browser.new_context(accept_downloads=True)
+                context = await browser.new_context(
+                    accept_downloads=True,
+                    viewport={"width": 1600, "height": 1000},
+                    device_scale_factor=DEFAULT_REPORT_DEVICE_SCALE_FACTOR,
+                )
 
                 async def _run_entry(
                     idx: int, building: str, site: Dict[str, Any], worker_index: int
@@ -1620,6 +1739,7 @@ class DownloadGateway:
                     ):
                         await asyncio.sleep(worker_index * site_start_delay_sec)
                     page = await context.new_page()
+                    await apply_report_page_view(page)
                     try:
                         result = await self._download_single_building_with_retry(
                             page=page,

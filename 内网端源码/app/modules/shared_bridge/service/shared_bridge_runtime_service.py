@@ -5017,7 +5017,7 @@ class SharedBridgeRuntimeService:
                 },
             }
             emit_log(
-                "[共享桥接][支路信息][内网] 开始下载三源文件 "
+                "[共享桥接][支路信息][内网] 开始下载四类整日源文件 "
                 f"mode=daily, business_date={target_business_date}, "
                 f"covered_hours={','.join(covered_bucket_keys)}, buildings={len(buildings)}"
             )
@@ -5239,7 +5239,7 @@ class SharedBridgeRuntimeService:
                     side="internal",
                     level="info",
                     event_type="await_external",
-                    payload={"message": "支路功率/电流/开关源文件已下载，等待外网上传"},
+                    payload={"message": "支路功率/电流/开关/楼栋全机柜功率源文件已下载，等待外网上传"},
                 )
                 self._request_runtime_status_refresh(reason=f"branch_power_internal_download_completed:{task_id}")
                 return

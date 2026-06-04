@@ -2302,6 +2302,120 @@ class SharedSourceCacheService:
             "metadata": entry_metadata,
         }
 
+    def _store_existing_canonical_entry_if_ready(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        bucket_kind: str,
+        bucket_key: str,
+        duty_date: str,
+        duty_shift: str = "",
+        suffix: str = ".xlsx",
+        metadata: Dict[str, Any] | None = None,
+        emit_log: Callable[[str], None] | None = None,
+    ) -> Dict[str, Any] | None:
+        if self.store is None:
+            raise RuntimeError("共享缓存存储未初始化")
+        normalized_family = self._normalize_source_family(source_family)
+        normalized_suffix = str(suffix or ".xlsx").strip()
+        if not normalized_suffix.startswith("."):
+            normalized_suffix = "." + normalized_suffix
+        target_path = self._source_target_path(
+            source_family=normalized_family,
+            building=building,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            source_path=Path(f"existing{normalized_suffix}"),
+        )
+        try:
+            if not target_path.is_file():
+                return None
+            self._validate_cached_source_file(source_family=normalized_family, path=target_path)
+            size_bytes = int(target_path.stat().st_size)
+            file_hash = self._hash_file(target_path)
+        except Exception as exc:  # noqa: BLE001
+            if emit_log:
+                emit_log(
+                    f"[{FAMILY_LABELS.get(normalized_family, normalized_family)}整日源文件补采] "
+                    f"已存在文件校验失败，将重新下载 building={building}, bucket={bucket_key}, "
+                    f"file={target_path}, error={exc}"
+                )
+            return None
+
+        downloaded_at = _now_text()
+        entry_metadata = dict(metadata or {})
+        entry_metadata.setdefault("naming_version", 2)
+        entry_metadata.setdefault("canonical", True)
+        entry_metadata.setdefault("alias_only", False)
+        try:
+            relative_path = target_path.relative_to(self.shared_root).as_posix() if self.shared_root else target_path.name
+        except Exception:  # noqa: BLE001
+            relative_path = str(target_path)
+        entry_metadata.setdefault("canonical_relative_path", relative_path)
+        entry_metadata.setdefault("reused_existing_file", True)
+        entry_metadata.setdefault("reused_existing_at", downloaded_at)
+        self.store.upsert_source_cache_entry(
+            source_family=normalized_family,
+            building=building,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            downloaded_at=downloaded_at,
+            relative_path=relative_path,
+            status="ready",
+            file_hash=file_hash,
+            size_bytes=size_bytes,
+            metadata=entry_metadata,
+        )
+        self._mark_external_full_snapshot_dirty()
+        if bucket_kind in {"latest", "daily"}:
+            with self._lock:
+                self._ensure_light_family_cache_unlocked(
+                    source_family=normalized_family,
+                    bucket_key=bucket_key,
+                    buildings=[building],
+                )
+                self._set_light_building_status_unlocked(
+                    source_family=normalized_family,
+                    building=building,
+                    bucket_key=bucket_key,
+                    payload={
+                        "status": "ready",
+                        "ready": True,
+                        "downloaded_at": downloaded_at,
+                        "last_error": "",
+                        "relative_path": relative_path,
+                        "resolved_file_path": str(target_path),
+                        "started_at": "",
+                        "blocked": False,
+                        "blocked_reason": "",
+                        "next_probe_at": "",
+                    },
+                )
+        if emit_log:
+            emit_log(
+                f"[{FAMILY_LABELS.get(normalized_family, normalized_family)}整日源文件补采] "
+                f"已存在，跳过下载并补登记索引 building={building}, bucket={bucket_key}, file={relative_path}"
+            )
+        return {
+            "building": building,
+            "bucket_kind": bucket_kind,
+            "bucket_key": bucket_key,
+            "duty_date": duty_date,
+            "duty_shift": duty_shift,
+            "source_family": normalized_family,
+            "relative_path": relative_path,
+            "file_path": str(target_path),
+            "downloaded_at": downloaded_at,
+            "file_hash": file_hash,
+            "size_bytes": size_bytes,
+            "metadata": entry_metadata,
+        }
+
     def store_existing_source_file(
         self,
         *,
@@ -3733,6 +3847,29 @@ class SharedSourceCacheService:
             FAMILY_BUILDING_FULL_CABINET_POWER: "run_building_full_cabinet_power_only",
         }
         family_label = FAMILY_LABELS.get(normalized_family, normalized_family)
+        entry_metadata = {
+            "family": normalized_family,
+            "building": building,
+            "granularity": "day",
+            "business_date": resolved_business_date,
+            "data_day": resolved_business_date,
+            "covered_data_hour_buckets": covered_buckets,
+            "query_start": start_time,
+            "query_end": end_time,
+            "range_query": True,
+            "day_query": True,
+        }
+        existing_entry = self._store_existing_canonical_entry_if_ready(
+            source_family=normalized_family,
+            building=building,
+            bucket_kind="daily",
+            bucket_key=resolved_business_date,
+            duty_date=resolved_business_date,
+            metadata=entry_metadata,
+            emit_log=emit_log,
+        )
+        if existing_entry:
+            return existing_entry
         temp_root = self._tmp_root / family_temp_names[normalized_family] / resolved_business_date / building
         cfg = load_handover_config(self.runtime_config)
         service = HandoverDownloadService(
@@ -3769,18 +3906,7 @@ class SharedSourceCacheService:
             duty_shift="",
             source_path=source_path,
             status="ready",
-            metadata={
-                "family": normalized_family,
-                "building": building,
-                "granularity": "day",
-                "business_date": resolved_business_date,
-                "data_day": resolved_business_date,
-                "covered_data_hour_buckets": covered_buckets,
-                "query_start": start_time,
-                "query_end": end_time,
-                "range_query": True,
-                "day_query": True,
-            },
+            metadata=entry_metadata,
         )
 
     def fill_branch_power_day_latest(
@@ -3843,6 +3969,30 @@ class SharedSourceCacheService:
         start_time, end_time, covered_buckets = self._building_full_cabinet_power_day_query_window(resolved_business_date)
         if self._tmp_root is None:
             raise RuntimeError("共享缓存临时目录未配置")
+        entry_metadata = {
+            "family": source_family,
+            "building": building,
+            "granularity": "day",
+            "business_date": resolved_business_date,
+            "data_day": resolved_business_date,
+            "covered_data_hour_buckets": covered_buckets,
+            "query_start": start_time,
+            "query_end": end_time,
+            "range_query": True,
+            "day_query": True,
+            "report_name": "楼栋全机柜功率",
+        }
+        existing_entry = self._store_existing_canonical_entry_if_ready(
+            source_family=source_family,
+            building=building,
+            bucket_kind="daily",
+            bucket_key=resolved_business_date,
+            duty_date=resolved_business_date,
+            metadata=entry_metadata,
+            emit_log=emit_log,
+        )
+        if existing_entry:
+            return existing_entry
         temp_root = self._tmp_root / "building_full_cabinet_power_daily" / resolved_business_date / building
         cfg = load_handover_config(self.runtime_config)
         service = HandoverDownloadService(
@@ -3878,19 +4028,7 @@ class SharedSourceCacheService:
             duty_shift="",
             source_path=source_path,
             status="ready",
-            metadata={
-                "family": source_family,
-                "building": building,
-                "granularity": "day",
-                "business_date": resolved_business_date,
-                "data_day": resolved_business_date,
-                "covered_data_hour_buckets": covered_buckets,
-                "query_start": start_time,
-                "query_end": end_time,
-                "range_query": True,
-                "day_query": True,
-                "report_name": "楼栋全机柜功率",
-            },
+            metadata=entry_metadata,
         )
 
     def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:

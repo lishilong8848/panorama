@@ -201,6 +201,7 @@ class InternalBridgeHttpTaskRunner:
         task_id = str(task.get("task_id", "") or "").strip()
         if not task_id:
             raise RuntimeError("内网端HTTP桥接任务创建失败，缺少 task_id")
+        self._cache_runtime_task_snapshot(runtime, task)
         self._start_worker_if_needed(task_id)
         normalized = self._normalize_status(task)
         normalized["transport"] = "http"
@@ -229,6 +230,36 @@ class InternalBridgeHttpTaskRunner:
             runtime._process_one_task_if_needed()
         except Exception as exc:  # noqa: BLE001
             self._emit(f"[内网HTTP桥接] 任务执行线程失败 task_id={task_id}, error={exc}")
+        finally:
+            try:
+                store = self._get_store()
+                task = store.get_task(str(task_id or "").strip())
+                if isinstance(task, dict):
+                    self._cache_runtime_task_snapshot(runtime, task)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _cache_runtime_task_snapshot(self, runtime: SharedBridgeRuntimeService, task: Dict[str, Any]) -> None:
+        if not isinstance(task, dict):
+            return
+        cache_detail = getattr(runtime, "_cache_task_detail", None)
+        if callable(cache_detail):
+            cache_detail(task)
+        task_id = str(task.get("task_id", "") or "").strip()
+        if not task_id:
+            return
+        cached_reader = getattr(runtime, "get_cached_tasks", None)
+        cached_tasks = cached_reader(limit=500) if callable(cached_reader) else []
+        merged: List[Dict[str, Any]] = [copy.deepcopy(task)]
+        for item in cached_tasks if isinstance(cached_tasks, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("task_id", "") or "").strip() == task_id:
+                continue
+            merged.append(item)
+        cache_list = getattr(runtime, "_cache_task_list", None)
+        if callable(cache_list):
+            cache_list(merged[:500])
 
     def get_task(self, task_id: str) -> Dict[str, Any] | None:
         task_text = str(task_id or "").strip()
@@ -242,11 +273,13 @@ class InternalBridgeHttpTaskRunner:
         normalized["transport"] = "http"
         return normalized
 
-    def list_tasks(self, *, status: str = "", limit: int = 100) -> List[Dict[str, Any]]:
-        store = self._get_store()
-        status_text = str(status or "").strip().lower()
-        safe_limit = max(1, int(limit or 100))
-        raw_tasks = store.list_tasks(limit=max(safe_limit, 1000 if status_text == "active" else safe_limit))
+    def _filter_tasks(
+        self,
+        raw_tasks: List[Dict[str, Any]] | None,
+        *,
+        status_text: str,
+        safe_limit: int,
+    ) -> List[Dict[str, Any]]:
         output: List[Dict[str, Any]] = []
         for task in raw_tasks if isinstance(raw_tasks, list) else []:
             if not isinstance(task, dict):
@@ -262,6 +295,20 @@ class InternalBridgeHttpTaskRunner:
             if len(output) >= safe_limit:
                 break
         return output
+
+    def list_tasks(self, *, status: str = "", limit: int = 100) -> List[Dict[str, Any]]:
+        runtime = self._ensure_runtime()
+        status_text = str(status or "").strip().lower()
+        safe_limit = max(1, int(limit or 100))
+        read_limit = max(safe_limit, 1000 if status_text in {"active", "running"} else safe_limit)
+        cached_reader = getattr(runtime, "get_cached_tasks", None)
+        cached_tasks = cached_reader(limit=read_limit) if callable(cached_reader) else []
+        output = self._filter_tasks(cached_tasks, status_text=status_text, safe_limit=safe_limit)
+        if output or status_text in {"active", "running"}:
+            return output
+        store = self._get_store()
+        raw_tasks = store.list_tasks(limit=read_limit)
+        return self._filter_tasks(raw_tasks, status_text=status_text, safe_limit=safe_limit)
 
     def cancel_task(self, task_id: str) -> bool:
         task_text = str(task_id or "").strip()
