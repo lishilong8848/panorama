@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Tuple
@@ -28,6 +28,88 @@ from handover_log_module.service.top5_power_report_service import (
 )
 from handover_log_module.service.wet_bulb_collection_service import WetBulbCollectionService
 from pipeline_utils import get_app_dir
+
+
+def _parse_datetime_text(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_hms_text(value: Any, fallback: str) -> tuple[int, int, int]:
+    text = str(value or "").strip() or fallback
+    try:
+        parts = [int(part) for part in text.split(":")]
+        if len(parts) == 2:
+            parts.append(0)
+        if len(parts) >= 3:
+            hour, minute, second = parts[:3]
+            if 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59:
+                return hour, minute, second
+    except Exception:
+        pass
+    if fallback != "00:00:00":
+        return _parse_hms_text(fallback, "00:00:00")
+    return 0, 0, 0
+
+
+def _handover_scheduler_cfg(config: Dict[str, Any]) -> Dict[str, Any]:
+    handover = config.get("handover_log", {}) if isinstance(config.get("handover_log", {}), dict) else {}
+    scheduler = handover.get("scheduler", {}) if isinstance(handover.get("scheduler", {}), dict) else {}
+    return scheduler
+
+
+def _handover_scheduler_stale_after(config: Dict[str, Any], payload: Dict[str, Any]) -> datetime | None:
+    explicit = _parse_datetime_text(payload.get("scheduler_stale_after"))
+    if explicit is not None:
+        return explicit
+    slot = str(payload.get("scheduler_slot", "") or "").strip().lower()
+    duty_date = str(payload.get("duty_date", "") or "").strip()
+    duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
+    if slot not in {"morning", "afternoon"} or not duty_date or duty_shift not in {"day", "night"}:
+        return None
+    try:
+        duty_day = datetime.strptime(duty_date, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    scheduler = _handover_scheduler_cfg(config)
+    if slot == "morning" and duty_shift == "night":
+        h, m, s = _parse_hms_text(scheduler.get("afternoon_time", "12:00:00"), "12:00:00")
+        target_day = duty_day + timedelta(days=1)
+        return datetime(target_day.year, target_day.month, target_day.day, h, m, s)
+    if slot == "afternoon" and duty_shift == "day":
+        h, m, s = _parse_hms_text(scheduler.get("morning_time", "02:00:00"), "02:00:00")
+        target_day = duty_day + timedelta(days=1)
+        return datetime(target_day.year, target_day.month, target_day.day, h, m, s)
+    return None
+
+
+def _stale_scheduled_handover_payload(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> Dict[str, Any]:
+    slot = str(payload.get("scheduler_slot", "") or "").strip().lower()
+    if slot not in {"morning", "afternoon"}:
+        return {"stale": False}
+    stale_after = _handover_scheduler_stale_after(config, payload)
+    if stale_after is None:
+        return {"stale": False, "slot": slot}
+    current = now or datetime.now()
+    stale = current >= stale_after
+    return {
+        "stale": stale,
+        "slot": slot,
+        "stale_after": stale_after.strftime("%Y-%m-%d %H:%M:%S"),
+        "now": current.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def _cleanup_temp_dir(config: Dict[str, Any], payload: Dict[str, Any]) -> None:
@@ -60,6 +142,29 @@ def handle_handover_from_download(
 ) -> Dict[str, Any]:
     notify = WebhookNotifyService(config)
     try:
+        stale_check = _stale_scheduled_handover_payload(config, payload)
+        if bool(stale_check.get("stale", False)):
+            duty_date = str(payload.get("duty_date", "") or "").strip()
+            duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
+            buildings = [
+                str(item or "").strip()
+                for item in (payload.get("buildings") if isinstance(payload.get("buildings"), list) else [])
+                if str(item or "").strip()
+            ]
+            emit_log(
+                "[交接班调度] 自动任务已跨过下一班次生成时间，跳过旧班次生成: "
+                f"slot={stale_check.get('slot', '-')}, duty_date={duty_date or '-'}, "
+                f"duty_shift={duty_shift or '-'}, stale_after={stale_check.get('stale_after', '-')}, "
+                f"now={stale_check.get('now', '-')}"
+            )
+            return {
+                "status": "skipped",
+                "reason": "scheduler_payload_stale",
+                "duty_date": duty_date,
+                "duty_shift": duty_shift,
+                "buildings": buildings,
+                "scheduler_stale": stale_check,
+            }
         if bool(payload.get("skip_if_batch_fully_generated_and_sent", False)):
             duty_date = str(payload.get("duty_date", "") or "").strip()
             duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()

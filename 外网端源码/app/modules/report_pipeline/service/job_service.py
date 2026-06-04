@@ -2751,7 +2751,8 @@ class JobService:
                 return job
             payload_path = self._task_engine_store.resolve_stage_payload_path(job.job_id, stage.stage_id)
             if isinstance(worker_payload, dict):
-                self._task_engine_store.persist_stage_payload(job.job_id, stage.stage_id, self._json_ready(worker_payload))
+                merged_payload = self._merge_waiting_resume_payload_metadata(job, payload_path, worker_payload)
+                self._task_engine_store.persist_stage_payload(job.job_id, stage.stage_id, self._json_ready(merged_payload))
             job.status = "queued"
             job.wait_reason = ""
             job.summary = str(summary or "").strip()
@@ -2779,6 +2780,42 @@ class JobService:
         self._persist_resource_snapshot()
         self._launch_existing_worker_job(job, stage, payload_path=payload_path, worker_handler=stage.worker_handler)
         return job
+
+    @staticmethod
+    def _load_stage_payload_for_resume(payload_path: Path) -> Dict[str, Any]:
+        try:
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _merge_waiting_resume_payload_metadata(
+        self,
+        job: JobState,
+        payload_path: Path,
+        worker_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        merged = dict(worker_payload if isinstance(worker_payload, dict) else {})
+        original = self._load_stage_payload_for_resume(payload_path)
+        for key in (
+            "scheduler_slot",
+            "scheduler_submitted_at",
+            "scheduler_stale_after",
+            "skip_if_batch_fully_generated_and_sent",
+        ):
+            if key not in merged and key in original:
+                merged[key] = original.get(key)
+
+        dedupe_key = str(getattr(job, "dedupe_key", "") or "").strip()
+        if dedupe_key and "scheduler_dedupe_key" not in merged:
+            merged["scheduler_dedupe_key"] = dedupe_key
+        if not str(merged.get("scheduler_slot", "") or "").strip():
+            parts = dedupe_key.split(":")
+            if len(parts) >= 3 and parts[0] == "handover" and parts[1] == "scheduler":
+                slot = str(parts[2] or "").strip().lower()
+                if slot in {"morning", "afternoon"}:
+                    merged["scheduler_slot"] = slot
+        return merged
 
     def fail_waiting_job(self, job_id: str, *, error_text: str, summary: str = "") -> JobState:
         with self._lock:

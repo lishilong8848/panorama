@@ -1352,6 +1352,42 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return True, detail
 
         now = datetime.now()
+        def _scheduler_time_text(key: str, fallback: str) -> str:
+            cfg = runtime_config.get("handover_log", {}) if isinstance(runtime_config.get("handover_log", {}), dict) else {}
+            scheduler_cfg = cfg.get("scheduler", {}) if isinstance(cfg.get("scheduler", {}), dict) else {}
+            return str(scheduler_cfg.get(key, fallback) or fallback).strip() or fallback
+
+        def _parse_hms_text(value: str, fallback: str) -> tuple[int, int, int]:
+            text = str(value or "").strip() or fallback
+            try:
+                parts = [int(part) for part in text.split(":")]
+                if len(parts) == 2:
+                    parts.append(0)
+                if len(parts) >= 3:
+                    hour, minute, second = parts[:3]
+                    if 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59:
+                        return hour, minute, second
+            except Exception:
+                pass
+            return _parse_hms_text(fallback, "00:00:00") if fallback != "00:00:00" else (0, 0, 0)
+
+        def _scheduler_stale_after_text(*, scheduler_slot: str, target_duty_date: str, target_duty_shift: str) -> str:
+            try:
+                duty_day = datetime.strptime(str(target_duty_date or "").strip(), "%Y-%m-%d").date()
+                shift_text = str(target_duty_shift or "").strip().lower()
+                slot_text = str(scheduler_slot or "").strip().lower()
+                if slot_text == "morning" and shift_text == "night":
+                    h, m, s = _parse_hms_text(_scheduler_time_text("afternoon_time", "12:00:00"), "12:00:00")
+                    next_day = duty_day + timedelta(days=1)
+                    return datetime(next_day.year, next_day.month, next_day.day, h, m, s).strftime("%Y-%m-%d %H:%M:%S")
+                if slot_text == "afternoon" and shift_text == "day":
+                    h, m, s = _parse_hms_text(_scheduler_time_text("morning_time", "02:00:00"), "02:00:00")
+                    next_day = duty_day + timedelta(days=1)
+                    return datetime(next_day.year, next_day.month, next_day.day, h, m, s).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return ""
+            return ""
+
         if slot == "morning":
             duty_date = (now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
             duty_shift = "night"
@@ -1362,6 +1398,24 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             slot_name = "下午"
         else:
             return False, f"未知交接班调度时段: {slot}"
+
+        scheduler_stale_after = _scheduler_stale_after_text(
+            scheduler_slot=slot,
+            target_duty_date=duty_date,
+            target_duty_shift=duty_shift,
+        )
+        if scheduler_stale_after:
+            try:
+                if now >= datetime.strptime(scheduler_stale_after, "%Y-%m-%d %H:%M:%S"):
+                    detail = (
+                        "自动任务已跨过下一班次生成时间，跳过旧班次生成："
+                        f"slot={slot}, duty_date={duty_date}, duty_shift={duty_shift}, "
+                        f"stale_after={scheduler_stale_after}, now={now.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    container.add_system_log(f"[交接班调度] {detail}")
+                    return True, detail
+            except ValueError:
+                pass
 
         job_name = f"{source}-交接班定时（{slot_name}）"
 
@@ -1457,6 +1511,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                             "end_time": None,
                             "duty_date": duty_date,
                             "duty_shift": duty_shift,
+                            "scheduler_slot": slot,
+                            "scheduler_submitted_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                            "scheduler_stale_after": scheduler_stale_after,
                             "skip_if_batch_fully_generated_and_sent": True,
                         },
                         resource_keys=["shared_bridge:handover"],
