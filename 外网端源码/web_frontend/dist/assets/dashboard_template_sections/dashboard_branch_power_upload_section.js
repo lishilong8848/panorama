@@ -28,7 +28,7 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   <strong class="status-metric-value">{{ branchPowerUploadScheduleText || '-' }}</strong>
                 </div>
               </div>
-              <div class="hint">每天 00:30 左右处理前一业务日，内网端按整日窗口下载支路功率、支路电流、支路开关，外网端解析 24 小时后直接清表整传多维表。</div>
+              <div class="hint">每天 00:30 左右处理前一业务日，内网端按整日窗口下载支路功率、支路电流、支路开关和楼栋全机柜功率；外网端先写主表与单支路表，再用楼栋全机柜功率写三张汇总表。</div>
               <div class="task-grid two-col">
                 <div class="form-row">
                   <label class="label">调度口径</label>
@@ -82,8 +82,8 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                 </div>
                 <div class="ops-focus-card">
                   <div class="ops-focus-card-label">当前策略</div>
-                  <div class="ops-focus-card-title">读取整日共享三源表，解析完成后直接上传多维表</div>
-                  <div class="ops-focus-card-meta">支路本地库不再参与新流程；源文件缺失时会创建内网整日补采任务。</div>
+                  <div class="ops-focus-card-title">读取整日共享四类源文件，按主表/统计表拆分上传</div>
+                  <div class="ops-focus-card-meta">旧三源负责主表和单支路表，楼栋全机柜功率负责机柜/列头柜/机列三张汇总表；缺源文件时会创建内网整日补采任务。</div>
                 </div>
                 <div class="task-grid two-col" style="margin-top:10px;">
                   <div class="form-row">
@@ -133,9 +133,9 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   </div>
                   <span class="status-badge status-badge-soft tone-neutral">共享文件</span>
                 </div>
-                <div class="hint">采集端分别下载“支路功率 / 支路电流 / 支路开关”三张整日表，每楼每类每天一份源文件。</div>
-                <div class="hint">外网端从第 4 行开始按行合并：功率表 A/B/C 给包间、机列、PDU编号，开关表 C 给支路编号，按 00:00 至 23:00 小时列读取对应值。</div>
-                <div class="hint">目标多维表固定为 ASLxbfESPahdTKs0A9NccgbrnXc / tblT5KbsxGCK1SwA；整日解析全部成功后才清空并批量上传。</div>
+                <div class="hint">采集端每天分别下载“支路功率 / 支路电流 / 支路开关 / 楼栋全机柜功率”四类整日源文件，每楼每天一份。</div>
+                <div class="hint">外网端仍按旧三源生成主表和单支路表；机柜超18KW、列头柜超107.5KW、机列超215KW 改由楼栋全机柜功率判定，其中机柜表的 PDU 与电流仍回查旧三源补齐。</div>
+                <div class="hint">主表目标多维表固定为 ASLxbfESPahdTKs0A9NccgbrnXc / tblT5KbsxGCK1SwA；统计表会按业务日删除旧记录后重建。</div>
               </article>
             </div>
           </div>

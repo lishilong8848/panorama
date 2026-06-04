@@ -1029,9 +1029,11 @@ export function createAppState(vueApi) {
       "handover_log_family",
       "handover_capacity_report_family",
       "monthly_report_family",
+      "top5_monthly_report_family",
       "branch_power_family",
       "branch_current_family",
       "branch_switch_family",
+      "building_full_cabinet_power_family",
       "chiller_mode_switch_family",
       "alarm_event_family",
     ].filter((familyKey) => payload?.[familyKey] && typeof payload[familyKey] === "object");

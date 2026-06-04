@@ -86,6 +86,21 @@
         }
       ]
     },
+    "building_full_cabinet_power": {
+      "download": {
+        "template_name": "楼栋全机柜功率",
+        "sheet_name": "",
+        "scale_label": "小时",
+        "menu_path": [
+          "报表报告",
+          "数据查询",
+          "即时报表"
+        ],
+        "export_button_text": "原样导出",
+        "query_result_timeout_ms": 180000,
+        "page_refresh_retry_count": 2
+      }
+    },
     "capacity_report": {
       "download": {
         "template_name": "交接班容量报表",

@@ -184,6 +184,16 @@ class DownloadGateway:
         return [
             (
                 "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
+                "' showTemplate ') and normalize-space(@title)="
+                f"{name_literal}]"
+            ),
+            (
+                "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
+                "' showTemplate ') and contains(normalize-space(@title),"
+                f"{name_literal})]"
+            ),
+            (
+                "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
                 "' showTemplate ') and (.//span[normalize-space(.)="
                 f"{name_literal}] or normalize-space(.)={name_literal})]"
             ),
@@ -192,6 +202,12 @@ class DownloadGateway:
                 f"{name_literal}]/ancestor::div[contains(concat(' ', normalize-space(@class), ' '), "
                 "' showTemplate ')][1]"
             ),
+            (
+                "xpath=//td[.//div[contains(concat(' ', normalize-space(@class), ' '), "
+                "' showTemplate ') and (normalize-space(@title)="
+                f"{name_literal} or contains(normalize-space(@title), {name_literal}))]]"
+            ),
+            f'tr:has-text("{name}")',
             f'div.showTemplate:has-text("{name}")',
         ]
 
@@ -210,12 +226,266 @@ class DownloadGateway:
             )
         )
 
+    @staticmethod
+    def _is_building_full_cabinet_power_download(*, template_name: str, sheet_name: str) -> bool:
+        text = f"{template_name or ''} {sheet_name or ''}"
+        return "楼栋全机柜功率" in text
+
+    @staticmethod
+    def _is_top5_monthly_report_download(*, template_name: str, sheet_name: str) -> bool:
+        text = f"{template_name or ''} {sheet_name or ''}"
+        return any(
+            token in text
+            for token in (
+                "阿里南通容量报表",
+                "C楼容量报表",
+                "D楼容量报表",
+                "E楼容量报表",
+            )
+        )
+
+    @staticmethod
+    async def _template_page_signature(frame1) -> str:
+        try:
+            return await frame1.evaluate(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll(
+                        'tbody tr, tr[data-index], div.showTemplate, .showTemplate, li.page-number, .page-number, li.page-next, .page-next, [title="下一页"]'
+                    ));
+                    return nodes.map((node) => {
+                        const cls = node.getAttribute('class') || '';
+                        const title = node.getAttribute('title') || '';
+                        const text = (node.innerText || node.textContent || '').trim();
+                        return `${cls}|${title}|${text}`;
+                    }).join('\\n').slice(0, 6000);
+                }"""
+            )
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _wait_template_page_settled(
+        self,
+        frame1,
+        *,
+        previous_signature: str = "",
+        timeout_ms: int = 3500,
+    ) -> None:
+        deadline = time.monotonic() + max(0.8, int(timeout_ms or 3500) / 1000)
+        last_signature = ""
+        stable_since = 0.0
+        changed_once = False
+        while time.monotonic() < deadline:
+            signature = await self._template_page_signature(frame1)
+            now = time.monotonic()
+            if previous_signature and signature and signature != previous_signature:
+                changed_once = True
+            if signature and signature == last_signature:
+                if stable_since <= 0:
+                    stable_since = now
+                if now - stable_since >= (0.8 if changed_once else 1.2):
+                    return
+            else:
+                stable_since = now if signature else 0.0
+                last_signature = signature
+            await asyncio.sleep(0.2)
+
+    async def _wait_active_template_page_number(
+        self,
+        frame1,
+        *,
+        expected_page_number: int,
+        timeout_ms: int = 3500,
+    ) -> bool:
+        if expected_page_number <= 0:
+            return True
+        deadline = time.monotonic() + max(0.8, int(timeout_ms or 3500) / 1000)
+        selectors = [
+            "li.page-number.active",
+            ".page-number.active",
+            ".pagination li.active",
+        ]
+        while time.monotonic() < deadline:
+            for selector in selectors:
+                try:
+                    locator = frame1.locator(selector).first
+                    if await locator.count() == 0:
+                        continue
+                    text = str(await locator.inner_text(timeout=300) or "").strip()
+                    if text == str(expected_page_number):
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+            await asyncio.sleep(0.2)
+        return False
+
+    async def _click_active_template_page_number(
+        self,
+        frame1,
+        *,
+        debug_step_log: bool = False,
+        building: str = "",
+        template_name: str = "",
+        page_number: int = 0,
+    ) -> bool:
+        selectors = [
+            'li.page-number.active a',
+            'li.page-number.active',
+            '.pagination li.active a',
+            '.pagination li.active',
+            '.page-number.active a',
+            '.page-number.active',
+        ]
+        for selector in selectors:
+            try:
+                locator = frame1.locator(selector).first
+                if await locator.count() == 0:
+                    continue
+                await locator.wait_for(state="visible", timeout=500)
+                page_text = ""
+                try:
+                    page_text = str(await locator.inner_text(timeout=300) or "").strip()
+                except Exception:  # noqa: BLE001
+                    page_text = ""
+                await locator.scroll_into_view_if_needed()
+                before_signature = await self._template_page_signature(frame1)
+                await locator.click(force=True)
+                if page_number > 0:
+                    await self._wait_active_template_page_number(
+                        frame1,
+                        expected_page_number=page_number,
+                        timeout_ms=2500,
+                    )
+                await self._wait_template_page_settled(
+                    frame1,
+                    previous_signature=before_signature,
+                    timeout_ms=3500,
+                )
+                self._debug_log(
+                    debug_step_log,
+                    building,
+                    f"已点击当前页码触发模板列表加载 page={page_text or page_number or '-'}, template={template_name}",
+                )
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    async def _click_template_next_page(
+        self,
+        frame1,
+        *,
+        debug_step_log: bool = False,
+        building: str = "",
+        template_name: str = "",
+        page_number: int = 0,
+    ) -> bool:
+        selectors = [
+            'li.page-next:not(.disabled):not(.ui-state-disabled) a',
+            'li.page-next:not(.disabled):not(.ui-state-disabled)',
+            '.page-next:not(.disabled):not(.ui-state-disabled) a',
+            'button[title="下一页"]:not([disabled])',
+            'a[title="下一页"]',
+            '.x-tbar-page-next:not(.x-item-disabled)',
+            '.x-paging-next:not(.x-item-disabled)',
+            'xpath=//*[contains(@class,"x-tbar-page-next") and not(contains(@class,"x-item-disabled"))]',
+            'xpath=//*[normalize-space(.)="下一页" and not(@disabled)]',
+        ]
+        for selector in selectors:
+            try:
+                locator = frame1.locator(selector).first
+                if await locator.count() == 0:
+                    continue
+                await locator.wait_for(state="visible", timeout=300)
+                await locator.scroll_into_view_if_needed()
+                before_signature = await self._template_page_signature(frame1)
+                await locator.click(force=True)
+                await self._wait_active_template_page_number(
+                    frame1,
+                    expected_page_number=page_number + 1,
+                    timeout_ms=3500,
+                )
+                await self._wait_template_page_settled(
+                    frame1,
+                    previous_signature=before_signature,
+                    timeout_ms=4000,
+                )
+                await self._click_active_template_page_number(
+                    frame1,
+                    debug_step_log=debug_step_log,
+                    building=building,
+                    template_name=template_name,
+                    page_number=page_number + 1,
+                )
+                self._debug_log(
+                    debug_step_log,
+                    building,
+                    f"报表模板未在第{page_number}页命中，已点击下一页继续查找 template={template_name}",
+                )
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        self._debug_log(
+            debug_step_log,
+            building,
+            f"报表模板未在第{page_number}页命中，且未找到可用下一页按钮 template={template_name}",
+        )
+        return False
+
+    async def _find_report_template_locator(
+        self,
+        frame1,
+        *,
+        template_name: str,
+        timeout_ms: int,
+        debug_step_log: bool = False,
+        building: str = "",
+    ):
+        names = _template_name_candidates(template_name)
+        report_locator = None
+        attempts = max(1, min(20, int(timeout_ms / 500)))
+        for page_number in range(1, attempts + 1):
+            await self._wait_template_page_settled(frame1, timeout_ms=1800)
+            await self._click_active_template_page_number(
+                frame1,
+                debug_step_log=debug_step_log,
+                building=building,
+                template_name=template_name,
+                page_number=page_number,
+            )
+            page_deadline = time.monotonic() + 3.5
+            for name in names:
+                for selector in self._report_template_selectors(name):
+                    candidate = frame1.locator(selector).first
+                    try:
+                        remaining_ms = max(250, int((page_deadline - time.monotonic()) * 1000))
+                        await candidate.wait_for(state="visible", timeout=min(1800, remaining_ms))
+                        self._debug_log(
+                            debug_step_log,
+                            building,
+                            f"报表模板已找到 page={page_number}, template={template_name}",
+                        )
+                        return candidate
+                    except Exception:  # noqa: BLE001
+                        continue
+            moved = await self._click_template_next_page(
+                frame1,
+                debug_step_log=debug_step_log,
+                building=building,
+                template_name=template_name,
+                page_number=page_number,
+            )
+            if not moved:
+                break
+        return report_locator
+
     async def _report_template_visible(
         self,
         page: Page,
         *,
         template_name: str,
         timeout_ms: int,
+        debug_step_log: bool = False,
+        building: str = "",
     ) -> bool:
         names = _template_name_candidates(template_name)
         if not names:
@@ -236,16 +506,18 @@ class DownloadGateway:
                 frame1 = None
 
             if frame1 is not None:
-                for name in names:
-                    for selector in self._report_template_selectors(name):
-                        try:
-                            await frame1.locator(selector).first.wait_for(
-                                state="visible",
-                                timeout=min(150, remaining_ms),
-                            )
-                            return True
-                        except Exception:  # noqa: BLE001
-                            continue
+                try:
+                    locator = await self._find_report_template_locator(
+                        frame1,
+                        template_name=template_name,
+                        timeout_ms=min(5000, remaining_ms),
+                        debug_step_log=debug_step_log,
+                        building=building,
+                    )
+                    if locator is not None:
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
 
             sleep_seconds = min(0.25, max(0.05, deadline - time.monotonic()))
             await asyncio.sleep(sleep_seconds)
@@ -344,10 +616,18 @@ class DownloadGateway:
                 state="visible",
                 timeout=menu_visible_timeout_ms,
             )
+            template_visible_timeout_ms = 8000 if self._is_top5_monthly_report_download(
+                template_name=template_name,
+                sheet_name="",
+            ) else 3000
             for attempt in range(1, 11):
                 await level2_locator.click()
                 if await self._report_template_visible(
-                    page, template_name=template_name, timeout_ms=3000
+                    page,
+                    template_name=template_name,
+                    timeout_ms=template_visible_timeout_ms,
+                    debug_step_log=debug_step_log,
+                    building=building,
                 ):
                     if attempt > 1:
                         self._debug_log(
@@ -360,7 +640,7 @@ class DownloadGateway:
                     self._debug_log(
                         debug_step_log,
                         building,
-                        f"{level2_menu}点击后3秒未显示模板，准备重试 click={attempt}/10 template={template_name}",
+                        f"{level2_menu}点击后{int(template_visible_timeout_ms / 1000)}秒未显示模板，准备重试 click={attempt}/10 template={template_name}",
                     )
                     await level2_locator.wait_for(
                         state="visible",
@@ -382,6 +662,8 @@ class DownloadGateway:
         template_name: str,
         force_iframe_reopen_each_task: bool,
         iframe_timeout_ms: int,
+        debug_step_log: bool = False,
+        building: str = "",
     ):
         frame_timeout = max(1000, int(iframe_timeout_ms))
         _ = force_iframe_reopen_each_task
@@ -394,21 +676,13 @@ class DownloadGateway:
             if frame1 is None:
                 raise StepError("iframe", "未获取到right-content iframe")
 
-            report_locator = None
-            template_wait_timeout = frame_timeout
-            for name in names:
-                for selector in self._report_template_selectors(name):
-                    candidate = frame1.locator(selector).first
-                    try:
-                        await candidate.wait_for(
-                            state="visible", timeout=template_wait_timeout
-                        )
-                        report_locator = candidate
-                        break
-                    except Exception:  # noqa: BLE001
-                        continue
-                if report_locator is not None:
-                    break
+            report_locator = await self._find_report_template_locator(
+                frame1,
+                template_name=template_name,
+                timeout_ms=frame_timeout,
+                debug_step_log=debug_step_log,
+                building=building,
+            )
             if report_locator is None:
                 raise StepError("iframe", f"未找到报表模板: {template_name}")
 
@@ -918,8 +1192,20 @@ class DownloadGateway:
                 template_name=template_name,
                 sheet_name=sheet_name,
             )
-            query_session_attempts = 3 if is_branch_source else 1
-            query_wait_timeout_ms = 15000 if is_branch_source else int(query_result_timeout_ms)
+            is_building_full_cabinet_power = self._is_building_full_cabinet_power_download(
+                template_name=template_name,
+                sheet_name=sheet_name,
+            )
+            is_top5_monthly_report = self._is_top5_monthly_report_download(
+                template_name=template_name,
+                sheet_name=sheet_name,
+            )
+            query_session_attempts = 3 if (is_branch_source or is_building_full_cabinet_power) else 1
+            query_wait_timeout_ms = (
+                int(query_result_timeout_ms)
+                if (is_building_full_cabinet_power or is_top5_monthly_report)
+                else (15000 if is_branch_source else int(query_result_timeout_ms))
+            )
             frame2 = None
             for query_attempt in range(1, query_session_attempts + 1):
                 step_suffix = (
@@ -954,19 +1240,28 @@ class DownloadGateway:
                             template_name=template_name,
                             force_iframe_reopen_each_task=force_iframe_reopen_each_task,
                             iframe_timeout_ms=int(iframe_timeout_ms),
+                            debug_step_log=debug_step_log,
+                            building=building,
                         ),
                     )
-                    await _run_step(
-                        f"填参查询{step_suffix}",
-                        lambda: self._fill_query_conditions(
-                            frame2,
-                            start_time=start_time,
-                            end_time=end_time,
-                            scale_label=scale_label,
-                            sheet_name=sheet_name,
-                            start_end_visible_timeout_ms=start_end_visible_timeout_ms,
-                        ),
-                    )
+                    if is_top5_monthly_report:
+                        self._debug_log(
+                            debug_step_log,
+                            building,
+                            f"TOP5月报源文件跳过填参，直接等待报表加载 query={query_attempt}/{query_session_attempts}",
+                        )
+                    else:
+                        await _run_step(
+                            f"填参查询{step_suffix}",
+                            lambda: self._fill_query_conditions(
+                                frame2,
+                                start_time=start_time,
+                                end_time=end_time,
+                                scale_label=scale_label,
+                                sheet_name=sheet_name,
+                                start_end_visible_timeout_ms=start_end_visible_timeout_ms,
+                            ),
+                        )
                     await _run_step(
                         f"查询等待{step_suffix}",
                         lambda: self._wait_query_ready(

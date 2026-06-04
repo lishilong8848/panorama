@@ -1,4 +1,4 @@
-{
+﻿{
   "version": 3,
   "common": {
     "paths": {
@@ -324,16 +324,16 @@
         },
         "weather": {
           "provider": "seniverse",
-          "location": "崇川区",
+          "auth_mode": "signed",
           "fallback_locations": [
             "南通"
           ],
           "language": "zh-Hans",
-          "unit": "c",
-          "timeout_sec": 8,
-          "auth_mode": "signed",
+          "location": "崇川区",
+          "seniverse_private_key": "SwWfUI324UukiuVs2",
           "seniverse_public_key": "Pw-nkmTzcCorv7Dey",
-          "seniverse_private_key": "SwWfUI324UukiuVs2"
+          "timeout_sec": 8,
+          "unit": "c"
         }
       },
       "template": {
@@ -913,7 +913,8 @@
           "date": "日期",
           "shift": "班次",
           "report_link": "交接班日报"
-        }
+        },
+        "browser_profile_directory": ""
       },
       "cabinet_shift_record_bitable_export": {
         "enabled": true,
@@ -1345,104 +1346,104 @@
         "review_link_recipients_by_building": {
           "110站": [
             {
-              "note": "lsl",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true
+              "enabled": true,
+              "note": "lsl"
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": true,
+              "note": "m"
             },
             {
-              "note": "110",
               "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
-              "enabled": true
+              "enabled": true,
+              "note": "110"
             }
           ],
           "A楼": [
             {
-              "note": "李世龙A",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true
+              "enabled": true,
+              "note": "李世龙A"
             },
             {
-              "note": "A",
               "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a",
-              "enabled": true
+              "enabled": true,
+              "note": "A"
             },
             {
-              "note": "M",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": true,
+              "note": "M"
             }
           ],
           "B楼": [
             {
-              "note": "李世龙B",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true
+              "enabled": true,
+              "note": "李世龙B"
             },
             {
-              "note": "B",
               "open_id": "ou_160e991b0fd811cda7260de056d8a363",
-              "enabled": true
+              "enabled": true,
+              "note": "B"
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": true,
+              "note": "m"
             }
           ],
           "C楼": [
             {
-              "note": "李世龙C",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true
+              "enabled": true,
+              "note": "李世龙C"
             },
             {
-              "note": "C",
               "open_id": "ou_99391b00c1406917930483d8500af400",
-              "enabled": true
+              "enabled": true,
+              "note": "C"
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": true,
+              "note": "m"
             }
           ],
           "D楼": [
             {
-              "note": "李世龙D",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true
+              "enabled": true,
+              "note": "李世龙D"
             },
             {
-              "note": "D",
               "open_id": "ou_b9c26b4da3721c2de11ee175c707e756",
-              "enabled": true
+              "enabled": true,
+              "note": "D"
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": true,
+              "note": "m"
             }
           ],
           "E楼": [
             {
-              "note": "李世龙E",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true
+              "enabled": true,
+              "note": "李世龙E"
             },
             {
-              "note": "E",
               "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3",
-              "enabled": true
+              "enabled": true,
+              "note": "E"
             },
             {
-              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": true,
+              "note": "m"
             }
           ]
         }
@@ -2200,7 +2201,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电时长"
+                "电池放电时长",
+                "电池放电后备时间",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -3432,7 +3436,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电后备时间"
+                "电池放电后备时间",
+                "电池放电时长",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -4008,7 +4015,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电后备时间"
+                "电池放电后备时间",
+                "电池放电时长",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -4455,7 +4465,22 @@
           ]
         }
       },
-      "sites": []
+      "sites": [],
+      "top5_power_report": {
+        "over_power_attachment": {
+          "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
+          "enabled": true,
+          "output_dir": "C:\\Users\\HP\\Desktop\\自建app\\全景平台程序\\QJPT_V3\\外网端源码\\QLDownload\\月度超功率附件",
+          "table_id": "tblkh6YCMYtS8nHa",
+          "view_id": "vewrHJHl3v",
+          "zip_file_name_pattern": "月度超功率附件_{year}{month}_{timestamp}.zip"
+        },
+        "template": {
+          "file_name_pattern": "TOP5功率文件_{timestamp}.xlsx",
+          "output_dir": "C:\\Users\\HP\\Desktop\\自建app\\全景平台程序\\QJPT_V3\\外网端源码\\QLDownload\\TOP5功率文件",
+          "source_path": ""
+        }
+      }
     },
     "day_metric_upload": {
       "scheduler": {
@@ -4633,65 +4658,65 @@
         "page_size": 500,
         "delete_batch_size": 500,
         "create_batch_size": 200,
-        "timeout": 30,
+        "clear_before_upload": true,
         "list_page_size": 500,
-        "clear_before_upload": true
+        "timeout": 30
       },
       "shared_source_upload": {
         "replace_existing_on_full": true
       },
-      "resume": {
-        "max_retry": 3,
-        "enabled": true,
-        "root_dir": "alarm_export_resume",
-        "reuse_extracted_rows": true,
-        "state_file": "alarm_export_resume_state.json",
-        "retry_interval_sec": 2
-      },
-      "level_mapping": {
-        "4": "次要",
-        "2": "严重",
-        "1": "紧急",
-        "3": "重要"
-      },
-      "window_days": 35,
+      "window_end_time": "00:00:00",
       "enabled": true,
-      "alarm_category_default": "真实告警",
-      "run_with_scheduler": true,
       "fields": {
-        "content": "content",
-        "alarm_type": "alarm_type",
-        "accept_time": "accept_time",
-        "event_time": "event_time",
-        "event_level": "event_level",
-        "confirm_user": "confirm_user",
+        "confirm_description": "confirm_description",
+        "recover_time": "recover_time",
+        "accept_user": "accept_user",
         "event_source": "event_source",
-        "recover_status": "recover_status",
+        "event_level": "event_level",
         "process_status": "process_status",
+        "confirm_time": "confirm_time",
+        "accept_time": "accept_time",
         "process_suggestion": "process_suggestion",
         "trigger_value": "trigger_value",
         "accept_description": "accept_description",
-        "confirm_time": "confirm_time",
-        "accept_user": "accept_user",
-        "confirm_description": "confirm_description",
-        "recover_time": "recover_time"
+        "confirm_user": "confirm_user",
+        "recover_status": "recover_status",
+        "event_time": "event_time",
+        "content": "content",
+        "alarm_type": "alarm_type"
       },
       "snapshot_mode": "clear_and_rebuild",
-      "window_end_time": "00:00:00",
+      "alarm_category_default": "真实告警",
+      "test_db": {
+        "port": 3306,
+        "enabled": true,
+        "table_mode": "fixed",
+        "password": "123456",
+        "fixed_table": "event_2026_02",
+        "database": "e_event",
+        "building_label": "测试楼栋",
+        "host": "127.0.0.1",
+        "time_field_mode": "auto",
+        "user": "root"
+      },
+      "run_with_scheduler": true,
       "skip_levels": [
         5
       ],
-      "test_db": {
-        "port": 3306,
-        "password": "123456",
+      "window_days": 35,
+      "resume": {
         "enabled": true,
-        "database": "e_event",
-        "building_label": "测试楼栋",
-        "fixed_table": "event_2026_02",
-        "host": "127.0.0.1",
-        "time_field_mode": "auto",
-        "table_mode": "fixed",
-        "user": "root"
+        "retry_interval_sec": 2,
+        "reuse_extracted_rows": true,
+        "max_retry": 3,
+        "state_file": "alarm_export_resume_state.json",
+        "root_dir": "alarm_export_resume"
+      },
+      "level_mapping": {
+        "3": "重要",
+        "2": "严重",
+        "4": "次要",
+        "1": "紧急"
       }
     },
     "manual_upload_gui": {

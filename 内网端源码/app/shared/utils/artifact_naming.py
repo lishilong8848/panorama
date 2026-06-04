@@ -9,20 +9,24 @@ from pathlib import Path
 FAMILY_HANDOVER_LOG = "handover_log_family"
 FAMILY_HANDOVER_CAPACITY_REPORT = "handover_capacity_report_family"
 FAMILY_MONTHLY_REPORT = "monthly_report_family"
+FAMILY_TOP5_MONTHLY_REPORT = "top5_monthly_report_family"
 FAMILY_ALARM_EVENT = "alarm_event_family"
 FAMILY_BRANCH_POWER = "branch_power_family"
 FAMILY_BRANCH_CURRENT = "branch_current_family"
 FAMILY_BRANCH_SWITCH = "branch_switch_family"
+FAMILY_BUILDING_FULL_CABINET_POWER = "building_full_cabinet_power_family"
 FAMILY_CHILLER_MODE_SWITCH = "chiller_mode_switch_family"
 
 SOURCE_TYPE_FOLDERS = {
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
     FAMILY_HANDOVER_CAPACITY_REPORT: "交接班容量报表源文件",
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
+    FAMILY_TOP5_MONTHLY_REPORT: "TOP5月报源文件",
     FAMILY_ALARM_EVENT: "告警信息源文件",
     FAMILY_BRANCH_POWER: "支路功率源文件",
     FAMILY_BRANCH_CURRENT: "支路电流源文件",
     FAMILY_BRANCH_SWITCH: "支路开关源文件",
+    FAMILY_BUILDING_FULL_CABINET_POWER: "楼栋全机柜功率源文件",
     FAMILY_CHILLER_MODE_SWITCH: "制冷单元模式切换参数源文件",
 }
 
@@ -134,7 +138,7 @@ def source_bucket_segment(
     normalized_family = str(source_family or "").strip()
     normalized_kind = str(bucket_kind or "").strip().lower() or "latest"
     duty_digits = "".join(ch for ch in str(duty_date or "").strip() if ch.isdigit())[:8]
-    if normalized_family == FAMILY_MONTHLY_REPORT and len(duty_digits) == 8:
+    if normalized_family in {FAMILY_MONTHLY_REPORT, FAMILY_TOP5_MONTHLY_REPORT} and len(duty_digits) == 8:
         # 月报源文件按“业务日期”统一落盘，latest 与历史补采共用同一套日期目录和文件名。
         return f"{duty_digits}--月报"
     if normalized_family == FAMILY_CHILLER_MODE_SWITCH and normalized_kind in {"latest", "interval"}:
@@ -153,13 +157,18 @@ def source_bucket_segment(
 
     if normalized_family in {FAMILY_HANDOVER_LOG, FAMILY_HANDOVER_CAPACITY_REPORT}:
         return f"{duty_digits}--{handover_shift_text(duty_shift)}"
-    if normalized_family == FAMILY_MONTHLY_REPORT:
+    if normalized_family in {FAMILY_MONTHLY_REPORT, FAMILY_TOP5_MONTHLY_REPORT}:
         return f"{duty_digits}--月报"
     if normalized_family == FAMILY_ALARM_EVENT and normalized_kind == "handover_window":
         return f"{duty_digits}--{handover_shift_text(duty_shift)}--交接班告警"
     if normalized_family == FAMILY_ALARM_EVENT:
         return duty_digits
-    if normalized_family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} and normalized_kind in {"day", "daily"}:
+    if normalized_family in {
+        FAMILY_BRANCH_POWER,
+        FAMILY_BRANCH_CURRENT,
+        FAMILY_BRANCH_SWITCH,
+        FAMILY_BUILDING_FULL_CABINET_POWER,
+    } and normalized_kind in {"day", "daily"}:
         return f"{duty_digits}--整日"
     return duty_digits
 

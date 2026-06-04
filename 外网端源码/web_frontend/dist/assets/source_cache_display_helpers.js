@@ -8,9 +8,11 @@ function resolveSourceCacheFamilyTitle(key) {
   if (text === "handover_log_family") return "交接班日志源文件";
   if (text === "handover_capacity_report_family") return "交接班容量报表源文件";
   if (text === "monthly_report_family") return "全景平台月报源文件";
+  if (text === "top5_monthly_report_family") return "TOP5月报源文件";
   if (text === "branch_power_family") return "支路功率源文件";
   if (text === "branch_current_family") return "支路电流源文件";
   if (text === "branch_switch_family") return "支路开关源文件";
+  if (text === "building_full_cabinet_power_family") return "楼栋全机柜功率源文件";
   if (text === "chiller_mode_switch_family") return "制冷单元模式切换参数源文件";
   if (text === "alarm_event_family") return "告警信息源文件";
   return "";
@@ -21,9 +23,11 @@ function resolveSourceCacheFamilyKeyByTitle(title) {
   if (text === "交接班日志源文件") return "handover_log_family";
   if (text === "交接班容量报表源文件") return "handover_capacity_report_family";
   if (text === "全景平台月报源文件") return "monthly_report_family";
+  if (text === "TOP5月报源文件") return "top5_monthly_report_family";
   if (text === "支路功率源文件") return "branch_power_family";
   if (text === "支路电流源文件") return "branch_current_family";
   if (text === "支路开关源文件") return "branch_switch_family";
+  if (text === "楼栋全机柜功率源文件") return "building_full_cabinet_power_family";
   if (text === "制冷单元模式切换参数源文件") return "chiller_mode_switch_family";
   if (text === "告警信息源文件") return "alarm_event_family";
   return "";

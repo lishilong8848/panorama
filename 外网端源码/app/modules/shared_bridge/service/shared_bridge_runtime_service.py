@@ -29,6 +29,7 @@ from app.modules.internal_bridge_http.service.client import InternalBridgeHttpCl
 from app.modules.shared_bridge.service.shared_bridge_runtime_mirror_store import SharedBridgeRuntimeMirrorStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_ALARM_EVENT,
+    FAMILY_BUILDING_FULL_CABINET_POWER,
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
     FAMILY_BRANCH_SWITCH,
@@ -37,6 +38,7 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_HANDOVER_LOG,
     FAMILY_LABELS,
     FAMILY_MONTHLY_REPORT,
+    FAMILY_TOP5_MONTHLY_REPORT,
     SharedSourceCacheService,
     is_accessible_cached_file_path,
 )
@@ -521,9 +523,19 @@ class SharedBridgeRuntimeService:
                 relative_path=item.get("switch_relative_path", "") or source_files.get("switch_relative_path", ""),
                 source_family=FAMILY_BRANCH_SWITCH,
             )
+            full_cabinet_power_file = self._external_shared_file_path_text(
+                item.get("full_cabinet_power_file", "") or source_files.get("full_cabinet_power_file", "") or "",
+                relative_path=item.get("full_cabinet_power_relative_path", "") or source_files.get("full_cabinet_power_relative_path", ""),
+                source_family=FAMILY_BUILDING_FULL_CABINET_POWER,
+            )
             if not building or not power_file:
                 continue
-            for label, file_path in (("支路功率", power_file), ("支路电流", current_file), ("支路开关", switch_file)):
+            for label, file_path in (
+                ("支路功率", power_file),
+                ("支路电流", current_file),
+                ("支路开关", switch_file),
+                ("楼栋全机柜功率", full_cabinet_power_file),
+            ):
                 if not file_path or (self.role_mode != "external" and not is_accessible_cached_file_path(file_path)):
                     raise FileNotFoundError(f"共享目录中的{label}整日源文件不存在或不可访问: {file_path or '-'}")
             metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
@@ -534,6 +546,7 @@ class SharedBridgeRuntimeService:
                     "power_file": power_file,
                     "current_file": current_file,
                     "switch_file": switch_file,
+                    "full_cabinet_power_file": full_cabinet_power_file,
                     "business_date": business_date,
                     "metadata": metadata,
                 }
@@ -545,7 +558,12 @@ class SharedBridgeRuntimeService:
         if not requested_buildings:
             requested_buildings = self.get_source_cache_buildings()
         family_maps: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        for family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH):
+        for family in (
+            FAMILY_BRANCH_POWER,
+            FAMILY_BRANCH_CURRENT,
+            FAMILY_BRANCH_SWITCH,
+            FAMILY_BUILDING_FULL_CABINET_POWER,
+        ):
             entries = self.get_latest_source_cache_entries(
                 source_family=family,
                 buildings=requested_buildings or None,
@@ -566,17 +584,24 @@ class SharedBridgeRuntimeService:
             power_entry = family_maps.get(FAMILY_BRANCH_POWER, {}).get(building)
             current_entry = family_maps.get(FAMILY_BRANCH_CURRENT, {}).get(building)
             switch_entry = family_maps.get(FAMILY_BRANCH_SWITCH, {}).get(building)
+            full_cabinet_entry = family_maps.get(FAMILY_BUILDING_FULL_CABINET_POWER, {}).get(building)
             if not power_entry:
                 missing.append(f"{business_date}/{building}/支路功率")
             if not current_entry:
                 missing.append(f"{business_date}/{building}/支路电流")
             if not switch_entry:
                 missing.append(f"{business_date}/{building}/支路开关")
-            if not power_entry or not current_entry or not switch_entry:
+            if not full_cabinet_entry:
+                missing.append(f"{business_date}/{building}/楼栋全机柜功率")
+            if not power_entry or not current_entry or not switch_entry or not full_cabinet_entry:
                 continue
             power_file = self._require_accessible_cached_file(power_entry.get("file_path", ""), description="支路功率整日源文件")
             current_file = self._require_accessible_cached_file(current_entry.get("file_path", ""), description="支路电流整日源文件")
             switch_file = self._require_accessible_cached_file(switch_entry.get("file_path", ""), description="支路开关整日源文件")
+            full_cabinet_power_file = self._require_accessible_cached_file(
+                full_cabinet_entry.get("file_path", ""),
+                description="楼栋全机柜功率整日源文件",
+            )
             metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
             source_units.append(
                 {
@@ -585,6 +610,7 @@ class SharedBridgeRuntimeService:
                     "power_file": power_file,
                     "current_file": current_file,
                     "switch_file": switch_file,
+                    "full_cabinet_power_file": full_cabinet_power_file,
                     "business_date": business_date,
                     "metadata": metadata,
                 }
@@ -1215,7 +1241,12 @@ class SharedBridgeRuntimeService:
         if not target_bucket:
             return [{"bucket_or_date": "", "bucket_kind": ""}]
         family = str(source_family or "").strip().lower()
-        if family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} and (
+        if family in {
+            FAMILY_BRANCH_POWER,
+            FAMILY_BRANCH_CURRENT,
+            FAMILY_BRANCH_SWITCH,
+            FAMILY_BUILDING_FULL_CABINET_POWER,
+        } and (
             self._http_source_bucket_is_date_only(target_bucket) or self._http_source_bucket_dt(target_bucket) is None
         ):
             return [
@@ -1238,11 +1269,16 @@ class SharedBridgeRuntimeService:
             return False
         family = str(source_family or "").strip().lower()
         bucket_kinds = ["latest"]
-        if family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH}:
+        if family in {
+            FAMILY_BRANCH_POWER,
+            FAMILY_BRANCH_CURRENT,
+            FAMILY_BRANCH_SWITCH,
+            FAMILY_BUILDING_FULL_CABINET_POWER,
+        }:
             bucket_kinds = ["daily", "day", "date"]
         elif family == FAMILY_CHILLER_MODE_SWITCH:
             bucket_kinds = ["interval", "latest"]
-        elif family == FAMILY_MONTHLY_REPORT:
+        elif family in {FAMILY_MONTHLY_REPORT, FAMILY_TOP5_MONTHLY_REPORT}:
             bucket_kinds = ["latest", "date"]
         segments: set[str] = set()
         for bucket_kind in bucket_kinds:
@@ -1479,6 +1515,111 @@ class SharedBridgeRuntimeService:
             and len(selected_entries) == len(target_buildings),
             "transport": "http",
         }
+
+    def _latest_http_entries_by_building(
+        self,
+        *,
+        entries: List[Dict[str, Any]],
+        buildings: List[str],
+        not_before: datetime | None = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        requested = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        requested_set = set(requested)
+        selected: Dict[str, Dict[str, Any]] = {}
+        for raw in entries if isinstance(entries, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            building = str(raw.get("building", "") or "").strip()
+            file_path = str(raw.get("file_path", "") or "").strip()
+            if not building or not file_path or building not in requested_set:
+                continue
+            metadata = raw.get("metadata", {}) if isinstance(raw.get("metadata", {}), dict) else {}
+            freshness_dt = datetime.min
+            for value in (
+                raw.get("downloaded_at"),
+                raw.get("updated_at"),
+                metadata.get("downloaded_at"),
+                metadata.get("updated_at"),
+            ):
+                parsed = self._parse_source_index_time(value)
+                if parsed != datetime.min:
+                    freshness_dt = parsed
+                    break
+            if not_before is not None:
+                if freshness_dt == datetime.min or freshness_dt < not_before:
+                    continue
+            current = selected.get(building)
+            if current is None or self._source_index_sort_key(raw) >= self._source_index_sort_key(current):
+                selected[building] = {**raw, "building": building, "file_path": file_path}
+        return selected
+
+    def refresh_top5_monthly_latest_cache_entries(
+        self,
+        *,
+        buildings: List[str],
+        timeout_sec: int = 420,
+        poll_interval_sec: float = 5.0,
+        emit_log: Callable[[str], None] | None = None,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> List[Dict[str, Any]]:
+        target_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        if not target_buildings:
+            raise RuntimeError("TOP5月报源文件下载缺少楼栋列表")
+        if not self._http_bridge_should_try() or self._internal_bridge_http_client is None:
+            raise RuntimeError("内网端 HTTP 桥接不可用，无法触发 TOP5 月报源文件下载")
+
+        request_started_at = datetime.now().replace(microsecond=0)
+        if emit_log:
+            emit_log(
+                "[TOP5功率文件生成] 请求内网端下载本次 TOP5 月报源文件: "
+                f"buildings={','.join(target_buildings)}"
+            )
+        refresh_result = self.request_latest_source_cache_refresh(
+            source_family=FAMILY_TOP5_MONTHLY_REPORT,
+            buildings=target_buildings,
+        )
+        if not bool(refresh_result.get("ok", False)) and int(refresh_result.get("accepted_count", 0) or 0) <= 0:
+            reason = str(refresh_result.get("error") or refresh_result.get("reason") or "内网端未受理下载任务").strip()
+            raise RuntimeError(f"TOP5月报源文件下载任务提交失败: {reason}")
+
+        deadline = time.monotonic() + max(30.0, float(timeout_sec or 420))
+        poll_interval = max(1.0, float(poll_interval_sec or 5.0))
+        last_log_key = ""
+        while True:
+            if cancel_check:
+                cancel_check()
+            entries = self._http_source_index_entries(
+                source_family=FAMILY_TOP5_MONTHLY_REPORT,
+                buildings=target_buildings,
+                bucket_key="",
+                limit_per_building=50,
+            )
+            if entries is None:
+                raise RuntimeError("内网端 HTTP source-index 暂不可用，无法读取 TOP5 月报源文件下载结果")
+            selected = self._latest_http_entries_by_building(
+                entries=entries,
+                buildings=target_buildings,
+                not_before=request_started_at,
+            )
+            missing = [building for building in target_buildings if building not in selected]
+            if not missing:
+                output = [selected[building] for building in target_buildings]
+                if emit_log:
+                    emit_log(
+                        "[TOP5功率文件生成] 本次 TOP5 月报源文件下载完成: "
+                        + "; ".join(
+                            f"{item.get('building')}={Path(str(item.get('file_path', '') or '')).name}"
+                            for item in output
+                        )
+                    )
+                return output
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"TOP5月报源文件下载等待超时，缺失楼栋: {','.join(missing)}")
+            log_key = ",".join(missing)
+            if emit_log and log_key != last_log_key:
+                emit_log(f"[TOP5功率文件生成] 等待内网端 TOP5 月报源文件下载完成: missing={log_key}")
+                last_log_key = log_key
+            time.sleep(poll_interval)
 
     def _http_alarm_event_upload_selection(self, *, building: str = "") -> Dict[str, Any] | None:
         entries = self._http_source_index_entries(
@@ -1846,9 +1987,11 @@ class SharedBridgeRuntimeService:
             (FAMILY_HANDOVER_LOG, current_bucket),
             (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
             (FAMILY_MONTHLY_REPORT, current_bucket),
+            (FAMILY_TOP5_MONTHLY_REPORT, current_bucket),
             (FAMILY_BRANCH_POWER, branch_day_bucket),
             (FAMILY_BRANCH_CURRENT, branch_day_bucket),
             (FAMILY_BRANCH_SWITCH, branch_day_bucket),
+            (FAMILY_BUILDING_FULL_CABINET_POWER, branch_day_bucket),
             (FAMILY_CHILLER_MODE_SWITCH, chiller_bucket),
         ]
         try:
@@ -1857,7 +2000,14 @@ class SharedBridgeRuntimeService:
                     source_family=family,
                     current_bucket=bucket,
                     buildings=buildings,
-                    max_selection_age_hours=72.0 if family in {FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH} else 3.0,
+                    max_selection_age_hours=72.0
+                    if family in {
+                        FAMILY_BRANCH_POWER,
+                        FAMILY_BRANCH_CURRENT,
+                        FAMILY_BRANCH_SWITCH,
+                        FAMILY_BUILDING_FULL_CABINET_POWER,
+                    }
+                    else 3.0,
                 )
                 if payload is None:
                     return None
@@ -2783,6 +2933,7 @@ class SharedBridgeRuntimeService:
             (FAMILY_HANDOVER_LOG, FAMILY_LABELS[FAMILY_HANDOVER_LOG]),
             (FAMILY_HANDOVER_CAPACITY_REPORT, FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT]),
             (FAMILY_MONTHLY_REPORT, FAMILY_LABELS[FAMILY_MONTHLY_REPORT]),
+            (FAMILY_TOP5_MONTHLY_REPORT, FAMILY_LABELS[FAMILY_TOP5_MONTHLY_REPORT]),
             (FAMILY_BRANCH_POWER, FAMILY_LABELS[FAMILY_BRANCH_POWER]),
             (FAMILY_BRANCH_CURRENT, FAMILY_LABELS[FAMILY_BRANCH_CURRENT]),
             (FAMILY_BRANCH_SWITCH, FAMILY_LABELS[FAMILY_BRANCH_SWITCH]),
@@ -2839,6 +2990,12 @@ class SharedBridgeRuntimeService:
                 FAMILY_MONTHLY_REPORT,
                 FAMILY_LABELS[FAMILY_MONTHLY_REPORT],
                 Path(str(cache_paths.get(FAMILY_MONTHLY_REPORT, "") or (root_path / FAMILY_LABELS[FAMILY_MONTHLY_REPORT]))),
+                "directory",
+            ),
+            (
+                FAMILY_TOP5_MONTHLY_REPORT,
+                FAMILY_LABELS[FAMILY_TOP5_MONTHLY_REPORT],
+                Path(str(cache_paths.get(FAMILY_TOP5_MONTHLY_REPORT, "") or (root_path / FAMILY_LABELS[FAMILY_TOP5_MONTHLY_REPORT]))),
                 "directory",
             ),
             (
@@ -3169,6 +3326,7 @@ class SharedBridgeRuntimeService:
             "handover_log_family": {},
             "handover_capacity_report_family": {},
             "monthly_report_family": {},
+            "top5_monthly_report_family": {},
             "alarm_event_family": {},
         }
 
@@ -4375,6 +4533,38 @@ class SharedBridgeRuntimeService:
             buildings=buildings,
         )
 
+    def get_top5_monthly_by_date_cache_entries(self, *, selected_dates: List[str], buildings: List[str] | None = None) -> List[Dict[str, Any]]:
+        if self._http_bridge_should_try():
+            output: List[Dict[str, Any]] = []
+            used_http = True
+            for selected_date in [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]:
+                http_entries = self._http_source_index_entries(
+                    source_family=FAMILY_TOP5_MONTHLY_REPORT,
+                    buildings=buildings,
+                    bucket_key=selected_date,
+                    limit_per_building=20,
+                )
+                if http_entries is None:
+                    used_http = False
+                    break
+                output.extend(
+                    self._pick_latest_source_index_entries_for_date(
+                        http_entries,
+                        selected_date=selected_date,
+                        buildings=buildings,
+                    )
+                )
+            if used_http:
+                return output
+        if self._http_bridge_forced():
+            return []
+        if self._source_cache_service is None:
+            return []
+        return self._source_cache_service.get_top5_monthly_by_date_entries(
+            selected_dates=selected_dates,
+            buildings=buildings,
+        )
+
     def get_source_cache_buildings(self) -> List[str]:
         if self._http_bridge_should_try():
             return self._http_source_cache_buildings()
@@ -5075,7 +5265,7 @@ class SharedBridgeRuntimeService:
 
         paused = False
         try:
-            for family in (FAMILY_HANDOVER_LOG, FAMILY_HANDOVER_CAPACITY_REPORT, FAMILY_MONTHLY_REPORT):
+            for family in (FAMILY_HANDOVER_LOG, FAMILY_HANDOVER_CAPACITY_REPORT, FAMILY_MONTHLY_REPORT, FAMILY_TOP5_MONTHLY_REPORT):
                 _guard(
                     f"latest:{family}",
                     lambda family_name=family: source_cache.get_latest_ready_selection(
@@ -6372,9 +6562,17 @@ class SharedBridgeRuntimeService:
                 power_file = str(item.get("power_file", "") or source_files.get("power_file", "") or item.get("file_path", "") or item.get("source_file", "") or "").strip()
                 current_file = str(item.get("current_file", "") or source_files.get("current_file", "") or "").strip()
                 switch_file = str(item.get("switch_file", "") or source_files.get("switch_file", "") or "").strip()
+                full_cabinet_power_file = str(
+                    item.get("full_cabinet_power_file", "") or source_files.get("full_cabinet_power_file", "") or ""
+                ).strip()
                 if not building or not power_file:
                     continue
-                for label, file_path in (("支路功率", power_file), ("支路电流", current_file), ("支路开关", switch_file)):
+                for label, file_path in (
+                    ("支路功率", power_file),
+                    ("支路电流", current_file),
+                    ("支路开关", switch_file),
+                    ("楼栋全机柜功率", full_cabinet_power_file),
+                ):
                     if not file_path or (self.role_mode != "external" and not is_accessible_cached_file_path(file_path)):
                         raise FileNotFoundError(f"共享目录中的{label}整日源文件不存在或不可访问: {file_path or '-'}")
                 metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
@@ -6385,6 +6583,7 @@ class SharedBridgeRuntimeService:
                         "power_file": power_file,
                         "current_file": current_file,
                         "switch_file": switch_file,
+                        "full_cabinet_power_file": full_cabinet_power_file,
                         "business_date": business_date,
                         "metadata": metadata,
                     }

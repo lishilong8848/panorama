@@ -3,9 +3,11 @@ const SOURCE_FAMILIES = [
   ["handover_log_family", "交接班日志源文件"],
   ["handover_capacity_report_family", "交接班容量报表源文件"],
   ["monthly_report_family", "全景平台月报源文件"],
+  ["top5_monthly_report_family", "TOP5月报源文件"],
   ["branch_power_family", "支路功率源文件"],
   ["branch_current_family", "支路电流源文件"],
   ["branch_switch_family", "支路开关源文件"],
+  ["building_full_cabinet_power_family", "楼栋全机柜功率源文件"],
   ["chiller_mode_switch_family", "制冷单元模式切换参数源文件"],
   ["alarm_event_family", "告警信息源文件"],
 ];

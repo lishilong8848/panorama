@@ -63,7 +63,7 @@ const SPECIAL_GROUP = {
     {
       id: 'top5_power_report',
       title: 'TOP5功率文件生成',
-      desc: '读取容量和支路功率最新共享源文件，生成高功率设备TOP5报表。',
+      desc: '读取所选年月的TOP5月报源文件，生成高功率设备TOP5报表。',
     },
     {
       id: 'wet_bulb_collection',

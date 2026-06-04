@@ -13,6 +13,12 @@ from app.config.config_adapter import normalize_role_mode
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
+from app.shared.utils.artifact_naming import (
+    FAMILY_BUILDING_FULL_CABINET_POWER as ARTIFACT_FAMILY_BUILDING_FULL_CABINET_POWER,
+)
+from handover_log_module.service.full_cabinet_power_stats_sync_service import (
+    FullCabinetPowerStatsSyncService,
+)
 from handover_log_module.service.power_alert_sync_service import PowerAlertSyncService
 
 
@@ -31,6 +37,7 @@ class _SourceBundle:
     power_file: Path
     current_file: Path
     switch_file: Path
+    full_cabinet_power_file: Path
     metadata: Dict[str, Any]
 
 
@@ -49,6 +56,7 @@ class BranchPowerUploadService:
     FAMILY_POWER = "branch_power_family"
     FAMILY_CURRENT = "branch_current_family"
     FAMILY_SWITCH = "branch_switch_family"
+    FAMILY_BUILDING_FULL_CABINET_POWER = ARTIFACT_FAMILY_BUILDING_FULL_CABINET_POWER
 
     SWITCH_UNKNOWN_VALUE = "未知"
     SWITCH_ALLOWED_VALUES = {"分闸", "合闸", SWITCH_UNKNOWN_VALUE}
@@ -153,7 +161,7 @@ class BranchPowerUploadService:
             sheet = workbook.active
             if hasattr(sheet, "reset_dimensions"):
                 sheet.reset_dimensions()
-            header = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+            header = cls._detect_header_row_values(sheet)
             detected: List[str] = []
             for value in header:
                 parsed = cls._parse_header_datetime(value)
@@ -173,7 +181,7 @@ class BranchPowerUploadService:
         data_bucket_dts: List[datetime],
         file_path: Path,
     ) -> Dict[str, int]:
-        header = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+        header = self._detect_header_row_values(sheet)
         target_by_key = {
             item.strftime("%Y-%m-%d %H"): item.replace(minute=0, second=0, microsecond=0)
             for item in data_bucket_dts
@@ -246,6 +254,19 @@ class BranchPowerUploadService:
                     )
         finally:
             workbook.close()
+        return rows_by_bucket
+
+    @classmethod
+    def _detect_header_row_values(cls, sheet: Any, *, scan_rows: int = 4) -> tuple[Any, ...]:
+        best_header: tuple[Any, ...] = ()
+        best_count = -1
+        for row in sheet.iter_rows(min_row=1, max_row=max(1, int(scan_rows or 4)), values_only=True):
+            values = tuple(row or ())
+            parsed_count = sum(1 for value in values if cls._parse_header_datetime(value) is not None)
+            if parsed_count > best_count:
+                best_count = parsed_count
+                best_header = values
+        return best_header
         return rows_by_bucket
 
     @staticmethod
@@ -406,7 +427,14 @@ class BranchPowerUploadService:
                 continue
             bucket = grouped.setdefault(
                 building,
-                {"building": building, "metadata": {}, "power_files": [], "current_files": [], "switch_files": []},
+                {
+                    "building": building,
+                    "metadata": {},
+                    "power_files": [],
+                    "current_files": [],
+                    "switch_files": [],
+                    "full_cabinet_power_files": [],
+                },
             )
             metadata = unit.get("metadata", {}) if isinstance(unit.get("metadata", {}), dict) else {}
             if metadata and not bucket.get("metadata"):
@@ -416,6 +444,7 @@ class BranchPowerUploadService:
                 ("power_file", "power_files"),
                 ("current_file", "current_files"),
                 ("switch_file", "switch_files"),
+                ("full_cabinet_power_file", "full_cabinet_power_files"),
             ):
                 raw = unit.get(key) or source_files.get(key)
                 if raw:
@@ -428,6 +457,8 @@ class BranchPowerUploadService:
                     list_key = "current_files"
                 elif source_family == self.FAMILY_SWITCH:
                     list_key = "switch_files"
+                elif source_family == self.FAMILY_BUILDING_FULL_CABINET_POWER:
+                    list_key = "full_cabinet_power_files"
                 bucket[list_key].append(Path(str(raw_source).strip()))
 
         bundles: List[_SourceBundle] = []
@@ -453,12 +484,21 @@ class BranchPowerUploadService:
                 building=building,
                 label="支路开关源文件",
             )
+            full_cabinet_power_file = self._choose_range_source_file(
+                payload.get("full_cabinet_power_files", [])
+                if isinstance(payload.get("full_cabinet_power_files", []), list)
+                else [],
+                target_bucket_keys=target_bucket_keys,
+                building=building,
+                label="楼栋全机柜功率源文件",
+            )
             bundles.append(
                 _SourceBundle(
                     building=building,
                     power_file=power_file,
                     current_file=current_file,
                     switch_file=switch_file,
+                    full_cabinet_power_file=full_cabinet_power_file,
                     metadata=payload.get("metadata", {}) if isinstance(payload.get("metadata", {}), dict) else {},
                 )
             )
@@ -760,21 +800,50 @@ class BranchPowerUploadService:
                 f"[支路功率上传] 整日直传批量上传完成 business_date={resolved_business_date}, "
                 f"records={len(upload_records)}, parsed_hours={parsed_hour_count}, elapsed_ms={self._elapsed_ms(total_start)}",
             )
-            power_alert_sync = PowerAlertSyncService(self.config).sync(
+            branch_power_alert_sync = PowerAlertSyncService(self.config).sync(
                 report_date=resolved_business_date,
+                only_keys=["branch"],
                 emit_log=emit_log,
             )
         else:
             self._emit(
                 emit_log,
-                f"[支路功率上传] 跳过主表上传，直接同步动环功率四表 business_date={resolved_business_date}, records={len(upload_records)}",
+                f"[支路功率上传] 跳过主表上传，直接同步动环功率相关统计表 business_date={resolved_business_date}, records={len(upload_records)}",
             )
-            power_alert_sync = PowerAlertSyncService(self.config).sync_from_source_records(
+            branch_power_alert_sync = PowerAlertSyncService(self.config).sync_from_source_records(
                 report_date=resolved_business_date,
                 source_records=upload_records,
+                only_keys=["branch"],
                 emit_log=emit_log,
             )
+        full_cabinet_power_alert_sync = FullCabinetPowerStatsSyncService(self.config).sync_from_source_units(
+            report_date=resolved_business_date,
+            source_units=units,
+            detail_records=upload_records,
+            emit_log=emit_log,
+        )
         elapsed_ms = self._elapsed_ms(total_start)
+        branch_targets = (
+            branch_power_alert_sync.get("targets", {})
+            if isinstance(branch_power_alert_sync, dict) and isinstance(branch_power_alert_sync.get("targets", {}), dict)
+            else {}
+        )
+        full_cabinet_targets = (
+            full_cabinet_power_alert_sync.get("targets", {})
+            if isinstance(full_cabinet_power_alert_sync, dict)
+            and isinstance(full_cabinet_power_alert_sync.get("targets", {}), dict)
+            else {}
+        )
+        power_alert_targets = {**branch_targets, **full_cabinet_targets}
+        power_alert_sync = {
+            "ok": True,
+            "status": "success",
+            "report_date": resolved_business_date,
+            "elapsed_ms": elapsed_ms,
+            "targets": power_alert_targets,
+            "branch": branch_power_alert_sync,
+            "full_cabinet_power": full_cabinet_power_alert_sync,
+        }
         if not isinstance(power_alert_sync, dict) or str(power_alert_sync.get("status", "") or "").strip().lower() != "success":
             upstream_label = "支路主表已上传" if upload_main_table else "支路源文件已解析"
             raise RuntimeError(

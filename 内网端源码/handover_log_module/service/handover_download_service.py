@@ -167,6 +167,107 @@ class HandoverDownloadService:
         base_cfg["report_kind"] = "chiller_mode_switch"
         return base_cfg
 
+    def _building_full_cabinet_power_download_config(self) -> Dict[str, Any]:
+        base_cfg = copy.deepcopy(
+            self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
+        )
+        root_cfg = (
+            self.config.get("building_full_cabinet_power", {})
+            if isinstance(self.config.get("building_full_cabinet_power", {}), dict)
+            else {}
+        )
+        download_cfg = (
+            root_cfg.get("download", {})
+            if isinstance(root_cfg.get("download", {}), dict)
+            else {}
+        )
+        base_cfg.update(copy.deepcopy(download_cfg))
+        base_cfg["template_name"] = str(
+            download_cfg.get("template_name")
+            or root_cfg.get("template_name")
+            or "楼栋全机柜功率"
+        ).strip()
+        base_cfg["sheet_name"] = str(download_cfg.get("sheet_name", "") or "").strip()
+        base_cfg["scale_label"] = str(
+            download_cfg.get("scale_label")
+            or root_cfg.get("scale_label")
+            or "小时"
+        ).strip()
+        base_cfg["export_button_text"] = str(
+            download_cfg.get("export_button_text")
+            or root_cfg.get("export_button_text")
+            or base_cfg.get("export_button_text")
+            or "原样导出"
+        ).strip()
+        base_cfg["query_result_timeout_ms"] = max(
+            _as_int(base_cfg.get("query_result_timeout_ms", 180000), 180000),
+            180000,
+        )
+        base_cfg["page_refresh_retry_count"] = max(
+            _as_int(base_cfg.get("page_refresh_retry_count", 2), 2),
+            2,
+        )
+        base_cfg["report_kind"] = "building_full_cabinet_power"
+        return base_cfg
+
+    @staticmethod
+    def _top5_monthly_report_template_name(building: str) -> str:
+        normalized = str(building or "").strip()
+        if normalized in {"A楼", "B楼"}:
+            return "阿里南通容量报表"
+        if normalized == "C楼":
+            return "C楼容量报表"
+        if normalized == "D楼":
+            return "D楼容量报表"
+        if normalized == "E楼":
+            return "E楼容量报表"
+        return "阿里南通容量报表"
+
+    def _top5_monthly_report_download_config(self, *, template_name: str) -> Dict[str, Any]:
+        base_cfg = copy.deepcopy(
+            self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
+        )
+        top5_cfg = (
+            self.config.get("top5_power_report", {})
+            if isinstance(self.config.get("top5_power_report", {}), dict)
+            else {}
+        )
+        source_download_cfg = (
+            top5_cfg.get("source_download", {})
+            if isinstance(top5_cfg.get("source_download", {}), dict)
+            else {}
+        )
+        base_cfg.update(copy.deepcopy(source_download_cfg))
+        base_cfg["template_name"] = str(template_name or "阿里南通容量报表").strip()
+        base_cfg["sheet_name"] = str(source_download_cfg.get("sheet_name", "") or "").strip()
+        base_cfg["scale_label"] = str(source_download_cfg.get("scale_label", "") or "").strip()
+        base_cfg["export_button_text"] = str(
+            source_download_cfg.get("export_button_text")
+            or base_cfg.get("export_button_text")
+            or "原样导出"
+        ).strip()
+        menu_path_raw = source_download_cfg.get("menu_path", ["报表报告", "数据查询", "即时报表"])
+        base_cfg["menu_path"] = menu_path_raw if isinstance(menu_path_raw, list) else ["报表报告", "数据查询", "即时报表"]
+        base_cfg["query_result_timeout_ms"] = max(
+            _as_int(source_download_cfg.get("query_result_timeout_ms", base_cfg.get("query_result_timeout_ms", 120000)), 120000),
+            120000,
+        )
+        base_cfg["page_refresh_retry_count"] = max(
+            _as_int(source_download_cfg.get("page_refresh_retry_count", base_cfg.get("page_refresh_retry_count", 2)), 2),
+            2,
+        )
+        base_cfg["max_retries"] = max(
+            _as_int(source_download_cfg.get("max_retries", base_cfg.get("max_retries", 2)), 2),
+            2,
+        )
+        base_cfg["retry_wait_sec"] = max(
+            _as_int(source_download_cfg.get("retry_wait_sec", base_cfg.get("retry_wait_sec", 2)), 2),
+            1,
+        )
+        base_cfg["report_kind"] = "top5_monthly_report"
+        base_cfg["skip_query_conditions"] = True
+        return base_cfg
+
     @staticmethod
     def _merge_multi_download_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         merged_results: List[Dict[str, Any]] = []
@@ -374,6 +475,75 @@ class HandoverDownloadService:
         result["report_kind"] = "chiller_mode_switch"
         return result
 
+    def run_building_full_cabinet_power_only(
+        self,
+        buildings: List[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        cloned_service = self._clone_with_download_config(self._building_full_cabinet_power_download_config())
+        result = cloned_service.run(
+            buildings=buildings,
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=switch_network,
+            reuse_cached=reuse_cached,
+            emit_log=emit_log,
+        )
+        result["report_kind"] = "building_full_cabinet_power"
+        return result
+
+    def run_top5_monthly_report_only(
+        self,
+        buildings: List[str] | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        target_buildings = buildings[:] if buildings else self._enabled_buildings()
+        target_buildings = [str(item or "").strip() for item in target_buildings if str(item or "").strip()]
+        if not target_buildings:
+            raise ValueError("没有可下载的楼栋，请检查 handover_log.sites 或传入 buildings 参数")
+
+        grouped_buildings: List[tuple[List[str], str]] = []
+        ab_buildings = [building for building in target_buildings if building in {"A楼", "B楼"}]
+        if ab_buildings:
+            grouped_buildings.append((ab_buildings, "阿里南通容量报表"))
+        for building, template_name in (
+            ("C楼", "C楼容量报表"),
+            ("D楼", "D楼容量报表"),
+            ("E楼", "E楼容量报表"),
+        ):
+            if building in target_buildings:
+                grouped_buildings.append(([building], template_name))
+        others = [building for building in target_buildings if building not in {"A楼", "B楼", "C楼", "D楼", "E楼"}]
+        if others:
+            grouped_buildings.append((others, "阿里南通容量报表"))
+
+        results: List[Dict[str, Any]] = []
+        switched = False
+        for group_buildings, template_name in grouped_buildings:
+            cloned_service = self._clone_with_download_config(
+                self._top5_monthly_report_download_config(template_name=template_name)
+            )
+            emit_log(f"[交接班下载][TOP5月报] 使用报表: {template_name}, buildings={','.join(group_buildings)}")
+            result = cloned_service.run(
+                buildings=group_buildings,
+                start_time="",
+                end_time="",
+                switch_network=bool(switch_network and not switched),
+                reuse_cached=reuse_cached,
+                emit_log=emit_log,
+            )
+            switched = bool(switched or cloned_service.did_switch_internal_this_run)
+            results.append(result)
+        merged = self._merge_multi_download_results(results)
+        merged["report_kind"] = "top5_monthly_report"
+        return merged
+
     def run_with_capacity_report(
         self,
         buildings: List[str] | None = None,
@@ -517,26 +687,34 @@ class HandoverDownloadService:
         if not target_buildings:
             raise ValueError("没有可下载的楼栋，请检查 handover_log.sites 或传入 buildings 参数")
 
-        explicit_time_window = bool(start_time or end_time)
-        time_range = self._build_time_range(
-            start_time=start_time,
-            end_time=end_time,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-        )
-        start_time = str(time_range.get("start_time", "")).strip()
-        end_time_text = str(time_range.get("end_time", "")).strip()
-        duty_date_text = str(time_range.get("duty_date", "")).strip() or None
-        duty_shift_text = str(time_range.get("duty_shift", "")).strip() or None
-        is_shift_window = bool(time_range.get("is_shift_window", False))
-
         download_cfg = self.config.get("download", {})
         template_name = str(download_cfg.get("template_name", "")).strip()
         scale_label = str(download_cfg.get("scale_label", "")).strip()
         sheet_name = str(download_cfg.get("sheet_name", "") or "").strip()
+        report_kind = str(download_cfg.get("report_kind", "") or "").strip().lower()
+        skip_query_conditions = bool(download_cfg.get("skip_query_conditions", False))
+        explicit_time_window = bool(start_time or end_time)
+        if skip_query_conditions:
+            start_time = ""
+            end_time_text = ""
+            duty_date_text = datetime.now().strftime("%Y-%m-%d")
+            duty_shift_text = None
+            is_shift_window = False
+        else:
+            time_range = self._build_time_range(
+                start_time=start_time,
+                end_time=end_time,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+            )
+            start_time = str(time_range.get("start_time", "")).strip()
+            end_time_text = str(time_range.get("end_time", "")).strip()
+            duty_date_text = str(time_range.get("duty_date", "")).strip() or None
+            duty_shift_text = str(time_range.get("duty_shift", "")).strip() or None
+            is_shift_window = bool(time_range.get("is_shift_window", False))
         if not template_name:
             raise ValueError("配置错误: handover_log.download.template_name 不能为空")
-        if not scale_label:
+        if not scale_label and not skip_query_conditions:
             raise ValueError("配置错误: handover_log.download.scale_label 不能为空")
 
         query_result_timeout_ms = _as_int(download_cfg.get("query_result_timeout_ms", 20000), 20000)
@@ -612,7 +790,9 @@ class HandoverDownloadService:
                 f"query_result_timeout_ms={query_result_timeout_ms}, "
                 f"start_end_visible_timeout_ms={start_end_visible_timeout_ms}"
             )
-            if explicit_time_window:
+            if skip_query_conditions:
+                emit_log(f"[交接班下载] 页面查询模式: 直接打开报表并等待加载完成, report_kind={report_kind or '-'}")
+            elif explicit_time_window:
                 emit_log(f"[交接班下载] 页面查询时间窗: start={start_time}, end={end_time_text}")
             else:
                 emit_log(
@@ -625,6 +805,10 @@ class HandoverDownloadService:
                     emit_log(
                         f"[交接班下载][{building}] 已入队: duty_date={duty_date_text}, duty_shift={duty_shift_text}, "
                         f"start={start_time}, end={end_time_text}, 刻度={scale_label}, sheet={sheet_name or '-'}"
+                    )
+                elif skip_query_conditions:
+                    emit_log(
+                        f"[交接班下载][{building}] 已入队: 直接导出模板={template_name}, sheet={sheet_name or '-'}"
                     )
                 else:
                     emit_log(

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import openpyxl
 
@@ -20,56 +21,43 @@ def _code(building: str) -> str:
     return building[:1]
 
 
-def _write_capacity_source(path: Path, building: str) -> None:
+def _write_monthly_source(path: Path, building: str) -> None:
     code = _code(building)
     workbook = openpyxl.Workbook()
     sheet = workbook.active
-    sheet.append([None] * 11)
-    sheet.append([None, None, None, None, "00:00", "01:00", "02:00", "03:00", "最大值", "最小值", "平均值"])
-
+    sheet.append([None] * 8)
+    sheet.append(["变压器", "变压器总容量", "设备容量(KVA)", "安全容量(KVA)", "实际负载KW", "负载率", "安全使用率"])
     for index in range(5):
-        prefix = f"{code}-{200 + index}"
-        suffix = "101" if index % 2 == 0 else "201"
-        sheet.append([
-            None,
-            f"{building}/变电所/{prefix}/{prefix}-TRB-{suffix}",
-            f"{prefix}-TRB-{suffix}_总进线柜",
-            "总_有功功率_KW",
-            90 + index,
-            91 + index,
-            92 + index,
-            93 + index,
-            100 + index,
-            90 + index,
-            95 + index,
-        ])
+        room = 120 + index
+        side = "A" if index % 2 == 0 else "B"
+        sheet.append([None, f"{code}-{room}-{side}变压器容量", "2500", "1317", 300 + index * 10, 0.1, 0.2])
 
+    sheet.append([None] * 4)
+    sheet.append(["HVDC容量", "HVDC总容量", "设备容量(KW)", "安全容量(KW)", "实际负载KW", "负载率", "安全使用率"])
     for index in range(5):
-        prefix = f"{code}-{300 + index}"
-        sheet.append([None, f"{building}/变电所/{prefix}", f"{prefix}-HVDC-{100 + index}", "直流电压_V", 270, 270, 270, 270, 270, 270, 270])
-        sheet.append([None, None, None, "直流总功率_KW", 80 + index, 81 + index, 82 + index, 83 + index, 110 + index, 80 + index, 88 + index])
+        room = 218 + index
+        sheet.append([None, f"{code}-{room}-HVDC-{112 + index}", "324", "145", 100 + index * 5, 0.3, 0.7])
 
+    sheet.append([None] * 4)
+    sheet.append(["UPS容量", "UPS使用总容量", "设计容量(KVA)", "安全容量(KVA)", "实际负载KW", "负载率", "安全使用率"])
     for index in range(5):
-        prefix = f"{code}-{400 + index}"
-        sheet.append([None, f"{building}/UPS/{prefix}-UPS-{100 + index}", f"{prefix}-UPS-{100 + index}_UPS", "电池_正极电压_V", 260, 260, 260, 260, 260, 260, 260])
-        sheet.append([None, None, None, "UPS_输出总有功功率_KW", 10 + index, 11 + index, 12 + index, 13 + index, 30 + index, 10 + index, 15 + index])
+        room = 120 + index
+        sheet.append([None, f"{code}-{room}-UPS-{101 + index}_UPS", "300", "210", 20 + index * 2, 0.1, 0.2])
 
-    workbook.save(path)
-
-
-def _write_branch_source(path: Path, building: str) -> None:
-    code = _code(building)
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.append([None, None, None, "00:00", "01:00", "02:00"])
-    sheet.append([None] * 6)
-    sheet.append(["设备名称", "设备名称", "测点", None, None, None])
-    for index in range(5):
-        room = f"{code}-{500 + index}包间"
-        cabinet = f"{code}-{500 + index}-{chr(65 + index)}列-AC010"
-        base = 20 + index
-        sheet.append([room, cabinet, "1_支路功率_KW", base, base + 1, base + 2])
-        sheet.append([room, cabinet, "2_支路功率_KW", 1, 1, 1])
+    sheet.append([None] * 4)
+    sheet.append(["区域", "设备编号", "上电情况", "设计容量（KW）", "实际负载（KW）", "使用率"])
+    cabinet_rows = [
+        ("M1包间", f"{code}-202-A01", "闭合", "13", 11.25, 0.86),
+        (None, f"{code}-202-A02", "闭合", "13", 12.35, 0.95),
+        (None, f"{code}-202-B01", "闭合", "13", 8.10, 0.62),
+        (None, f"{code}-202-B02", "闭合", "13", 7.90, 0.61),
+        ("M2包间", f"{code}-201-A01", "闭合", "13", 14.60, 1.12),
+        (None, f"{code}-201-A02", "闭合", "13", 13.40, 1.03),
+        (None, f"{code}-201-C01", "闭合", "13", 9.20, 0.71),
+        (None, f"{code}-302-A01", "闭合", "18", 5.10, 0.28),
+    ]
+    for row in cabinet_rows:
+        sheet.append(list(row))
     workbook.save(path)
 
 
@@ -78,43 +66,30 @@ def _entry(building: str, path: Path) -> dict:
 
 
 class Top5PowerReportServiceTest(unittest.TestCase):
-    def test_extract_capacity_records_normalizes_top5(self) -> None:
+    def test_extract_monthly_top5_groups_normalizes_top5(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            source = temp_path / "capacity_A.xlsx"
-            _write_capacity_source(source, "A楼")
+            source = temp_path / "monthly_A.xlsx"
+            _write_monthly_source(source, "A楼")
 
-            groups = Top5PowerReportService.extract_capacity_records(source, building="A楼")
+            groups = Top5PowerReportService.extract_monthly_top5_groups(source, building="A楼")
 
-            self.assertEqual(groups.transformers[0].identifier, "A-204-A变压器容量")
-            self.assertEqual(groups.transformers[0].power_kw, 104)
-            self.assertEqual(groups.hvdcs[0].identifier, "A-304-HVDC-104")
-            self.assertEqual(groups.upss[0].identifier, "A-404-UPS-104_UPS")
-
-    def test_extract_branch_records_aggregates_hourly_column_power(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            source = temp_path / "branch_A.xlsx"
-            _write_branch_source(source, "A楼")
-
-            records = Top5PowerReportService.extract_branch_records(source, building="A楼")
-
-            self.assertEqual(records[0].identifier, "A-504-E列功率和")
-            self.assertEqual(records[0].power_kw, 27)
-            self.assertEqual(len(records), 5)
+            self.assertEqual(groups.transformers[0].identifier, "A-124-A变压器容量")
+            self.assertEqual(groups.transformers[0].power_kw, 340)
+            self.assertEqual(groups.hvdcs[0].identifier, "A-222-HVDC-116")
+            self.assertEqual(groups.upss[0].identifier, "A-124-UPS-105_UPS")
+            self.assertEqual(groups.row_lines[0].identifier, "A-201-A列")
+            self.assertAlmostEqual(groups.row_lines[0].power_kw, 28.0)
+            self.assertTrue(any(item.identifier == "A-202-A列" for item in groups.row_line_aggregates))
 
     def test_run_writes_summary_and_source_sheets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            capacity_entries = []
-            branch_entries = []
+            monthly_entries = []
             for building in BUILDINGS:
-                capacity_path = temp_path / f"capacity_{_code(building)}.xlsx"
-                branch_path = temp_path / f"branch_{_code(building)}.xlsx"
-                _write_capacity_source(capacity_path, building)
-                _write_branch_source(branch_path, building)
-                capacity_entries.append(_entry(building, capacity_path))
-                branch_entries.append(_entry(building, branch_path))
+                monthly_path = temp_path / f"monthly_{_code(building)}.xlsx"
+                _write_monthly_source(monthly_path, building)
+                monthly_entries.append(_entry(building, monthly_path))
 
             service = Top5PowerReportService(
                 {
@@ -129,27 +104,62 @@ class Top5PowerReportServiceTest(unittest.TestCase):
                 }
             )
 
-            result = service.run(capacity_entries=capacity_entries, branch_entries=branch_entries, emit_log=lambda _: None)
+            result = service.run(monthly_entries=monthly_entries, emit_log=lambda _: None)
 
             output_path = Path(result["output_file"])
             self.assertTrue(output_path.exists())
             workbook = openpyxl.load_workbook(output_path, data_only=True)
             try:
                 self.assertEqual(workbook.sheetnames[0], "汇总信息表")
-                self.assertEqual(len(workbook.sheetnames), 11)
+                self.assertEqual(
+                    workbook.sheetnames,
+                    ["汇总信息表", "A", "B", "C", "D", "E", "A楼容量", "B楼容量", "C楼容量", "D楼容量", "E楼容量", "Sheet1"],
+                )
                 summary = workbook["汇总信息表"]
+                self.assertEqual(summary["G2"].value, "机列编号")
+                self.assertEqual(summary["H2"].value, "机列负载（KW）")
                 self.assertEqual(summary["A3"].value, 1)
                 self.assertEqual(summary["B3"].value, "A")
-                self.assertTrue(summary["E23"].value.startswith("E-"))
+                self.assertTrue(summary["G3"].value.endswith("列"))
                 self.assertEqual(summary["D3"].number_format, "0.00")
                 self.assertEqual(summary["F3"].number_format, "0.00")
                 self.assertEqual(summary["H3"].number_format, "0.00")
                 self.assertEqual(summary["J3"].number_format, "0.00")
-                self.assertIn("容量_A", workbook.sheetnames)
-                self.assertIn("支路功率_E", workbook.sheetnames)
+                detail = workbook["A"]
+                self.assertEqual(detail["A1"].value, "地点")
+                self.assertEqual(detail["J1"].value, "地点")
+                self.assertTrue(str(detail["J2"].value).endswith("列"))
+                self.assertEqual(detail["K2"].number_format, "0.00")
+                self.assertIn("A楼容量", workbook.sheetnames)
+                self.assertIn("E楼容量", workbook.sheetnames)
+                self.assertIn("Sheet1", workbook.sheetnames)
             finally:
                 workbook.close()
 
+    def test_run_fails_when_any_building_monthly_source_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            monthly_entries = []
+            for building in BUILDINGS[:-1]:
+                monthly_path = temp_path / f"monthly_{_code(building)}.xlsx"
+                _write_monthly_source(monthly_path, building)
+                monthly_entries.append(_entry(building, monthly_path))
+
+            service = Top5PowerReportService(
+                {
+                    "handover_log": {
+                        "top5_power_report": {
+                            "template": {
+                                "source_path": str(temp_path / "missing_template.xlsx"),
+                                "output_dir": str(temp_path / "out"),
+                            }
+                        }
+                    }
+                }
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "缺少TOP5月报最新源文件: E楼"):
+                service.run(monthly_entries=monthly_entries, emit_log=lambda _: None)
 
 class _FakeBitableClient:
     def __init__(self) -> None:
@@ -217,6 +227,122 @@ class Top5PowerReportBitableUploadServiceTest(unittest.TestCase):
             self.assertEqual(client.created_fields[0]["月份"], "04")
             self.assertEqual(client.created_fields[0]["上传文件"], [{"file_token": "file_token_1"}])
             self.assertEqual(client.updated, [("new_top5", {"链接": "https://example.test/top5.xlsx"})])
+
+
+class Top5PowerReportWorkerHandlerTest(unittest.TestCase):
+    def test_worker_uses_top5_monthly_report_family(self) -> None:
+        from app.worker import task_handlers
+
+        class FakeBridgeRuntime:
+            instances: list["FakeBridgeRuntime"] = []
+
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.monthly_args: dict[str, Any] | None = None
+                FakeBridgeRuntime.instances.append(self)
+
+            def get_monthly_by_date_cache_entries(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                raise AssertionError("TOP5 worker must use top5_monthly_report_family")
+
+            def get_top5_monthly_by_date_cache_entries(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                raise AssertionError("TOP5 worker must not query month-range source-index")
+
+            def refresh_top5_monthly_latest_cache_entries(self, *, buildings, emit_log, cancel_check=None):  # noqa: ANN001
+                self.monthly_args = {"buildings": buildings}
+                return [
+                    {
+                        "building": "A楼",
+                        "file_path": r"D:\share\monthly_A.xlsx",
+                        "metadata": {"upload_date": "2026-05-20"},
+                    }
+                ]
+
+            def stop(self) -> None:
+                return None
+
+        class FakeTop5Service:
+            monthly_entries: list[dict[str, Any]] = []
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def all_buildings(self) -> list[str]:
+                return ["A楼"]
+
+            def run(self, *, monthly_entries, emit_log):  # noqa: ANN001
+                FakeTop5Service.monthly_entries = list(monthly_entries)
+                return {"output_file": r"D:\tmp\top5.xlsx", "file_name": "top5.xlsx"}
+
+        class FakeUploadService:
+            @staticmethod
+            def _validate_year_month(year, month):  # noqa: ANN001
+                return str(year), f"{int(month):02d}"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def upload_report(self, *, file_path, year, month, emit_log):  # noqa: ANN001
+                return {"status": "ok", "file_path": file_path, "year": str(year), "month": f"{int(month):02d}"}
+
+        with (
+            patch.object(task_handlers.shared_bridge_runtime_module, "SharedBridgeRuntimeService", FakeBridgeRuntime),
+            patch.object(task_handlers, "Top5PowerReportService", FakeTop5Service),
+            patch.object(task_handlers, "Top5PowerReportBitableUploadService", FakeUploadService),
+        ):
+            result = task_handlers.handle_top5_power_report(
+                {},
+                {"year": "2026", "month": 5},
+                emit_log=lambda _message: None,
+            )
+
+        self.assertEqual(result["bitable_upload"]["status"], "ok")
+        self.assertEqual(FakeBridgeRuntime.instances[0].monthly_args["buildings"], ["A楼"])
+        self.assertEqual(FakeTop5Service.monthly_entries[0]["building"], "A楼")
+
+
+class Top5PowerReportBridgeRuntimeTest(unittest.TestCase):
+    def test_refresh_latest_waits_for_entries_downloaded_after_request(self) -> None:
+        from app.modules.shared_bridge.service import shared_bridge_runtime_service as bridge_module
+
+        runtime = bridge_module.SharedBridgeRuntimeService.__new__(bridge_module.SharedBridgeRuntimeService)
+        runtime._internal_bridge_http_client = object()
+        runtime._http_bridge_should_try = lambda: True
+        runtime.request_latest_source_cache_refresh = lambda *, source_family, buildings: {
+            "ok": True,
+            "accepted_count": len(buildings),
+            "results": [],
+        }
+        calls = {"count": 0}
+
+        def fake_entries(*, source_family, buildings, bucket_key, limit_per_building):  # noqa: ANN001
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return [
+                    {
+                        "building": "A楼",
+                        "file_path": r"D:\share\old.xlsx",
+                        "downloaded_at": "2000-01-01 00:00:00",
+                        "updated_at": "2000-01-01 00:00:00",
+                    }
+                ]
+            return [
+                {
+                    "building": "A楼",
+                    "file_path": r"D:\share\new.xlsx",
+                    "downloaded_at": "2099-01-01 00:00:00",
+                    "updated_at": "2099-01-01 00:00:00",
+                }
+            ]
+
+        runtime._http_source_index_entries = fake_entries
+        with patch.object(bridge_module.time, "sleep", lambda _seconds: None):
+            entries = runtime.refresh_top5_monthly_latest_cache_entries(
+                buildings=["A楼"],
+                timeout_sec=30,
+                poll_interval_sec=1,
+            )
+
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual(entries[0]["file_path"], r"D:\share\new.xlsx")
 
 
 if __name__ == "__main__":

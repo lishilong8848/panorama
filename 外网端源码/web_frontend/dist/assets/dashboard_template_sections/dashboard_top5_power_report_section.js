@@ -30,8 +30,8 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                 </div>
                 <div class="ops-focus-card">
                   <div class="ops-focus-card-label">数据来源</div>
-                  <div class="ops-focus-card-title">交接班容量报表源文件、支路功率源文件</div>
-                  <div class="ops-focus-card-meta">通过现有共享缓存读取最新 ready 文件，生成后按下方年月覆盖上传到高功率 TOP5 多维附件记录。</div>
+                  <div class="ops-focus-card-title">TOP5月报源文件</div>
+                  <div class="ops-focus-card-meta">A/B楼读取“阿里南通容量报表”，C/D/E楼读取各楼容量报表；按所选年月取每栋楼最新文件，生成后覆盖上传到高功率 TOP5 多维附件记录。</div>
                 </div>
                 <div class="config-form-grid config-form-grid-compact">
                   <div class="form-row">

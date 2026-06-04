@@ -201,6 +201,11 @@ def build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             title="全景平台月报源文件",
             fallback_bucket=current_bucket,
         ),
+        "top5_monthly_report_family": _complete_internal_source_family(
+            raw_cache.get("top5_monthly_report_family", {}),
+            key="top5_monthly_report_family",
+            fallback_bucket=str(raw_cache.get("top5_monthly_report_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+        ),
         "branch_power_family": _complete_internal_source_family(
             raw_cache.get("branch_power_family", {}),
             key="branch_power_family",
@@ -218,6 +223,12 @@ def build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             key="branch_switch_family",
             title="支路开关源文件",
             fallback_bucket=str(raw_cache.get("branch_switch_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+        ),
+        "building_full_cabinet_power_family": _complete_internal_source_family(
+            raw_cache.get("building_full_cabinet_power_family", {}),
+            key="building_full_cabinet_power_family",
+            title="楼栋全机柜功率源文件",
+            fallback_bucket=str(raw_cache.get("building_full_cabinet_power_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
         ),
         "chiller_mode_switch_family": _complete_internal_source_family(
             raw_cache.get("chiller_mode_switch_family", {}),
@@ -294,6 +305,12 @@ def build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building
                 fallback_bucket=current_bucket,
                 source_family="monthly_report_family",
             ),
+            "top5_monthly_report_family": select_internal_runtime_building_row(
+                raw_cache.get("top5_monthly_report_family", {}),
+                building=building,
+                fallback_bucket=str(raw_cache.get("top5_monthly_report_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+                source_family="top5_monthly_report_family",
+            ),
             "branch_power_family": select_internal_runtime_building_row(
                 raw_cache.get("branch_power_family", {}),
                 building=building,
@@ -305,6 +322,12 @@ def build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building
                 building=building,
                 fallback_bucket=str(raw_cache.get("branch_current_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
                 source_family="branch_current_family",
+            ),
+            "building_full_cabinet_power_family": select_internal_runtime_building_row(
+                raw_cache.get("building_full_cabinet_power_family", {}),
+                building=building,
+                fallback_bucket=str(raw_cache.get("building_full_cabinet_power_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
+                source_family="building_full_cabinet_power_family",
             ),
             "branch_switch_family": select_internal_runtime_building_row(
                 raw_cache.get("branch_switch_family", {}),

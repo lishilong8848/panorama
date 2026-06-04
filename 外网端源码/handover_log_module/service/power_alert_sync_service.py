@@ -1022,17 +1022,20 @@ class PowerAlertSyncService:
                 "dry_run": True,
             }
         converted_rows = self._convert_target_rows(rows=rows, field_meta=field_meta, field_names=field_names)
+        # Create first so a transient Feishu create failure cannot wipe the
+        # previous same-date records. If there are no new rows, deleting old
+        # records is still the correct representation for "no over-limit data".
+        if converted_rows:
+            client.batch_create_records(
+                table_id=table.table_id,
+                fields_list=converted_rows,
+                batch_size=batch_size,
+            )
         deleted = 0
         if same_date_ids:
             deleted = client.batch_delete_records(
                 table_id=table.table_id,
                 record_ids=same_date_ids,
-                batch_size=batch_size,
-            )
-        if converted_rows:
-            client.batch_create_records(
-                table_id=table.table_id,
-                fields_list=converted_rows,
                 batch_size=batch_size,
             )
         self._emit(
@@ -1055,18 +1058,25 @@ class PowerAlertSyncService:
         self,
         *,
         report_date: str,
+        only_keys: List[str] | None = None,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
-        return self._sync_impl(report_date=report_date, emit_log=emit_log, source_records=None)
+        return self._sync_impl(report_date=report_date, emit_log=emit_log, source_records=None, only_keys=only_keys)
 
     def sync_from_source_records(
         self,
         *,
         report_date: str,
         source_records: List[Dict[str, Any]],
+        only_keys: List[str] | None = None,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
-        return self._sync_impl(report_date=report_date, emit_log=emit_log, source_records=source_records)
+        return self._sync_impl(
+            report_date=report_date,
+            emit_log=emit_log,
+            source_records=source_records,
+            only_keys=only_keys,
+        )
 
     def _sync_impl(
         self,
@@ -1074,6 +1084,7 @@ class PowerAlertSyncService:
         report_date: str,
         emit_log: Callable[[str], None],
         source_records: List[Dict[str, Any]] | None,
+        only_keys: List[str] | None,
     ) -> Dict[str, Any]:
         started = time.perf_counter()
         cfg = self._cfg()
@@ -1089,6 +1100,9 @@ class PowerAlertSyncService:
 
         source_table = self._resolve_source_table(cfg)
         target_tables, missing = self._resolve_target_tables(cfg)
+        if only_keys:
+            key_set = {str(item or "").strip() for item in only_keys if str(item or "").strip()}
+            target_tables = [table for table in target_tables if table.key in key_set]
         if missing or not target_tables:
             message = "；".join(missing or ["未配置任何动环功率统计目标表"])
             if required:

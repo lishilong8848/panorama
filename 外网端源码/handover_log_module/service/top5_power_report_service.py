@@ -33,8 +33,8 @@ _HEADERS = [
     "变压器功率（KW）",
     "HVDC编号",
     "HVDC功率（KW）",
-    "列头柜编号编号",
-    "列头柜功率（KW）",
+    "机列编号",
+    "机列负载（KW）",
     "UPS编号",
     "UPS功率（KW）",
 ]
@@ -50,17 +50,10 @@ _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 _TITLE_FONT = Font(name="宋体", size=20, bold=True)
 _HEADER_FONT = Font(name="宋体", size=11, bold=True)
 _DATA_FONT = Font(name="宋体", size=11)
-_DEVICE_PATTERNS = {
-    "TRB": re.compile(r"([A-E]-\d{3}-TRB-(?:101|201))", re.IGNORECASE),
-    "HVDC": re.compile(r"([A-E]-\d{3}-HVDC-\d+)", re.IGNORECASE),
-    "UPS": re.compile(r"([A-E]-\d{3}-UPS-\d+)", re.IGNORECASE),
-}
-_DEVICE_FALLBACK_PATTERNS = {
-    "HVDC": re.compile(r"(?<![A-E]-)(\d{3}-HVDC-\d+)", re.IGNORECASE),
-    "UPS": re.compile(r"(?<![A-E]-)(\d{3}-UPS-\d+)", re.IGNORECASE),
-}
-_BRANCH_COLUMN_PATTERN = re.compile(r"([A-E]-\d{3})-([A-Z])列", re.IGNORECASE)
-_BRANCH_COLUMN_FALLBACK_PATTERN = re.compile(r"(?<![A-E]-)(\d{3})-([A-Z])列", re.IGNORECASE)
+_MONTHLY_TRANSFORMER_PATTERN = re.compile(r"([A-E]-\d{3}-[AB]变压器容量)$", re.IGNORECASE)
+_MONTHLY_HVDC_PATTERN = re.compile(r"(?:([A-E])-)?(\d{3}-HVDC-\d+)$", re.IGNORECASE)
+_MONTHLY_UPS_PATTERN = re.compile(r"(?:([A-E])-)?(\d{3}-UPS-\d+(?:_UPS)?)$", re.IGNORECASE)
+_MONTHLY_CABINET_PATTERN = re.compile(r"([A-E])-(\d{3})-([A-Z])(\d{2})$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -72,10 +65,28 @@ class PowerRecord:
 
 
 @dataclass(frozen=True)
-class CapacityPowerGroups:
+class RowLineAggregate:
+    building: str
+    room: str
+    column: str
+    identifier: str
+    cabinet_count: int
+    cabinet_ids: List[str]
+    power_kw: float
+    source_file: str = ""
+
+
+@dataclass(frozen=True)
+class MonthlyTop5Groups:
     transformers: List[PowerRecord]
     hvdcs: List[PowerRecord]
+    row_lines: List[PowerRecord]
     upss: List[PowerRecord]
+    all_transformers: List[PowerRecord]
+    all_hvdcs: List[PowerRecord]
+    all_row_lines: List[PowerRecord]
+    all_upss: List[PowerRecord]
+    row_line_aggregates: List[RowLineAggregate]
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -92,10 +103,6 @@ def _cell_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
-
-
-def _row_text(row: Iterable[Any]) -> str:
-    return " ".join(_cell_text(item) for item in row if _cell_text(item))
 
 
 def _to_float(value: Any) -> float | None:
@@ -143,38 +150,31 @@ def _dedupe_records(records: Iterable[PowerRecord]) -> List[PowerRecord]:
     return list(best.values())
 
 
-def _top_records(records: Iterable[PowerRecord], *, building: str, group_name: str) -> List[PowerRecord]:
-    sorted_records = sorted(
+def _sorted_records(records: Iterable[PowerRecord]) -> List[PowerRecord]:
+    return sorted(
         _dedupe_records(records),
         key=lambda item: (-item.power_kw, item.identifier),
     )
+
+
+def _top_records(records: Iterable[PowerRecord], *, building: str, group_name: str) -> List[PowerRecord]:
+    sorted_records = _sorted_records(records)
     if len(sorted_records) < _TOP_N:
         raise RuntimeError(f"{building}{group_name}有效数据不足{_TOP_N}条，当前{len(sorted_records)}条")
     return sorted_records[:_TOP_N]
 
 
-def _find_max_value_column(rows: List[List[Any]]) -> int | None:
-    for row in rows[:8]:
-        for index, value in enumerate(row):
-            if _cell_text(value) == "最大值":
-                return index
-    return None
-
-
-def _power_value(row: List[Any], max_value_col: int | None) -> float | None:
-    if max_value_col is not None and max_value_col < len(row):
-        value = _to_float(row[max_value_col])
-        if value is not None:
-            return value
-    numeric_values = [_to_float(item) for item in row[4:]]
-    numeric_values = [item for item in numeric_values if item is not None]
-    if not numeric_values:
-        return None
-    return max(numeric_values)
-
-
 def _format_power(value: float) -> float:
     return round(float(value), 2)
+
+
+def _monthly_entry_date(entry: Dict[str, Any]) -> str:
+    metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+    for key in ("upload_date", "duty_date", "bucket_key"):
+        text = str(metadata.get(key, "") or entry.get(key, "") or "").strip()
+        if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", text):
+            return text
+    return ""
 
 
 def _load_rows(path: Path) -> List[List[Any]]:
@@ -194,39 +194,34 @@ def _load_rows(path: Path) -> List[List[Any]]:
         workbook.close()
 
 
-def _extract_device_id(row: List[Any], device_kind: str, *, building: str) -> str:
-    kind = str(device_kind or "").strip().upper()
-    combined = _row_text(row)
-    pattern = _DEVICE_PATTERNS.get(kind)
-    if pattern is not None:
-        match = pattern.search(combined)
-        if match:
-            return match.group(1).upper()
-    fallback_pattern = _DEVICE_FALLBACK_PATTERNS.get(kind)
-    if fallback_pattern is not None:
-        match = fallback_pattern.search(combined)
-        if match:
-            return f"{_building_code(building)}-{match.group(1).upper()}"
-    return ""
+def _monthly_transformer_label(text: str) -> str:
+    match = _MONTHLY_TRANSFORMER_PATTERN.search(str(text or "").strip())
+    return match.group(1).upper() if match else ""
 
 
-def _transformer_label(device_id: str) -> str:
-    match = re.match(r"([A-E]-\d{3})-TRB-(101|201)$", str(device_id or "").strip(), re.IGNORECASE)
+def _monthly_hvdc_label(text: str, *, building: str) -> str:
+    match = _MONTHLY_HVDC_PATTERN.search(str(text or "").strip())
     if not match:
         return ""
-    transformer_side = "A" if match.group(2) == "101" else "B"
-    return f"{match.group(1).upper()}-{transformer_side}变压器容量"
+    if match.group(1):
+        return f"{match.group(1).upper()}-{match.group(2).upper()}"
+    return match.group(2).upper()
 
 
-def _branch_column_key(row: List[Any], *, building: str) -> str:
-    combined = _row_text(row[:3])
-    match = _BRANCH_COLUMN_PATTERN.search(combined)
-    if match:
-        return f"{match.group(1).upper()}-{match.group(2).upper()}列"
-    fallback = _BRANCH_COLUMN_FALLBACK_PATTERN.search(combined)
-    if fallback:
-        return f"{_building_code(building)}-{fallback.group(1)}-{fallback.group(2).upper()}列"
-    return ""
+def _monthly_ups_label(text: str, *, building: str) -> str:
+    match = _MONTHLY_UPS_PATTERN.search(str(text or "").strip())
+    if not match:
+        return ""
+    prefix = match.group(1).upper() if match.group(1) else _building_code(building)
+    suffix = match.group(2).upper()
+    return suffix if suffix.startswith(f"{prefix}-") else f"{prefix}-{suffix}"
+
+
+def _monthly_cabinet_parts(text: str) -> tuple[str, str, str, str] | None:
+    match = _MONTHLY_CABINET_PATTERN.fullmatch(str(text or "").strip().upper())
+    if not match:
+        return None
+    return match.group(1), match.group(2), match.group(3), match.group(4)
 
 
 class Top5PowerReportService:
@@ -327,80 +322,89 @@ class Top5PowerReportService:
         return candidate
 
     @staticmethod
-    def extract_capacity_records(path: Path | str, *, building: str) -> CapacityPowerGroups:
+    def extract_monthly_top5_groups(path: Path | str, *, building: str) -> MonthlyTop5Groups:
         source_path = Path(path)
         rows = _load_rows(source_path)
-        max_value_col = _find_max_value_column(rows)
+        normalized_building = _normalize_building(building)
         transformers: List[PowerRecord] = []
         hvdcs: List[PowerRecord] = []
         upss: List[PowerRecord] = []
-        current_hvdc_id = ""
-        current_ups_id = ""
-        normalized_building = _normalize_building(building)
+        row_line_groups: Dict[str, Dict[str, Any]] = {}
 
         for row in rows:
-            metric_name = _cell_text(row[3] if len(row) > 3 else "")
-            hvdc_id = _extract_device_id(row, "HVDC", building=normalized_building)
-            if hvdc_id:
-                current_hvdc_id = hvdc_id
-            ups_id = _extract_device_id(row, "UPS", building=normalized_building)
-            if ups_id:
-                current_ups_id = ups_id
+            device_text = _cell_text(row[1] if len(row) > 1 else "")
+            actual_load = _to_float(row[4] if len(row) > 4 else None)
 
-            transformer_id = _extract_device_id(row, "TRB", building=normalized_building)
-            if transformer_id and "有功功率" in metric_name:
-                label = _transformer_label(transformer_id)
-                value = _power_value(row, max_value_col)
-                if label and value is not None:
-                    transformers.append(PowerRecord(normalized_building, label, value, str(source_path)))
+            transformer_id = _monthly_transformer_label(device_text)
+            if transformer_id and actual_load is not None:
+                transformers.append(PowerRecord(normalized_building, transformer_id, actual_load, str(source_path)))
                 continue
 
-            if metric_name == "直流总功率_KW":
-                value = _power_value(row, max_value_col)
-                if current_hvdc_id and value is not None:
-                    hvdcs.append(PowerRecord(normalized_building, current_hvdc_id, value, str(source_path)))
+            hvdc_id = _monthly_hvdc_label(device_text, building=normalized_building)
+            if hvdc_id and actual_load is not None:
+                hvdcs.append(PowerRecord(normalized_building, hvdc_id, actual_load, str(source_path)))
                 continue
 
-            if "输出总有功功率" in metric_name:
-                value = _power_value(row, max_value_col)
-                if current_ups_id and value is not None:
-                    upss.append(PowerRecord(normalized_building, f"{current_ups_id}_UPS", value, str(source_path)))
+            ups_id = _monthly_ups_label(device_text, building=normalized_building)
+            if ups_id and actual_load is not None:
+                upss.append(PowerRecord(normalized_building, ups_id, actual_load, str(source_path)))
+                continue
 
-        return CapacityPowerGroups(
+            cabinet_parts = _monthly_cabinet_parts(device_text)
+            if cabinet_parts is None or actual_load is None:
+                continue
+            _building, room, column, _cabinet_no = cabinet_parts
+            identifier = f"{_building_code(normalized_building)}-{room}-{column}列"
+            group = row_line_groups.setdefault(
+                identifier,
+                {
+                    "building": normalized_building,
+                    "room": room,
+                    "column": column,
+                    "identifier": identifier,
+                    "cabinet_ids": [],
+                    "power_kw": 0.0,
+                },
+            )
+            group["cabinet_ids"].append(device_text.strip().upper())
+            group["power_kw"] += float(actual_load)
+
+        row_line_aggregates = [
+            RowLineAggregate(
+                building=str(item["building"]),
+                room=str(item["room"]),
+                column=str(item["column"]),
+                identifier=str(item["identifier"]),
+                cabinet_count=len(item["cabinet_ids"]),
+                cabinet_ids=list(item["cabinet_ids"]),
+                power_kw=float(item["power_kw"]),
+                source_file=str(source_path),
+            )
+            for item in row_line_groups.values()
+        ]
+        row_lines = [
+            PowerRecord(
+                normalized_building,
+                item.identifier,
+                float(item.power_kw),
+                str(source_path),
+            )
+            for item in row_line_aggregates
+        ]
+        return MonthlyTop5Groups(
             transformers=_top_records(transformers, building=normalized_building, group_name="变压器"),
             hvdcs=_top_records(hvdcs, building=normalized_building, group_name="HVDC"),
+            row_lines=_top_records(row_lines, building=normalized_building, group_name="机列"),
             upss=_top_records(upss, building=normalized_building, group_name="UPS"),
+            all_transformers=_sorted_records(transformers),
+            all_hvdcs=_sorted_records(hvdcs),
+            all_row_lines=_sorted_records(row_lines),
+            all_upss=_sorted_records(upss),
+            row_line_aggregates=sorted(
+                row_line_aggregates,
+                key=lambda item: (-item.power_kw, item.identifier),
+            ),
         )
-
-    @staticmethod
-    def extract_branch_records(path: Path | str, *, building: str) -> List[PowerRecord]:
-        source_path = Path(path)
-        rows = _load_rows(source_path)
-        normalized_building = _normalize_building(building)
-        sums_by_column: Dict[str, List[float]] = {}
-
-        for row in rows[3:]:
-            metric_name = _cell_text(row[2] if len(row) > 2 else "")
-            if "支路功率" not in metric_name:
-                continue
-            column_key = _branch_column_key(row, building=normalized_building)
-            if not column_key:
-                continue
-            values = [_to_float(value) or 0.0 for value in row[3:]]
-            if not values:
-                continue
-            current = sums_by_column.setdefault(column_key, [0.0] * len(values))
-            if len(current) < len(values):
-                current.extend([0.0] * (len(values) - len(current)))
-            for index, value in enumerate(values):
-                current[index] += value
-
-        records = [
-            PowerRecord(normalized_building, f"{column_key}功率和", max(values), str(source_path))
-            for column_key, values in sums_by_column.items()
-            if values
-        ]
-        return _top_records(records, building=normalized_building, group_name="列头柜")
 
     @staticmethod
     def _entries_by_building(entries: List[Dict[str, Any]], *, label: str) -> Dict[str, Dict[str, Any]]:
@@ -487,14 +491,12 @@ class Top5PowerReportService:
         self,
         sheet,
         *,
-        capacity_by_building: Dict[str, CapacityPowerGroups],
-        branch_by_building: Dict[str, List[PowerRecord]],
+        monthly_by_building: Dict[str, MonthlyTop5Groups],
     ) -> None:
         row_index = 3
         sequence = 1
         for building in _ALL_BUILDINGS:
-            groups = capacity_by_building[building]
-            branches = branch_by_building[building]
+            groups = monthly_by_building[building]
             for index in range(_TOP_N):
                 values = [
                     sequence,
@@ -503,8 +505,8 @@ class Top5PowerReportService:
                     _format_power(groups.transformers[index].power_kw),
                     groups.hvdcs[index].identifier,
                     _format_power(groups.hvdcs[index].power_kw),
-                    branches[index].identifier,
-                    _format_power(branches[index].power_kw),
+                    groups.row_lines[index].identifier,
+                    _format_power(groups.row_lines[index].power_kw),
                     groups.upss[index].identifier,
                     _format_power(groups.upss[index].power_kw),
                 ]
@@ -527,11 +529,62 @@ class Top5PowerReportService:
         sheet.freeze_panes = "A4"
         return row_count
 
+    def _append_building_detail_sheet(
+        self,
+        workbook,
+        *,
+        sheet_name: str,
+        groups: MonthlyTop5Groups,
+    ) -> int:
+        if sheet_name in workbook.sheetnames:
+            workbook.remove(workbook[sheet_name])
+        sheet = workbook.create_sheet(sheet_name)
+        blocks = [
+            (1, groups.all_transformers),
+            (4, groups.all_hvdcs),
+            (7, groups.all_upss),
+            (10, groups.all_row_lines),
+        ]
+        for start_column, records in blocks:
+            for offset, header in enumerate(("地点", "值")):
+                cell = sheet.cell(row=1, column=start_column + offset, value=header)
+                self._style_cell(cell, is_header=True)
+            for index, record in enumerate(records, start=2):
+                name_cell = sheet.cell(row=index, column=start_column, value=record.identifier)
+                value_cell = sheet.cell(row=index, column=start_column + 1, value=_format_power(record.power_kw))
+                self._style_cell(name_cell)
+                self._style_cell(value_cell)
+                value_cell.number_format = "0.00"
+        sheet.freeze_panes = "A2"
+        for column in ("A", "D", "G", "J"):
+            sheet.column_dimensions[column].width = 24
+        for column in ("B", "E", "H", "K"):
+            sheet.column_dimensions[column].width = 12
+        for column in ("C", "F", "I"):
+            sheet.column_dimensions[column].width = 4
+        return max(
+            len(groups.all_transformers),
+            len(groups.all_hvdcs),
+            len(groups.all_upss),
+            len(groups.all_row_lines),
+        )
+
+    def _append_sheet1(self, workbook, *, records: List[PowerRecord]) -> int:
+        if "Sheet1" in workbook.sheetnames:
+            workbook.remove(workbook["Sheet1"])
+        sheet = workbook.create_sheet("Sheet1")
+        for row_index, record in enumerate(records, start=1):
+            sheet.cell(row=row_index, column=1, value=record.identifier)
+            value_cell = sheet.cell(row=row_index, column=2, value=_format_power(record.power_kw))
+            value_cell.number_format = "0.00"
+        sheet.column_dimensions["A"].width = 24
+        sheet.column_dimensions["B"].width = 12
+        return len(records)
+
     def run(
         self,
         *,
-        capacity_entries: List[Dict[str, Any]],
-        branch_entries: List[Dict[str, Any]],
+        monthly_entries: List[Dict[str, Any]],
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         if not self.is_enabled():
@@ -539,17 +592,13 @@ class Top5PowerReportService:
 
         started_at = datetime.now()
         emit_log("[TOP5功率文件生成] 开始读取共享源文件")
-        capacity_entry_map = self._entries_by_building(capacity_entries, label="交接班容量报表")
-        branch_entry_map = self._entries_by_building(branch_entries, label="支路功率")
+        monthly_entry_map = self._entries_by_building(monthly_entries, label="TOP5月报")
 
-        capacity_by_building: Dict[str, CapacityPowerGroups] = {}
-        branch_by_building: Dict[str, List[PowerRecord]] = {}
+        monthly_by_building: Dict[str, MonthlyTop5Groups] = {}
         for building in _ALL_BUILDINGS:
-            capacity_path = Path(capacity_entry_map[building]["file_path"])
-            branch_path = Path(branch_entry_map[building]["file_path"])
-            emit_log(f"[TOP5功率文件生成] 解析{building}: capacity={capacity_path.name}, branch={branch_path.name}")
-            capacity_by_building[building] = self.extract_capacity_records(capacity_path, building=building)
-            branch_by_building[building] = self.extract_branch_records(branch_path, building=building)
+            monthly_path = Path(monthly_entry_map[building]["file_path"])
+            emit_log(f"[TOP5功率文件生成] 解析{building}: monthly={monthly_path.name}")
+            monthly_by_building[building] = self.extract_monthly_top5_groups(monthly_path, building=building)
 
         output_path = self._build_output_path()
         workbook = self._load_workbook_for_output()
@@ -557,47 +606,41 @@ class Top5PowerReportService:
             summary_sheet = self._prepare_summary_sheet(workbook)
             self._write_summary_rows(
                 summary_sheet,
-                capacity_by_building=capacity_by_building,
-                branch_by_building=branch_by_building,
+                monthly_by_building=monthly_by_building,
             )
             source_sheet_rows: Dict[str, int] = {}
             for building in _ALL_BUILDINGS:
                 code = _building_code(building)
-                row_count = self._append_source_sheet(
+                row_count = self._append_building_detail_sheet(
                     workbook,
-                    sheet_name=f"容量_{code}",
-                    source_path=Path(capacity_entry_map[building]["file_path"]),
+                    sheet_name=code,
+                    groups=monthly_by_building[building],
                 )
-                source_sheet_rows[f"容量_{code}"] = row_count
+                source_sheet_rows[code] = row_count
             for building in _ALL_BUILDINGS:
-                code = _building_code(building)
                 row_count = self._append_source_sheet(
                     workbook,
-                    sheet_name=f"支路功率_{code}",
-                    source_path=Path(branch_entry_map[building]["file_path"]),
+                    sheet_name=f"{building}容量",
+                    source_path=Path(monthly_entry_map[building]["file_path"]),
                 )
-                source_sheet_rows[f"支路功率_{code}"] = row_count
+                source_sheet_rows[f"{building}容量"] = row_count
+            source_sheet_rows["Sheet1"] = self._append_sheet1(
+                workbook,
+                records=monthly_by_building["E楼"].all_row_lines,
+            )
             atomic_save_workbook(workbook, output_path)
         finally:
             workbook.close()
 
         finished_at = datetime.now()
         source_files = {
-            "capacity": {
+            "monthly_report": {
                 building: {
                     "building": building,
-                    "file_path": capacity_entry_map[building]["file_path"],
-                    "file_name": Path(capacity_entry_map[building]["file_path"]).name,
-                    "bucket_key": str(capacity_entry_map[building].get("bucket_key", "") or "").strip(),
-                }
-                for building in _ALL_BUILDINGS
-            },
-            "branch_power": {
-                building: {
-                    "building": building,
-                    "file_path": branch_entry_map[building]["file_path"],
-                    "file_name": Path(branch_entry_map[building]["file_path"]).name,
-                    "bucket_key": str(branch_entry_map[building].get("bucket_key", "") or "").strip(),
+                    "file_path": monthly_entry_map[building]["file_path"],
+                    "file_name": Path(monthly_entry_map[building]["file_path"]).name,
+                    "bucket_key": str(monthly_entry_map[building].get("bucket_key", "") or "").strip(),
+                    "duty_date": _monthly_entry_date(monthly_entry_map[building]),
                 }
                 for building in _ALL_BUILDINGS
             },
@@ -611,13 +654,14 @@ class Top5PowerReportService:
             "file_name": output_path.name,
             "output_dir": str(output_path.parent),
             "summary_row_count": len(_ALL_BUILDINGS) * _TOP_N,
-            "source_sheet_count": 10,
+            "source_sheet_count": len(source_sheet_rows),
             "source_sheet_rows": source_sheet_rows,
             "source_files": source_files,
         }
         emit_log(
             "[TOP5功率文件生成] 文件生成完成: "
-            f"output={output_path}, summary_rows={result['summary_row_count']}, source_sheets=10"
+            f"output={output_path}, summary_rows={result['summary_row_count']}, "
+            f"source_sheets={result['source_sheet_count']}"
         )
         return result
 

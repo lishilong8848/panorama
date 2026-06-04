@@ -326,8 +326,27 @@ class InternalBridgeHttpTaskRunner:
             relative = str(item.get("relative_path", "") or "").replace("\\", "/").strip()
             if relative and shared_root is not None:
                 item.setdefault("file_path", str(shared_root / relative.replace("/", "\\")))
+            file_path_text = str(item.get("file_path", "") or "").strip()
+            if not self._source_index_file_accessible(file_path_text):
+                self._emit(
+                    "[内网HTTP桥接] source-index 已过滤不可访问源文件: "
+                    f"family={source_family or '-'}, building={item.get('building') or building or '-'}, "
+                    f"bucket={item.get('bucket_key') or bucket_key or duty_date or '-'}, path={file_path_text or '-'}"
+                )
+                continue
             output.append(item)
         return output
+
+    @staticmethod
+    def _source_index_file_accessible(file_path: str) -> bool:
+        text = str(file_path or "").strip()
+        if not text:
+            return False
+        try:
+            candidate = Path(text)
+            return candidate.is_file()
+        except OSError:
+            return False
 
     def _list_source_cache_entries_fast(
         self,

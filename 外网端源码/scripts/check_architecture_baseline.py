@@ -760,7 +760,7 @@ def check_internal_bridge_http_config_preserved() -> None:
         PROJECT_DIR / "config" / "表格计算配置.template.json",
         PROJECT_DIR / "表格计算配置.json",
     ):
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
         common = payload.get("common", {}) if isinstance(payload, dict) else {}
         cfg = common.get("internal_bridge_http", {}) if isinstance(common, dict) else {}
         _assert(isinstance(cfg, dict) and cfg, f"internal_bridge_http missing from {path.name}")

@@ -666,7 +666,7 @@ def present_external_source_cache_family(
         tone = "success"
         status_text = "共享文件已就绪"
         summary_text = f"{title}当前已齐套。"
-    is_date_semantic = key == "monthly_report_family"
+    is_date_semantic = key in {"monthly_report_family", "top5_monthly_report_family"}
     reference_label = "当前日期文件" if is_date_semantic else "最新时间桶"
     age_label = "距当前约"
     family_meta_lines: List[str] = []
@@ -925,6 +925,13 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
         fallback_bucket=current_hour_bucket,
         bucket_scope_text="本小时",
     )
+    top5_monthly_family = present_source_cache_family(
+        source_cache.get("top5_monthly_report_family", {}),
+        key="top5_monthly_report_family",
+        title="TOP5月报源文件",
+        fallback_bucket=current_hour_bucket,
+        bucket_scope_text="本小时",
+    )
     alarm_bucket = _string(source_cache.get("alarm_event_family", {}).get("current_bucket", "")) or current_hour_bucket
     alarm_family = present_source_cache_family(
         source_cache.get("alarm_event_family", {}),
@@ -957,6 +964,16 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
         fallback_bucket=branch_switch_bucket,
         bucket_scope_text="本小时",
     )
+    building_full_cabinet_power_bucket = (
+        _string(source_cache.get("building_full_cabinet_power_family", {}).get("current_bucket", "")) or branch_power_bucket
+    )
+    building_full_cabinet_power_family = present_source_cache_family(
+        source_cache.get("building_full_cabinet_power_family", {}),
+        key="building_full_cabinet_power_family",
+        title="楼栋全机柜功率源文件",
+        fallback_bucket=building_full_cabinet_power_bucket,
+        bucket_scope_text="本小时",
+    )
     chiller_mode_switch_bucket = _string(source_cache.get("chiller_mode_switch_family", {}).get("current_bucket", "")) or current_hour_bucket
     chiller_mode_switch_family = present_source_cache_family(
         source_cache.get("chiller_mode_switch_family", {}),
@@ -969,9 +986,11 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
         handover_family,
         handover_capacity_family,
         monthly_family,
+        top5_monthly_family,
         branch_power_family,
         branch_current_family,
         branch_switch_family,
+        building_full_cabinet_power_family,
         chiller_mode_switch_family,
         alarm_family,
     ]
@@ -1130,8 +1149,10 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
         ("branch_power_family", "支路功率源文件"),
         ("branch_current_family", "支路电流源文件"),
         ("branch_switch_family", "支路开关源文件"),
+        ("building_full_cabinet_power_family", "楼栋全机柜功率源文件"),
         ("chiller_mode_switch_family", "制冷单元模式切换参数源文件"),
         ("monthly_report_family", "全景平台月报源文件"),
+        ("top5_monthly_report_family", "TOP5月报源文件"),
     ):
         family_payload = source_cache.get(key, {}) if isinstance(source_cache.get(key, {}), dict) else {}
         display_family = family_payload.get("display_overview", {})
@@ -1145,7 +1166,7 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
                 live_payload=family_payload,
                 latest_payload=latest_payload,
             )
-        if key in {"handover_log_family", "monthly_report_family"}:
+        if key in {"handover_log_family", "monthly_report_family", "top5_monthly_report_family"}:
             latest_payload = family_payload.get("latest_selection", {})
             if not isinstance(latest_payload, dict):
                 latest_payload = {}
@@ -1272,7 +1293,7 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
         "summary_text": summary_text,
         "detail_text": error_text or summary_text,
         "reason_code": reason_code,
-        "display_note_text": "交接班容量报表源文件和支路功率源文件仅在状态页同步展示，不单独阻断外网默认流程。",
+        "display_note_text": "交接班容量报表源文件、支路功率源文件、支路电流源文件、支路开关源文件和楼栋全机柜功率源文件仅在状态页同步展示，不单独阻断外网默认流程。",
         "reference_bucket_key": reference_bucket_key,
         "error_text": error_text,
         "families": families,
@@ -1439,7 +1460,7 @@ def apply_external_source_cache_backfill_overlays(overview: Any, tasks: Any) -> 
             family_payload["backfill_task_id"] = ""
             updated_families.append(family_payload)
             continue
-        is_monthly = family_key == "monthly_report_family"
+        is_monthly = family_key in {"monthly_report_family", "top5_monthly_report_family"}
         backfill_label = "当前同步" if is_monthly else "当前补采"
         backfill_scope_label = "同步日期" if is_monthly else "补采范围"
         family_payload["backfill_label"] = backfill_label

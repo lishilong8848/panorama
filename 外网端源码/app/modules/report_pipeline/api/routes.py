@@ -60,6 +60,7 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
     start_waiting_bridge_job,
 )
 from app.modules.shared_bridge.service.shared_source_cache_service import (
+    FAMILY_BUILDING_FULL_CABINET_POWER,
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
     FAMILY_BRANCH_SWITCH,
@@ -103,7 +104,6 @@ from handover_log_module.service.day_metric_standalone_upload_service import Day
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from handover_log_module.service.monthly_report_delivery_service import MonthlyReportDeliveryService
-from handover_log_module.service.power_alert_sync_service import PowerAlertSyncService
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
@@ -1588,19 +1588,28 @@ def _collect_indexed_branch_source_units(
             buildings=target_buildings,
             business_date=business_date,
         )
+        full_cabinet_power_by_building = _cached_branch_source_by_building(
+            bridge_service,
+            source_family=FAMILY_BUILDING_FULL_CABINET_POWER,
+            buildings=target_buildings,
+            business_date=business_date,
+        )
         units: List[Dict[str, Any]] = []
         missing: List[str] = []
         for building in target_buildings:
             power_entry = power_by_building.get(building)
             current_entry = current_by_building.get(building)
             switch_entry = switch_by_building.get(building)
+            full_cabinet_power_entry = full_cabinet_power_by_building.get(building)
             if not power_entry:
                 missing.append(f"{building}/支路功率")
             if not current_entry:
                 missing.append(f"{building}/支路电流")
             if not switch_entry:
                 missing.append(f"{building}/支路开关")
-            if not power_entry or not current_entry or not switch_entry:
+            if not full_cabinet_power_entry:
+                missing.append(f"{building}/楼栋全机柜功率")
+            if not power_entry or not current_entry or not switch_entry or not full_cabinet_power_entry:
                 continue
             metadata = dict(power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {})
             metadata["business_date"] = business_date
@@ -1609,6 +1618,7 @@ def _collect_indexed_branch_source_units(
                 "power_file": _branch_file_path(power_entry),
                 "current_file": _branch_file_path(current_entry),
                 "switch_file": _branch_file_path(switch_entry),
+                "full_cabinet_power_file": _branch_file_path(full_cabinet_power_entry),
             }
             units.append(
                 {
@@ -1618,6 +1628,7 @@ def _collect_indexed_branch_source_units(
                     "power_file": source_files["power_file"],
                     "current_file": source_files["current_file"],
                     "switch_file": source_files["switch_file"],
+                    "full_cabinet_power_file": source_files["full_cabinet_power_file"],
                     "metadata": metadata,
                     "source_files": source_files,
                 }
@@ -4528,10 +4539,14 @@ def job_top5_power_report_run(payload: Dict[str, Any], request: Request) -> Dict
     _shared_bridge_service_or_raise(container)
     service = Top5PowerReportService(config)
     buildings = service.all_buildings()
-    now = datetime.now()
-    year = str(payload.get("year", "") or now.year).strip()
+    year = str(payload.get("year", "") or "").strip()
+    if not year:
+        raise HTTPException(status_code=400, detail="年份不能为空")
     try:
-        month = int(payload.get("month", 0) or now.month)
+        month_raw = payload.get("month", None)
+        if month_raw in (None, ""):
+            raise ValueError("empty")
+        month = int(month_raw)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="月份必须为 1-12 的数字") from exc
     if not re.fullmatch(r"20\d{2}", year):
@@ -5723,24 +5738,16 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
 def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     container = request.app.state.container
     config = _runtime_config(container)
+    bridge_service = _shared_bridge_service_or_raise(container)
     payload_obj = payload if isinstance(payload, dict) else {}
     business_date_keys = _normalize_branch_power_business_dates(payload_obj)
+    buildings = _normalize_branch_power_buildings(payload_obj, bridge_service)
     submitted_by = str(payload_obj.get("submitted_by", "") or "").strip() or "manual"
     priority = "scheduler" if submitted_by == "scheduler" else "manual"
 
     def _run(emit_log):
         emit_log(f"[动环功率统计同步] 已进入后台重试: business_dates={','.join(business_date_keys)}")
-        retry_config = copy.deepcopy(config if isinstance(config, dict) else {})
-        branch_cfg = retry_config.get("branch_power_upload", {})
-        if not isinstance(branch_cfg, dict):
-            branch_cfg = {}
-            retry_config["branch_power_upload"] = branch_cfg
-        power_alert_cfg = branch_cfg.get("power_alert_sync", {})
-        if not isinstance(power_alert_cfg, dict):
-            power_alert_cfg = {}
-            branch_cfg["power_alert_sync"] = power_alert_cfg
-        power_alert_cfg["required"] = True
-        service = PowerAlertSyncService(retry_config)
+        service = BranchPowerUploadService(config)
         summary: Dict[str, Any] = {
             "ok": True,
             "status": "success",
@@ -5751,7 +5758,22 @@ def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request)
         last_result: Dict[str, Any] | None = None
         for business_date_key in business_date_keys:
             try:
-                result = service.sync(report_date=business_date_key, emit_log=emit_log)
+                collect_result = _collect_indexed_branch_source_units(
+                    bridge_service,
+                    bucket_keys=[business_date_key],
+                    buildings=buildings,
+                    emit_log=emit_log,
+                )
+                source_units = collect_result.get("bucket_source_units", {}).get(business_date_key, [])
+                missing_items = collect_result.get("missing_by_bucket", {}).get(business_date_key, [])
+                if missing_items:
+                    raise RuntimeError(f"{business_date_key} 缺少共享源文件: {','.join(missing_items[:12])}")
+                result = service.upload_day_from_source_files(
+                    business_date=business_date_key,
+                    source_units=source_units,
+                    upload_main_table=False,
+                    emit_log=emit_log,
+                )
                 if isinstance(result, dict):
                     last_result = result
                     summary["uploaded_dates"].append(

@@ -12,10 +12,6 @@ from app.modules.report_pipeline.service.monthly_cache_continue_service import r
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.sheet_import.service.sheet_import_service import SheetImportService
 from app.modules.shared_bridge.service import shared_bridge_runtime_service as shared_bridge_runtime_module
-from app.modules.shared_bridge.service.shared_source_cache_service import (
-    FAMILY_BRANCH_POWER,
-    FAMILY_HANDOVER_CAPACITY_REPORT,
-)
 from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.api.facade import load_handover_config
@@ -366,6 +362,15 @@ def handle_top5_power_report(
 ) -> Dict[str, Any]:
     notify = WebhookNotifyService(config)
     service = Top5PowerReportService(config)
+    upload_year_raw = str(payload.get("year", "") or "").strip()
+    upload_month_raw = payload.get("month", None)
+    if not upload_year_raw or upload_month_raw in (None, ""):
+        raise RuntimeError("TOP5上传任务缺少目标年月，已拒绝使用当前年月兜底")
+    upload_year, upload_month_text = Top5PowerReportBitableUploadService._validate_year_month(
+        upload_year_raw,
+        upload_month_raw,
+    )
+    upload_month = int(upload_month_text)
     payload_buildings = [
         str(item or "").strip()
         for item in (payload.get("buildings") if isinstance(payload.get("buildings"), list) else [])
@@ -380,36 +385,23 @@ def handle_top5_power_report(
     try:
         if runtime is not None:
             runtime.raise_if_cancelled()
-        emit_log("[TOP5功率文件生成] 读取内网 HTTP source-index: 交接班容量报表源文件")
-        capacity_entries = _top5_index_entries_by_building(
-            bridge_runtime.get_latest_source_cache_entries(
-                source_family=FAMILY_HANDOVER_CAPACITY_REPORT,
+        monthly_entries = _top5_index_entries_by_building(
+            bridge_runtime.refresh_top5_monthly_latest_cache_entries(
                 buildings=buildings,
-            )
-        )
-        if runtime is not None:
-            runtime.raise_if_cancelled()
-        emit_log("[TOP5功率文件生成] 读取内网 HTTP source-index: 支路功率源文件")
-        branch_entries = _top5_index_entries_by_building(
-            bridge_runtime.get_latest_source_cache_entries(
-                source_family=FAMILY_BRANCH_POWER,
-                buildings=buildings,
+                emit_log=emit_log,
+                cancel_check=runtime.raise_if_cancelled if runtime is not None else None,
             )
         )
         if runtime is not None:
             runtime.raise_if_cancelled()
         emit_log(
-            "[TOP5功率文件生成] source-index 读取完成: "
-            f"capacity={len(capacity_entries)}/{len(buildings)}, branch={len(branch_entries)}/{len(buildings)}"
+            "[TOP5功率文件生成] 本次源文件读取完成: "
+            f"monthly={len(monthly_entries)}/{len(buildings)}, year={upload_year}, month={upload_month:02d}"
         )
         result = service.run(
-            capacity_entries=capacity_entries,
-            branch_entries=branch_entries,
+            monthly_entries=monthly_entries,
             emit_log=emit_log,
         )
-        now = datetime.now()
-        upload_year = str(payload.get("year", "") or now.year).strip()
-        upload_month = int(payload.get("month", 0) or now.month)
         if runtime is not None:
             runtime.raise_if_cancelled()
         upload_result = Top5PowerReportBitableUploadService(config).upload_report(

@@ -1971,6 +1971,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
     def branch_power_upload_scheduler_callback(source: str) -> tuple[bool, str]:
         from app.shared.utils.artifact_naming import (
+            FAMILY_BUILDING_FULL_CABINET_POWER,
             FAMILY_BRANCH_CURRENT,
             FAMILY_BRANCH_POWER,
             FAMILY_BRANCH_SWITCH,
@@ -2025,10 +2026,18 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             power_ready = _ready_building_set(cached_entries)
             current_ready = _ready_building_set(_ready_entries(FAMILY_BRANCH_CURRENT))
             switch_ready = _ready_building_set(_ready_entries(FAMILY_BRANCH_SWITCH))
+            full_cabinet_power_ready = _ready_building_set(_ready_entries(FAMILY_BUILDING_FULL_CABINET_POWER))
             missing_power = [building for building in target_buildings if building not in power_ready]
             missing_current = [building for building in target_buildings if building not in current_ready]
             missing_switch = [building for building in target_buildings if building not in switch_ready]
-            missing_buildings = list(dict.fromkeys([*missing_power, *missing_current, *missing_switch]))
+            missing_full_cabinet_power = [
+                building for building in target_buildings if building not in full_cabinet_power_ready
+            ]
+            missing_buildings = list(
+                dict.fromkeys(
+                    [*missing_power, *missing_current, *missing_switch, *missing_full_cabinet_power]
+                )
+            )
             if missing_buildings:
                 dedupe_key = f"branch_power_upload:daily:{target_business_date}:{'|'.join(sorted(target_buildings))}"
                 job, bridge_task = start_waiting_bridge_job(
@@ -2043,6 +2052,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         "building_scope": "all_enabled",
                         "building": None,
                         "buildings": missing_buildings,
+                        "download_buildings": missing_buildings,
+                        "upload_buildings": target_buildings,
                         "requested_by": "scheduler",
                         "submitted_by": "scheduler",
                     },
@@ -2055,6 +2066,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     bridge_create_name="create_branch_power_upload_task",
                     bridge_kwargs={
                         "buildings": missing_buildings,
+                        "download_buildings": missing_buildings,
+                        "upload_buildings": target_buildings,
                         "target_bucket_key": target_business_date,
                         "mode": "daily_branch_sources",
                         "target_business_date": target_business_date,
@@ -2094,18 +2107,23 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 power_map = _entry_map(FAMILY_BRANCH_POWER)
                 current_map = _entry_map(FAMILY_BRANCH_CURRENT)
                 switch_map = _entry_map(FAMILY_BRANCH_SWITCH)
+                full_cabinet_power_map = _entry_map(FAMILY_BUILDING_FULL_CABINET_POWER)
                 missing_current: list[str] = []
                 missing_switch: list[str] = []
+                missing_full_cabinet_power: list[str] = []
                 source_units: list[dict] = []
                 for item in cached_entries:
                     building = str(item.get("building", "") or "").strip()
                     power_entry = power_map.get(building) or item
                     current_entry = _entry_for(building, current_map)
                     switch_entry = _entry_for(building, switch_map)
+                    full_cabinet_power_entry = _entry_for(building, full_cabinet_power_map)
                     if not current_entry:
                         missing_current.append(building)
                     if not switch_entry:
                         missing_switch.append(building)
+                    if not full_cabinet_power_entry:
+                        missing_full_cabinet_power.append(building)
                     metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
                     unit = {
                         "bucket_key": target_business_date,
@@ -2123,13 +2141,18 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         switch_file = str(switch_entry.get("file_path", "") or "").strip()
                         unit["switch_file"] = switch_file
                         source_files["switch_file"] = switch_file
+                    if full_cabinet_power_entry:
+                        full_cabinet_power_file = str(full_cabinet_power_entry.get("file_path", "") or "").strip()
+                        unit["full_cabinet_power_file"] = full_cabinet_power_file
+                        source_files["full_cabinet_power_file"] = full_cabinet_power_file
                     unit["source_files"] = source_files
                     source_units.append(unit)
-                if missing_current or missing_switch:
+                if missing_current or missing_switch or missing_full_cabinet_power:
                     emit_log(
                         "[支路功率上传] 部分源文件未命中共享索引，将按功率源文件同目录同命名规则兜底: "
                         f"电流索引缺失={','.join(missing_current) or '-'}, "
-                        f"开关索引缺失={','.join(missing_switch) or '-'}"
+                        f"开关索引缺失={','.join(missing_switch) or '-'}, "
+                        f"楼栋全机柜功率索引缺失={','.join(missing_full_cabinet_power) or '-'}"
                     )
                 service = BranchPowerUploadService(container.runtime_config)
                 try:

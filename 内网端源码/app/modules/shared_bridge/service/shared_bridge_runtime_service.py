@@ -33,6 +33,7 @@ from app.modules.shared_bridge.service.shared_bridge_mailbox_store import Shared
 from app.modules.shared_bridge.service.shared_bridge_runtime_mirror_store import SharedBridgeRuntimeMirrorStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_ALARM_EVENT,
+    FAMILY_BUILDING_FULL_CABINET_POWER,
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
     FAMILY_BRANCH_SWITCH,
@@ -4996,6 +4997,11 @@ class SharedBridgeRuntimeService:
                     "file_key": "switch_file",
                     "daily": self._source_cache_service.fill_branch_switch_day_latest,
                 },
+                FAMILY_BUILDING_FULL_CABINET_POWER: {
+                    "label": "楼栋全机柜功率",
+                    "file_key": "full_cabinet_power_file",
+                    "daily": self._source_cache_service.fill_building_full_cabinet_power_day_latest,
+                },
             }
             emit_log(
                 "[共享桥接][支路信息][内网] 开始下载三源文件 "
@@ -5037,7 +5043,12 @@ class SharedBridgeRuntimeService:
                         "source_family": source_family,
                         "reason": "daily_all_families",
                     }
-                    for source_family in (FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT, FAMILY_BRANCH_SWITCH)
+                    for source_family in (
+                        FAMILY_BRANCH_POWER,
+                        FAMILY_BRANCH_CURRENT,
+                        FAMILY_BRANCH_SWITCH,
+                        FAMILY_BUILDING_FULL_CABINET_POWER,
+                    )
                 ]
 
             def download_building(building: str) -> Dict[str, Any]:
@@ -5106,12 +5117,14 @@ class SharedBridgeRuntimeService:
                     power_entry = by_family.get(FAMILY_BRANCH_POWER)
                     current_entry = by_family.get(FAMILY_BRANCH_CURRENT)
                     switch_entry = by_family.get(FAMILY_BRANCH_SWITCH)
-                    if not power_entry or not current_entry or not switch_entry:
+                    full_cabinet_entry = by_family.get(FAMILY_BUILDING_FULL_CABINET_POWER)
+                    if not power_entry or not current_entry or not switch_entry or not full_cabinet_entry:
                         continue
                     metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
                     power_path = str(power_entry.get("file_path", "") or "").strip()
                     current_path = str(current_entry.get("file_path", "") or "").strip()
                     switch_path = str(switch_entry.get("file_path", "") or "").strip()
+                    full_cabinet_power_path = str(full_cabinet_entry.get("file_path", "") or "").strip()
                     building_source_units.append(
                         {
                             "building": building,
@@ -5119,10 +5132,12 @@ class SharedBridgeRuntimeService:
                             "power_file": power_path,
                             "current_file": current_path,
                             "switch_file": switch_path,
+                            "full_cabinet_power_file": full_cabinet_power_path,
                             "source_files": {
                                 "power_file": power_path,
                                 "current_file": current_path,
                                 "switch_file": switch_path,
+                                "full_cabinet_power_file": full_cabinet_power_path,
                             },
                             "bucket_key": data_bucket,
                             "business_date": str(metadata.get("business_date", "") or target_business_date).strip(),
