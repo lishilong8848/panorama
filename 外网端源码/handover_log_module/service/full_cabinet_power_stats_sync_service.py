@@ -180,6 +180,28 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                             powers=powers,
                         )
                     )
+                    continue
+                room_prefix = room_code.split("-", 1)[1] if "-" in room_code else room_code
+                row_line_total_match = re.fullmatch(
+                    rf"{re.escape(room_prefix)}包间(?P<col>[A-Z])列列头柜总功率和",
+                    item_text,
+                )
+                row_line_group_fallback = re.fullmatch(
+                    rf"{re.escape(room_prefix)}包间(?P<col>[A-Z])列功率和",
+                    current_group_text,
+                )
+                if row_line_total_match and row_line_group_fallback:
+                    col = row_line_total_match.group("col").upper()
+                    if col == row_line_group_fallback.group("col").upper():
+                        row_line_rows.append(
+                            _RowLineMetricRow(
+                                building=building,
+                                room_code=room_code,
+                                room_short=room_code,
+                                row_col=col,
+                                powers=powers,
+                            )
+                        )
             return {
                 "cabinet": cabinet_rows,
                 "line_head": line_head_rows,
@@ -227,6 +249,31 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
             )
         return output
 
+    def _build_legacy_line_group_stats(self, detail_records: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        groups: Dict[str, List[Any]] = {}
+        for item in detail_records if isinstance(detail_records, list) else []:
+            if not isinstance(item, dict):
+                continue
+            row = self._normalize_source_row(item)
+            if row is None:
+                continue
+            groups.setdefault(row.line_raw, []).append(row)
+        return {key: {"group": group, "totals": self._sum_by_hour(group)} for key, group in groups.items()}
+
+    @staticmethod
+    def _cabinet_room_display(room_code: str) -> str:
+        text = str(room_code or "").strip()
+        if not text:
+            return ""
+        return text if text.endswith("包间") else f"{text}包间"
+
+    @staticmethod
+    def _cabinet_display(cabinet_col: str, cabinet_no: str) -> str:
+        col = str(cabinet_col or "").strip().upper()
+        no = str(cabinet_no or "").strip().zfill(2)
+        cabinet_id = f"{col}{no}" if col and no else f"{col}{no}".strip()
+        return f"{col}列{cabinet_id}" if col and cabinet_id else cabinet_id
+
     def _generate_cabinet_rows(
         self,
         rows: List[_CabinetMetricRow],
@@ -242,6 +289,8 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
             if not int(stats["over_count"] or 0):
                 continue
             cabinet_id = f"{row.cabinet_col}{row.cabinet_no}"
+            cabinet_display = self._cabinet_display(row.cabinet_col, row.cabinet_no)
+            room_display = self._cabinet_room_display(row.room_code)
             details = detail_index.get((row.building, row.room_code, cabinet_id), [])
             max_hour = int(stats["max_hour"])
             if not details:
@@ -251,8 +300,8 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                         "数据时间": report_date,
                         "机房": data_center_name,
                         "楼栋": row.building,
-                        "房间": row.room_code,
-                        "机柜号": cabinet_id,
+                        "房间": room_display,
+                        "机柜号": cabinet_display,
                         "机柜功率": f"{self._fmt_trim(stats['max_value'], 2)}kw",
                         "PDU编号": None,
                         "电流值": None,
@@ -270,8 +319,8 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                         "数据时间": report_date,
                         "机房": data_center_name,
                         "楼栋": row.building,
-                        "房间": row.room_code,
-                        "机柜号": cabinet_id,
+                        "房间": room_display,
+                        "机柜号": cabinet_display,
                         "机柜功率": f"{self._fmt_trim(stats['max_value'], 2)}kw",
                         "PDU编号": item.get("pdu_code"),
                         "电流值": float(self._fmt_trim(item.get("currents", [0])[max_hour], 3) or 0),
@@ -290,14 +339,18 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         threshold: float,
         report_date: str,
         data_center_name: str,
+        legacy_line_group_stats: Dict[str, Dict[str, Any]] | None = None,
     ) -> List[Dict[str, Any]]:
         group_stats = {row.line_raw: {"group": [row], "totals": row.powers} for row in rows}
+        legacy_stats = legacy_line_group_stats if isinstance(legacy_line_group_stats, dict) else {}
         output: List[Dict[str, Any]] = []
         for row in rows:
             stats = self._threshold_stats(row.powers, threshold)
             if not int(stats["over_count"] or 0):
                 continue
             opposite = self._find_opposite_line_group(row.line_raw, group_stats)
+            if opposite is None and legacy_stats:
+                opposite = self._find_opposite_line_group(row.line_raw, legacy_stats)
             opposite_max = self._max_of(opposite["totals"]) if opposite else None
             output.append(
                 {
@@ -308,8 +361,8 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                     "房间": f"{row.room_short}.{data_center_name}",
                     "机列": self._line_display(row.line),
                     "功率": f"{self._fmt_trim(stats['max_value'], 3)}kw",
-                    "对侧机列": self._line_display(opposite["group"][0].line) if opposite else None,
-                    "对侧机列最大功率": f"{self._fmt_trim(opposite_max, 3)}kw" if opposite else None,
+                    "对侧机列": self._line_display(opposite["group"][0].line) if opposite else "/",
+                    "对侧机列最大功率": f"{self._fmt_trim(opposite_max, 3)}kw" if opposite else "/",
                     "次数": stats["runs"],
                     "时长": f"{stats['over_count']}h",
                     "备注": None,
@@ -379,6 +432,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
             }
 
         detail_index = self._build_detail_index(detail_records)
+        legacy_line_group_stats = self._build_legacy_line_group_stats(detail_records)
         building_file_map: Dict[str, Path] = {}
         for item in source_units if isinstance(source_units, list) else []:
             if not isinstance(item, dict):
@@ -415,6 +469,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                 threshold=next((table.threshold for table in target_tables if table.key == "line_head"), 107.5),
                 report_date=report_date_slash,
                 data_center_name=data_center_name,
+                legacy_line_group_stats=legacy_line_group_stats,
             ),
             "row_line": self._generate_row_line_rows(
                 row_line_rows,

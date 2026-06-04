@@ -12,6 +12,9 @@ from typing import Any, Callable, Dict
 from app.worker.task_handlers import HANDLER_REGISTRY
 
 
+_STDOUT_LOCK = threading.Lock()
+
+
 class WorkerCancelledError(RuntimeError):
     pass
 
@@ -84,8 +87,17 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 
 def _emit_event(payload: Dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(_json_ready(payload), ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    if getattr(sys, "is_finalizing", lambda: False)():
+        return
+    line = json.dumps(_json_ready(payload), ensure_ascii=False) + "\n"
+    try:
+        with _STDOUT_LOCK:
+            if getattr(sys, "is_finalizing", lambda: False)():
+                return
+            sys.stdout.write(line)
+            sys.stdout.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        return
 
 
 def _emit_log(stage_id: str, text: str, *, level: str = "info") -> None:
@@ -199,13 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     control_thread = threading.Thread(
         target=_run_control_server,
         args=(int(args.control_port or 0), runtime),
-        daemon=True,
+        daemon=False,
         name=f"worker-control-{stage_id}",
     )
     heartbeat_thread = threading.Thread(
         target=_run_heartbeat,
         args=(runtime, float(args.heartbeat_interval or 5.0)),
-        daemon=True,
+        daemon=False,
         name=f"worker-heartbeat-{stage_id}",
     )
     control_thread.start()
@@ -225,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     def emit_log(text: str) -> None:
         runtime.emit_log(text)
 
+    exit_code = 1
     try:
         runtime.raise_if_cancelled()
         try:
@@ -243,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         cancel_context.run_cleanup()
-        return 0
+        exit_code = 0
     except WorkerCancelledError:
         cancel_context.run_cleanup()
         _emit_event(
@@ -267,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ts": _now_text(),
             }
         )
-        return 130
+        exit_code = 130
     except Exception as exc:  # noqa: BLE001
         detail = str(exc)
         cancel_context.run_cleanup()
@@ -282,7 +295,16 @@ def main(argv: list[str] | None = None) -> int:
                 "ts": _now_text(),
             }
         )
-        return 1
+        exit_code = 1
+    finally:
+        cancel_context.request_cancel()
+        for thread in (control_thread, heartbeat_thread):
+            try:
+                if thread.is_alive():
+                    thread.join(timeout=2.0)
+            except Exception:
+                pass
+    return exit_code
 
 
 if __name__ == "__main__":

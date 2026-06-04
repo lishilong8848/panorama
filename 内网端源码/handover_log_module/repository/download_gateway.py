@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import shutil
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -545,7 +548,12 @@ class DownloadGateway:
     def _debug_log(enabled: bool, building: str, message: str) -> None:
         if not enabled:
             return
-        print(f"[交接班调试][{_normalize_text(building)}] {_normalize_text(message)}")
+        if getattr(sys, "is_finalizing", lambda: False)():
+            return
+        try:
+            print(f"[交接班调试][{_normalize_text(building)}] {_normalize_text(message)}", flush=True)
+        except (BrokenPipeError, OSError, ValueError):
+            return
 
     async def _login_if_needed(
         self, page: Page, username: str, password: str, login_fill_timeout_ms: int
@@ -1090,7 +1098,12 @@ class DownloadGateway:
                     else:
                         await export_btn.evaluate("(el) => el.click()")
                 download = await download_info.value
-                await download.save_as(save_path)
+                await self._save_download_with_fallback(
+                    download,
+                    save_path=save_path,
+                    building=building,
+                    debug_step_log=debug_step_log,
+                )
                 self._debug_log(
                     debug_step_log,
                     building,
@@ -1098,7 +1111,7 @@ class DownloadGateway:
                 )
                 return
             except Exception as exc:  # noqa: BLE001
-                err = str(exc)
+                err = f"{type(exc).__name__}: {exc}; save_path={save_path}"
                 errors.append(f"{strategy}:{err}")
                 self._debug_log(
                     debug_step_log,
@@ -1108,6 +1121,41 @@ class DownloadGateway:
                 continue
 
         raise StepError("导出", "; ".join(errors) if errors else "导出下载失败")
+
+    async def _save_download_with_fallback(
+        self,
+        download,
+        *,
+        save_path: str,
+        building: str,
+        debug_step_log: bool,
+    ) -> None:
+        target_path = Path(save_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await download.save_as(str(target_path))
+            return
+        except OSError as exc:
+            if getattr(exc, "errno", None) != errno.EINVAL:
+                raise
+            temp_path = ""
+            try:
+                temp_path = str(await download.path() or "").strip()
+            except Exception as path_exc:  # noqa: BLE001
+                self._debug_log(
+                    debug_step_log,
+                    building,
+                    f"导出下载save_as触发EINVAL，读取Playwright临时文件失败 error={path_exc}",
+                )
+            if temp_path:
+                shutil.copyfile(temp_path, target_path)
+                self._debug_log(
+                    debug_step_log,
+                    building,
+                    f"导出下载save_as触发EINVAL，已从临时文件复制完成 temp={temp_path}",
+                )
+                return
+            raise
 
     async def _download_file_once(
         self,

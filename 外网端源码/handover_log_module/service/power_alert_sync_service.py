@@ -348,7 +348,7 @@ class PowerAlertSyncService:
     @staticmethod
     def _parse_line(value: Any) -> Dict[str, Any]:
         match = re.match(
-            r"^(.+?)-([A-Z])列(?:(A|B)[路列])?-(AC|DC)0*(\d+)$",
+            r"^(.+?)-([A-Z])列(?:(A|B)[路列])?-(AC|DC)-?0*(\d+)$",
             str(value or "").strip(),
             re.IGNORECASE,
         )
@@ -798,8 +798,8 @@ class PowerAlertSyncService:
                     "房间": f"{first.room_short}.{data_center_name}",
                     "机列": self._line_display(first.line),
                     "功率": f"{self._fmt_trim(stats['max_value'], 3)}kw",
-                    "对侧机列": self._line_display(opposite["group"][0].line) if opposite else None,
-                    "对侧机列最大功率": f"{self._fmt_trim(opposite_max, 3)}kw" if opposite else None,
+                    "对侧机列": self._line_display(opposite["group"][0].line) if opposite else "/",
+                    "对侧机列最大功率": f"{self._fmt_trim(opposite_max, 3)}kw" if opposite else "/",
                     "次数": stats["runs"],
                     "时长": f"{stats['over_count']}h",
                     "备注": None,

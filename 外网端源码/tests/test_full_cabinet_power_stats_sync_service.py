@@ -56,6 +56,106 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
             self.assertEqual(parsed["line_head"][0].line_raw, "E-202-A列A路-DC019")
             self.assertEqual(parsed["row_line"][0].row_col, "A")
 
+    def test_parse_metric_file_accepts_hyphenated_dc_line_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "full_cabinet.xlsx"
+            _write_full_cabinet_source(source_path)
+            workbook = openpyxl.load_workbook(source_path)
+            try:
+                sheet = workbook.active
+                sheet["C5"] = "A-202-A列-DC-001"
+                workbook.save(source_path)
+            finally:
+                workbook.close()
+            service = FullCabinetPowerStatsSyncService({})
+
+            parsed = service._parse_metric_file(
+                file_path=source_path,
+                building="A楼",
+                business_date="2026-05-31",
+            )
+
+            self.assertEqual(len(parsed["line_head"]), 1)
+            self.assertEqual(parsed["line_head"][0].line["type"], "DC")
+            self.assertEqual(parsed["line_head"][0].line["num"], "001")
+
+    def test_parse_metric_file_accepts_c_building_row_line_total_format(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "full_cabinet.xlsx"
+            _write_full_cabinet_source(source_path)
+            workbook = openpyxl.load_workbook(source_path)
+            try:
+                sheet = workbook.active
+                sheet["B6"] = "南通阿里保税A区C楼/C楼/二层/包间M1 C-202"
+                sheet["C6"] = "202包间A列功率和"
+                sheet["D6"] = "202包间A列列头柜总功率和"
+                workbook.save(source_path)
+            finally:
+                workbook.close()
+            service = FullCabinetPowerStatsSyncService({})
+
+            parsed = service._parse_metric_file(
+                file_path=source_path,
+                building="C楼",
+                business_date="2026-05-31",
+            )
+
+            self.assertEqual(len(parsed["row_line"]), 1)
+            self.assertEqual(parsed["row_line"][0].room_short, "C-202")
+            self.assertEqual(parsed["row_line"][0].row_col, "A")
+
+    def test_generate_line_head_rows_uses_placeholder_when_opposite_missing(self) -> None:
+        service = FullCabinetPowerStatsSyncService({})
+        line_head_row = service._parse_metric_file(
+            file_path=self._temp_full_cabinet_source(),
+            building="E楼",
+            business_date="2026-05-31",
+        )["line_head"][0]
+
+        rows = service._generate_line_head_rows(
+            [line_head_row],
+            threshold=107.5,
+            report_date="2026/05/31",
+            data_center_name="EA118",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["对侧机列"], "/")
+        self.assertEqual(rows[0]["对侧机列最大功率"], "/")
+
+    def test_generate_line_head_rows_backfills_opposite_from_old_detail_rows(self) -> None:
+        service = FullCabinetPowerStatsSyncService({})
+        line_head_row = service._parse_metric_file(
+            file_path=self._temp_full_cabinet_source(),
+            building="E楼",
+            business_date="2026-05-31",
+        )["line_head"][0]
+        legacy_stats = service._build_legacy_line_group_stats(
+            [
+                {
+                    "机楼": "E楼",
+                    "包间": "E-202包间",
+                    "机列": "E-202-A列-AC019",
+                    "支路编号": "A01-A1",
+                    "PDU编号": "1",
+                    "功率-0:00": 45.0,
+                    "功率-1:00": 99.0,
+                }
+            ]
+        )
+
+        rows = service._generate_line_head_rows(
+            [line_head_row],
+            threshold=107.5,
+            report_date="2026/05/31",
+            data_center_name="EA118",
+            legacy_line_group_stats=legacy_stats,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["对侧机列"], "A列-AC019")
+        self.assertEqual(rows[0]["对侧机列最大功率"], "99kw")
+
     def test_generate_cabinet_rows_backfills_pdu_and_current_from_old_detail_rows(self) -> None:
         service = FullCabinetPowerStatsSyncService({})
         cabinet_row = service._parse_metric_file(
@@ -85,11 +185,51 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["机柜号"], "A01")
+        self.assertEqual(rows[0]["房间"], "E-202包间")
+        self.assertEqual(rows[0]["机柜号"], "A列A01")
         self.assertEqual(rows[0]["PDU编号"], "A01-A1")
         self.assertEqual(rows[0]["电流值"], 5.2)
         self.assertEqual(rows[0]["次数"], 1)
         self.assertEqual(rows[0]["时长"], "1h")
+
+    def test_generate_cabinet_rows_keeps_multiple_pdu_records_for_same_cabinet(self) -> None:
+        service = FullCabinetPowerStatsSyncService({})
+        cabinet_row = service._parse_metric_file(
+            file_path=self._temp_full_cabinet_source(),
+            building="E楼",
+            business_date="2026-05-31",
+        )["cabinet"][0]
+        detail_records = [
+            {
+                "机楼": "E楼",
+                "包间": "E-202包间",
+                "机列": "E-202-A列A路-DC019",
+                "支路编号": pdu,
+                "PDU编号": branch,
+                "功率-0:00": 20.5,
+                "电流-0:00": current,
+            }
+            for pdu, branch, current in (
+                ("A01-A1", "1", 5.2),
+                ("A01-A2", "2", 5.3),
+                ("A01-B1", "1", 4.8),
+                ("A01-B2", "2", 4.9),
+            )
+        ]
+        detail_index = service._build_detail_index(detail_records)
+
+        rows = service._generate_cabinet_rows(
+            [cabinet_row],
+            detail_index=detail_index,
+            threshold=18.0,
+            report_date="2026/05/31",
+            data_center_name="EA118",
+        )
+
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({row["机柜号"] for row in rows}, {"A列A01"})
+        self.assertEqual([row["PDU编号"] for row in rows], ["A01-A1", "A01-A2", "A01-B1", "A01-B2"])
+        self.assertEqual([row["电流值"] for row in rows], [5.2, 5.3, 4.8, 4.9])
 
     def test_generate_cabinet_rows_keeps_record_when_old_detail_rows_missing(self) -> None:
         service = FullCabinetPowerStatsSyncService({})
@@ -108,7 +248,8 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["机柜号"], "A01")
+        self.assertEqual(rows[0]["房间"], "E-202包间")
+        self.assertEqual(rows[0]["机柜号"], "A列A01")
         self.assertIsNone(rows[0]["PDU编号"])
         self.assertIsNone(rows[0]["电流值"])
         self.assertEqual(rows[0]["次数"], 1)
