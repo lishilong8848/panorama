@@ -9,7 +9,10 @@ from typing import Any, Callable, Dict, List
 
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
-from app.modules.shared_bridge.service.shared_source_cache_service import SharedSourceCacheService
+from app.modules.shared_bridge.service.shared_source_cache_service import (
+    FAMILY_CHILLER_MODE_SWITCH,
+    SharedSourceCacheService,
+)
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from pipeline_utils import get_app_dir
 
@@ -486,14 +489,48 @@ class InternalBridgeHttpTaskRunner:
         specific building/family has no ready index row we can do a bounded
         local scan and register the existing file before returning the index.
         """
-        if entries:
-            return entries
         family = str(source_family or "").strip()
         building_name = str(building or "").strip()
         if not family or not building_name:
             return entries
         main_cache = getattr(self._main_service, "_source_cache_service", None)
         if main_cache is None:
+            return entries
+        if (
+            family.strip().lower() == FAMILY_CHILLER_MODE_SWITCH
+            and not str(bucket_key or duty_date or "").strip()
+        ):
+            recovered_latest = self._recover_latest_existing_chiller_mode_file_to_index(
+                main_cache=main_cache,
+                source_family=family,
+                building=building_name,
+            )
+            if recovered_latest:
+                self._emit(
+                    "[内网HTTP桥接] source-index 查询时补登记最新制冷模式源文件: "
+                    f"building={building_name}, bucket={recovered_latest.get('bucket_key') or '-'}, "
+                    f"path={recovered_latest.get('relative_path') or recovered_latest.get('file_path') or '-'}"
+                )
+                main_store = getattr(main_cache, "store", None)
+                if main_store is not None:
+                    try:
+                        rows = self._list_source_cache_entries_fast(
+                            main_store,
+                            source_family=family,
+                            building=building_name,
+                            status="ready",
+                            limit=max(int(limit or 50), 200),
+                        )
+                        if rows:
+                            return rows
+                    except Exception as exc:  # noqa: BLE001
+                        self._emit(
+                            "[内网HTTP桥接] 最新制冷模式源文件补登记后读取索引失败: "
+                            f"building={building_name}, error={exc}"
+                        )
+            if entries:
+                return entries
+        elif entries:
             return entries
         target_bucket = str(bucket_key or duty_date or "").strip()
         if not target_bucket:
@@ -633,6 +670,123 @@ class InternalBridgeHttpTaskRunner:
                 )
                 return None
         return None
+
+    def _recover_latest_existing_chiller_mode_file_to_index(
+        self,
+        *,
+        main_cache: Any,
+        source_family: str,
+        building: str,
+    ) -> Dict[str, Any] | None:
+        store = getattr(main_cache, "store", None)
+        index_store = getattr(store, "_source_cache_index_store", None)
+        shared_root = getattr(main_cache, "shared_root", None)
+        family_root_getter = getattr(main_cache, "_family_root", None)
+        if index_store is None or shared_root is None or not callable(family_root_getter):
+            return None
+        try:
+            family_root = Path(family_root_getter(FAMILY_CHILLER_MODE_SWITCH))
+        except Exception:
+            return None
+        month_dir = family_root / time.strftime("%Y%m")
+        if not month_dir.is_dir():
+            return None
+
+        building_text = str(building or "").strip()
+        best_path: Path | None = None
+        best_key: tuple[float, str] = (0.0, "")
+        scanned = 0
+        try:
+            for candidate in month_dir.rglob(f"*{building_text}*.xlsx"):
+                scanned += 1
+                if scanned > 3000:
+                    self._emit(
+                        "[内网HTTP桥接] 扫描制冷模式月份目录达到上限，停止继续扫描: "
+                        f"building={building_text}, dir={month_dir}"
+                    )
+                    break
+                if not candidate.is_file():
+                    continue
+                parent_name = candidate.parent.name
+                parent_digits = "".join(ch for ch in parent_name if ch.isdigit())
+                if len(parent_digits) < 12:
+                    continue
+                try:
+                    mtime = float(candidate.stat().st_mtime)
+                    if int(candidate.stat().st_size) <= 0:
+                        continue
+                except OSError:
+                    continue
+                candidate_key = (mtime, str(candidate))
+                if candidate_key > best_key:
+                    best_path = candidate
+                    best_key = candidate_key
+        except OSError as exc:
+            self._emit(
+                "[内网HTTP桥接] 扫描制冷模式月份目录失败: "
+                f"building={building_text}, dir={month_dir}, error={exc}"
+            )
+            return None
+        if best_path is None:
+            return None
+
+        parent_digits = "".join(ch for ch in best_path.parent.name if ch.isdigit())
+        if len(parent_digits) < 12:
+            return None
+        bucket_key = (
+            f"{parent_digits[:4]}-{parent_digits[4:6]}-{parent_digits[6:8]} "
+            f"{parent_digits[8:10]}:{parent_digits[10:12]}"
+        )
+        try:
+            relative_path = best_path.relative_to(Path(shared_root)).as_posix()
+        except ValueError:
+            relative_path = str(best_path).replace("\\", "/")
+        try:
+            best_size = int(best_path.stat().st_size)
+        except OSError:
+            return None
+        downloaded_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(best_key[0]))
+        now_text = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry = {
+            "entry_id": "|".join(
+                [
+                    FAMILY_CHILLER_MODE_SWITCH,
+                    "latest",
+                    bucket_key,
+                    "-",
+                    "-",
+                    building_text,
+                ]
+            ),
+            "source_family": FAMILY_CHILLER_MODE_SWITCH,
+            "building": building_text,
+            "bucket_kind": "latest",
+            "bucket_key": bucket_key,
+            "duty_date": "",
+            "duty_shift": "",
+            "downloaded_at": downloaded_at,
+            "relative_path": relative_path,
+            "status": "ready",
+            "file_hash": "",
+            "size_bytes": best_size,
+            "metadata": {
+                "family": FAMILY_CHILLER_MODE_SWITCH,
+                "building": building_text,
+                "recovered_from_existing_file": True,
+                "recovered_by_http_source_index": True,
+                "recovered_at": now_text,
+            },
+            "created_at": now_text,
+            "updated_at": now_text,
+        }
+        try:
+            return index_store.upsert_entry(entry)
+        except Exception as exc:  # noqa: BLE001
+            self._emit(
+                "[内网HTTP桥接] 最新制冷模式源文件轻量索引补登记失败: "
+                f"building={building_text}, path={relative_path}, error={exc}"
+            )
+            return None
 
     def refresh_latest_source_cache(
         self,

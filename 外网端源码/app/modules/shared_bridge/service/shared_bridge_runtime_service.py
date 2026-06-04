@@ -3394,6 +3394,11 @@ class SharedBridgeRuntimeService:
             "handover_capacity_report_family": {},
             "monthly_report_family": {},
             "top5_monthly_report_family": {},
+            "branch_power_family": {},
+            "branch_current_family": {},
+            "branch_switch_family": {},
+            "building_full_cabinet_power_family": {},
+            "chiller_mode_switch_family": {},
             "alarm_event_family": {},
         }
 
@@ -6620,44 +6625,7 @@ class SharedBridgeRuntimeService:
                     f"buildings={failed_internal_buildings}, units={failed_source_units}"
                 )
 
-            source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
-            source_units = [item for item in source_units if isinstance(item, dict)]
             normalized_units: List[Dict[str, Any]] = []
-            for item in source_units:
-                building = str(item.get("building", "") or "").strip()
-                source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
-                power_file = str(item.get("power_file", "") or source_files.get("power_file", "") or item.get("file_path", "") or item.get("source_file", "") or "").strip()
-                current_file = str(item.get("current_file", "") or source_files.get("current_file", "") or "").strip()
-                switch_file = str(item.get("switch_file", "") or source_files.get("switch_file", "") or "").strip()
-                full_cabinet_power_file = str(
-                    item.get("full_cabinet_power_file", "") or source_files.get("full_cabinet_power_file", "") or ""
-                ).strip()
-                if not building or not power_file:
-                    continue
-                for label, file_path in (
-                    ("支路功率", power_file),
-                    ("支路电流", current_file),
-                    ("支路开关", switch_file),
-                    ("楼栋全机柜功率", full_cabinet_power_file),
-                ):
-                    if not file_path or (self.role_mode != "external" and not is_accessible_cached_file_path(file_path)):
-                        raise FileNotFoundError(f"共享目录中的{label}整日源文件不存在或不可访问: {file_path or '-'}")
-                metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
-                normalized_units.append(
-                    {
-                        "building": building,
-                        "file_path": power_file,
-                        "power_file": power_file,
-                        "current_file": current_file,
-                        "switch_file": switch_file,
-                        "full_cabinet_power_file": full_cabinet_power_file,
-                        "business_date": business_date,
-                        "metadata": metadata,
-                    }
-                )
-            if not normalized_units:
-                raise RuntimeError("共享目录中没有可继续上传的支路整日源文件")
-
             expected_buildings = self._branch_power_expected_buildings_from_task(task)
             if expected_buildings:
                 normalized_units = self._build_branch_power_daily_units_from_cache(
@@ -6672,6 +6640,43 @@ class SharedBridgeRuntimeService:
                 missing_buildings = [building for building in expected_buildings if building not in ready_buildings]
                 if missing_buildings:
                     raise RuntimeError(f"支路整日源文件缺少楼栋，外网端停止上传: {','.join(missing_buildings)}")
+            else:
+                source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
+                source_units = [item for item in source_units if isinstance(item, dict)]
+                for item in source_units:
+                    building = str(item.get("building", "") or "").strip()
+                    source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
+                    power_file = str(item.get("power_file", "") or source_files.get("power_file", "") or item.get("file_path", "") or item.get("source_file", "") or "").strip()
+                    current_file = str(item.get("current_file", "") or source_files.get("current_file", "") or "").strip()
+                    switch_file = str(item.get("switch_file", "") or source_files.get("switch_file", "") or "").strip()
+                    full_cabinet_power_file = str(
+                        item.get("full_cabinet_power_file", "") or source_files.get("full_cabinet_power_file", "") or ""
+                    ).strip()
+                    if not building or not power_file:
+                        continue
+                    for label, file_path in (
+                        ("支路功率", power_file),
+                        ("支路电流", current_file),
+                        ("支路开关", switch_file),
+                        ("楼栋全机柜功率", full_cabinet_power_file),
+                    ):
+                        if not file_path or (self.role_mode != "external" and not is_accessible_cached_file_path(file_path)):
+                            raise FileNotFoundError(f"共享目录中的{label}整日源文件不存在或不可访问: {file_path or '-'}")
+                    metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+                    normalized_units.append(
+                        {
+                            "building": building,
+                            "file_path": power_file,
+                            "power_file": power_file,
+                            "current_file": current_file,
+                            "switch_file": switch_file,
+                            "full_cabinet_power_file": full_cabinet_power_file,
+                            "business_date": business_date,
+                            "metadata": metadata,
+                        }
+                    )
+                if not normalized_units:
+                    raise RuntimeError("共享目录中没有可继续上传的支路整日源文件")
 
             resume_job_id = self._resume_job_id_from_task(task)
             if resume_job_id:

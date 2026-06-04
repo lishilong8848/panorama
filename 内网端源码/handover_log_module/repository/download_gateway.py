@@ -929,11 +929,12 @@ class DownloadGateway:
         start_time: str,
         end_time: str,
         scale_label: str,
+        template_name: str = "",
         sheet_name: str = "",
         start_end_visible_timeout_ms: int,
     ) -> None:
         try:
-            is_chiller_mode_switch = "制冷单元模式切换参数" in str(sheet_name or "")
+            is_chiller_mode_switch = "制冷单元模式切换参数" in f"{template_name or ''} {sheet_name or ''}"
             await self._fill_text_input_by_widget_or_label(
                 frame2,
                 label_text="开始时间",
@@ -1306,6 +1307,7 @@ class DownloadGateway:
                                 start_time=start_time,
                                 end_time=end_time,
                                 scale_label=scale_label,
+                                template_name=template_name,
                                 sheet_name=sheet_name,
                                 start_end_visible_timeout_ms=start_end_visible_timeout_ms,
                             ),

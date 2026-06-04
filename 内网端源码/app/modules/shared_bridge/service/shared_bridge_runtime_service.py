@@ -2517,6 +2517,8 @@ class SharedBridgeRuntimeService:
         range_query_start: str | None = None,
         range_query_end: str | None = None,
         requested_source_units: List[Dict[str, Any]] | None = None,
+        upload_buildings: List[str] | None = None,
+        skip_main_table: bool | None = None,
         mode: str | None = None,
         target_business_date: str | None = None,
         requested_by: str = "manual",
@@ -2532,6 +2534,8 @@ class SharedBridgeRuntimeService:
             range_query_start=range_query_start,
             range_query_end=range_query_end,
             requested_source_units=requested_source_units,
+            upload_buildings=upload_buildings,
+            skip_main_table=skip_main_table,
             mode=mode,
             target_business_date=target_business_date,
             created_by_role=self.role_mode,
@@ -2611,6 +2615,8 @@ class SharedBridgeRuntimeService:
         range_query_start: str | None = None,
         range_query_end: str | None = None,
         requested_source_units: List[Dict[str, Any]] | None = None,
+        upload_buildings: List[str] | None = None,
+        skip_main_table: bool | None = None,
         mode: str | None = None,
         target_business_date: str | None = None,
         requested_by: str = "manual",
@@ -2619,6 +2625,7 @@ class SharedBridgeRuntimeService:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
         normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        normalized_upload_buildings = [str(item or "").strip() for item in (upload_buildings or []) if str(item or "").strip()]
         normalized_bucket_keys = []
         normalized_requested_units: List[Dict[str, Any]] = []
         resolved_bucket_key = str(target_bucket_key or "").strip()
@@ -2644,6 +2651,10 @@ class SharedBridgeRuntimeService:
             bucket_dedupe or _now_text()[:13],
             ",".join(normalized_buildings) or "all_enabled",
         ]
+        if normalized_upload_buildings:
+            dedupe_parts.append("upload=" + ",".join(normalized_upload_buildings))
+        if bool(skip_main_table):
+            dedupe_parts.append("skip_main_table")
         dedupe_key = "|".join(dedupe_parts)
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
@@ -2656,6 +2667,8 @@ class SharedBridgeRuntimeService:
             range_query_start=range_query_start,
             range_query_end=range_query_end,
             requested_source_units=normalized_requested_units,
+            upload_buildings=normalized_upload_buildings,
+            skip_main_table=skip_main_table,
             mode=normalized_mode,
             target_business_date=normalized_business_date,
             requested_by=requested_by,

@@ -148,11 +148,9 @@ class HandoverDownloadService:
             or root_cfg.get("template_name")
             or "制冷单元模式切换参数"
         ).strip()
-        base_cfg["sheet_name"] = str(
-            download_cfg.get("sheet_name")
-            or root_cfg.get("sheet_name")
-            or "制冷单元模式切换参数"
-        ).strip()
+        # 制冷单元模式切换参数页只需要开始时间、结束时间和查询刻度。
+        # 这里不能传 sheet_name，否则通用填参逻辑可能误触发页面上的测点/配置控件。
+        base_cfg["sheet_name"] = ""
         base_cfg["scale_label"] = str(
             download_cfg.get("scale_label")
             or root_cfg.get("scale_label")
