@@ -275,11 +275,14 @@ class InternalBridgeHttpTaskRunner:
         building: str = "",
         bucket_kind: str = "",
         duty_shift: str = "",
+        status: str = "ready",
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         store = self._get_store()
         bucket_text = str(bucket_or_date or "").strip()
         kind_text = str(bucket_kind or "").strip().lower()
+        status_text = str(status or "ready").strip().lower()
+        status_filter = "" if status_text in {"all", "*"} else status_text
         duty_date = ""
         bucket_key = bucket_text
         if kind_text == "date" or (len(bucket_text) == 10 and bucket_text.count("-") == 2):
@@ -293,7 +296,7 @@ class InternalBridgeHttpTaskRunner:
             bucket_key=bucket_key,
             duty_date=duty_date,
             duty_shift=duty_shift,
-            status="ready",
+            status=status_filter,
             limit=limit,
         )
         entries = self._merge_main_source_cache_entries(
@@ -304,6 +307,7 @@ class InternalBridgeHttpTaskRunner:
             bucket_key=bucket_key,
             duty_date=duty_date,
             duty_shift=duty_shift,
+            status=status_filter,
             limit=limit,
         )
         entries = self._recover_source_index_from_existing_files_if_needed(
@@ -327,7 +331,8 @@ class InternalBridgeHttpTaskRunner:
             if relative and shared_root is not None:
                 item.setdefault("file_path", str(shared_root / relative.replace("/", "\\")))
             file_path_text = str(item.get("file_path", "") or "").strip()
-            if not self._source_index_file_accessible(file_path_text):
+            item_status = str(item.get("status", "") or "").strip().lower()
+            if item_status == "ready" and not self._source_index_file_accessible(file_path_text):
                 self._emit(
                     "[内网HTTP桥接] source-index 已过滤不可访问源文件: "
                     f"family={source_family or '-'}, building={item.get('building') or building or '-'}, "
@@ -397,6 +402,7 @@ class InternalBridgeHttpTaskRunner:
         bucket_key: str = "",
         duty_date: str = "",
         duty_shift: str = "",
+        status: str = "",
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         """Merge HTTP-task-local index with the main internal source cache index.
@@ -442,7 +448,7 @@ class InternalBridgeHttpTaskRunner:
                     bucket_key=bucket_key,
                     duty_date=duty_date,
                     duty_shift=duty_shift,
-                    status="ready",
+                    status=status,
                     limit=max(int(limit or 50), 200),
                 )
                 for row in rows if isinstance(rows, list) else []:
@@ -699,6 +705,7 @@ class InternalBridgeHttpTaskRunner:
                     building=str(query.get("building", "") or ""),
                     bucket_kind=str(query.get("bucket_kind", "") or ""),
                     duty_shift=str(query.get("duty_shift", "") or ""),
+                    status=str(query.get("status", "ready") or "ready"),
                     limit=int(query.get("limit", default_limit) or default_limit),
                 )
                 results.append({"index": index, "ok": True, "entries": entries})

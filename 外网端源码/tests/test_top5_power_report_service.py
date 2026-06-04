@@ -300,6 +300,47 @@ class Top5PowerReportWorkerHandlerTest(unittest.TestCase):
 
 
 class Top5PowerReportBridgeRuntimeTest(unittest.TestCase):
+    def test_latest_selection_prefers_newer_failed_over_old_ready(self) -> None:
+        from app.modules.shared_bridge.service import shared_bridge_runtime_service as bridge_module
+
+        runtime = bridge_module.SharedBridgeRuntimeService.__new__(bridge_module.SharedBridgeRuntimeService)
+        runtime._http_source_cache_buildings = lambda buildings=None: ["A楼"]
+
+        def fake_entries(*, source_family, buildings, bucket_key, status="ready", limit_per_building):  # noqa: ANN001
+            self.assertEqual(status, "all")
+            return [
+                {
+                    "building": "A楼",
+                    "status": "ready",
+                    "bucket_key": "2026-06-04 08",
+                    "file_path": r"D:\share\old.xlsx",
+                    "relative_path": "old.xlsx",
+                    "downloaded_at": "2026-06-04 08:10:00",
+                    "updated_at": "2026-06-04 08:10:00",
+                },
+                {
+                    "building": "A楼",
+                    "status": "failed",
+                    "bucket_key": "2026-06-04 09",
+                    "metadata": {"error": "下载失败"},
+                    "downloaded_at": "2026-06-04 09:10:00",
+                    "updated_at": "2026-06-04 09:10:00",
+                },
+            ]
+
+        runtime._http_source_index_entries = fake_entries
+        selection = runtime._http_latest_source_cache_selection(
+            source_family=bridge_module.FAMILY_TOP5_MONTHLY_REPORT,
+            buildings=["A楼"],
+            max_selection_age_hours=999999,
+        )
+
+        self.assertFalse(selection["can_proceed"])
+        self.assertEqual(selection["failed_buildings"], ["A楼"])
+        self.assertEqual(selection["selected_entries"], [])
+        self.assertEqual(selection["buildings"][0]["status"], "failed")
+        self.assertEqual(selection["buildings"][0]["last_error"], "下载失败")
+
     def test_refresh_latest_waits_for_entries_downloaded_after_request(self) -> None:
         from app.modules.shared_bridge.service import shared_bridge_runtime_service as bridge_module
 
@@ -313,12 +354,13 @@ class Top5PowerReportBridgeRuntimeTest(unittest.TestCase):
         }
         calls = {"count": 0}
 
-        def fake_entries(*, source_family, buildings, bucket_key, limit_per_building):  # noqa: ANN001
+        def fake_entries(*, source_family, buildings, bucket_key, status="ready", limit_per_building):  # noqa: ANN001
             calls["count"] += 1
             if calls["count"] == 1:
                 return [
                     {
                         "building": "A楼",
+                        "status": "ready",
                         "file_path": r"D:\share\old.xlsx",
                         "downloaded_at": "2000-01-01 00:00:00",
                         "updated_at": "2000-01-01 00:00:00",
@@ -327,6 +369,7 @@ class Top5PowerReportBridgeRuntimeTest(unittest.TestCase):
             return [
                 {
                     "building": "A楼",
+                    "status": "ready",
                     "file_path": r"D:\share\new.xlsx",
                     "downloaded_at": "2099-01-01 00:00:00",
                     "updated_at": "2099-01-01 00:00:00",

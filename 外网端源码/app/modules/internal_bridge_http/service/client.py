@@ -182,6 +182,7 @@ class InternalBridgeHttpClient:
         building: str = "",
         bucket_kind: str = "",
         duty_shift: str = "",
+        status: str = "ready",
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         payload = self._request(
@@ -193,6 +194,7 @@ class InternalBridgeHttpClient:
                 "building": building,
                 "bucket_kind": bucket_kind,
                 "duty_shift": duty_shift,
+                "status": status,
                 "limit": limit,
             },
         )

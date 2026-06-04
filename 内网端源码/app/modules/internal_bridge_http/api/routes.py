@@ -177,6 +177,7 @@ def query_internal_source_index(
     building: str = "",
     bucket_kind: str = "",
     duty_shift: str = "",
+    status: str = "ready",
     limit: int = 50,
     x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
@@ -187,6 +188,7 @@ def query_internal_source_index(
         building=building,
         bucket_kind=bucket_kind,
         duty_shift=duty_shift,
+        status=status,
         limit=limit,
     )
     return {"ok": True, "entries": entries}

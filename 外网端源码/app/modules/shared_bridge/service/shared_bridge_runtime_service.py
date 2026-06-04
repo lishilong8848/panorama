@@ -1305,6 +1305,7 @@ class SharedBridgeRuntimeService:
         buildings: List[str] | None = None,
         bucket_key: str | None = None,
         duty_shift: str = "",
+        status: str = "ready",
         limit_per_building: int = 20,
     ) -> List[Dict[str, Any]] | None:
         if not self._http_bridge_should_try():
@@ -1317,6 +1318,8 @@ class SharedBridgeRuntimeService:
         target_buildings = self._http_source_cache_buildings(buildings)
         target_bucket = str(bucket_key or "").strip()
         query_specs = self._http_source_index_query_specs(source_family, target_bucket)
+        status_text = str(status or "ready").strip().lower()
+        status_filter_all = status_text in {"all", "*"}
         output: List[Dict[str, Any]] = []
         seen: set[str] = set()
         try:
@@ -1330,6 +1333,7 @@ class SharedBridgeRuntimeService:
                             "building": building,
                             "bucket_kind": spec.get("bucket_kind", ""),
                             "duty_shift": duty_shift,
+                            "status": status_text,
                             "limit": max(1, int(limit_per_building or 20)),
                         }
                     )
@@ -1361,7 +1365,8 @@ class SharedBridgeRuntimeService:
                     if not isinstance(row, dict):
                         continue
                     item = self._normalize_http_source_index_entry(row)
-                    if str(item.get("status", "") or "").strip().lower() != "ready":
+                    item_status = str(item.get("status", "") or "").strip().lower()
+                    if not status_filter_all and item_status != status_text:
                         continue
                     if str(item.get("source_family", "") or "").strip().lower() != str(source_family or "").strip().lower():
                         continue
@@ -1414,6 +1419,7 @@ class SharedBridgeRuntimeService:
             source_family=source_family,
             buildings=buildings,
             bucket_key=target_bucket_key,
+            status="all",
             limit_per_building=30,
         )
         if entries is None:
@@ -1441,6 +1447,7 @@ class SharedBridgeRuntimeService:
         fallback_buildings: List[str] = []
         missing_buildings: List[str] = []
         stale_buildings: List[str] = []
+        failed_buildings: List[str] = []
         building_rows: List[Dict[str, Any]] = []
         best_bucket_age_hours: float | None = None
         is_best_bucket_too_old = False
@@ -1474,21 +1481,25 @@ class SharedBridgeRuntimeService:
             candidate_dt = candidate.get("_bucket_dt") if isinstance(candidate.get("_bucket_dt"), datetime) else None
             version_gap = max(0, int((latest_bucket_dt - candidate_dt).total_seconds() // 3600)) if candidate_dt else 0
             using_fallback = version_gap > 0
+            candidate_status = str(candidate.get("status", "") or "").strip().lower() or "ready"
+            metadata = candidate.get("metadata", {}) if isinstance(candidate.get("metadata", {}), dict) else {}
             row = {
                 "building": building,
                 "bucket_key": str(candidate.get("bucket_key", "") or "").strip(),
-                "status": "ready",
+                "status": candidate_status if candidate_status in {"ready", "failed"} else "waiting",
                 "using_fallback": using_fallback,
                 "version_gap": version_gap,
                 "downloaded_at": str(candidate.get("downloaded_at", "") or "").strip(),
-                "last_error": "",
+                "last_error": str(metadata.get("error", "") or candidate.get("last_error", "") or "").strip() if candidate_status == "failed" else "",
                 "relative_path": str(candidate.get("relative_path", "") or "").strip(),
-                "resolved_file_path": str(candidate.get("file_path", "") or "").strip(),
+                "resolved_file_path": str(candidate.get("file_path", "") or "").strip() if candidate_status == "ready" else "",
                 "blocked": False,
                 "blocked_reason": "",
                 "next_probe_at": "",
             }
-            if version_gap > max_version_gap:
+            if candidate_status == "failed":
+                failed_buildings.append(building)
+            elif version_gap > max_version_gap:
                 row["status"] = "stale"
                 stale_buildings.append(building)
             else:
@@ -1506,11 +1517,13 @@ class SharedBridgeRuntimeService:
             "fallback_buildings": fallback_buildings,
             "missing_buildings": missing_buildings,
             "stale_buildings": stale_buildings,
+            "failed_buildings": failed_buildings,
             "blocked_buildings": [],
             "buildings": building_rows,
             "can_proceed": bool(target_buildings)
             and not missing_buildings
             and not stale_buildings
+            and not failed_buildings
             and not is_best_bucket_too_old
             and len(selected_entries) == len(target_buildings),
             "transport": "http",
@@ -1557,7 +1570,7 @@ class SharedBridgeRuntimeService:
         self,
         *,
         buildings: List[str],
-        timeout_sec: int = 420,
+        timeout_sec: int = 1200,
         poll_interval_sec: float = 5.0,
         emit_log: Callable[[str], None] | None = None,
         cancel_check: Callable[[], None] | None = None,
@@ -1582,8 +1595,10 @@ class SharedBridgeRuntimeService:
             reason = str(refresh_result.get("error") or refresh_result.get("reason") or "内网端未受理下载任务").strip()
             raise RuntimeError(f"TOP5月报源文件下载任务提交失败: {reason}")
 
-        deadline = time.monotonic() + max(30.0, float(timeout_sec or 420))
+        deadline = time.monotonic() + max(30.0, float(timeout_sec or 1200))
         poll_interval = max(1.0, float(poll_interval_sec or 5.0))
+        retry_interval_sec = 60.0
+        next_retry_monotonic = time.monotonic() + retry_interval_sec
         last_log_key = ""
         while True:
             if cancel_check:
@@ -1592,12 +1607,28 @@ class SharedBridgeRuntimeService:
                 source_family=FAMILY_TOP5_MONTHLY_REPORT,
                 buildings=target_buildings,
                 bucket_key="",
+                status="all",
                 limit_per_building=50,
             )
             if entries is None:
                 raise RuntimeError("内网端 HTTP source-index 暂不可用，无法读取 TOP5 月报源文件下载结果")
+            ready_entries = [
+                item
+                for item in entries
+                if isinstance(item, dict) and str(item.get("status", "") or "").strip().lower() == "ready"
+            ]
+            failed_entries = [
+                item
+                for item in entries
+                if isinstance(item, dict) and str(item.get("status", "") or "").strip().lower() == "failed"
+            ]
             selected = self._latest_http_entries_by_building(
-                entries=entries,
+                entries=ready_entries,
+                buildings=target_buildings,
+                not_before=request_started_at,
+            )
+            latest_failed = self._latest_http_entries_by_building(
+                entries=failed_entries,
                 buildings=target_buildings,
                 not_before=request_started_at,
             )
@@ -1613,12 +1644,43 @@ class SharedBridgeRuntimeService:
                         )
                     )
                 return output
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"TOP5月报源文件下载等待超时，缺失楼栋: {','.join(missing)}")
-            log_key = ",".join(missing)
+            now_monotonic = time.monotonic()
+            failed_detail = "; ".join(
+                f"{building}:{str((latest_failed.get(building) or {}).get('metadata', {}).get('error') or (latest_failed.get(building) or {}).get('last_error') or '下载失败').strip()}"
+                for building in missing
+                if building in latest_failed
+            )
+            if now_monotonic >= deadline:
+                completed = [building for building in target_buildings if building in selected]
+                detail_parts = [
+                    f"已完成: {','.join(completed) or '-'}",
+                    f"缺失: {','.join(missing) or '-'}",
+                ]
+                if failed_detail:
+                    detail_parts.append(f"失败详情: {failed_detail}")
+                raise RuntimeError("TOP5月报源文件下载等待超时，" + "；".join(detail_parts))
+            log_key = "|".join([",".join(missing), failed_detail])
             if emit_log and log_key != last_log_key:
-                emit_log(f"[TOP5功率文件生成] 等待内网端 TOP5 月报源文件下载完成: missing={log_key}")
+                emit_log(
+                    "[TOP5功率文件生成] 等待内网端 TOP5 月报源文件下载完成: "
+                    f"completed={len(selected)}/{len(target_buildings)}, missing={','.join(missing)}"
+                    + (f", failed={failed_detail}" if failed_detail else "")
+                )
                 last_log_key = log_key
+            if now_monotonic >= next_retry_monotonic:
+                next_retry_monotonic = now_monotonic + retry_interval_sec
+                retry_result = self.request_latest_source_cache_refresh(
+                    source_family=FAMILY_TOP5_MONTHLY_REPORT,
+                    buildings=missing,
+                )
+                if emit_log:
+                    accepted = int(retry_result.get("accepted_count", 0) or 0) if isinstance(retry_result, dict) else 0
+                    reason = str((retry_result or {}).get("reason", "") or (retry_result or {}).get("error", "") or "").strip() if isinstance(retry_result, dict) else ""
+                    emit_log(
+                        "[TOP5功率文件生成] 已重新请求缺失楼栋下载: "
+                        f"buildings={','.join(missing)}, accepted={accepted}"
+                        + (f", reason={reason}" if reason else "")
+                    )
             time.sleep(poll_interval)
 
     def _http_alarm_event_upload_selection(self, *, building: str = "") -> Dict[str, Any] | None:
@@ -1890,7 +1952,12 @@ class SharedBridgeRuntimeService:
         ]
         live_payload = {
             "ready_count": sum(1 for row in live_rows if row.get("status") == "ready"),
-            "failed_buildings": [],
+            "failed_buildings": [
+                str(row.get("building", "") or "").strip()
+                for row in live_rows
+                if str(row.get("status", "") or "").strip().lower() == "failed"
+                and str(row.get("building", "") or "").strip()
+            ],
             "blocked_buildings": [],
             "last_success_at": max(
                 (
