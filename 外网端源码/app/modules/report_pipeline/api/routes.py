@@ -5636,8 +5636,6 @@ def job_branch_power_from_download(payload: Dict[str, Any], request: Request) ->
                     bridge_kwargs={
                         "target_bucket_key": current_business_date,
                         "buildings": bridge_buildings,
-                        "upload_buildings": buildings,
-                        "skip_main_table": not upload_main_table,
                         "requested_by": str(requested_by or submitted_by or "").strip() or "manual",
                         "mode": "daily_branch_sources",
                         "target_business_date": current_business_date,
@@ -5805,8 +5803,6 @@ def job_branch_power_power_alert_sync(payload: Dict[str, Any], request: Request)
                         bridge_kwargs={
                             "target_bucket_key": business_date_key,
                             "buildings": bridge_buildings,
-                            "upload_buildings": buildings,
-                            "skip_main_table": True,
                             "requested_by": submitted_by,
                             "mode": "daily_branch_sources",
                             "target_business_date": business_date_key,
