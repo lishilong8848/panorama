@@ -20,7 +20,22 @@ STATION_H_LONG_DAY_ROLE_BY_NAME = {
     "曹毅": "弱电主管",
     "明志勇": "安全&消防工程师",
     "高荣": "消防主管",
+    "李苏琪": "FOC",
+    "曾娜娜": "FOC",
+    "刘小杏": "FOC",
 }
+
+STATION_H_DEFAULT_LONG_DAY_NAMES = [
+    "梅冰冰",
+    "马进宇",
+    "曹李培",
+    "王庆华",
+    "周海祥",
+    "曹毅",
+    "明志勇",
+    "高荣",
+    "李苏琪",
+]
 
 
 def _now_text() -> str:
@@ -50,10 +65,22 @@ def split_station_h_people(value: Any) -> List[str]:
             parts.extend(split_station_h_people(item))
     else:
         raw = str(value or "").strip()
-        if "：" in raw:
-            raw = raw.split("：", 1)[1]
-        elif ":" in raw:
-            raw = raw.split(":", 1)[1]
+        separator = "：" if "：" in raw else (":" if ":" in raw else "")
+        if separator:
+            before, after = [item.strip() for item in raw.split(separator, 1)]
+            before_key = re.sub(r"\s+", "", before)
+            after_key = re.sub(r"\s+", "", after)
+            known_before = any(re.sub(r"\s+", "", name) in before_key for name in STATION_H_LONG_DAY_ROLE_BY_NAME)
+            known_after = any(re.sub(r"\s+", "", name) in after_key for name in STATION_H_LONG_DAY_ROLE_BY_NAME)
+            label_before = bool(re.search(r"(人员|长白岗|常白岗|值班|接班|交班|跟进人|负责人|FOC)", before))
+            if known_before and not known_after:
+                raw = before
+            elif known_after and not known_before:
+                raw = after
+            elif label_before and after:
+                raw = after
+            elif after:
+                raw = after
         parts = [item.strip() for item in re.split(r"[、,/，；;\s]+", raw) if item.strip()]
     seen: set[str] = set()
     output: list[str] = []
@@ -70,10 +97,44 @@ def join_station_h_people(names: Sequence[Any]) -> str:
     return "、".join(split_station_h_people(list(names)))
 
 
+def _station_h_name_key(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def _matches_station_h_name(candidate: Any, expected_name: str) -> bool:
+    candidate_key = _station_h_name_key(candidate)
+    expected_key = _station_h_name_key(expected_name)
+    return bool(candidate_key and expected_key and (candidate_key == expected_key or expected_key in candidate_key))
+
+
 def station_h_long_day_text(names: Sequence[Any] | Any) -> str:
-    selected = set(split_station_h_people(names))
-    ordered = [name for name in STATION_H_LONG_DAY_ROLE_BY_NAME if name in selected]
+    selected = split_station_h_people(names)
+    ordered = [
+        name
+        for name in STATION_H_LONG_DAY_ROLE_BY_NAME
+        if any(_matches_station_h_name(item, name) for item in selected)
+    ]
     return f"常白岗：{' '.join(ordered) if ordered else '/'}"
+
+
+def station_h_is_long_day_person(name: Any) -> bool:
+    for item in STATION_H_LONG_DAY_ROLE_BY_NAME:
+        if _matches_station_h_name(name, item):
+            return True
+    return False
+
+
+def station_h_filter_duty_people(names: Any) -> List[str]:
+    return [name for name in split_station_h_people(names) if not station_h_is_long_day_person(name)]
+
+
+def station_h_default_long_day_people_from_roster(names: Any) -> List[str]:
+    roster_people = split_station_h_people(names)
+    return [
+        name
+        for name in STATION_H_DEFAULT_LONG_DAY_NAMES
+        if any(_matches_station_h_name(item, name) for item in roster_people)
+    ]
 
 
 def _runtime_config_from_handover_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -173,43 +234,18 @@ class StationHReviewSelectionService:
             exact["resolved_source"] = "current"
             return exact
 
-        current_people: list[str] = []
-        next_people: list[str] = []
-        people_source = ""
-        for candidate in self._same_team_candidates(duty_date_text, duty_shift_text):
-            saved = self.get_selection(candidate["duty_date"], candidate["duty_shift"])
-            if not saved:
-                continue
-            candidate_current = split_station_h_people(saved.get("current_people", []))
-            candidate_next = split_station_h_people(saved.get("next_people", []))
-            if candidate_current or candidate_next:
-                current_people = candidate_current
-                next_people = candidate_next
-                people_source = f"rotation:{saved.get('batch_key', '')}"
-                break
-
-        long_day_people: list[str] = []
-        long_day_source = ""
-        for candidate in self._previous_shift_candidates(duty_date_text, duty_shift_text):
-            saved = self.get_selection(candidate["duty_date"], candidate["duty_shift"])
-            if not saved:
-                continue
-            long_day_people = self._normalize_long_day_people(saved.get("long_day_people", []))
-            long_day_source = f"previous:{saved.get('batch_key', '')}"
-            break
-
         return self._normalize_payload(
             {
                 "duty_date": duty_date_text,
                 "duty_shift": duty_shift_text,
                 "batch_key": station_h_build_batch_key(duty_date_text, duty_shift_text),
-                "current_people": current_people,
-                "next_people": next_people,
-                "long_day_people": long_day_people,
+                "current_people": [],
+                "next_people": [],
+                "long_day_people": [],
                 "source": "fallback",
                 "resolved_source": "fallback",
-                "people_source": people_source,
-                "long_day_source": long_day_source,
+                "people_source": "roster_default",
+                "long_day_source": "roster_default",
                 "updated_at": "",
             }
         )
@@ -241,8 +277,12 @@ class StationHReviewSelectionService:
 
     @staticmethod
     def _normalize_long_day_people(value: Any) -> List[str]:
-        selected = set(split_station_h_people(value))
-        return [name for name in STATION_H_LONG_DAY_ROLE_BY_NAME if name in selected]
+        selected = split_station_h_people(value)
+        return [
+            name
+            for name in STATION_H_LONG_DAY_ROLE_BY_NAME
+            if any(_matches_station_h_name(item, name) for item in selected)
+        ]
 
     @staticmethod
     def _context(duty_day: datetime, duty_shift: str) -> Dict[str, str]:
@@ -280,4 +320,3 @@ class StationHReviewSelectionService:
                 cursor_shift = "night"
             candidates.append(self._context(cursor_day, cursor_shift))
         return candidates
-

@@ -24,6 +24,7 @@ from app.config.settings_loader import (
 )
 from app.shared.utils.frontend_cache import render_frontend_index_html, source_frontend_no_cache_headers
 from handover_log_module.api.facade import load_handover_config
+from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
@@ -53,9 +54,11 @@ from handover_log_module.service.review_session_service import (
 from handover_log_module.service.station_h_review_selection_service import (
     STATION_H_LONG_DAY_ROLE_BY_NAME,
     StationHReviewSelectionService,
+    station_h_default_long_day_people_from_roster,
     join_station_h_people,
     split_station_h_people,
     station_h_build_batch_key,
+    station_h_filter_duty_people,
 )
 
 
@@ -2003,8 +2006,20 @@ def _resolve_building_or_404(service: ReviewSessionService, building_code: str) 
     return building
 
 
+def _normalize_review_page_code(building_code: str) -> str:
+    raw = str(building_code or "").strip()
+    code = raw.lower()
+    if code in {"110", "110站"}:
+        return "110"
+    if code in {"h", "h楼"} or raw == "H楼":
+        return "h"
+    if code.endswith("楼") and len(code) >= 2:
+        code = code[:-1]
+    return code
+
+
 def _ensure_review_page_code_or_404(building_code: str) -> None:
-    code = str(building_code or "").strip().lower()
+    code = _normalize_review_page_code(building_code)
     if code in {"110", "h"} or code in {"a", "b", "c", "d", "e"}:
         return
     raise HTTPException(status_code=404, detail="未知楼栋页面")
@@ -3499,6 +3514,29 @@ def _station_h_long_day_options() -> list[dict[str, str]]:
     ]
 
 
+def _station_h_roster_candidate_people(
+    container,
+    *,
+    handover_cfg: Dict[str, Any],
+    duty_date: str,
+    duty_shift: str,
+) -> tuple[list[str], list[str], list[str], str]:
+    try:
+        assignment = ShiftRosterRepository(handover_cfg).query_assignment(
+            building="H楼",
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=getattr(container, "add_system_log", print),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return [], [], [], f"排班候选读取失败: {exc}"
+    current_raw = getattr(assignment, "current_people", "")
+    current_candidates = station_h_filter_duty_people(current_raw)
+    next_candidates = station_h_filter_duty_people(getattr(assignment, "next_people", ""))
+    long_day_candidates = station_h_default_long_day_people_from_roster(current_raw)
+    return current_candidates, next_candidates, long_day_candidates, ""
+
+
 def _station_h_status_payload(
     container,
     *,
@@ -3516,6 +3554,33 @@ def _station_h_status_payload(
     selected_current = resolved_selection.get("current_people", [])
     selected_next = resolved_selection.get("next_people", [])
     selected_long_day = resolved_selection.get("long_day_people", [])
+    selected_current_people = split_station_h_people(selected_current)
+    selected_next_people = split_station_h_people(selected_next)
+    roster_current_candidates: list[str] = []
+    roster_next_candidates: list[str] = []
+    roster_long_day_candidates: list[str] = []
+    roster_candidate_error = ""
+    if not selected_current_people or not selected_next_people or not bool(saved_selection):
+        (
+            roster_current_candidates,
+            roster_next_candidates,
+            roster_long_day_candidates,
+            roster_candidate_error,
+        ) = _station_h_roster_candidate_people(
+            container,
+            handover_cfg=handover_cfg,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+        )
+        if not selected_current_people:
+            selected_current = roster_current_candidates
+            selected_current_people = split_station_h_people(selected_current)
+        if not selected_next_people:
+            selected_next = roster_next_candidates
+            selected_next_people = split_station_h_people(selected_next)
+        if not bool(saved_selection):
+            selected_long_day = roster_long_day_candidates
+    selected_long_day_people = split_station_h_people(selected_long_day)
     return {
         "ok": True,
         "building": "H楼",
@@ -3531,11 +3596,11 @@ def _station_h_status_payload(
             "duty_date": duty_date_text,
             "duty_shift": duty_shift_text,
             "batch_key": batch_key,
-            "current_people": split_station_h_people(selected_current),
+            "current_people": selected_current_people,
             "current_people_text": join_station_h_people(selected_current),
-            "next_people": split_station_h_people(selected_next),
+            "next_people": selected_next_people,
             "next_people_text": join_station_h_people(selected_next),
-            "long_day_people": split_station_h_people(selected_long_day),
+            "long_day_people": selected_long_day_people,
             "long_day_people_text": join_station_h_people(selected_long_day),
             "source": str(resolved_selection.get("source", "") or "").strip(),
             "resolved_source": str(resolved_selection.get("resolved_source", "") or "").strip(),
@@ -3544,13 +3609,17 @@ def _station_h_status_payload(
             "updated_at": str(resolved_selection.get("updated_at", "") or "").strip(),
         },
         "options": {
-            "current_people": _station_h_person_options(selected_current, selected_next),
-            "next_people": _station_h_person_options(selected_next, selected_current),
+            "current_people": _station_h_person_options(selected_current, roster_current_candidates, roster_next_candidates),
+            "next_people": _station_h_person_options(selected_next, roster_next_candidates, roster_current_candidates),
             "long_day_people": _station_h_long_day_options(),
         },
         "rules": {
-            "duty_people": "首次手动填写；后续按白夜休休轮换，优先复用同一班组上次保存的值。",
-            "long_day_people": "默认复用上一班组保存的长白岗；当天不上班或第二天不上班时可手动清空或改选。",
+            "duty_people": "默认使用当前班次排班人员；保存后优先使用本页手动值。",
+            "long_day_people": "默认填写固定长白岗；当天不上班或第二天不上班时可手动清空或改选。",
+        },
+        "candidate_source": {
+            "duty_people": "saved" if bool(saved_selection) else "roster_default",
+            "error": roster_candidate_error,
         },
     }
 

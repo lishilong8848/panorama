@@ -44,7 +44,7 @@ const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
   { key: "G", label: "其他补充说明", source_cols: ["G"], span: 1 },
   { key: "H", label: "清点确认人（接班）", source_cols: ["H"], span: 1 },
 ];
-const REVIEW_PATH_RE = /^\/handover\/review\/([a-e]|h|110)\/?$/i;
+const REVIEW_PATH_RE = /^\/handover\/review\/([a-e](?:楼)?|h(?:楼)?|110(?:站)?)\/?$/i;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const SUBSTATION_110KV_AUTO_SAVE_DEBOUNCE_MS = 350;
@@ -578,6 +578,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
             @click="togglePerson('current_people_text', item.name)"
           >{{ item.label || item.name }}</button>
         </div>
+        <div v-else class="person-picker-hint">暂无候选人员，可直接输入姓名后保存。</div>
         <small class="person-picker-hint">{{ state.rules.duty_people || "首次填写后，下个同班组自动复用。" }}</small>
       </article>
 
@@ -598,6 +599,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
             @click="togglePerson('next_people_text', item.name)"
           >{{ item.label || item.name }}</button>
         </div>
+        <div v-else class="person-picker-hint">暂无候选人员，可直接输入姓名后保存。</div>
         <small class="person-picker-hint">保存后写入H楼交接班云文档接班区域。</small>
       </article>
 
@@ -1047,6 +1049,7 @@ function normalizeStationHState(raw = {}) {
         : [],
     },
     rules: raw?.rules && typeof raw.rules === "object" ? raw.rules : {},
+    candidate_source: raw?.candidate_source && typeof raw.candidate_source === "object" ? raw.candidate_source : {},
   };
 }
 
@@ -1138,13 +1141,26 @@ function mergeInventoryFooterBlock(currentDocument, nextDocument) {
   };
 }
 
+function normalizeReviewPathname(pathname = window.location.pathname) {
+  const raw = String(pathname || "").trim();
+  try {
+    return decodeURIComponent(raw);
+  } catch (_err) {
+    return raw;
+  }
+}
+
 export function isHandoverReviewPath(pathname = window.location.pathname) {
-  return REVIEW_PATH_RE.test(String(pathname || "").trim());
+  return REVIEW_PATH_RE.test(normalizeReviewPathname(pathname));
 }
 
 function resolveReviewBuildingCode(pathname = window.location.pathname) {
-  const match = String(pathname || "").trim().match(REVIEW_PATH_RE);
-  return match ? String(match[1] || "").toLowerCase() : "";
+  const match = normalizeReviewPathname(pathname).match(REVIEW_PATH_RE);
+  const code = match ? String(match[1] || "").toLowerCase() : "";
+  if (code === "110站") return "110";
+  if (code === "h楼") return "h";
+  if (/^[a-e]楼$/i.test(code)) return code.slice(0, 1).toLowerCase();
+  return code;
 }
 
 function resolveReviewSelection(search = window.location.search) {

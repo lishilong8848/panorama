@@ -25,6 +25,8 @@ from handover_log_module.service.review_document_state_service import (
 from handover_log_module.service.review_session_service import ReviewSessionNotFoundError, ReviewSessionService
 from handover_log_module.service.station_h_review_selection_service import (
     StationHReviewSelectionService,
+    station_h_default_long_day_people_from_roster,
+    station_h_filter_duty_people,
     station_h_long_day_text,
 )
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
@@ -1667,7 +1669,9 @@ class ReviewFollowupTriggerService:
 
         roster_repo = ShiftRosterRepository(self.config)
         assignment = None
-        if not current_names or not next_names:
+        selection_has_manual_long_day = str(selection.get("resolved_source", "") or "").strip() == "current"
+        long_day_people = self._station_h_split_people(selection.get("long_day_people", []))
+        if not current_names or not next_names or not selection_has_manual_long_day:
             try:
                 assignment = roster_repo.query_assignment(
                     building="H楼",
@@ -1676,53 +1680,26 @@ class ReviewFollowupTriggerService:
                     emit_log=emit_log,
                 )
             except Exception as exc:  # noqa: BLE001
-                if not current_names or not next_names:
-                    return {"ok": False, "status": "failed", "reason": "roster_failed", "error": str(exc)}
+                emit_log(f"[交接班][H楼云表] 排班读取失败，人员信息按空白写入: {exc}")
             if assignment is not None:
+                current_raw = getattr(assignment, "current_people", "")
                 if not current_names:
-                    current_names = self._station_h_split_people(assignment.current_people)
+                    current_names = station_h_filter_duty_people(current_raw)
                 if not next_names:
-                    next_names = self._station_h_split_people(assignment.next_people)
+                    next_names = station_h_filter_duty_people(assignment.next_people)
+                if not selection_has_manual_long_day:
+                    long_day_people = station_h_default_long_day_people_from_roster(current_raw)
         current_first = current_names[0] if current_names else ""
-        next_first = (
-            str(getattr(assignment, "next_first_person", "") or "").strip()
-            if assignment is not None
-            else ""
-        ) or (next_names[0] if next_names else "")
+        next_first = next_names[0] if next_names else ""
         if not current_names or not next_names or not current_first or not next_first:
-            return {
-                "ok": False,
-                "status": "failed",
-                "reason": "missing_roster_people",
-                "error": "H楼值班/接班人员未填写或未识别，请先在H楼审核页保存人员",
-            }
+            emit_log("[交接班][H楼云表] 值班/接班人员为空，按空白人员信息继续写入")
 
-        selection_has_long_day = bool(
-            str(selection.get("resolved_source", "") or "").strip() == "current"
-            or str(selection.get("long_day_source", "") or "").strip()
-        )
-        long_day_people = self._station_h_split_people(selection.get("long_day_people", []))
-        if selection_has_long_day:
-            long_day_cells = {
-                "B4" if duty_shift == "day" else "F4": self._station_h_long_day_text(long_day_people)
-            }
-        else:
-            try:
-                long_day_cells = roster_repo.query_long_day_cell_values(
-                    building="H楼",
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    emit_log=emit_log,
-                )
-            except Exception as exc:  # noqa: BLE001
-                emit_log(f"[交接班][H楼云表] 常白岗查询失败，将使用空值: {exc}")
-                long_day_cells = {}
         b4_value = "常白岗：/"
         f4_value = "常白岗：/"
         if duty_shift == "day":
-            b4_value = self._station_h_long_day_text(long_day_cells.get("B4", ""))
+            b4_value = self._station_h_long_day_text(long_day_people)
         else:
-            f4_value = self._station_h_long_day_text(long_day_cells.get("F4", ""))
+            f4_value = self._station_h_long_day_text(long_day_people)
 
         patrol_times = ("10:00", "15:00") if duty_shift == "day" else ("22：00", "3：00")
         shift_text = "白班" if duty_shift == "day" else "夜班"
