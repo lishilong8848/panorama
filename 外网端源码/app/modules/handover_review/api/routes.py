@@ -1035,6 +1035,9 @@ def _empty_followup_progress() -> Dict[str, Any]:
         "attachment_pending_count": 0,
         "cloud_pending_count": 0,
         "daily_report_status": "idle",
+        "items": [],
+        "pending_items": [],
+        "failed_items": [],
     }
 
 

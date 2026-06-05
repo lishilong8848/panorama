@@ -4,6 +4,7 @@ import copy
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -729,61 +730,123 @@ class InternalBridgeHttpTaskRunner:
         index_store = getattr(store, "_source_cache_index_store", None)
         shared_root = getattr(main_cache, "shared_root", None)
         family_root_getter = getattr(main_cache, "_family_root", None)
+        candidate_builder = getattr(main_cache, "_candidate_existing_latest_paths", None)
+        resolver = getattr(main_cache, "_resolve_relative_path_under_shared_root", None)
+        current_bucket_getter = getattr(main_cache, "current_chiller_mode_switch_bucket", None)
         if index_store is None or shared_root is None or not callable(family_root_getter):
             return None
         try:
             family_root = Path(family_root_getter(FAMILY_CHILLER_MODE_SWITCH))
         except Exception:
             return None
-        month_dir = family_root / time.strftime("%Y%m")
-        if not month_dir.is_dir():
-            return None
 
         building_text = str(building or "").strip()
         best_path: Path | None = None
-        best_key: tuple[float, str] = (0.0, "")
-        scanned = 0
-        try:
-            for candidate in month_dir.rglob(f"*{building_text}*.xlsx"):
-                scanned += 1
-                if scanned > 3000:
-                    self._emit(
-                        "[内网HTTP桥接] 扫描制冷模式月份目录达到上限，停止继续扫描: "
-                        f"building={building_text}, dir={month_dir}"
-                    )
-                    break
-                if not candidate.is_file():
-                    continue
-                parent_name = candidate.parent.name
-                parent_digits = "".join(ch for ch in parent_name if ch.isdigit())
-                if len(parent_digits) < 12:
-                    continue
+        best_key: tuple[float, float, str] = (0.0, 0.0, "")
+        best_bucket_key = ""
+
+        def _bucket_epoch(bucket_text: str) -> float:
+            digits = "".join(ch for ch in str(bucket_text or "") if ch.isdigit())
+            if len(digits) >= 12:
                 try:
-                    mtime = float(candidate.stat().st_mtime)
-                    if int(candidate.stat().st_size) <= 0:
-                        continue
-                except OSError:
-                    continue
-                candidate_key = (mtime, str(candidate))
+                    return datetime.strptime(digits[:12], "%Y%m%d%H%M").timestamp()
+                except ValueError:
+                    return 0.0
+            return 0.0
+
+        def _consider_candidate(candidate: Path, *, bucket_key: str = "") -> None:
+            nonlocal best_path, best_key, best_bucket_key
+            try:
+                if not candidate.is_file() or candidate.suffix.lower() != ".xlsx":
+                    return
+                if building_text and building_text not in candidate.name:
+                    return
+                stat = candidate.stat()
+                if int(stat.st_size) <= 0:
+                    return
+                bucket_epoch = _bucket_epoch(bucket_key)
+                if bucket_epoch <= 0:
+                    parent_digits = "".join(ch for ch in candidate.parent.name if ch.isdigit())
+                    bucket_epoch = _bucket_epoch(parent_digits)
+                candidate_key = (bucket_epoch, float(stat.st_mtime), str(candidate))
                 if candidate_key > best_key:
                     best_path = candidate
                     best_key = candidate_key
-        except OSError as exc:
-            self._emit(
-                "[内网HTTP桥接] 扫描制冷模式月份目录失败: "
-                f"building={building_text}, dir={month_dir}, error={exc}"
-            )
-            return None
+                    if bucket_key:
+                        best_bucket_key = bucket_key
+                    else:
+                        parent_digits = "".join(ch for ch in candidate.parent.name if ch.isdigit())
+                        if len(parent_digits) >= 12:
+                            best_bucket_key = (
+                                f"{parent_digits[:4]}-{parent_digits[4:6]}-{parent_digits[6:8]} "
+                                f"{parent_digits[8:10]}:{parent_digits[10:12]}"
+                            )
+            except OSError:
+                return
+
+        if callable(candidate_builder) and callable(resolver):
+            try:
+                current_bucket = (
+                    str(current_bucket_getter() or "").strip()
+                    if callable(current_bucket_getter)
+                    else time.strftime("%Y-%m-%d %H:%M")
+                )
+                for context in candidate_builder(
+                    source_family=FAMILY_CHILLER_MODE_SWITCH,
+                    building=building_text,
+                    bucket_key=current_bucket,
+                ) or []:
+                    if not isinstance(context, dict):
+                        continue
+                    relative_path = str(context.get("relative_path", "") or "").strip()
+                    if not relative_path:
+                        continue
+                    candidate = resolver(relative_path)
+                    if candidate is None:
+                        continue
+                    _consider_candidate(
+                        Path(candidate),
+                        bucket_key=str(context.get("bucket_key", "") or "").strip(),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._emit(
+                    "[内网HTTP桥接] 最近分钟制冷模式源文件补登记检查失败: "
+                    f"building={building_text}, error={exc}"
+                )
+
+        if best_path is None:
+            month_dir = family_root / time.strftime("%Y%m")
+            if not month_dir.is_dir():
+                return None
+            scanned = 0
+            try:
+                for candidate in month_dir.rglob(f"*{building_text}*.xlsx"):
+                    scanned += 1
+                    if scanned > 3000:
+                        self._emit(
+                            "[内网HTTP桥接] 扫描制冷模式月份目录达到上限，停止继续扫描: "
+                            f"building={building_text}, dir={month_dir}"
+                        )
+                        break
+                    _consider_candidate(candidate)
+            except OSError as exc:
+                self._emit(
+                    "[内网HTTP桥接] 扫描制冷模式月份目录失败: "
+                    f"building={building_text}, dir={month_dir}, error={exc}"
+                )
+                return None
         if best_path is None:
             return None
 
-        parent_digits = "".join(ch for ch in best_path.parent.name if ch.isdigit())
-        if len(parent_digits) < 12:
-            return None
-        bucket_key = (
-            f"{parent_digits[:4]}-{parent_digits[4:6]}-{parent_digits[6:8]} "
-            f"{parent_digits[8:10]}:{parent_digits[10:12]}"
-        )
+        bucket_key = str(best_bucket_key or "").strip()
+        if not bucket_key:
+            parent_digits = "".join(ch for ch in best_path.parent.name if ch.isdigit())
+            if len(parent_digits) < 12:
+                return None
+            bucket_key = (
+                f"{parent_digits[:4]}-{parent_digits[4:6]}-{parent_digits[6:8]} "
+                f"{parent_digits[8:10]}:{parent_digits[10:12]}"
+            )
         try:
             relative_path = best_path.relative_to(Path(shared_root)).as_posix()
         except ValueError:
@@ -792,7 +855,7 @@ class InternalBridgeHttpTaskRunner:
             best_size = int(best_path.stat().st_size)
         except OSError:
             return None
-        downloaded_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(best_key[0]))
+        downloaded_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(best_key[1] or time.time()))
         now_text = time.strftime("%Y-%m-%d %H:%M:%S")
         entry = {
             "entry_id": "|".join(

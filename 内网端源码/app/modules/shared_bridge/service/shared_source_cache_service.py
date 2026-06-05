@@ -1443,6 +1443,28 @@ class SharedSourceCacheService:
                 continue
         return fallback or datetime.now()
 
+    def _recent_chiller_mode_switch_buckets(self, bucket_key: str, *, lookback_minutes: int = 30) -> List[str]:
+        """Return the current and recent minute buckets for the chiller mode report.
+
+        The report is downloaded on a minute bucket, while the external scheduler
+        may query the next minute. Checking a bounded recent window avoids
+        needlessly re-downloading files that already exist, without scanning the
+        whole shared tree.
+        """
+        base = self._parse_chiller_mode_switch_bucket(
+            str(bucket_key or "").strip() or self.current_chiller_mode_switch_bucket(),
+            fallback=datetime.now(),
+        )
+        output: List[str] = []
+        seen: set[str] = set()
+        for offset in range(max(0, int(lookback_minutes or 0)) + 1):
+            key = (base - timedelta(minutes=offset)).strftime("%Y-%m-%d %H:%M")
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(key)
+        return output
+
     def get_enabled_buildings(self) -> List[str]:
         configured_sites = self.runtime_config.get("internal_source_sites", [])
         if isinstance(configured_sites, list):
@@ -6667,6 +6689,16 @@ class SharedSourceCacheService:
                 "duty_shift": "",
             }
         ]
+        if normalized_family == FAMILY_CHILLER_MODE_SWITCH:
+            contexts = [
+                {
+                    "bucket_kind": bucket_kind,
+                    "bucket_key": recent_bucket,
+                    "duty_date": "",
+                    "duty_shift": "",
+                }
+                for recent_bucket in self._recent_chiller_mode_switch_buckets(bucket_key)
+            ]
         bucket_date = self._date_text_from_bucket_key(bucket_key)
         if normalized_family in {FAMILY_MONTHLY_REPORT, FAMILY_TOP5_MONTHLY_REPORT} and bucket_date:
             contexts.extend(

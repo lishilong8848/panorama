@@ -307,6 +307,28 @@ export const STATUS_TEMPLATE = `<section v-if="isStatusView" class="status-page"
               <strong class="status-metric-value">{{ handoverFollowupProgress.summaryText || '已清空' }}</strong>
             </div>
           </div>
+          <div
+            class="handover-followup-list"
+            v-if="handoverFollowupProgress.pendingItems && handoverFollowupProgress.pendingItems.length"
+          >
+            <div class="handover-followup-list-head">
+              <strong>待处理后续任务</strong>
+              <span>{{ handoverFollowupProgress.pendingItems.length }} 项</span>
+            </div>
+            <div
+              class="handover-followup-list-item"
+              v-for="item in handoverFollowupProgress.pendingItems"
+              :key="'handover-followup-' + item.key"
+            >
+              <span class="status-badge status-badge-soft" :class="'tone-' + (item.tone || 'warning')">
+                {{ item.statusText || '待处理' }}
+              </span>
+              <span class="handover-followup-list-title">
+                {{ item.building ? (item.building + ' - ') : '' }}{{ item.label }}
+              </span>
+              <span class="handover-followup-list-detail" v-if="item.detail">{{ item.detail }}</span>
+            </div>
+          </div>
           <div class="hint" v-if="health.handover.review_base_url_effective">
             当前生效地址（手工指定）：{{ health.handover.review_base_url_effective }}
           </div>

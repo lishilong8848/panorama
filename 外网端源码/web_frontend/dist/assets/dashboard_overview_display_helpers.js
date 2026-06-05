@@ -349,6 +349,9 @@ export function createEmptyHandoverReviewOverview() {
       attachmentPendingCount: 0,
       cloudPendingCount: 0,
       dailyReportStatus: "idle",
+      items: [],
+      pendingItems: [],
+      failedItems: [],
       tone: "neutral",
       statusText: "等待后端交接班状态",
       summaryText: "已清空",
@@ -379,6 +382,39 @@ export function createEmptyHandoverReviewOverview() {
       }),
     },
   };
+}
+
+function normalizeFollowupProgressItem(raw) {
+  const item = raw && typeof raw === "object" ? raw : {};
+  const building = String(item.building || "").trim();
+  const label = String(item.label || item.title || item.type || "").trim() || "后续上传任务";
+  const status = String(item.status || "").trim().toLowerCase() || "pending";
+  const detail = String(item.detail || item.error || item.error_text || item.errorText || "").trim();
+  const sessionId = String(item.session_id || item.sessionId || "").trim();
+  const revision = Number(item.revision || 0);
+  return {
+    key: String(item.key || `${item.type || label}:${building || "-"}:${sessionId || "-"}:${revision}:${status}`).trim(),
+    type: String(item.type || "").trim(),
+    label,
+    building,
+    status,
+    statusText: formatFollowupProgressItemStatus(status),
+    detail,
+    sessionId,
+    revision,
+    tone: String(item.tone || "").trim() || (status === "failed" || status === "prepare_failed" ? "danger" : "warning"),
+  };
+}
+
+function formatFollowupProgressItemStatus(status) {
+  const value = String(status || "").trim().toLowerCase();
+  if (value === "failed" || value === "prepare_failed") return "失败";
+  if (value === "uploading" || value === "syncing" || value === "running") return "处理中";
+  if (value === "pending_upload") return "待上传";
+  if (value === "queued" || value === "pending" || value === "idle") return "待处理";
+  if (value === "success") return "已完成";
+  if (value === "skipped" || value === "disabled") return "已跳过";
+  return value || "待处理";
 }
 
 export function normalizeHandoverReviewOverview(raw) {
@@ -429,6 +465,15 @@ export function normalizeHandoverReviewOverview(raw) {
       attachmentPendingCount: Number(rawFollowup.attachment_pending_count ?? rawFollowup.attachmentPendingCount ?? 0),
       cloudPendingCount: Number(rawFollowup.cloud_pending_count ?? rawFollowup.cloudPendingCount ?? 0),
       dailyReportStatus: String(rawFollowup.daily_report_status || rawFollowup.dailyReportStatus || "").trim().toLowerCase() || defaults.followupProgress.dailyReportStatus,
+      items: Array.isArray(rawFollowup.items)
+        ? rawFollowup.items.map(normalizeFollowupProgressItem)
+        : defaults.followupProgress.items,
+      pendingItems: Array.isArray(rawFollowup.pending_items || rawFollowup.pendingItems)
+        ? (rawFollowup.pending_items || rawFollowup.pendingItems).map(normalizeFollowupProgressItem)
+        : defaults.followupProgress.pendingItems,
+      failedItems: Array.isArray(rawFollowup.failed_items || rawFollowup.failedItems)
+        ? (rawFollowup.failed_items || rawFollowup.failedItems).map(normalizeFollowupProgressItem)
+        : defaults.followupProgress.failedItems,
       tone: String(rawFollowup.tone || "").trim() || defaults.followupProgress.tone,
       statusText: String(rawFollowup.status_text || rawFollowup.statusText || "").trim() || defaults.followupProgress.statusText,
       summaryText: String(rawFollowup.summary_text || rawFollowup.summaryText || "").trim() || defaults.followupProgress.summaryText,

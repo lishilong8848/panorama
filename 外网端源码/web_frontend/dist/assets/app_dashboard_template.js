@@ -71,7 +71,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
             <div class="status-metric-grid status-metric-grid-compact" v-if="currentTaskOverview.items && currentTaskOverview.items.length">
               <div
                 class="status-metric"
-                v-for="item in currentTaskOverview.items.slice(0, 3)"
+                v-for="item in currentTaskOverview.items"
                 :key="'dashboard-task-overview-' + item.label"
               >
                 <div class="status-metric-label">{{ item.label }}</div>
@@ -98,7 +98,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
           >
             <div
               class="status-metric"
-              v-for="item in taskPanelOverview.items.slice(0, 3)"
+              v-for="item in taskPanelOverview.items"
               :key="'task-panel-overview-' + item.label"
             >
               <div class="status-metric-label">{{ item.label }}</div>
@@ -106,7 +106,7 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
             </div>
           </div>
           <div class="hint" v-else>等待后端任务摘要。</div>
-          <div class="ops-job-grid">
+          <div class="ops-job-grid ops-job-grid-priority">
             <article class="task-block task-block-compact">
               <div class="task-block-head">
                 <div>
@@ -116,6 +116,9 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                 <span class="status-badge status-badge-soft" :class="taskPanelOverview.runningCount ? 'tone-info' : 'tone-neutral'">
                   {{ taskPanelOverview.runningCount ? (taskPanelOverview.runningCount + ' 项') : '无' }}
                 </span>
+              </div>
+              <div class="hint" v-if="runningJobs.length > 3">
+                已展开 {{ runningJobs.length }} 个运行中任务，列表可滚动查看。
               </div>
               <div class="ops-job-list" v-if="runningJobs.length">
                 <div
@@ -159,6 +162,9 @@ export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDash
                 <span class="status-badge status-badge-soft" :class="taskPanelOverview.waitingCount ? 'tone-warning' : 'tone-neutral'">
                   {{ taskPanelOverview.waitingCount ? (taskPanelOverview.waitingCount + ' 项') : '无' }}
                 </span>
+              </div>
+              <div class="hint" v-if="waitingResourceJobs.length > 3">
+                已展开 {{ waitingResourceJobs.length }} 个等待资源任务，列表可滚动查看。
               </div>
               <div class="ops-job-list" v-if="waitingResourceJobs.length">
                 <div

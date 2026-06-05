@@ -923,6 +923,41 @@ class ReviewFollowupTriggerService:
             if isinstance(session, dict) and bool(session.get("confirmed", False))
         ]
         all_cloud_synced = self._all_sessions_cloud_synced_current_revision(sessions)
+        pending_items: List[Dict[str, Any]] = []
+        failed_items: List[Dict[str, Any]] = []
+
+        def _state_status(state: Dict[str, Any]) -> str:
+            return str(state.get("status", "")).strip().lower() or "pending"
+
+        def _state_error(state: Dict[str, Any]) -> str:
+            return str(state.get("error", "") or state.get("last_error", "") or "").strip()
+
+        def _add_followup_item(
+            *,
+            item_type: str,
+            label: str,
+            status: str,
+            building: str = "",
+            detail: str = "",
+            session_id: str = "",
+            revision: int = 0,
+        ) -> None:
+            normalized_status = str(status or "").strip().lower() or "pending"
+            item = {
+                "key": f"{item_type}:{building or '-'}:{len(pending_items) + len(failed_items) + 1}",
+                "type": item_type,
+                "label": label,
+                "building": str(building or "").strip(),
+                "status": normalized_status,
+                "detail": str(detail or "").strip(),
+                "session_id": str(session_id or "").strip(),
+                "revision": int(revision or 0),
+                "tone": "danger" if normalized_status in {"failed", "prepare_failed"} else "warning",
+            }
+            pending_items.append(item)
+            if normalized_status in {"failed", "prepare_failed"}:
+                failed_items.append(item)
+
         daily_report_status = "idle"
         daily_report_pending = 0
         daily_report_failed = 0
@@ -939,10 +974,20 @@ class ReviewFollowupTriggerService:
             daily_report_status = str(daily_report_state.get("status", "")).strip().lower() or "idle"
             if all_cloud_synced and daily_report_status not in {"success", "skipped"}:
                 daily_report_pending = 1
+                _add_followup_item(
+                    item_type="daily_report_export",
+                    label="日报记录导出",
+                    status=daily_report_status,
+                    detail=str(daily_report_state.get("error", "") or "").strip(),
+                )
             if all_cloud_synced and daily_report_status == "failed":
                 daily_report_failed = 1
             if all_cloud_synced:
                 batch_meta = self._review_service.get_cloud_batch(batch_key) or {}
+                extra_labels = {
+                    "station_h_sync": "H楼云文档同步",
+                    "abcdeh_work_content_sync": "ABCDEH工作内容同步",
+                }
                 for extra_field in ("station_h_sync", "abcdeh_work_content_sync"):
                     extra_state = batch_meta.get(extra_field, {}) if isinstance(batch_meta, dict) else {}
                     extra_status = (
@@ -956,6 +1001,16 @@ class ReviewFollowupTriggerService:
                         extra_sheet_failed += 1
                     else:
                         extra_sheet_pending += 1
+                    _add_followup_item(
+                        item_type=extra_field,
+                        label=extra_labels.get(extra_field, extra_field),
+                        status=extra_status or "pending",
+                        detail=(
+                            str(extra_state.get("error", "") or extra_state.get("last_error", "") or "").strip()
+                            if isinstance(extra_state, dict)
+                            else ""
+                        ),
+                    )
 
         attachment_pending_count = 0
         cabinet_pending_count = 0
@@ -964,6 +1019,8 @@ class ReviewFollowupTriggerService:
         failed_count = daily_report_failed + extra_sheet_failed
         for session in confirmed_sessions:
             revision = int(session.get("revision", 0) or 0)
+            building = str(session.get("building", "") or "").strip()
+            session_id = str(session.get("session_id", "") or "").strip()
             attachment_state = _normalize_export_state(session.get("source_data_attachment_export", {}))
             if not self._is_export_complete_for_revision(
                 attachment_state,
@@ -971,6 +1028,15 @@ class ReviewFollowupTriggerService:
                 static_skip_reasons=self.STATIC_SKIP_REASONS,
             ):
                 attachment_pending_count += 1
+                _add_followup_item(
+                    item_type="source_data_attachment_export",
+                    label="源数据附件上传",
+                    building=building,
+                    session_id=session_id,
+                    revision=revision,
+                    status=_state_status(attachment_state),
+                    detail=_state_error(attachment_state),
+                )
             if str(attachment_state.get("status", "")).strip().lower() == "failed":
                 failed_count += 1
 
@@ -981,6 +1047,15 @@ class ReviewFollowupTriggerService:
                 static_skip_reasons={"disabled", "missing_duty_context"},
             ):
                 cabinet_pending_count += 1
+                _add_followup_item(
+                    item_type="cabinet_shift_record_export",
+                    label="机柜班次记录上传",
+                    building=building,
+                    session_id=session_id,
+                    revision=revision,
+                    status=_state_status(cabinet_state),
+                    detail=_state_error(cabinet_state),
+                )
             if str(cabinet_state.get("status", "")).strip().lower() == "failed":
                 cabinet_failed_count += 1
                 failed_count += 1
@@ -988,6 +1063,15 @@ class ReviewFollowupTriggerService:
             cloud_state = _normalize_cloud_sync_state(session.get("cloud_sheet_sync", {}))
             if not self._is_cloud_sync_complete_for_revision(cloud_state, revision):
                 cloud_pending_count += 1
+                _add_followup_item(
+                    item_type="cloud_sheet_sync",
+                    label="本楼云文档上传",
+                    building=building,
+                    session_id=session_id,
+                    revision=revision,
+                    status=_state_status(cloud_state),
+                    detail=_state_error(cloud_state),
+                )
             if self._is_cloud_sync_failed(cloud_state):
                 failed_count += 1
 
@@ -1023,6 +1107,9 @@ class ReviewFollowupTriggerService:
             "daily_report_status": daily_report_status,
             "extra_sheet_pending_count": extra_sheet_pending,
             "extra_sheet_failed_count": extra_sheet_failed,
+            "pending_items": pending_items,
+            "failed_items": failed_items,
+            "items": pending_items,
         }
 
     def get_followup_progress(self, batch_key: str) -> Dict[str, Any]:

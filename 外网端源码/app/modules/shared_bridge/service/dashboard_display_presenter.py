@@ -562,6 +562,9 @@ def present_handover_review_overview(
     followup_daily_report_status = _string(
         followup_progress.get("daily_report_status", "")
     ).lower() or "idle"
+    followup_items = _list(followup_progress.get("items", []))
+    followup_pending_items = _list(followup_progress.get("pending_items", []))
+    followup_failed_items = _list(followup_progress.get("failed_items", []))
     followup_status = _string(followup_progress.get("status", "")).lower() or "idle"
     can_resume_followup = bool(followup_progress.get("can_resume_followup", False))
     if followup_failed > 0:
@@ -913,6 +916,9 @@ def present_handover_review_overview(
             "attachment_pending_count": followup_attachment_pending,
             "cloud_pending_count": followup_cloud_pending,
             "daily_report_status": followup_daily_report_status,
+            "items": followup_items,
+            "pending_items": followup_pending_items,
+            "failed_items": followup_failed_items,
             "tone": followup_tone,
             "status_text": followup_status_text,
             "summary_text": followup_summary_text,
