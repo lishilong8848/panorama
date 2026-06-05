@@ -271,46 +271,7 @@ def _merge_internal_config_payload(current: Dict[str, Any], payload: Dict[str, A
     return merged
 
 def _initialize_handover_daily_report_auth(container) -> None:
-    existing_thread = getattr(container, "_handover_daily_report_auth_init_thread", None)
-    if isinstance(existing_thread, threading.Thread) and existing_thread.is_alive():
-        try:
-            container.add_system_log("[交接班][日报截图登录] 启动自动初始化已在后台执行，跳过重复触发")
-        except Exception:  # noqa: BLE001
-            pass
-        return
-
-    def _runner() -> None:
-        try:
-            handover_cfg = load_handover_config(container.runtime_config)
-            export_cfg = handover_cfg.get("daily_report_bitable_export", {})
-            if not isinstance(export_cfg, dict):
-                export_cfg = {}
-            if not bool(export_cfg.get("enabled", True)):
-                container.add_system_log("[交接班][日报截图登录] 启动自动初始化已跳过：日报多维导出已禁用")
-                return
-            screenshot_service = HandoverDailyReportScreenshotService(handover_cfg)
-            result = screenshot_service.open_login_browser(emit_log=container.add_system_log)
-            message = str(result.get("message", "") or "").strip() or "已触发自动初始化"
-            container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化: {message}")
-        except Exception as exc:  # noqa: BLE001
-            try:
-                container.add_system_log(f"[交接班][日报截图登录] 启动自动初始化失败：{exc}")
-            except Exception:  # noqa: BLE001
-                pass
-        finally:
-            try:
-                setattr(container, "_handover_daily_report_auth_init_thread", None)
-            except Exception:  # noqa: BLE001
-                pass
-
-    thread = threading.Thread(
-        target=_runner,
-        name="handover-daily-report-auth-init",
-        daemon=True,
-    )
-    setattr(container, "_handover_daily_report_auth_init_thread", thread)
-    thread.start()
-    container.add_system_log("[交接班][日报截图登录] 启动自动初始化已转入后台，不阻塞外网页面进入")
+    return
 
 
 def create_app(*, enable_lifespan: bool = True) -> FastAPI:
@@ -752,8 +713,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.add_system_log(
                     "[访问控制] 已启用局域网页面隔离：仅对外开放 /handover/review/*、/api/handover/review/* 与 /assets/*"
                 )
-                app.state.runtime_activation_step = "initializing_handover_daily_report_auth"
-                _initialize_handover_daily_report_auth(container)
                 app.state.runtime_activation_step = "probing_handover_review_access"
                 schedule_handover_review_access_startup_probe(container)
             app.state.runtime_services_activated = True

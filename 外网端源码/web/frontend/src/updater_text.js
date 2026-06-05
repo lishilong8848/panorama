@@ -9,7 +9,7 @@ export const UPDATER_RESULT_TEXT_MAP = {
   applying_patch: "补丁应用中",
   dependency_checking: "运行依赖检查中",
   dependency_syncing: "运行依赖同步中",
-  dependency_rollback: "依赖同步失败，正在回滚",
+  dependency_rollback: "运行依赖同步失败",
   updated: "补丁已应用",
   updated_restart_scheduled: "更新后将自动重启",
   queued_busy: "任务结束后自动更新",

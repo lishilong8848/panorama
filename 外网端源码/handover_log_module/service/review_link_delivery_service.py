@@ -240,6 +240,26 @@ class ReviewLinkDeliveryService:
             "open_ids": [item["open_id"] for item in recipients],
         }
 
+    def _recipient_snapshot_from_runtime_config(self, building: str) -> Dict[str, Any]:
+        building_text = str(building or "").strip()
+        target_building = STATION_110_BUILDING if building_text in {STATION_110_BUILDING, STATION_110_CODE} else building_text
+        review_cfg = self._review_cfg()
+        by_building = (
+            review_cfg.get("review_link_recipients_by_building", {})
+            if isinstance(review_cfg.get("review_link_recipients_by_building", {}), dict)
+            else {}
+        )
+        normalized = self._normalize_recipient_rows(
+            by_building.get(target_building, []) if isinstance(by_building, dict) else []
+        )
+        return {
+            "building": target_building,
+            "revision": 0,
+            "updated_at": "",
+            "source": "runtime",
+            **normalized,
+        }
+
     def _recipient_snapshot_for_building(self, building: str) -> Dict[str, Any]:
         building_text = str(building or "").strip()
         if not building_text:
@@ -268,13 +288,20 @@ class ReviewLinkDeliveryService:
                         else {}
                     )
                     normalized = self._normalize_recipient_rows(by_building.get(STATION_110_BUILDING, []))
-                    return {
+                    snapshot = {
                         "building": STATION_110_BUILDING,
                         "revision": int(document.get("revision", 0) or 0) if isinstance(document, dict) else 0,
                         "updated_at": str(document.get("updated_at", "") or "").strip() if isinstance(document, dict) else "",
                         "source": "common_segment",
                         **normalized,
                     }
+                    if snapshot.get("recipients"):
+                        return snapshot
+                    runtime_snapshot = self._recipient_snapshot_from_runtime_config(STATION_110_BUILDING)
+                    if runtime_snapshot.get("recipients"):
+                        runtime_snapshot["source"] = "runtime_fallback_after_empty_common_segment"
+                        return runtime_snapshot
+                    return snapshot
                 document = read_segment_document(
                     handover_building_segment_path(
                         self.config_path,
@@ -289,30 +316,24 @@ class ReviewLinkDeliveryService:
                     else {}
                 )
                 normalized = self._normalize_recipient_rows(by_building.get(building_text, []))
-                return {
+                snapshot = {
                     "building": building_text,
                     "revision": int(document.get("revision", 0) or 0) if isinstance(document, dict) else 0,
                     "updated_at": str(document.get("updated_at", "") or "").strip() if isinstance(document, dict) else "",
                     "source": "segment",
                     **normalized,
                 }
+                if snapshot.get("recipients"):
+                    return snapshot
+                runtime_snapshot = self._recipient_snapshot_from_runtime_config(building_text)
+                if runtime_snapshot.get("recipients"):
+                    runtime_snapshot["source"] = "runtime_fallback_after_empty_segment"
+                    return runtime_snapshot
+                return snapshot
             except Exception:
                 pass
 
-        review_cfg = self._review_cfg()
-        by_building = (
-            review_cfg.get("review_link_recipients_by_building", {})
-            if isinstance(review_cfg.get("review_link_recipients_by_building", {}), dict)
-            else {}
-        )
-        normalized = self._normalize_recipient_rows(by_building.get(building_text, []) if isinstance(by_building, dict) else [])
-        return {
-            "building": building_text,
-            "revision": 0,
-            "updated_at": "",
-            "source": "runtime",
-            **normalized,
-        }
+        return self._recipient_snapshot_from_runtime_config(building_text)
 
     def _recipients_for_building(self, building: str) -> List[Dict[str, str]]:
         return list(self._recipient_snapshot_for_building(building).get("recipients", []))

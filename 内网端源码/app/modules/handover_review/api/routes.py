@@ -2758,6 +2758,8 @@ def handover_daily_report_open_screenshot_auth(
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
 ) -> Dict[str, Any]:
+    return {"ok": False, "status": "disabled", "message": "日报截图功能已停用"}
+
     duty_date_text, duty_shift_text = _normalize_duty_context(
         str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",
         str(payload.get("duty_shift", "")).strip() if isinstance(payload, dict) else "",
@@ -2798,6 +2800,8 @@ def handover_daily_report_screenshot_test(
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
 ) -> Dict[str, Any]:
+    return {"ok": False, "status": "disabled", "message": "日报截图功能已停用"}
+
     duty_date_text, duty_shift_text = _normalize_duty_context(
         str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",
         str(payload.get("duty_shift", "")).strip() if isinstance(payload, dict) else "",
@@ -2908,6 +2912,8 @@ def handover_daily_report_recapture_asset(
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
 ) -> Dict[str, Any]:
+    return {"ok": False, "status": "disabled", "message": "日报截图功能已停用"}
+
     duty_date_text, duty_shift_text = _normalize_duty_context(
         str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",
         str(payload.get("duty_shift", "")).strip() if isinstance(payload, dict) else "",
@@ -2998,6 +3004,8 @@ async def handover_daily_report_upload_asset(
     target: str = Form(default=""),
     file: UploadFile = File(...),
 ) -> Dict[str, Any]:
+    return {"ok": False, "status": "disabled", "message": "日报截图功能已停用"}
+
     duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
     if not duty_date_text or not duty_shift_text:
         raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
@@ -3052,6 +3060,8 @@ def handover_daily_report_delete_manual_asset(
     duty_shift: str = "",
     target: str = "",
 ) -> Dict[str, Any]:
+    return {"ok": False, "status": "disabled", "message": "日报截图功能已停用"}
+
     duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
     if not duty_date_text or not duty_shift_text:
         raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
@@ -3092,6 +3102,8 @@ def handover_daily_report_rewrite_record(
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
 ) -> Dict[str, Any]:
+    return {"ok": False, "status": "disabled", "message": "日报截图功能已停用"}
+
     duty_date_text, duty_shift_text = _normalize_duty_context(
         str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",
         str(payload.get("duty_shift", "")).strip() if isinstance(payload, dict) else "",

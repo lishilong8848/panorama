@@ -943,12 +943,22 @@ def handle_daily_report_record_rewrite(
     emit_log: Callable[[str], None],
     runtime: Any = None,  # noqa: ANN401
 ) -> Dict[str, Any]:
-    routes = _review_routes()
-    container = _review_container(config, emit_log)
     duty_date = str(payload.get("duty_date", "") or "").strip()
     duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
     if runtime is not None:
         runtime.raise_if_cancelled()
+    emit_log(f"[交接班][日报多维] 已停用，跳过日报多维重写 batch={duty_date}|{duty_shift}")
+    return {
+        "ok": False,
+        "error": "日报截图功能已停用",
+        "error_code": "daily_report_disabled",
+        "error_detail": "日报截图功能已停用",
+        "daily_report_record_export": {"status": "skipped", "error": "日报截图功能已停用"},
+        "capture_assets": {},
+    }
+
+    routes = _review_routes()
+    container = _review_container(config, emit_log)
     review_service, state_service = routes._build_daily_report_services(container)
     followup = routes.ReviewFollowupTriggerService(routes._handover_cfg(container))
     logged_failure = False

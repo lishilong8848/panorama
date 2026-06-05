@@ -746,7 +746,7 @@ class UpdaterService:
             "applying_patch": "补丁应用中",
             "dependency_checking": "运行依赖检查中",
             "dependency_syncing": "运行依赖同步中",
-            "dependency_rollback": "依赖同步失败，正在回滚",
+            "dependency_rollback": "运行依赖同步失败",
             "updated": "补丁已应用",
             "updated_restart_scheduled": "更新后将自动重启",
             "queued_busy": "任务结束后自动更新",
@@ -779,7 +779,7 @@ class UpdaterService:
             "running": "同步中",
             "success": "成功",
             "failed": "失败",
-            "rolled_back": "失败后已回滚",
+            "rolled_back": "失败后已回滚（历史状态）",
             "skipped": "已跳过",
         }
         return mapping.get(key, key or "-")
@@ -1763,35 +1763,21 @@ class UpdaterService:
         error_text: str,
     ) -> Dict[str, Any]:
         backup_path = str(applied.get("backup", "") or "").strip()
-        rollback_detail = ""
-        if backup_path:
-            self._set_runtime_and_state(last_result="dependency_rollback")
-            try:
-                rollback_result = self.applier.restore_backup_snapshot(backup_path)
-                rollback_detail = (
-                    "已回滚到旧版本，"
-                    f"恢复文件={rollback_result.get('restored', 0)}, "
-                    f"移除新增={rollback_result.get('removed_created', 0)}"
-                )
-                self._log(f"依赖安装失败，{rollback_detail}")
-            except Exception as rollback_exc:  # noqa: BLE001
-                rollback_detail = f"回滚失败: {rollback_exc}"
-                self._log(rollback_detail)
-        local_after_rollback = normalize_local_version(load_local_build_meta(self.app_dir))
-        local_after_text = local_after_rollback.get("display_version") or local_after_rollback.get("build_id") or "-"
-        update_available = compare_versions(local_after_rollback, remote) < 0
-        force_apply_available = bool(remote.get("build_id") or remote.get("display_version")) and compare_versions(local_after_rollback, remote) > 0
-        dependency_status = "rolled_back" if rollback_detail and not rollback_detail.startswith("回滚失败") else "failed"
-        dependency_message = "更新失败：运行依赖安装失败，已自动回滚到旧版本。"
-        if dependency_status == "failed":
-            dependency_message = "更新失败：运行依赖安装失败，且自动回滚失败，请检查系统日志。"
+        rollback_detail = f"未回滚，已保留新版本文件；备份={backup_path or '-'}"
+        self._log(f"依赖安装失败，已保留新版本文件不回滚；backup={backup_path or '-'}")
+        local_after_failure = normalize_local_version(load_local_build_meta(self.app_dir))
+        local_after_text = local_after_failure.get("display_version") or local_after_failure.get("build_id") or "-"
+        update_available = compare_versions(local_after_failure, remote) < 0
+        force_apply_available = bool(remote.get("build_id") or remote.get("display_version")) and compare_versions(local_after_failure, remote) > 0
+        dependency_status = "failed"
+        dependency_message = "更新已应用，但运行依赖安装失败；已保留新版本文件，请检查依赖或重新执行依赖同步。"
 
         self._set_runtime_and_state(
             last_result="failed",
             last_error=error_text,
             local_version=str(local_after_text),
             remote_version=str(remote_version_text),
-            local_release_revision=int(local_after_rollback.get("release_revision", 0) or 0),
+            local_release_revision=int(local_after_failure.get("release_revision", 0) or 0),
             remote_release_revision=remote_release_revision,
             update_available=update_available,
             force_apply_available=force_apply_available,

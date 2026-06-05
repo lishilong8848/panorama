@@ -528,19 +528,16 @@ def handle_daily_report_auth_open(
     emit_log: Callable[[str], None],
     runtime: Any = None,  # noqa: ANN401
 ) -> Dict[str, Any]:
-    routes = _review_routes()
-    container = _review_container(config, emit_log)
     duty_date = str(payload.get("duty_date", "") or "").strip()
     duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
     if runtime is not None:
         runtime.raise_if_cancelled()
-    _, _, _, screenshot_service = routes._build_daily_report_services(container)
-    result = screenshot_service.open_login_browser(emit_log=emit_log)
+    emit_log(f"[交接班][日报截图] 已停用，跳过登录态初始化 batch={duty_date}|{duty_shift}")
     return {
-        "ok": bool(result.get("ok", False)),
-        "status": str(result.get("status", "")).strip() or "failed",
-        "message": str(result.get("message", "")).strip(),
-        "profile_dir": str(result.get("profile_dir", "")).strip(),
+        "ok": False,
+        "status": "disabled",
+        "message": "日报截图功能已停用",
+        "profile_dir": "",
         "duty_date": duty_date,
         "duty_shift": duty_shift,
     }
@@ -552,48 +549,20 @@ def handle_daily_report_screenshot_test(
     emit_log: Callable[[str], None],
     runtime: Any = None,  # noqa: ANN401
 ) -> Dict[str, Any]:
-    routes = _review_routes()
-    container = _review_container(config, emit_log)
     duty_date = str(payload.get("duty_date", "") or "").strip()
     duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
     batch_key = f"{duty_date}|{duty_shift}"
     if runtime is not None:
         runtime.raise_if_cancelled()
-    review_service, _state_service, asset_service, screenshot_service = routes._build_daily_report_services(container)
-    cloud_batch = review_service.get_cloud_batch(batch_key) or {}
-    spreadsheet_url = str(cloud_batch.get("spreadsheet_url", "")).strip() if isinstance(cloud_batch, dict) else ""
-    summary_result = screenshot_service.capture_summary_sheet(
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-        emit_log=emit_log,
-        prefer_existing_page=True,
-        allow_open_fallback=True,
-    )
-    external_result = screenshot_service.capture_external_page(
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-        emit_log=emit_log,
-        prefer_existing_page=True,
-        allow_open_fallback=True,
-    )
-    statuses = {
-        "summary": str(summary_result.get("status", "")).strip().lower(),
-        "external": str(external_result.get("status", "")).strip().lower(),
-    }
-    if statuses["summary"] in {"ok", "skipped"} and statuses["external"] == "ok":
-        overall_status = "ok"
-    elif statuses["summary"] == "ok" or statuses["external"] == "ok":
-        overall_status = "partial_failed"
-    else:
-        overall_status = "failed"
+    emit_log(f"[交接班][日报截图] 已停用，跳过截图测试 batch={batch_key}")
     return {
-        "ok": overall_status != "failed",
-        "status": overall_status,
+        "ok": False,
+        "status": "disabled",
         "batch_key": batch_key,
-        "spreadsheet_url": spreadsheet_url,
-        "summary_sheet_image": summary_result,
-        "external_page_image": external_result,
-        "capture_assets": asset_service.get_capture_assets_context(duty_date=duty_date, duty_shift=duty_shift),
+        "spreadsheet_url": "",
+        "summary_sheet_image": {"status": "disabled", "error": "日报截图功能已停用"},
+        "external_page_image": {"status": "disabled", "error": "日报截图功能已停用"},
+        "capture_assets": {},
     }
 
 
@@ -603,57 +572,18 @@ def handle_daily_report_recapture(
     emit_log: Callable[[str], None],
     runtime: Any = None,  # noqa: ANN401
 ) -> Dict[str, Any]:
-    routes = _review_routes()
-    container = _review_container(config, emit_log)
     duty_date = str(payload.get("duty_date", "") or "").strip()
     duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
     target = str(payload.get("target", "") or "").strip().lower()
     if runtime is not None:
         runtime.raise_if_cancelled()
-    review_service, state_service, asset_service, screenshot_service = routes._build_daily_report_services(container)
-    try:
-        if target == "summary_sheet":
-            result = routes._daily_report_capture_result_payload(
-                screenshot_service.capture_summary_sheet(
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    emit_log=emit_log,
-                    prefer_existing_page=True,
-                    allow_open_fallback=True,
-                )
-            )
-        else:
-            result = routes._daily_report_capture_result_payload(
-                screenshot_service.capture_external_page(
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    emit_log=emit_log,
-                    prefer_existing_page=True,
-                    allow_open_fallback=True,
-                )
-            )
-    except Exception as exc:  # noqa: BLE001
-        result = routes._daily_report_capture_result_payload(fallback_stage="unknown", fallback_detail=str(exc))
-        emit_log(
-            f"[交接班][日报截图] 失败 batch={duty_date}|{duty_shift}, target={target}, "
-            f"stage={result['stage']}, status={result['status']}, error={result['error_detail'] or result['error']}"
-        )
-    if str(result.get("status", "")).strip().lower() == "ok":
-        routes._touch_daily_report_asset_rewrite_state(state_service, duty_date=duty_date, duty_shift=duty_shift)
-    context = routes._build_daily_report_context_payload(
-        review_service=review_service,
-        state_service=state_service,
-        asset_service=asset_service,
-        screenshot_service=screenshot_service,
-        duty_date=duty_date,
-        duty_shift=duty_shift,
-    )
+    emit_log(f"[交接班][日报截图] 已停用，跳过重截 batch={duty_date}|{duty_shift}, target={target or '-'}")
     return {
-        "ok": str(result.get("status", "")).strip().lower() == "ok",
+        "ok": False,
         "target": target,
-        "result": result,
-        "capture_assets": context.get("capture_assets", {}),
-        "daily_report_record_export": context.get("daily_report_record_export", {}),
+        "result": {"status": "disabled", "error": "日报截图功能已停用"},
+        "capture_assets": {},
+        "daily_report_record_export": {"status": "skipped", "error": "日报截图功能已停用"},
     }
 
 
@@ -663,12 +593,22 @@ def handle_daily_report_record_rewrite(
     emit_log: Callable[[str], None],
     runtime: Any = None,  # noqa: ANN401
 ) -> Dict[str, Any]:
-    routes = _review_routes()
-    container = _review_container(config, emit_log)
     duty_date = str(payload.get("duty_date", "") or "").strip()
     duty_shift = str(payload.get("duty_shift", "") or "").strip().lower()
     if runtime is not None:
         runtime.raise_if_cancelled()
+    emit_log(f"[交接班][日报多维] 已停用，跳过日报多维重写 batch={duty_date}|{duty_shift}")
+    return {
+        "ok": False,
+        "error": "日报截图功能已停用",
+        "error_code": "daily_report_disabled",
+        "error_detail": "日报截图功能已停用",
+        "daily_report_record_export": {"status": "skipped", "error": "日报截图功能已停用"},
+        "capture_assets": {},
+    }
+
+    routes = _review_routes()
+    container = _review_container(config, emit_log)
     review_service, state_service, asset_service, screenshot_service = routes._build_daily_report_services(container)
     followup = routes.ReviewFollowupTriggerService(routes._handover_cfg(container))
     logged_failure = False

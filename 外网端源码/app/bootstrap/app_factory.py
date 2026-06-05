@@ -207,28 +207,7 @@ def _default_role_route(role_mode: str) -> str:
     return "/external/dashboard"
 
 def _ensure_capacity_report_image_runtime(container) -> None:
-    try:
-        from handover_log_module.api.facade import load_handover_config
-        from handover_log_module.service.capacity_report_image_delivery_service import (
-            ensure_capacity_report_image_runtime_dependencies,
-        )
-
-        runtime_config = getattr(container, "runtime_config", {})
-        handover_cfg = load_handover_config(runtime_config if isinstance(runtime_config, dict) else {})
-        result = ensure_capacity_report_image_runtime_dependencies(
-            handover_cfg,
-            emit_log=lambda text: container.add_system_log(str(text)),
-            install_missing=True,
-        )
-        if not bool(result.get("ok", False)):
-            container.add_system_log(
-                "[交接班][容量表图片发送] 截图依赖未完全就绪，发送容量表图片时会提示依赖错误"
-            )
-    except Exception as exc:  # noqa: BLE001
-        try:
-            container.add_system_log(f"[交接班][容量表图片发送] 截图依赖初始化失败，已跳过: {exc}")
-        except Exception:  # noqa: BLE001
-            pass
+    return
 
 
 def create_app(*, enable_lifespan: bool = True) -> FastAPI:
@@ -713,8 +692,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 "[访问控制] 已启用局域网页面隔离：仅对外开放 /handover/review/*、/api/handover/review/* 与 /assets/*"
             )
             if role_mode != "internal":
-                app.state.runtime_activation_step = "installing_capacity_report_image_runtime"
-                _ensure_capacity_report_image_runtime(container)
                 app.state.runtime_activation_step = "probing_handover_review_access"
                 schedule_handover_review_access_startup_probe(container)
             app.state.runtime_services_activated = True

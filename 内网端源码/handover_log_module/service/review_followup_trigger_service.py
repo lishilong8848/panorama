@@ -1184,6 +1184,14 @@ class ReviewFollowupTriggerService:
         first_session = sessions[0] if isinstance(sessions[0], dict) else {}
         duty_date = str(first_session.get("duty_date", "")).strip()
         duty_shift = str(first_session.get("duty_shift", "")).strip().lower()
+        emit_log(f"[交接班][日报多维] 已停用，跳过日报截图和日报多维上传 batch={target_batch}")
+        state = self._daily_report_export_state(status="skipped", error="日报截图功能已停用")
+        return self._daily_report_state_service.update_export_state(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            daily_report_record_export=state,
+        )
+
         cloud_status = str(cloud_result.get("status", "")).strip().lower()
         spreadsheet_url = str(cloud_result.get("spreadsheet_url", "")).strip()
         if not spreadsheet_url:
