@@ -110,6 +110,19 @@ _CAPACITY_SYNC_REQUIRED_CELLS = ("H6", "F8", "B6", "D6", "F6", "B13", "D13")
 _CAPACITY_LOAD_RATE_ROWS = (12, 13, 14, 15)
 _CAPACITY_LOAD_RATE_DENOMINATOR = 10000.0
 _CAPACITY_PERCENT_NUMBER_FORMAT = "0.00%"
+_CAPACITY_WATER_RESERVE_CELL = "AC29"
+_CAPACITY_WATER_RESERVE_SOURCE_CELL_ALIASES = {
+    "AC26": ("AC26", "AC27"),
+    "AC28": ("AC28",),
+}
+_CAPACITY_WATER_RESERVE_NUMBER_FORMAT = "0.00"
+_CAPACITY_WATER_RESERVE_FACTOR_BY_BUILDING = {
+    "A楼": 15.89625,
+    "B楼": 15.89625,
+    "C楼": 15.89625,
+    "D楼": 150.6,
+    "E楼": 150.6,
+}
 _SUBSTATION_110KV_TARGET_ROWS = {
     "阿开": 59,
     "阿家": 60,
@@ -1783,6 +1796,68 @@ class HandoverCapacityReportService:
             return None
 
     @classmethod
+    def _capacity_water_reserve_factor(cls, building: Any) -> float | None:
+        building_text = _text(building).replace(" ", "")
+        if not building_text:
+            return None
+        if not building_text.endswith("楼") and len(building_text) == 1:
+            building_text = f"{building_text.upper()}楼"
+        return _CAPACITY_WATER_RESERVE_FACTOR_BY_BUILDING.get(building_text)
+
+    @classmethod
+    def _inject_capacity_water_reserve_value(
+        cls,
+        cell_values: Dict[str, Any],
+        *,
+        building: Any,
+        emit_log: Callable[[str], None] = print,
+        log_prefix: str = "[交接班][容量报表][补水罐总储备量]",
+        log_missing: bool = False,
+    ) -> bool:
+        factor = cls._capacity_water_reserve_factor(building)
+        building_text = _text(building)
+        if factor is None:
+            emit_log(f"{log_prefix} 跳过: 未匹配楼栋系数 building={building_text or '-'}")
+            return False
+
+        values_by_cell = {
+            _text(cell).upper(): value
+            for cell, value in (cell_values or {}).items()
+            if _text(cell)
+        }
+        source_values: Dict[str, float] = {}
+        for source_cell, aliases in _CAPACITY_WATER_RESERVE_SOURCE_CELL_ALIASES.items():
+            matched_cell = ""
+            raw_value: Any = ""
+            number: float | None = None
+            for alias in aliases:
+                alias_cell = _text(alias).upper()
+                if alias_cell not in values_by_cell:
+                    continue
+                matched_cell = alias_cell
+                raw_value = values_by_cell.get(alias_cell)
+                number = cls._to_float_cell_value(raw_value)
+                break
+            if number is None:
+                if matched_cell or log_missing:
+                    emit_log(
+                        f"{log_prefix} 跳过: 待写入数据中源单元格无有效数值 "
+                        f"building={building_text or '-'}, source={source_cell}, matched={matched_cell or '-'}, "
+                        f"raw={_text(raw_value) or '-'}"
+                    )
+                return False
+            source_values[source_cell] = number
+
+        reserve_value = (source_values["AC26"] + source_values["AC28"]) * float(factor)
+        cell_values[_CAPACITY_WATER_RESERVE_CELL] = reserve_value
+        emit_log(
+            f"{log_prefix} 已填入 "
+            f"building={building_text or '-'}, AC26={source_values['AC26']}, AC28={source_values['AC28']}, "
+            f"factor={factor}, {_CAPACITY_WATER_RESERVE_CELL}={format_number(reserve_value, 2)}"
+        )
+        return True
+
+    @classmethod
     def _current_load_rates_from_sheet(
         cls,
         sheet,
@@ -2123,6 +2198,12 @@ class HandoverCapacityReportService:
             emit_log=emit_log,
         )
         overlay_values.update(load_rate_values)
+        self._inject_capacity_water_reserve_value(
+            overlay_values,
+            building=building,
+            emit_log=emit_log,
+            log_prefix="[交接班][容量报表][签名][补水罐总储备量]",
+        )
         signature_load_rates = {
             cell: load_rate_payload[cell]
             for cell in sorted(load_rate_payload)
@@ -2579,7 +2660,14 @@ class HandoverCapacityReportService:
                     )
                     if self._is_current_load_rate_warning(load_rate_warning):
                         load_rate_blocking_error = load_rate_warning
+                self._inject_capacity_water_reserve_value(
+                    overlay_values,
+                    building=building,
+                    emit_log=emit_log,
+                    log_prefix="[交接班][容量报表][补写][补水罐总储备量]",
+                )
                 _write_cells_with_merged_support(sheet, overlay_values)
+                sheet[_CAPACITY_WATER_RESERVE_CELL].number_format = _CAPACITY_WATER_RESERVE_NUMBER_FORMAT
                 self._apply_load_rate_number_format(sheet)
                 atomic_save_workbook(workbook, capacity_output_path)
             finally:
@@ -2851,7 +2939,15 @@ class HandoverCapacityReportService:
                 warnings.append(load_rate_warning)
                 if self._is_current_load_rate_warning(load_rate_warning):
                     load_rate_blocking_error = load_rate_warning
+            self._inject_capacity_water_reserve_value(
+            cell_values,
+            building=building_text,
+            emit_log=emit_log,
+            log_prefix="[交接班][容量报表][补水罐总储备量]",
+            log_missing=True,
+        )
             _write_cells_with_merged_support(sheet, cell_values)
+            sheet[_CAPACITY_WATER_RESERVE_CELL].number_format = _CAPACITY_WATER_RESERVE_NUMBER_FORMAT
             self._apply_load_rate_number_format(sheet)
             atomic_save_workbook(workbook, output_file)
             self._save_current_capacity_display_oil_values(
