@@ -2455,7 +2455,6 @@ def present_external_system_overview(
     runtime_resources = runtime_resources_summary if isinstance(runtime_resources_summary, dict) else {}
     task = task_overview if isinstance(task_overview, dict) else {}
     shared_root = shared_root_diagnostic if isinstance(shared_root_diagnostic, dict) else {}
-    updater = updater_overview if isinstance(updater_overview, dict) else {}
     deployment = _dict(health.get("deployment"))
     network = _dict(runtime_resources.get("network"))
     role_mode = _normalize_role_mode(deployment.get("role_mode", ""))
@@ -2499,16 +2498,6 @@ def present_external_system_overview(
             "tone": _string(shared_root.get("tone", "")) or "neutral",
         },
     ]
-    updater_text = _string(updater.get("status_text", ""))
-    if updater_text:
-        items.append(
-            {
-                "label": "更新镜像",
-                "value": updater_text,
-                "tone": _string(updater.get("tone", "")) or "neutral",
-            }
-        )
-
     return {
         "kicker": "系统与网络",
         "title": "当前运行环境",

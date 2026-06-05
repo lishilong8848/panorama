@@ -76,50 +76,6 @@ export const STATUS_TEMPLATE = `<section v-if="isStatusView" class="status-page"
         <article class="status-card">
           <div class="status-card-head">
             <div>
-              <span class="status-panel-kicker">{{ dashboardSystemOverview.kicker || '系统与网络' }}</span>
-              <h2 class="status-panel-title">{{ dashboardSystemOverview.title || '当前运行环境' }}</h2>
-            </div>
-            <span class="status-badge status-badge-solid" :class="'tone-' + dashboardSystemOverview.tone">
-              {{ dashboardSystemOverview.statusText }}
-            </span>
-          </div>
-          <div class="hint" v-if="dashboardSystemOverview.summaryText">{{ dashboardSystemOverview.summaryText }}</div>
-          <div class="hint" v-if="dashboardSystemOverview.detailText">{{ dashboardSystemOverview.detailText }}</div>
-          <div class="status-metric-grid" v-if="dashboardSystemStatusItems && dashboardSystemStatusItems.length">
-            <div class="status-metric" v-for="item in dashboardSystemStatusItems" :key="'status-system-' + item.label">
-              <div class="status-metric-label">{{ item.label }}</div>
-              <div class="status-badge status-badge-solid" :class="'tone-' + item.tone">{{ item.value }}</div>
-            </div>
-          </div>
-          <div class="hint" v-else>等待后端系统概览。</div>
-        </article>
-
-        <article class="status-card">
-          <div class="status-card-head">
-            <div>
-              <span class="status-panel-kicker">{{ sharedRootDiagnosticOverview.kicker || '共享目录诊断' }}</span>
-              <h2 class="status-panel-title">{{ sharedRootDiagnosticOverview.title || '共享目录一致性' }}</h2>
-            </div>
-            <span class="status-badge status-badge-solid" :class="'tone-' + sharedRootDiagnosticOverview.tone">
-              {{ sharedRootDiagnosticOverview.statusText }}
-            </span>
-          </div>
-          <div class="hint">{{ sharedRootDiagnosticOverview.summaryText }}</div>
-          <div class="status-list" v-if="sharedRootDiagnosticOverview.items && sharedRootDiagnosticOverview.items.length">
-            <div
-              class="status-list-row"
-              v-for="item in sharedRootDiagnosticOverview.items"
-              :key="'status-shared-root-' + item.label"
-            >
-              <span class="status-list-label">{{ item.label }}</span>
-              <span class="status-badge status-badge-soft" :class="'tone-' + item.tone">{{ item.value }}</span>
-            </div>
-          </div>
-        </article>
-
-        <article class="status-card">
-          <div class="status-card-head">
-            <div>
               <span class="status-panel-kicker">{{ dashboardScheduleOverview.kicker || '调度状态' }}</span>
               <h2 class="status-panel-title">{{ dashboardScheduleOverview.title || '月报与交接班调度' }}</h2>
             </div>

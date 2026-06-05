@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ class SystemAlertLogUploadService:
     TARGET_APP_TOKEN = "HScCwZt9QiqPCUkSrHjcbBL1ngb"
     TARGET_TABLE_ID = "tblGy6Z1GTxbY1EQ"
     TARGET_FIELD_NAME = "日志信息"
+    COMPUTER_NAME_FIELD_NAME = "创建者电脑名"
     IDLE_SECONDS = 30.0
     POLL_INTERVAL_SECONDS = 1.0
     BATCH_SIZE = 100
@@ -41,6 +43,7 @@ class SystemAlertLogUploadService:
         self._queue_dir = self._runtime_root / "system_alert_logs"
         self._queue_path = self._queue_dir / "queue.jsonl"
         self._state_path = self._queue_dir / "upload_state.json"
+        self._identity_path = self._queue_dir / "creator_identity.json"
         self._queue_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -50,6 +53,32 @@ class SystemAlertLogUploadService:
         self._state = self._load_state()
         self._last_flush_at = ""
         self._last_error = ""
+        self._host_name = self._load_or_create_host_name()
+        self._target_field_names_cache: set[str] | None = None
+        self._target_field_names_cache_at = 0.0
+
+    @staticmethod
+    def _detect_host_name() -> str:
+        try:
+            return str(socket.gethostname() or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _load_or_create_host_name(self) -> str:
+        payload = self._state_repository.load(self._identity_path, {})
+        host_name = str(payload.get("host_name", "") if isinstance(payload, dict) else "").strip()
+        if host_name:
+            return host_name
+        host_name = self._detect_host_name()
+        if host_name:
+            self._state_repository.save(
+                self._identity_path,
+                {
+                    "host_name": host_name,
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+        return host_name
 
     @staticmethod
     def _resolve_runtime_root(runtime_state_root: str) -> Path:
@@ -96,6 +125,8 @@ class SystemAlertLogUploadService:
         level = str(payload.get("level", "")).strip().lower()
         if level not in {"warning", "error"}:
             return
+        payload = dict(payload)
+        payload.setdefault("host_name", self._host_name)
         with self._lock:
             with self._queue_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -253,13 +284,38 @@ class SystemAlertLogUploadService:
             dimension_mapping={},
         )
 
+    @staticmethod
+    def _field_name(field: Dict[str, Any]) -> str:
+        return str(field.get("field_name") or field.get("name") or "").strip()
+
+    def _target_field_names(self, client: FeishuBitableClient) -> set[str]:
+        now = time.monotonic()
+        if self._target_field_names_cache is not None and now - self._target_field_names_cache_at < 300:
+            return set(self._target_field_names_cache)
+        fields = client.list_fields(self.TARGET_TABLE_ID, page_size=200)
+        names = {self._field_name(item) for item in fields if isinstance(item, dict)}
+        names = {name for name in names if name}
+        self._target_field_names_cache = set(names)
+        self._target_field_names_cache_at = now
+        return names
+
     def _upload_entries(self, entries: List[Dict[str, Any]]) -> None:
         client = self._build_client()
-        fields_list = [
-            {self.TARGET_FIELD_NAME: str(item.get("line", "") or "").strip()}
-            for item in entries
-            if str(item.get("line", "") or "").strip()
-        ]
+        try:
+            target_field_names = self._target_field_names(client)
+        except Exception as exc:  # noqa: BLE001
+            target_field_names = {self.TARGET_FIELD_NAME}
+            self._emit_log(f"[系统告警上报] 字段定义读取失败，仅上传日志信息: {exc}")
+        fields_list = []
+        for item in entries:
+            line = str(item.get("line", "") or "").strip()
+            if not line:
+                continue
+            row = {self.TARGET_FIELD_NAME: line}
+            host_name = str(item.get("host_name", "") or "").strip() or self._host_name
+            if self.COMPUTER_NAME_FIELD_NAME in target_field_names and host_name:
+                row[self.COMPUTER_NAME_FIELD_NAME] = host_name
+            fields_list.append(row)
         if not fields_list:
             return
         client.batch_create_records(
