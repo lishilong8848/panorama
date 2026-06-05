@@ -760,7 +760,7 @@ class UpdaterService:
         mapping = {
             "": "-",
             "disabled": "已禁用",
-            "up_to_date": "已经是最新版本",
+            "up_to_date": "代码已是最新",
             "update_available": "发现可用更新",
             "downloading_patch": "补丁下载中",
             "applying_patch": "补丁应用中",
@@ -771,9 +771,9 @@ class UpdaterService:
             "updated_restart_scheduled": "更新后将自动重启",
             "queued_busy": "任务结束后自动更新",
             "restart_pending": "等待重启生效",
-            "ahead_of_remote": "本地版本高于远端正式版本",
-            "ahead_of_mirror": "本地版本高于共享目录批准版本",
-            "mirror_pending_publish": "等待外网端发布批准版本",
+            "ahead_of_remote": "本地代码领先远端正式源",
+            "ahead_of_mirror": "本地代码领先共享目录同步包",
+            "mirror_pending_publish": "等待外网端发布同步包",
             "git_fetching": "Git 远端检查中",
             "git_pulling": "Git 拉取中",
             "dirty_worktree": "检测到本地改动，已阻止更新",
@@ -799,7 +799,7 @@ class UpdaterService:
             "running": "同步中",
             "success": "成功",
             "failed": "失败",
-            "rolled_back": "失败后已回滚（历史状态）",
+            "rolled_back": "历史依赖失败状态（当前不再回滚）",
             "skipped": "已跳过",
         }
         return mapping.get(key, key or "-")
@@ -808,7 +808,7 @@ class UpdaterService:
     def _apply_mode_text(raw: Any) -> str:
         key = str(raw or "").strip().lower()
         if key == "force_remote":
-            return "按远端正式版本覆盖"
+            return "按远端正式源覆盖"
         return "正常更新"
 
     def _resolve_runtime_root(self) -> Path:
@@ -1084,9 +1084,7 @@ class UpdaterService:
             startup_result = self._run_check(apply_update=None, force_remote=False)
             self._log(
                 "启动检查完成: "
-                f"结果={self._result_text(startup_result.get('last_result', '-'))}, "
-                f"本地版本={startup_result.get('local_version', '-')}, "
-                f"远端版本={startup_result.get('remote_version', '-')}"
+                f"结果={self._result_text(startup_result.get('last_result', '-'))}"
             )
         except Exception as exc:  # noqa: BLE001
             self._record_failure("启动检查失败", exc)
@@ -1396,8 +1394,8 @@ class UpdaterService:
             )
             self._sync_mirror_runtime()
             self._log(
-                "已将当前批准版本发布到共享目录: "
-                f"版本={approved_local_version or '-'}, 发布路径={result.get('manifest_path', '-')}"
+                "已将当前源码同步包发布到共享目录: "
+                f"发布路径={result.get('manifest_path', '-')}"
             )
             return {"published": True, "result": result}
         except Exception as exc:  # noqa: BLE001
@@ -1467,11 +1465,11 @@ class UpdaterService:
 
     def publish_approved_source_snapshot(self) -> Dict[str, Any]:
         if self.role_mode != "external":
-            raise RuntimeError("仅外网端可发布内网批准源码版本。")
+            raise RuntimeError("仅外网端可发布内网源码同步包。")
         if self.update_mode != "git_pull":
             raise RuntimeError("当前不是 Git 源码更新模式，无法发布源码快照。")
         if not self.shared_bridge_root or not self.shared_mirror_client:
-            raise RuntimeError("共享目录未配置，无法发布内网批准源码版本。")
+            raise RuntimeError("共享目录未配置，无法发布内网源码同步包。")
 
         try:
             git_snapshot = self._sync_git_runtime(fetch_remote=False)
@@ -1482,7 +1480,7 @@ class UpdaterService:
             if bool(git_snapshot.get("worktree_dirty", False)):
                 dirty_files = list(git_snapshot.get("dirty_files", []) or [])
                 raise RuntimeError(
-                    "检测到本地代码改动，已阻止发布内网批准源码版本。"
+                    "检测到本地代码改动，已阻止发布内网源码同步包。"
                     + (f" 脏文件={','.join(dirty_files[:5])}" if dirty_files else "")
                 )
 
@@ -1541,7 +1539,7 @@ class UpdaterService:
             staging_approved_zip.unlink(missing_ok=True)
             self._sync_mirror_runtime()
             self._log(
-                "已发布内网批准源码版本到共享目录: "
+                "已发布内网源码同步包到共享目录: "
                 f"commit={_short_git_commit(local_commit)}, files={build_result.get('included_files', 0)}, "
                 f"path={self._source_manifest_path}"
             )
@@ -1559,7 +1557,7 @@ class UpdaterService:
         except Exception as exc:  # noqa: BLE001
             self._write_source_publish_error(str(exc))
             self._sync_mirror_runtime()
-            self._log(f"内网批准源码版本发布失败: {exc}")
+            self._log(f"内网源码同步包发布失败: {exc}")
             raise
 
     def _schedule_external_restart_after_source_publish(self, *, source_commit: str) -> bool:
@@ -1685,7 +1683,7 @@ class UpdaterService:
         try:
             save_cached_json(meta_path, payload, indent=2, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
-            self._log(f"写入本地版本元数据失败: {exc}")
+            self._log(f"写入本地构建元数据失败: {exc}")
 
     def _record_failure(self, prefix: str, exc: Exception) -> None:
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1767,7 +1765,7 @@ class UpdaterService:
             "exact_versions": False,
         }
 
-    def _rollback_after_dependency_failure(
+    def _handle_dependency_failure_keep_new_version(
         self,
         *,
         applied: Dict[str, Any],
@@ -1777,14 +1775,14 @@ class UpdaterService:
         error_text: str,
     ) -> Dict[str, Any]:
         backup_path = str(applied.get("backup", "") or "").strip()
-        rollback_detail = f"未回滚，已保留新版本文件；备份={backup_path or '-'}"
-        self._log(f"依赖安装失败，已保留新版本文件不回滚；backup={backup_path or '-'}")
+        dependency_failure_detail = f"已保留新代码文件；备份={backup_path or '-'}"
+        self._log(f"依赖安装失败，已保留新代码文件；backup={backup_path or '-'}")
         local_after_failure = normalize_local_version(load_local_build_meta(self.app_dir))
         local_after_text = local_after_failure.get("display_version") or local_after_failure.get("build_id") or "-"
         update_available = compare_versions(local_after_failure, remote) < 0
         force_apply_available = bool(remote.get("build_id") or remote.get("display_version")) and compare_versions(local_after_failure, remote) > 0
         dependency_status = "failed"
-        dependency_message = "更新已应用，但运行依赖安装失败；已保留新版本文件，请检查依赖或重新执行依赖同步。"
+        dependency_message = "更新已应用，但运行依赖安装失败；已保留新代码文件，请检查依赖或重新执行依赖同步。"
 
         self._set_runtime_and_state(
             last_result="failed",
@@ -1803,7 +1801,7 @@ class UpdaterService:
         return self._build_result_payload(
             last_result="failed",
             message=dependency_message,
-            rollback_detail=rollback_detail,
+            dependency_failure_detail=dependency_failure_detail,
         )
 
     def _check_git_once(self, *, apply_update: bool | None) -> Dict[str, Any]:
@@ -1939,15 +1937,15 @@ class UpdaterService:
 
     def _fetch_source_manifest(self) -> Dict[str, Any]:
         if not self.shared_bridge_root:
-            raise SharedMirrorPendingError("共享目录未配置，无法检查批准源码版本。")
+            raise SharedMirrorPendingError("共享目录未配置，无法检查源码同步包。")
         state = self._load_source_publish_state()
         if not self._source_publish_state_path.exists():
-            raise SharedMirrorPendingError("暂无外网端发布的批准源码版本。")
+            raise SharedMirrorPendingError("暂无外网端发布的源码同步包。")
         if not bool(state.get("mirror_ready", False)):
-            raise SharedMirrorPendingError("共享目录批准源码版本尚未发布完成。")
+            raise SharedMirrorPendingError("共享目录源码同步包尚未发布完成。")
         error_text = str(state.get("last_publish_error", "") or "").strip()
         if error_text:
-            raise SharedMirrorPendingError(f"共享目录批准源码版本发布异常: {error_text}")
+            raise SharedMirrorPendingError(f"共享目录源码同步包发布异常: {error_text}")
         if not self._source_manifest_path.exists():
             raise SharedMirrorPendingError("共享目录批准源码清单不存在。")
         try:
@@ -1966,7 +1964,7 @@ class UpdaterService:
         if expected_sha:
             actual_sha = _sha256_file(zip_path)
             if actual_sha != expected_sha:
-                raise RuntimeError("批准版本校验失败。")
+                raise RuntimeError("源码同步包校验失败。")
         payload["zip_relpath"] = Path(zip_relpath).name
         payload["zip_path"] = str(zip_path)
         return payload
@@ -2042,13 +2040,13 @@ class UpdaterService:
             self._set_runtime_and_state(last_result=result_key, last_error="")
             return self._build_result_payload(
                 last_result=result_key,
-                message="检测到共享目录批准源码版本。" if update_available else "当前已是共享目录批准源码版本。",
+                message="检测到共享目录源码同步包。" if update_available else "当前已是共享目录源码同步包。",
             )
 
         if not update_available:
             result_key = "restart_pending" if bool(self.state.get("restart_required", False)) else "up_to_date"
             self._set_runtime_and_state(last_result=result_key, last_error="")
-            return self._build_result_payload(last_result=result_key, message="当前已是共享目录批准源码版本。")
+            return self._build_result_payload(last_result=result_key, message="当前已是共享目录源码同步包。")
 
         zip_path = Path(str(manifest.get("zip_path", "") or ""))
         if not zip_path.exists():
@@ -2059,7 +2057,7 @@ class UpdaterService:
         shutil.copy2(zip_path, local_zip)
         if expected_sha and _sha256_file(local_zip) != expected_sha:
             local_zip.unlink(missing_ok=True)
-            raise RuntimeError("批准版本校验失败。")
+            raise RuntimeError("源码同步包校验失败。")
 
         self._set_runtime_and_state(last_result="applying_patch")
         applied = self.applier.apply_source_snapshot_zip(
@@ -2070,7 +2068,7 @@ class UpdaterService:
         try:
             dependency_result = self._sync_patch_dependencies(applied, {"dependency_manifest_path": "runtime_dependency_lock.json"})
         except Exception as dependency_exc:  # noqa: BLE001
-            return self._rollback_after_dependency_failure(
+            return self._handle_dependency_failure_keep_new_version(
                 applied=applied,
                 remote={
                     "build_id": approved_version or approved_commit,
@@ -2154,7 +2152,7 @@ class UpdaterService:
             )
             return self._build_result_payload(
                 last_result="mirror_pending_publish",
-                message="共享目录中还没有已批准的更新版本，等待外网端发布后会自动跟随更新。",
+                message="共享目录中还没有更新同步包，等待外网端发布后会自动跟随更新。",
             )
 
         remote = normalize_remote_version(remote_manifest)
@@ -2201,15 +2199,15 @@ class UpdaterService:
                 )
             return self._build_result_payload(
                 last_result=result_key,
-                message="补丁已应用，等待重启生效。" if result_key == "restart_pending" else "当前已经是最新版本。",
+                message="补丁已应用，等待重启生效。" if result_key == "restart_pending" else "当前代码已是最新。",
             )
 
         if cmp > 0 and not allow_downgrade and not force_remote:
             result_key = "ahead_of_mirror" if self.source_kind == "shared_mirror" else "ahead_of_remote"
             message = (
-                "本地版本高于共享目录中的批准版本，内网端不会自动回退。"
+                "本地代码领先共享目录同步包，内网端不会自动回退。"
                 if result_key == "ahead_of_mirror"
-                else "本地版本高于远端正式版本，点击“开始更新”将按远端正式版本重新覆盖。"
+                else "本地代码领先远端正式源，点击“开始更新”将按远端正式源重新覆盖。"
             )
             self._set_runtime_and_state(last_result=result_key, last_error="", force_apply_available=force_apply_available)
             return self._build_result_payload(last_result=result_key, message=message)
@@ -2219,7 +2217,7 @@ class UpdaterService:
             return self._build_result_payload(
                 last_result="update_available",
                 message=(
-                    "已检测到共享目录中的批准版本。"
+                    "已检测到共享目录同步包。"
                     if self.source_kind == "shared_mirror"
                     else "检测到可用更新。"
                 ),
@@ -2258,7 +2256,7 @@ class UpdaterService:
         try:
             dependency_result = self._sync_patch_dependencies(applied, patch_meta)
         except Exception as dependency_exc:  # noqa: BLE001
-            return self._rollback_after_dependency_failure(
+            return self._handle_dependency_failure_keep_new_version(
                 applied=applied,
                 remote=remote,
                 remote_version_text=str(remote_version_text),
@@ -2536,7 +2534,7 @@ class UpdaterService:
                         self._try_auto_publish_git_head_to_internal()
                 continue
             if self._consume_shared_mirror_watch_trigger():
-                self._log("检测到共享目录批准版本变化，立即检查更新")
+                self._log("检测到共享目录同步包变化，立即检查更新")
                 next_check_monotonic = time.monotonic() + int(self.cfg["check_interval_sec"])
                 try:
                     self._run_check(apply_update=None, force_remote=False)

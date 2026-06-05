@@ -388,7 +388,7 @@ def present_config_guidance_overview(
             "value": shared_root or "未配置",
             "tone": "success" if shared_root else "warning",
             "hint": (
-                "共享桥接、源文件和批准版本都会依赖该目录。"
+                "共享桥接、源文件和代码同步包都会依赖该目录。"
                 if shared_root
                 else "未配置共享目录时，内外网主链无法通过共享缓存协同。"
             ),
@@ -1239,7 +1239,7 @@ def _updater_disabled_reason_text(raw: Any) -> str:
     if key == "git_remote_missing":
         return "当前未配置 Git 更新仓库地址。"
     if key == "shared_root_missing":
-        return "共享目录未配置，无法检查批准版本。"
+        return "共享目录未配置，无法检查同步包。"
     return "当前运行模式已跳过更新。"
 
 
@@ -1251,8 +1251,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     source_label = _updater_source_label(updater)
     update_mode = _string(updater.get("update_mode", "")).lower()
     mirror_ready = bool(updater.get("mirror_ready", False))
-    mirror_version = _string(updater.get("mirror_version", ""))
-    local_version = _string(updater.get("local_version", "")) or "-"
     branch = _string(updater.get("branch", ""))
     local_commit = _string(updater.get("local_commit", ""))
     remote_commit = _string(updater.get("remote_commit", ""))
@@ -1264,16 +1262,13 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     last_internal_apply_completed_commit = _string(updater.get("last_internal_apply_completed_commit", ""))
     last_internal_apply_failed_commit = _string(updater.get("last_internal_apply_failed_commit", ""))
     worktree_dirty = bool(updater.get("worktree_dirty", False))
-    local_revision = int(updater.get("local_release_revision", 0) or 0)
     last_publish_at = _string(updater.get("last_publish_at", ""))
     manifest_path = _string(updater.get("mirror_manifest_path", ""))
     error_text = _string(updater.get("last_publish_error", ""))
     internal_peer = updater.get("internal_peer", {}) if isinstance(updater.get("internal_peer", {}), dict) else {}
     internal_peer_available = bool(internal_peer.get("available", False))
     internal_peer_online = bool(internal_peer.get("online", False))
-    internal_peer_version = _string(internal_peer.get("local_version", ""))
     internal_peer_commit = _string(internal_peer.get("local_commit", ""))
-    internal_peer_revision = int(internal_peer.get("local_release_revision", 0) or 0)
     internal_peer_heartbeat_at = _string(internal_peer.get("heartbeat_at", ""))
     internal_peer_check_at = _string(internal_peer.get("last_check_at", ""))
     internal_peer_update_available = bool(internal_peer.get("update_available", False))
@@ -1291,11 +1286,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     internal_peer_command_active = bool(internal_peer_command.get("active", False))
     internal_peer_command_source_commit = _string(internal_peer_command.get("source_commit", ""))
     internal_peer_last_command_source_commit = _string(internal_peer.get("last_command_source_commit", ""))
-    internal_peer_version_text = (
-        f"{internal_peer_version or '-'} / r{internal_peer_revision}"
-        if internal_peer_revision > 0
-        else (internal_peer_version or ("未上报" if internal_peer_available else "-"))
-    )
     if not internal_peer_command_active:
         internal_peer_command_label = "无待执行命令"
     else:
@@ -1432,7 +1422,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         publish_reason_code = main_action_reason_code or "updater_disabled"
     elif update_mode != "git_pull":
         publish_allowed = False
-        publish_disabled_reason = "当前不是 Git 源码更新模式，无法发布源码批准版本。"
+        publish_disabled_reason = "当前不是 Git 源码更新模式，无法发布源码同步包。"
         publish_reason_code = "not_git_pull"
     elif source_kind != "git_remote":
         publish_allowed = False
@@ -1500,7 +1490,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         internal_peer_apply_disabled_reason = (
             "需先检查更新"
             if not internal_peer_check_at and not internal_peer_last_result
-            else "当前未发现可更新版本"
+            else "当前未发现可更新代码"
         )
         internal_peer_apply_reason_code = (
             "needs_check"
@@ -1547,11 +1537,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             "error_text": "",
             "items": [
                 {"label": "运行方式", "value": "Python 本地源码运行", "tone": "info"},
-                {
-                    "label": "当前版本",
-                    "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
-                    "tone": "neutral",
-                },
                 {"label": "更新行为", "value": "不自动更新", "tone": "neutral"},
                 {"label": "共享镜像", "value": "不检查", "tone": "neutral"},
                 {
@@ -1714,11 +1699,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             summary_text = "当前 Git 工作区已经与远端保持一致，未检测到需要同步的提交。"
         items = [
             {"label": "同步方式", "value": "Git 跟踪 .py + 前端 dist", "tone": "info"},
-            {
-                "label": "旧版版本号",
-                "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
-                "tone": "neutral",
-            },
             {"label": "当前分支", "value": branch or "-", "tone": "neutral"},
             {"label": "外网当前提交", "value": _short_commit(local_commit) or "-", "tone": "neutral"},
             {"label": "远端提交", "value": _short_commit(remote_commit) or "-", "tone": "neutral"},
@@ -1885,15 +1865,15 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
         ]
     tone = "neutral"
     status_text = "尚未发布到共享目录"
-    summary_text = "当前更新链路尚未生成可供内网跟随的批准版本。"
+    summary_text = "当前更新链路尚未生成可供内网跟随的同步包。"
     if source_kind in {"shared_mirror", "shared_approved_source"}:
         if mirror_ready:
             tone = "success"
-            status_text = "已检测到共享目录批准版本"
+            status_text = "已检测到共享目录同步包"
             summary_text = (
                 "当前使用共享目录批准源码更新源，不访问互联网；点击“应用共享更新”后才会应用。"
                 if source_kind == "shared_approved_source"
-                else "当前使用共享目录更新源，不访问互联网；检测到新批准版本后会自动跟随。"
+                else "当前使用共享目录更新源，不访问互联网；检测到新同步包后会自动跟随。"
             )
         elif error_text:
             tone = "danger"
@@ -1901,24 +1881,24 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             summary_text = "当前使用共享目录更新源，但镜像读取失败，请先检查共享目录可访问性。"
         else:
             tone = "warning"
-            status_text = "等待外网端发布批准版本"
-            summary_text = "当前使用共享目录更新源，不访问互联网；外网端发布批准版本后会自动跟随。"
+            status_text = "等待外网端发布同步包"
+            summary_text = "当前使用共享目录更新源，不访问互联网；外网端发布同步包后会自动跟随。"
     elif mirror_ready:
         tone = "success"
-        status_text = "已发布批准版本到共享目录"
-        summary_text = "外网端已把当前已验证版本发布到共享目录，内网端可自动跟随。"
+        status_text = "已发布同步包到共享目录"
+        summary_text = "外网端已把当前已验证代码发布到共享目录，内网端可自动跟随。"
     elif error_text:
         tone = "danger"
         status_text = "共享目录发布失败"
         summary_text = "当前仍使用远端正式更新源，但最近一次共享目录镜像发布失败。"
     else:
         tone = "warning"
-        status_text = "尚未发布批准版本"
-        summary_text = "当前仍使用远端正式更新源；完成验证后会把批准版本发布到共享目录。"
+        status_text = "尚未发布同步包"
+        summary_text = "当前仍使用远端正式更新源；完成验证后会把同步包发布到共享目录。"
     if internal_peer_command_active:
         waiting_text = "内网端已在线，正在处理远程命令。" if internal_peer_online else "内网端当前离线，待上线后会自动执行远程命令。"
         if internal_peer_command_action == "check":
-            summary_text = f"{waiting_text} 检查完成后才会刷新“远程版本 / 最近检查 / 内网可更新”，完成前“开始更新”按钮保持不可点击。"
+            summary_text = f"{waiting_text} 检查完成后才会刷新“最近检查 / 内网可更新”，完成前“开始更新”按钮保持不可点击。"
         elif internal_peer_command_action == "apply":
             summary_text = f"{waiting_text} 开始更新命令完成前，不再接受新的远程更新命令。"
         else:
@@ -1936,16 +1916,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     items = [
         {"label": "更新源", "value": source_label, "tone": "warning" if source_kind == "shared_mirror" else "info"},
         {
-            "label": "本机版本",
-            "value": f"{local_version} / r{local_revision}" if local_revision > 0 else local_version,
-            "tone": "neutral",
-        },
-        {
-            "label": "批准版本号",
-            "value": mirror_version or ("待外网端发布" if source_kind == "shared_mirror" else "尚未发布"),
-            "tone": "success" if mirror_ready else "neutral",
-        },
-        {
             "label": "共享目录更新时间",
             "value": last_publish_at or "-",
             "tone": "info" if last_publish_at else "neutral",
@@ -1955,7 +1925,6 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
             "value": internal_peer_status_text,
             "tone": "warning" if internal_peer_command_active else ("success" if internal_peer_online else "neutral"),
         },
-        {"label": "远程版本", "value": internal_peer_version_text, "tone": "neutral"},
         {"label": "内网端最近检查", "value": internal_peer_check_text, "tone": "neutral"},
         {
             "label": "远程命令",
@@ -1973,7 +1942,7 @@ def present_updater_mirror_overview(payload: Any) -> Dict[str, Any]:
     return {
         "tone": tone,
         "kicker": "更新镜像",
-        "title": "共享目录批准版本",
+        "title": "共享目录同步包",
         "status_text": status_text,
         "badge_text": status_text,
         "summary_text": summary_text,

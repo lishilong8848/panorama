@@ -5038,6 +5038,7 @@ class SharedBridgeRuntimeService:
             "disk i/o error",
             "readonly database",
             "cannot operate on a closed database",
+            "no such table: bridge_tasks",
             "invalid uri authority",
             "permissionerror",
             "winerror 5",

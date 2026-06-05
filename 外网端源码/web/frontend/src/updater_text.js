@@ -1,7 +1,7 @@
 export const UPDATER_RESULT_TEXT_MAP = {
   "": "-",
   disabled: "已禁用",
-  up_to_date: "已经是最新版本",
+  up_to_date: "代码已是最新",
   update_available: "发现可用更新",
   git_fetching: "Git 远端检查中",
   git_pulling: "Git 状态同步中",
@@ -14,8 +14,8 @@ export const UPDATER_RESULT_TEXT_MAP = {
   updated_restart_scheduled: "更新后将自动重启",
   queued_busy: "任务结束后自动更新",
   restart_pending: "等待重启生效",
-  ahead_of_remote: "本地版本高于远端正式版本",
-  ahead_of_mirror: "本地版本高于共享目录同步包",
+  ahead_of_remote: "本地代码领先远端正式源",
+  ahead_of_mirror: "本地代码领先共享目录同步包",
   mirror_pending_publish: "等待外网端发布同步包",
   dirty_worktree: "检测到本地改动，已阻止代码同步",
   failed: "更新失败",
@@ -62,16 +62,16 @@ export function buildUpdaterApplyMessage(raw) {
     return "检测到本地已修改文件，已阻止代码同步。";
   }
   if (key === "ahead_of_remote") {
-    return "检测到本地版本高于远端正式版本，如需覆盖回远端正式版本，可继续执行更新。";
+    return "检测到本地代码领先远端正式源，如需覆盖回远端正式源，可继续执行更新。";
   }
   if (key === "ahead_of_mirror") {
-    return "当前本地版本高于共享目录同步包，不会自动回退。";
+    return "当前本地代码领先共享目录同步包，不会自动回退。";
   }
   if (key === "mirror_pending_publish") {
     return "共享目录中还没有代码和前端静态资源同步包。";
   }
   if (key === "failed" && String(payload?.dependency_sync_status || "").trim() === "rolled_back") {
-    return "更新失败：运行依赖同步失败，已自动回滚到旧版本。";
+    return "更新失败：运行依赖同步失败；这是历史遗留状态，当前不会自动回滚。";
   }
   return `更新处理完成：${mapUpdaterResultText(key)}`;
 }
