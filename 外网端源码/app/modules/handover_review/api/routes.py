@@ -3036,8 +3036,20 @@ def _build_review_display_state(
         capacity_disabled_reason = "当前没有可下载的交接班容量报表"
     elif str(capacity_state["status"]) != "ready":
         capacity_disabled_reason = ""
-    capacity_image_send_allowed = False
-    capacity_image_send_disabled_reason = "容量表图片发送功能已停用"
+    capacity_image_send_allowed = bool(session_payload) and has_capacity_file and not is_history_mode and not waiting_generation and not remote_editor_active and not capacity_image_sending
+    capacity_image_send_disabled_reason = ""
+    if not session_payload:
+        capacity_image_send_disabled_reason = "当前没有可发送的交接班记录"
+    elif not has_capacity_file:
+        capacity_image_send_disabled_reason = "当前交接班容量报表尚未生成"
+    elif is_history_mode:
+        capacity_image_send_disabled_reason = "历史交接班日志不支持发送审核文本和容量表图片"
+    elif waiting_generation:
+        capacity_image_send_disabled_reason = "当前班次交接班数据尚未生成"
+    elif remote_editor_active:
+        capacity_image_send_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
+    elif capacity_image_sending:
+        capacity_image_send_disabled_reason = "正在发送审核文本和容量表图片，请稍候"
     regenerate_allowed = (
         (waiting_generation and not remote_editor_active)
         or (bool(session_payload) and not is_history_mode and not remote_editor_active and not cloud_sheet_uploading and not confirmed)
@@ -3236,7 +3248,7 @@ def _build_review_display_state(
             ),
             "capacity_image_send": _review_action(
                 allowed=capacity_image_send_allowed,
-                visible=False,
+                visible=bool(session_payload) and not is_history_mode,
                 label="发送审核文本和容量表图片",
                 disabled_reason=capacity_image_send_disabled_reason,
                 tone="neutral",
@@ -4320,19 +4332,6 @@ def handover_review_capacity_image_send(
     request: Request,
     payload: Dict[str, Any] = Body(...),
 ) -> Dict[str, Any]:
-    session_id_text = str(payload.get("session_id", "") or "").strip() if isinstance(payload, dict) else ""
-    return {
-        "ok": False,
-        "status": "disabled",
-        "error": "容量表图片发送功能已停用",
-        "building": str(building_code or "").strip(),
-        "session_id": session_id_text,
-        "successful_recipients": [],
-        "failed_recipients": [],
-        "capacity_image_delivery": {"status": "disabled", "error": "容量表图片发送功能已停用"},
-        "review_link_delivery": {},
-    }
-
     container = request.app.state.container
     service, parser, writer, _ = _build_review_services(container)
     document_state = _build_review_document_state_service(container, parser=parser, writer=writer)

@@ -836,6 +836,15 @@ class Top5PowerReportBitableUploadService:
             raise ValueError("TOP5上传月份必须在 1-12 之间")
         return year_text, f"{month_number:02d}"
 
+    @classmethod
+    def _previous_year_month(cls, year: Any, month: Any) -> tuple[str, str]:
+        target_year, target_month = cls._validate_year_month(year, month)
+        year_number = int(target_year)
+        month_number = int(target_month)
+        if month_number == 1:
+            return str(year_number - 1), "12"
+        return target_year, f"{month_number - 1:02d}"
+
     @staticmethod
     def _extract_attachment_link(record: Dict[str, Any], attachment_field: str) -> str:
         fields = record.get("fields", {}) if isinstance(record.get("fields", {}), dict) else {}
@@ -898,13 +907,17 @@ class Top5PowerReportBitableUploadService:
         if not output_path.exists() or not output_path.is_file():
             raise FileNotFoundError(str(output_path))
 
-        target_year, target_month = self._validate_year_month(year, month)
+        selected_year, selected_month = self._validate_year_month(year, month)
+        target_year, target_month = self._previous_year_month(year, month)
         fields = cfg["fields"]
         client = self._client(cfg, emit_log)
         table_id = str(cfg["table_id"])
         sub_category = str(cfg["sub_category"])
 
-        emit_log(f"[TOP5功率文件生成] 开始上传多维附件: year={target_year}, month={target_month}, file={output_path.name}")
+        emit_log(
+            "[TOP5功率文件生成] 开始上传多维附件: "
+            f"selected={selected_year}-{selected_month}, upload={target_year}-{target_month}, file={output_path.name}"
+        )
         existing_records = client.list_records(
             table_id=table_id,
             field_names=[fields["sub_category"], fields["year"], fields["month"]],
@@ -961,7 +974,7 @@ class Top5PowerReportBitableUploadService:
             emit_log(f"[TOP5功率文件生成] 已删除旧多维记录: year={target_year}, month={target_month}, count={deleted}")
         emit_log(
             "[TOP5功率文件生成] 多维附件上传完成: "
-            f"year={target_year}, month={target_month}, record_id={record_id or '-'}, link={'yes' if link else 'no'}"
+            f"selected={selected_year}-{selected_month}, upload={target_year}-{target_month}, record_id={record_id or '-'}, link={'yes' if link else 'no'}"
         )
         return {
             "status": "ok",
@@ -970,6 +983,8 @@ class Top5PowerReportBitableUploadService:
             "sub_category": sub_category,
             "year": target_year,
             "month": target_month,
+            "selected_year": selected_year,
+            "selected_month": selected_month,
             "record_id": record_id,
             "deleted_count": int(deleted or 0),
             "file_token": file_token,
