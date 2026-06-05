@@ -2937,9 +2937,9 @@ export function createRuntimeHealthConfigActions(ctx) {
   function normalizeHandoverBuildingName(building) {
     const raw = String(building || "").trim();
     if (raw === "110站" || raw === "110") return "110站";
-    if (["A楼", "B楼", "C楼", "D楼", "E楼"].includes(raw)) return raw;
+    if (["A楼", "B楼", "C楼", "D楼", "E楼", "H楼"].includes(raw)) return raw;
     const upper = raw.toUpperCase();
-    if (["A", "B", "C", "D", "E"].includes(upper)) return `${upper}楼`;
+    if (["A", "B", "C", "D", "E", "H"].includes(upper)) return `${upper}楼`;
     return "A楼";
   }
 

@@ -818,9 +818,28 @@ def present_handover_review_overview(
             continue
         link_code = _string(link_item.get("code", "")).lower()
         link_building = _string(link_item.get("building", ""))
-        if link_code != "110" and link_building not in {"110站", "110"}:
+        if link_code == "110" or link_building in {"110站", "110"}:
+            building = "110站"
+            row_status = "upload_page"
+            row_text = "上传页"
+            row_tone = "info"
+            row_code = "110"
+            no_recipient_text = "110站未配置接收人"
+            all_disabled_text = "110站审核链接接收人已全部停用"
+            invalid_text = "110站审核链接接收人存在无效配置"
+            unconfigured_text = "110站未配置启用的审核链接接收人"
+        elif link_code == "h" or link_building == "H楼":
+            building = "H楼"
+            row_status = "personnel_page"
+            row_text = "人员选择页"
+            row_tone = "info"
+            row_code = "h"
+            no_recipient_text = "H楼未配置接收人"
+            all_disabled_text = "H楼审核链接接收人已全部停用"
+            invalid_text = "H楼审核链接接收人存在无效配置"
+            unconfigured_text = "H楼未配置启用的审核链接接收人"
+        else:
             continue
-        building = "110站"
         if building in existing_review_buildings:
             continue
         recipient_status = _dict(recipient_status_map.get(building, {}))
@@ -835,21 +854,21 @@ def present_handover_review_overview(
         review_link_send_reason_code = ""
         if not review_link_send_allowed:
             if enabled_count <= 0 and disabled_count > 0 and invalid_count <= 0:
-                review_link_send_disabled_reason = recipient_reason or "110站审核链接接收人已全部停用"
+                review_link_send_disabled_reason = recipient_reason or all_disabled_text
                 review_link_send_reason_code = "recipient_all_disabled"
             elif invalid_count > 0:
-                review_link_send_disabled_reason = recipient_reason or "110站审核链接接收人存在无效配置"
+                review_link_send_disabled_reason = recipient_reason or invalid_text
                 review_link_send_reason_code = "recipient_invalid"
             else:
-                review_link_send_disabled_reason = recipient_reason or "110站未配置启用的审核链接接收人"
+                review_link_send_disabled_reason = recipient_reason or unconfigured_text
                 review_link_send_reason_code = "recipient_unconfigured"
         review_board_rows.append(
             {
                 "building": building,
-                "status": "upload_page",
-                "text": "上传页",
-                "tone": "info",
-                "code": "110",
+                "status": row_status,
+                "text": row_text,
+                "tone": row_tone,
+                "code": row_code,
                 "url": _string(link_item.get("url", "")),
                 "has_url": bool(_string(link_item.get("url", ""))),
                 "session_id": "",
@@ -871,7 +890,7 @@ def present_handover_review_overview(
                     "last_attempt_at": "",
                 },
                 "review_link_recipient_status": {
-                    "text": recipient_status_text or ("已保存，可发送" if review_link_send_allowed else "110站未配置接收人"),
+                    "text": recipient_status_text or ("已保存，可发送" if review_link_send_allowed else no_recipient_text),
                     "reason": recipient_reason,
                     "recipient_count": recipient_count,
                     "enabled_count": enabled_count,

@@ -999,6 +999,9 @@ function applyHandoverDefaults(cfg) {
   if (!Array.isArray(reviewUi.review_link_recipients_by_building["110站"])) {
     reviewUi.review_link_recipients_by_building["110站"] = [];
   }
+  if (!Array.isArray(reviewUi.review_link_recipients_by_building["H楼"])) {
+    reviewUi.review_link_recipients_by_building["H楼"] = [];
+  }
 
   delete cfg.handover_log.rules;
   delete cfg.handover_log.cell_mapping;

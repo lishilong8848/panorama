@@ -8,6 +8,7 @@ import {
   getJobApi,
   getHandoverReviewApi,
   getHandoverReview110StationStatusApi,
+  getHandoverReviewStationHStatusApi,
   getHandoverReviewBootstrapApi,
   getHandoverReviewHistoryApi,
   getHandoverReviewSnapshotApi,
@@ -22,6 +23,7 @@ import {
   refreshHandoverReviewEventSectionsApi,
   saveHandoverReviewApi,
   saveHandoverReview110kvApi,
+  saveHandoverReviewStationHApi,
   sendHandoverReviewCapacityImageApi,
   regenerateHandoverReviewApi,
   retryHandoverReview110StationCloudSyncApi,
@@ -42,7 +44,7 @@ const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
   { key: "G", label: "其他补充说明", source_cols: ["G"], span: 1 },
   { key: "H", label: "清点确认人（接班）", source_cols: ["H"], span: 1 },
 ];
-const REVIEW_PATH_RE = /^\/handover\/review\/([a-e]|110)\/?$/i;
+const REVIEW_PATH_RE = /^\/handover\/review\/([a-e]|h|110)\/?$/i;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const SUBSTATION_110KV_AUTO_SAVE_DEBOUNCE_MS = 350;
@@ -514,6 +516,115 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
   </div>
 `;
 
+const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
+  <div class="review-shell">
+    <header class="review-header review-header-sticky">
+      <div class="review-header-main">
+        <div class="review-header-copy">
+          <h1 class="review-title">H楼</h1>
+          <p class="review-subtitle">{{ batchText }}</p>
+        </div>
+        <div class="review-header-actions">
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving" @click="refreshStatus">刷新</button>
+          <button class="btn btn-primary btn-mini" type="button" :disabled="loading || saving" @click="saveSelection">
+            {{ saving ? "保存中..." : "保存人员选择" }}
+          </button>
+        </div>
+      </div>
+      <div class="review-meta-row review-meta-row-rich">
+        <span>当前批次：{{ state.batch.batch_key || "-" }}</span>
+        <span>保存状态：{{ state.saved ? "已保存" : "未保存" }}</span>
+        <span v-if="state.selection.updated_at">更新时间：{{ state.selection.updated_at }}</span>
+      </div>
+      <div v-if="statusText" class="review-status-line review-status-info">{{ statusText }}</div>
+      <div v-if="errorText" class="review-status-line review-status-danger">{{ errorText }}</div>
+    </header>
+
+    <section class="review-current-view-section">
+      <article class="review-card">
+        <div class="review-card-head"><h2>批次</h2></div>
+        <div class="review-fixed-fields review-current-view-fields">
+          <label class="review-field">
+            <span class="review-field-label">日期</span>
+            <input class="review-input" type="date" v-model="dutyDate" :disabled="loading || saving" @change="onDutyChange" />
+          </label>
+          <label class="review-field">
+            <span class="review-field-label">班次</span>
+            <select class="review-input" v-model="dutyShift" :disabled="loading || saving" @change="onDutyChange">
+              <option value="day">白班</option>
+              <option value="night">夜班</option>
+            </select>
+          </label>
+        </div>
+      </article>
+    </section>
+
+    <section v-if="loading" class="review-empty-card">正在加载H楼人员选择...</section>
+    <section v-else class="review-shared-grid station-h-review-grid">
+      <article class="review-card station-h-person-card">
+        <div class="review-card-head"><h2>值班人员</h2></div>
+        <label class="review-field review-field-wide">
+          <span class="review-field-label">交班/值班人员</span>
+          <input class="review-input" v-model="form.current_people_text" :disabled="saving" placeholder="输入或点击下方人员" />
+        </label>
+        <div class="person-chip-row station-h-chip-row" v-if="state.options.current_people.length">
+          <button
+            v-for="item in state.options.current_people"
+            :key="'station-h-current-' + item.name"
+            type="button"
+            class="person-chip"
+            :class="{ 'is-active': hasName(form.current_people_text, item.name) }"
+            :disabled="saving"
+            @click="togglePerson('current_people_text', item.name)"
+          >{{ item.label || item.name }}</button>
+        </div>
+        <small class="person-picker-hint">{{ state.rules.duty_people || "首次填写后，下个同班组自动复用。" }}</small>
+      </article>
+
+      <article class="review-card station-h-person-card">
+        <div class="review-card-head"><h2>接班人员</h2></div>
+        <label class="review-field review-field-wide">
+          <span class="review-field-label">接班人员</span>
+          <input class="review-input" v-model="form.next_people_text" :disabled="saving" placeholder="输入或点击下方人员" />
+        </label>
+        <div class="person-chip-row station-h-chip-row" v-if="state.options.next_people.length">
+          <button
+            v-for="item in state.options.next_people"
+            :key="'station-h-next-' + item.name"
+            type="button"
+            class="person-chip"
+            :class="{ 'is-active': hasName(form.next_people_text, item.name) }"
+            :disabled="saving"
+            @click="togglePerson('next_people_text', item.name)"
+          >{{ item.label || item.name }}</button>
+        </div>
+        <small class="person-picker-hint">保存后写入H楼交接班云文档接班区域。</small>
+      </article>
+
+      <article class="review-card station-h-person-card station-h-person-card-wide">
+        <div class="review-card-head"><h2>长白岗人员</h2></div>
+        <label class="review-field review-field-wide">
+          <span class="review-field-label">长白岗</span>
+          <input class="review-input" v-model="form.long_day_people_text" :disabled="saving" placeholder="不上班时留空" />
+        </label>
+        <div class="person-chip-row station-h-chip-row">
+          <button
+            v-for="item in state.options.long_day_people"
+            :key="'station-h-long-day-' + item.name"
+            type="button"
+            class="person-chip station-h-role-chip"
+            :class="{ 'is-active': hasName(form.long_day_people_text, item.name) }"
+            :disabled="saving"
+            :title="item.role"
+            @click="togglePerson('long_day_people_text', item.name)"
+          >{{ item.name }}<span v-if="item.role"> · {{ item.role }}</span></button>
+        </div>
+        <small class="person-picker-hint">{{ state.rules.long_day_people || "默认复用上一班组保存的长白岗；不上班时清空后保存。" }}</small>
+      </article>
+    </section>
+  </div>
+`;
+
 function normalizeOutdoorTemperatureBlock(raw = {}) {
   const rawCells = raw?.cells && typeof raw.cells === "object" ? raw.cells : {};
   const cells = {};
@@ -892,6 +1003,50 @@ function normalizeStation110State(raw = {}) {
       spreadsheet_title: String(cloudBatch.spreadsheet_title || "").trim(),
       error: String(cloudBatch.error || "").trim(),
     },
+  };
+}
+
+function normalizeStationHState(raw = {}) {
+  const batch = raw?.batch && typeof raw.batch === "object" ? raw.batch : {};
+  const selection = raw?.selection && typeof raw.selection === "object" ? raw.selection : {};
+  const options = raw?.options && typeof raw.options === "object" ? raw.options : {};
+  const normalizeOption = (item) => ({
+    name: String(item?.name || "").trim(),
+    label: String(item?.label || item?.name || "").trim(),
+    role: String(item?.role || "").trim(),
+  });
+  return {
+    ok: raw?.ok !== false,
+    building: String(raw?.building || "H楼").trim() || "H楼",
+    batch: {
+      duty_date: String(batch.duty_date || "").trim(),
+      duty_shift: String(batch.duty_shift || "").trim().toLowerCase(),
+      duty_shift_label: String(batch.duty_shift_label || shiftTextFromCode(batch.duty_shift)).trim(),
+      batch_key: String(batch.batch_key || "").trim(),
+    },
+    saved: Boolean(raw?.saved),
+    selection: {
+      current_people_text: String(selection.current_people_text || "").trim(),
+      next_people_text: String(selection.next_people_text || "").trim(),
+      long_day_people_text: String(selection.long_day_people_text || "").trim(),
+      source: String(selection.source || "").trim(),
+      resolved_source: String(selection.resolved_source || "").trim(),
+      people_source: String(selection.people_source || "").trim(),
+      long_day_source: String(selection.long_day_source || "").trim(),
+      updated_at: String(selection.updated_at || "").trim(),
+    },
+    options: {
+      current_people: Array.isArray(options.current_people)
+        ? options.current_people.map(normalizeOption).filter((item) => item.name)
+        : [],
+      next_people: Array.isArray(options.next_people)
+        ? options.next_people.map(normalizeOption).filter((item) => item.name)
+        : [],
+      long_day_people: Array.isArray(options.long_day_people)
+        ? options.long_day_people.map(normalizeOption).filter((item) => item.name)
+        : [],
+    },
+    rules: raw?.rules && typeof raw.rules === "object" ? raw.rules : {},
   };
 }
 
@@ -1590,9 +1745,136 @@ function mountHandover110StationApp(Vue) {
   }).mount("#app");
 }
 
+function mountHandoverStationHApp(Vue) {
+  const { createApp, ref, computed, onMounted } = Vue;
+  createApp({
+    setup() {
+      const initialSelection = resolveReviewSelection();
+      const loading = ref(true);
+      const saving = ref(false);
+      const errorText = ref("");
+      const statusText = ref("");
+      const dutyDate = ref(String(initialSelection.dutyDate || "").trim());
+      const dutyShift = ref(["day", "night"].includes(String(initialSelection.dutyShift || "").trim().toLowerCase())
+        ? String(initialSelection.dutyShift || "").trim().toLowerCase()
+        : "");
+      const state = ref(normalizeStationHState({}));
+      const form = ref({
+        current_people_text: "",
+        next_people_text: "",
+        long_day_people_text: "",
+      });
+
+      const batchText = computed(() => {
+        const date = dutyDate.value || state.value.batch.duty_date || "-";
+        const shift = shiftTextFromCode(dutyShift.value || state.value.batch.duty_shift || "");
+        return `${date} ${shift}`;
+      });
+
+      function applyState(raw) {
+        const normalized = normalizeStationHState(raw || {});
+        state.value = normalized;
+        if (normalized.batch.duty_date) dutyDate.value = normalized.batch.duty_date;
+        if (["day", "night"].includes(normalized.batch.duty_shift)) dutyShift.value = normalized.batch.duty_shift;
+        form.value = {
+          current_people_text: normalized.selection.current_people_text,
+          next_people_text: normalized.selection.next_people_text,
+          long_day_people_text: normalized.selection.long_day_people_text,
+        };
+      }
+
+      function buildContextPayload() {
+        return {
+          duty_date: dutyDate.value || state.value.batch.duty_date || "",
+          duty_shift: dutyShift.value || state.value.batch.duty_shift || "",
+        };
+      }
+
+      async function refreshStatus() {
+        loading.value = true;
+        errorText.value = "";
+        try {
+          const response = await getHandoverReviewStationHStatusApi({
+            ...buildContextPayload(),
+            _t: Date.now(),
+          });
+          applyState(response);
+          statusText.value = "H楼人员选择已刷新";
+        } catch (error) {
+          errorText.value = String(error?.message || error || "读取H楼人员选择失败");
+          statusText.value = "";
+        } finally {
+          loading.value = false;
+        }
+      }
+
+      function onDutyChange() {
+        void refreshStatus();
+      }
+
+      function hasName(value, name) {
+        return hasPersonNameValue(value, name);
+      }
+
+      function togglePerson(field, name) {
+        const key = String(field || "").trim();
+        if (!Object.prototype.hasOwnProperty.call(form.value, key)) return;
+        form.value[key] = togglePersonNameValue(form.value[key], name);
+      }
+
+      async function saveSelection() {
+        saving.value = true;
+        errorText.value = "";
+        statusText.value = "正在保存H楼人员选择...";
+        try {
+          const response = await saveHandoverReviewStationHApi({
+            ...buildContextPayload(),
+            current_people_text: form.value.current_people_text,
+            next_people_text: form.value.next_people_text,
+            long_day_people_text: form.value.long_day_people_text,
+          });
+          applyState(response);
+          statusText.value = "H楼人员选择已保存，后续H楼云文档将优先使用本次保存值。";
+        } catch (error) {
+          errorText.value = String(error?.message || error || "保存H楼人员选择失败");
+          statusText.value = "";
+        } finally {
+          saving.value = false;
+        }
+      }
+
+      onMounted(() => {
+        void refreshStatus();
+      });
+
+      return {
+        loading,
+        saving,
+        errorText,
+        statusText,
+        dutyDate,
+        dutyShift,
+        state,
+        form,
+        batchText,
+        refreshStatus,
+        saveSelection,
+        onDutyChange,
+        hasName,
+        togglePerson,
+      };
+    },
+    template: HANDOVER_REVIEW_STATION_H_TEMPLATE,
+  }).mount("#app");
+}
+
 export function mountHandoverReviewApp(Vue) {
   if (resolveReviewBuildingCode() === "110") {
     mountHandover110StationApp(Vue);
+    return;
+  }
+  if (resolveReviewBuildingCode() === "h") {
+    mountHandoverStationHApp(Vue);
     return;
   }
   const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;

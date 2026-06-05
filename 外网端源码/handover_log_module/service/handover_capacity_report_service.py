@@ -2940,12 +2940,12 @@ class HandoverCapacityReportService:
                 if self._is_current_load_rate_warning(load_rate_warning):
                     load_rate_blocking_error = load_rate_warning
             self._inject_capacity_water_reserve_value(
-            cell_values,
-            building=building_text,
-            emit_log=emit_log,
-            log_prefix="[交接班][容量报表][补水罐总储备量]",
-            log_missing=True,
-        )
+                cell_values,
+                building=building_text,
+                emit_log=emit_log,
+                log_prefix="[交接班][容量报表][补水罐总储备量]",
+                log_missing=True,
+            )
             _write_cells_with_merged_support(sheet, cell_values)
             sheet[_CAPACITY_WATER_RESERVE_CELL].number_format = _CAPACITY_WATER_RESERVE_NUMBER_FORMAT
             self._apply_load_rate_number_format(sheet)

@@ -1949,6 +1949,9 @@ export function createAppState(vueApi) {
     if (!rows.some((item) => String(item?.value || "").trim() === "110站")) {
       rows.push({ value: "110站", label: "110站" });
     }
+    if (!rows.some((item) => String(item?.value || "").trim() === "H楼")) {
+      rows.push({ value: "H楼", label: "H楼" });
+    }
     return rows;
   });
   const handoverRuleScopeOptions = computed(() => {

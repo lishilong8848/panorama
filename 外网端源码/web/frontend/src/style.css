@@ -2803,6 +2803,27 @@ button:disabled,
   grid-template-columns: minmax(0, 1fr);
 }
 
+.station-h-review-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.station-h-person-card-wide {
+  grid-column: 1 / -1;
+}
+
+.station-h-chip-row {
+  padding-top: 8px;
+}
+
+.station-h-role-chip span {
+  color: var(--text-3);
+  font-weight: 700;
+}
+
+.station-h-role-chip.is-active span {
+  color: var(--tone-primary);
+}
+
 .station-110-table-wrap {
   overflow: visible;
 }
@@ -3563,6 +3584,10 @@ button:disabled,
 }
 
 @media (max-width: 760px) {
+  .station-h-review-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .app-shell,
   .review-shell {
     width: 98vw;

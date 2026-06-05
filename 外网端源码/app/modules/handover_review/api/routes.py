@@ -4,6 +4,7 @@ import asyncio
 import copy
 import functools
 import inspect
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +49,13 @@ from handover_log_module.service.review_session_service import (
     ReviewSessionNotFoundError,
     ReviewSessionService,
     ReviewSessionStoreUnavailableError,
+)
+from handover_log_module.service.station_h_review_selection_service import (
+    STATION_H_LONG_DAY_ROLE_BY_NAME,
+    StationHReviewSelectionService,
+    join_station_h_people,
+    split_station_h_people,
+    station_h_build_batch_key,
 )
 
 
@@ -893,6 +901,21 @@ def _build_review_followup_service(container) -> ReviewFollowupTriggerService:
 
 def _build_station_110_upload_service(container) -> Handover110StationUploadService:
     return Handover110StationUploadService(_handover_cfg(container))
+
+
+def _build_station_h_review_selection_service(container) -> StationHReviewSelectionService:
+    app_dir = None
+    try:
+        config_path = Path(str(getattr(container, "config_path", "") or "")).resolve()
+        if str(config_path):
+            app_dir = config_path.parent
+    except Exception:
+        app_dir = None
+    return StationHReviewSelectionService(
+        _handover_cfg(container),
+        app_state_repository=getattr(container, "app_state_repository", None),
+        app_dir=app_dir,
+    )
 
 
 def _build_review_ui_config(container) -> Dict[str, Any]:
@@ -1982,7 +2005,7 @@ def _resolve_building_or_404(service: ReviewSessionService, building_code: str) 
 
 def _ensure_review_page_code_or_404(building_code: str) -> None:
     code = str(building_code or "").strip().lower()
-    if code == "110" or code in {"a", "b", "c", "d", "e"}:
+    if code in {"110", "h"} or code in {"a", "b", "c", "d", "e"}:
         return
     raise HTTPException(status_code=404, detail="未知楼栋页面")
 
@@ -3456,6 +3479,82 @@ def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, b
         raise HTTPException(status_code=400, detail="仅最新交接班日志支持确认上传和云表重试")
 
 
+def _station_h_person_options(*values: Any) -> list[dict[str, str]]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for name in split_station_h_people(value):
+            key = re.sub(r"\s+", "", name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+    return [{"name": name, "label": name} for name in names]
+
+
+def _station_h_long_day_options() -> list[dict[str, str]]:
+    return [
+        {"name": name, "role": role, "label": f"{name}（{role}）"}
+        for name, role in STATION_H_LONG_DAY_ROLE_BY_NAME.items()
+    ]
+
+
+def _station_h_status_payload(
+    container,
+    *,
+    duty_date: str = "",
+    duty_shift: str = "",
+) -> Dict[str, Any]:
+    handover_cfg = _handover_cfg(container)
+    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
+    if not duty_date_text or not duty_shift_text:
+        duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
+    batch_key = station_h_build_batch_key(duty_date_text, duty_shift_text)
+    selection_service = _build_station_h_review_selection_service(container)
+    saved_selection = selection_service.get_selection(duty_date_text, duty_shift_text)
+    resolved_selection = selection_service.resolve_selection(duty_date=duty_date_text, duty_shift=duty_shift_text)
+    selected_current = resolved_selection.get("current_people", [])
+    selected_next = resolved_selection.get("next_people", [])
+    selected_long_day = resolved_selection.get("long_day_people", [])
+    return {
+        "ok": True,
+        "building": "H楼",
+        "building_code": "h",
+        "batch": {
+            "duty_date": duty_date_text,
+            "duty_shift": duty_shift_text,
+            "duty_shift_label": _shift_label(duty_shift_text),
+            "batch_key": batch_key,
+        },
+        "saved": bool(saved_selection),
+        "selection": {
+            "duty_date": duty_date_text,
+            "duty_shift": duty_shift_text,
+            "batch_key": batch_key,
+            "current_people": split_station_h_people(selected_current),
+            "current_people_text": join_station_h_people(selected_current),
+            "next_people": split_station_h_people(selected_next),
+            "next_people_text": join_station_h_people(selected_next),
+            "long_day_people": split_station_h_people(selected_long_day),
+            "long_day_people_text": join_station_h_people(selected_long_day),
+            "source": str(resolved_selection.get("source", "") or "").strip(),
+            "resolved_source": str(resolved_selection.get("resolved_source", "") or "").strip(),
+            "people_source": str(resolved_selection.get("people_source", "") or "").strip(),
+            "long_day_source": str(resolved_selection.get("long_day_source", "") or "").strip(),
+            "updated_at": str(resolved_selection.get("updated_at", "") or "").strip(),
+        },
+        "options": {
+            "current_people": _station_h_person_options(selected_current, selected_next),
+            "next_people": _station_h_person_options(selected_next, selected_current),
+            "long_day_people": _station_h_long_day_options(),
+        },
+        "rules": {
+            "duty_people": "首次手动填写；后续按白夜休休轮换，优先复用同一班组上次保存的值。",
+            "long_day_people": "默认复用上一班组保存的长白岗；当天不上班或第二天不上班时可手动清空或改选。",
+        },
+    }
+
+
 @router.get("/handover/review/{building_code}")
 async def handover_review_page(building_code: str, request: Request):
     container = request.app.state.container
@@ -3473,6 +3572,65 @@ async def handover_review_page(building_code: str, request: Request):
         container.frontend_root / "index.html",
         headers=source_frontend_no_cache_headers(container.frontend_mode),
     )
+
+
+@router.get("/api/handover/review/station-h/status")
+@_dedicated_review_endpoint
+def handover_review_station_h_status(
+    request: Request,
+    duty_date: str = "",
+    duty_shift: str = "",
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    try:
+        return _station_h_status_payload(container, duty_date=duty_date, duty_shift=duty_shift)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/api/handover/review/station-h")
+@_dedicated_review_endpoint
+def handover_review_station_h_save(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
+    duty_date_text, duty_shift_text = _normalize_duty_context(
+        str(body.get("duty_date", "") or "").strip(),
+        str(body.get("duty_shift", "") or "").strip().lower(),
+    )
+    if not duty_date_text or not duty_shift_text:
+        duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
+    current_people = body.get("current_people", body.get("current_people_text", ""))
+    next_people = body.get("next_people", body.get("next_people_text", ""))
+    long_day_people = body.get("long_day_people", body.get("long_day_people_text", ""))
+    selection_service = _build_station_h_review_selection_service(container)
+    try:
+        saved = selection_service.save_selection(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            current_people=current_people,
+            next_people=next_people,
+            long_day_people=long_day_people,
+            source="manual",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if callable(getattr(container, "add_system_log", None)):
+        container.add_system_log(
+            "[交接班][H楼审核页] 人员选择已保存 "
+            f"batch={saved.get('batch_key', '-')}, "
+            f"值班={saved.get('current_people_text', '-') or '-'}, "
+            f"接班={saved.get('next_people_text', '-') or '-'}, "
+            f"长白岗={saved.get('long_day_people_text', '-') or '-'}"
+        )
+    status = _station_h_status_payload(container, duty_date=duty_date_text, duty_shift=duty_shift_text)
+    status["saved_selection"] = saved
+    return status
 
 
 @router.get("/api/handover/review/110-station/status")

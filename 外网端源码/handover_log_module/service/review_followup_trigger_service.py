@@ -23,20 +23,13 @@ from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateService,
 )
 from handover_log_module.service.review_session_service import ReviewSessionNotFoundError, ReviewSessionService
+from handover_log_module.service.station_h_review_selection_service import (
+    StationHReviewSelectionService,
+    station_h_long_day_text,
+)
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
 )
-
-_STATION_H_LONG_DAY_ROLE_BY_NAME = {
-    "梅冰冰": "设施运维经理",
-    "马进宇": "设施运维副经理",
-    "曹李培": "综合管理",
-    "王庆华": "暖通主管",
-    "周海祥": "电气主管",
-    "曹毅": "弱电主管",
-    "明志勇": "安全&消防工程师",
-    "高荣": "消防主管",
-}
 
 
 def _normalize_export_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -158,6 +151,7 @@ class ReviewFollowupTriggerService:
         self._cabinet_shift_record_export_service = HandoverCabinetShiftRecordBitableExportService(self.config)
         self._review_document_state_service = ReviewDocumentStateService(self.config)
         self._summary_message_service = HandoverSummaryMessageService(self.config)
+        self._station_h_review_selection_service = StationHReviewSelectionService(self.config)
 
     def evaluate(self, batch_status: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = batch_status if isinstance(batch_status, dict) else {}
@@ -1538,16 +1532,7 @@ class ReviewFollowupTriggerService:
 
     @staticmethod
     def _station_h_long_day_text(value: Any) -> str:
-        names = ReviewFollowupTriggerService._station_h_split_people(value)
-        if not names:
-            return "常白岗：/"
-        name_set = set(names)
-        filtered_names = [
-            name
-            for name in _STATION_H_LONG_DAY_ROLE_BY_NAME
-            if name in name_set
-        ]
-        return f"常白岗：{' '.join(filtered_names) if filtered_names else '/'}"
+        return station_h_long_day_text(value)
 
     @staticmethod
     def _station_h_fixed_cell_values(document: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -1668,38 +1653,70 @@ class ReviewFollowupTriggerService:
                 "error": "缺少共享室外干球/湿球温度",
             }
 
-        roster_repo = ShiftRosterRepository(self.config)
+        selection: Dict[str, Any] = {}
         try:
-            assignment = roster_repo.query_assignment(
-                building="H楼",
+            selection = self._station_h_review_selection_service.resolve_selection(
                 duty_date=duty_date,
                 duty_shift=duty_shift,
-                emit_log=emit_log,
             )
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "status": "failed", "reason": "roster_failed", "error": str(exc)}
-        current_names = self._station_h_split_people(assignment.current_people)
-        next_names = self._station_h_split_people(assignment.next_people)
+            emit_log(f"[交接班][H楼云表] 审核页保存值读取失败，将使用排班兜底: {exc}")
+            selection = {}
+        current_names = self._station_h_split_people(selection.get("current_people", []))
+        next_names = self._station_h_split_people(selection.get("next_people", []))
+
+        roster_repo = ShiftRosterRepository(self.config)
+        assignment = None
+        if not current_names or not next_names:
+            try:
+                assignment = roster_repo.query_assignment(
+                    building="H楼",
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    emit_log=emit_log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not current_names or not next_names:
+                    return {"ok": False, "status": "failed", "reason": "roster_failed", "error": str(exc)}
+            if assignment is not None:
+                if not current_names:
+                    current_names = self._station_h_split_people(assignment.current_people)
+                if not next_names:
+                    next_names = self._station_h_split_people(assignment.next_people)
         current_first = current_names[0] if current_names else ""
-        next_first = assignment.next_first_person or (next_names[0] if next_names else "")
+        next_first = (
+            str(getattr(assignment, "next_first_person", "") or "").strip()
+            if assignment is not None
+            else ""
+        ) or (next_names[0] if next_names else "")
         if not current_names or not next_names or not current_first or not next_first:
             return {
                 "ok": False,
                 "status": "failed",
                 "reason": "missing_roster_people",
-                "error": "H楼值班/接班人员未识别",
+                "error": "H楼值班/接班人员未填写或未识别，请先在H楼审核页保存人员",
             }
 
-        try:
-            long_day_cells = roster_repo.query_long_day_cell_values(
-                building="H楼",
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][H楼云表] 常白岗查询失败，将使用空值: {exc}")
-            long_day_cells = {}
+        selection_has_long_day = bool(
+            str(selection.get("resolved_source", "") or "").strip() == "current"
+            or str(selection.get("long_day_source", "") or "").strip()
+        )
+        long_day_people = self._station_h_split_people(selection.get("long_day_people", []))
+        if selection_has_long_day:
+            long_day_cells = {
+                "B4" if duty_shift == "day" else "F4": self._station_h_long_day_text(long_day_people)
+            }
+        else:
+            try:
+                long_day_cells = roster_repo.query_long_day_cell_values(
+                    building="H楼",
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    emit_log=emit_log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][H楼云表] 常白岗查询失败，将使用空值: {exc}")
+                long_day_cells = {}
         b4_value = "常白岗：/"
         f4_value = "常白岗：/"
         if duty_shift == "day":

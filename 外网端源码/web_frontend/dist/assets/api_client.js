@@ -645,6 +645,17 @@ export async function getHandoverReview110StationStatusApi(params = {}) {
   return apiJsonWithTimeout(appendQuery("/api/handover/review/110-station/status", params), {}, 15000);
 }
 
+export async function getHandoverReviewStationHStatusApi(params = {}) {
+  return apiJsonWithTimeout(appendQuery("/api/handover/review/station-h/status", params), {}, 8000);
+}
+
+export async function saveHandoverReviewStationHApi(payload = {}) {
+  return apiJsonWithTimeout("/api/handover/review/station-h", {
+    method: "PUT",
+    body: JSON.stringify(payload || {}),
+  }, 8000);
+}
+
 export async function parseHandoverReview110StationFileApi(form) {
   const resp = await fetch("/api/handover/review/110-station/parse", {
     method: "POST",
