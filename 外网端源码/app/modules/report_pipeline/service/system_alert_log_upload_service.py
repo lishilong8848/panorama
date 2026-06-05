@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
@@ -54,6 +55,7 @@ class SystemAlertLogUploadService:
         self._last_flush_at = ""
         self._last_error = ""
         self._host_name = self._load_or_create_host_name()
+        self._session_id = self._build_session_id()
         self._target_field_names_cache: set[str] | None = None
         self._target_field_names_cache_at = 0.0
 
@@ -63,6 +65,10 @@ class SystemAlertLogUploadService:
             return str(socket.gethostname() or "").strip()
         except Exception:  # noqa: BLE001
             return ""
+
+    @staticmethod
+    def _build_session_id() -> str:
+        return f"{int(time.time() * 1000)}-{os.getpid()}"
 
     def _load_or_create_host_name(self) -> str:
         payload = self._state_repository.load(self._identity_path, {})
@@ -104,6 +110,7 @@ class SystemAlertLogUploadService:
     def start(self) -> Dict[str, Any]:
         if self.is_running():
             return {"started": False, "running": True, "reason": "already_running"}
+        self._discard_stale_queue_entries()
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop,
@@ -127,9 +134,47 @@ class SystemAlertLogUploadService:
             return
         payload = dict(payload)
         payload.setdefault("host_name", self._host_name)
+        payload.setdefault("session_id", self._session_id)
         with self._lock:
             with self._queue_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _discard_stale_queue_entries(self) -> None:
+        with self._lock:
+            if not self._queue_path.exists():
+                self._state["uploaded_line_count"] = 0
+                self._save_state()
+                return
+            try:
+                raw_lines = self._queue_path.read_text(encoding="utf-8").splitlines()
+            except Exception:  # noqa: BLE001
+                return
+            kept_lines: List[str] = []
+            dropped = 0
+            for raw_line in raw_lines:
+                text = str(raw_line or "").strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except Exception:  # noqa: BLE001
+                    dropped += 1
+                    continue
+                if not isinstance(payload, dict):
+                    dropped += 1
+                    continue
+                if str(payload.get("session_id", "") or "").strip() != self._session_id:
+                    dropped += 1
+                    continue
+                kept_lines.append(json.dumps(payload, ensure_ascii=False))
+            content = "\n".join(kept_lines)
+            if content:
+                content += "\n"
+            self._queue_path.write_text(content, encoding="utf-8")
+            self._state["uploaded_line_count"] = 0
+            self._save_state()
+        if dropped > 0:
+            self._emit_log(f"[系统告警上报] 启动时已丢弃旧积压日志 count={dropped}")
 
     def _loop(self) -> None:
         while not self._stop.wait(self.POLL_INTERVAL_SECONDS):
