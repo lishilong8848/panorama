@@ -6,10 +6,12 @@ import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
 import openpyxl
+from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
@@ -40,6 +42,7 @@ _HEADERS = [
 ]
 _HEADER_FILL = PatternFill("solid", fgColor="FFFF00")
 _DATA_FILL = PatternFill("solid", fgColor="C6E0B4")
+_TOP5_RED_FILL = PatternFill("solid", fgColor="FFFF0000")
 _THIN_BORDER = Border(
     left=Side(style="thin"),
     right=Side(style="thin"),
@@ -192,6 +195,34 @@ def _load_rows(path: Path) -> List[List[Any]]:
         return [list(row) for row in sheet.iter_rows(values_only=True)]
     finally:
         workbook.close()
+
+
+def _load_workbook(path: Path):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Workbook contains no default style, apply openpyxl's default",
+            category=UserWarning,
+        )
+        return openpyxl.load_workbook(path, data_only=False)
+
+
+def _clone_image(image: Any) -> OpenpyxlImage | None:
+    try:
+        raw = image._data()
+    except Exception:  # noqa: BLE001
+        return None
+    cloned = OpenpyxlImage(BytesIO(raw))
+    try:
+        cloned.width = image.width
+        cloned.height = image.height
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cloned.anchor = copy.copy(image.anchor)
+    except Exception:  # noqa: BLE001
+        return None
+    return cloned
 
 
 def _monthly_transformer_label(text: str) -> str:
@@ -354,7 +385,7 @@ class Top5PowerReportService:
             if cabinet_parts is None or actual_load is None:
                 continue
             _building, room, column, _cabinet_no = cabinet_parts
-            identifier = f"{_building_code(normalized_building)}-{room}-{column}列"
+            identifier = f"{_building_code(normalized_building)}-{room}-{column}列功率和"
             group = row_line_groups.setdefault(
                 identifier,
                 {
@@ -423,11 +454,13 @@ class Top5PowerReportService:
         return result
 
     @staticmethod
-    def _style_cell(cell, *, is_header: bool = False, is_data_fill: bool = False) -> None:
+    def _style_cell(cell, *, is_header: bool = False, is_data_fill: bool = False, fill: PatternFill | None = None) -> None:
         cell.border = _THIN_BORDER
         cell.alignment = _CENTER
         cell.font = _HEADER_FONT if is_header else _DATA_FONT
-        if is_header:
+        if fill is not None:
+            cell.fill = fill
+        elif is_header:
             cell.fill = _HEADER_FILL
         elif is_data_fill:
             cell.fill = _DATA_FILL
@@ -521,13 +554,63 @@ class Top5PowerReportService:
     def _append_source_sheet(self, workbook, *, sheet_name: str, source_path: Path) -> int:
         if sheet_name in workbook.sheetnames:
             workbook.remove(workbook[sheet_name])
-        sheet = workbook.create_sheet(sheet_name)
-        row_count = 0
-        for row in _load_rows(source_path):
-            sheet.append(row)
-            row_count += 1
-        sheet.freeze_panes = "A4"
-        return row_count
+        target_sheet = workbook.create_sheet(sheet_name)
+        source_workbook = _load_workbook(source_path)
+        try:
+            source_sheet = source_workbook.active
+            if hasattr(source_sheet, "reset_dimensions"):
+                source_sheet.reset_dimensions()
+            for row in source_sheet.iter_rows():
+                for source_cell in row:
+                    target_cell = target_sheet.cell(
+                        row=source_cell.row,
+                        column=source_cell.column,
+                        value=source_cell.value,
+                    )
+                    if source_cell.has_style:
+                        target_cell._style = copy.copy(source_cell._style)
+                    if source_cell.number_format:
+                        target_cell.number_format = source_cell.number_format
+                    if source_cell.font is not None:
+                        target_cell.font = copy.copy(source_cell.font)
+                    if source_cell.fill is not None:
+                        target_cell.fill = copy.copy(source_cell.fill)
+                    if source_cell.border is not None:
+                        target_cell.border = copy.copy(source_cell.border)
+                    if source_cell.alignment is not None:
+                        target_cell.alignment = copy.copy(source_cell.alignment)
+                    if source_cell.protection is not None:
+                        target_cell.protection = copy.copy(source_cell.protection)
+                    if source_cell.hyperlink:
+                        target_cell._hyperlink = copy.copy(source_cell.hyperlink)
+                    if source_cell.comment:
+                        target_cell.comment = copy.copy(source_cell.comment)
+            for merged_range in source_sheet.merged_cells.ranges:
+                target_sheet.merge_cells(str(merged_range))
+            for key, dimension in source_sheet.column_dimensions.items():
+                target_dimension = target_sheet.column_dimensions[key]
+                target_dimension.width = dimension.width
+                target_dimension.hidden = dimension.hidden
+                target_dimension.bestFit = dimension.bestFit
+                target_dimension.outlineLevel = dimension.outlineLevel
+                target_dimension.collapsed = dimension.collapsed
+            for key, dimension in source_sheet.row_dimensions.items():
+                target_dimension = target_sheet.row_dimensions[key]
+                target_dimension.height = dimension.height
+                target_dimension.hidden = dimension.hidden
+                target_dimension.outlineLevel = dimension.outlineLevel
+                target_dimension.collapsed = dimension.collapsed
+            target_sheet.freeze_panes = source_sheet.freeze_panes
+            target_sheet.sheet_state = source_sheet.sheet_state
+            if getattr(source_sheet.auto_filter, "ref", None):
+                target_sheet.auto_filter.ref = source_sheet.auto_filter.ref
+            for image in list(getattr(source_sheet, "_images", []) or []):
+                cloned_image = _clone_image(image)
+                if cloned_image is not None:
+                    target_sheet.add_image(cloned_image)
+            return int(source_sheet.max_row or 0)
+        finally:
+            source_workbook.close()
 
     def _append_building_detail_sheet(
         self,
@@ -552,8 +635,9 @@ class Top5PowerReportService:
             for index, record in enumerate(records, start=2):
                 name_cell = sheet.cell(row=index, column=start_column, value=record.identifier)
                 value_cell = sheet.cell(row=index, column=start_column + 1, value=_format_power(record.power_kw))
-                self._style_cell(name_cell)
-                self._style_cell(value_cell)
+                highlight_fill = _TOP5_RED_FILL if index <= 6 else None
+                self._style_cell(name_cell, fill=highlight_fill)
+                self._style_cell(value_cell, fill=highlight_fill)
                 value_cell.number_format = "0.00"
         sheet.freeze_panes = "A2"
         for column in ("A", "D", "G", "J"):
