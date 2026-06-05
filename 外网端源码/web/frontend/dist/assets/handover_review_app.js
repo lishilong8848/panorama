@@ -1762,10 +1762,11 @@ function mountHandover110StationApp(Vue) {
 }
 
 function mountHandoverStationHApp(Vue) {
-  const { createApp, ref, computed, onMounted } = Vue;
+  const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
   createApp({
     setup() {
       const initialSelection = resolveReviewSelection();
+      const routeHadExplicitDuty = Boolean(initialSelection.dutyDate && initialSelection.dutyShift);
       const loading = ref(true);
       const saving = ref(false);
       const errorText = ref("");
@@ -1780,12 +1781,18 @@ function mountHandoverStationHApp(Vue) {
         next_people_text: "",
         long_day_people_text: "",
       });
+      const stationHRefreshTimers = new Set();
 
       const batchText = computed(() => {
         const date = dutyDate.value || state.value.batch.duty_date || "-";
         const shift = shiftTextFromCode(dutyShift.value || state.value.batch.duty_shift || "");
         return `${date} ${shift}`;
       });
+      const hasUnsavedChanges = computed(() => (
+        String(form.value.current_people_text || "").trim() !== String(state.value.selection.current_people_text || "").trim()
+        || String(form.value.next_people_text || "").trim() !== String(state.value.selection.next_people_text || "").trim()
+        || String(form.value.long_day_people_text || "").trim() !== String(state.value.selection.long_day_people_text || "").trim()
+      ));
 
       function applyState(raw) {
         const normalized = normalizeStationHState(raw || {});
@@ -1806,26 +1813,64 @@ function mountHandoverStationHApp(Vue) {
         };
       }
 
-      async function refreshStatus() {
-        loading.value = true;
-        errorText.value = "";
+      async function refreshStatus({ background = false, forceCurrent = false } = {}) {
+        if (background && (saving.value || hasUnsavedChanges.value)) return;
+        if (!background) {
+          loading.value = true;
+          errorText.value = "";
+        }
         try {
           const response = await getHandoverReviewStationHStatusApi({
-            ...buildContextPayload(),
+            ...(routeHadExplicitDuty && !forceCurrent ? buildContextPayload() : {}),
             _t: Date.now(),
           });
           applyState(response);
-          statusText.value = "H楼人员选择已刷新";
+          if (!background) statusText.value = "H楼人员选择已刷新";
         } catch (error) {
-          errorText.value = String(error?.message || error || "读取H楼人员选择失败");
-          statusText.value = "";
+          if (!background) {
+            errorText.value = String(error?.message || error || "读取H楼人员选择失败");
+            statusText.value = "";
+          }
         } finally {
-          loading.value = false;
+          if (!background) loading.value = false;
         }
       }
 
       function onDutyChange() {
-        void refreshStatus();
+        void refreshStatus({ forceCurrent: false });
+      }
+
+      function clearStationHRefreshTimers() {
+        stationHRefreshTimers.forEach((timer) => window.clearTimeout(timer));
+        stationHRefreshTimers.clear();
+      }
+
+      function millisecondsUntilNextHandoverBoundary(now = new Date()) {
+        const candidates = [9, 18].map((hour) => {
+          const target = new Date(now.getTime());
+          target.setHours(hour, 0, 30, 0);
+          if (target.getTime() <= now.getTime()) {
+            target.setDate(target.getDate() + 1);
+          }
+          return target.getTime() - now.getTime();
+        });
+        return Math.max(1000, Math.min(...candidates));
+      }
+
+      function scheduleStationHBoundaryRefresh() {
+        if (routeHadExplicitDuty) return;
+        const delay = millisecondsUntilNextHandoverBoundary();
+        const timer = window.setTimeout(() => {
+          stationHRefreshTimers.delete(timer);
+          void refreshStatus({ background: true, forceCurrent: true });
+          const recheckTimer = window.setTimeout(() => {
+            stationHRefreshTimers.delete(recheckTimer);
+            void refreshStatus({ background: true, forceCurrent: true });
+            scheduleStationHBoundaryRefresh();
+          }, 5 * 60 * 1000);
+          stationHRefreshTimers.add(recheckTimer);
+        }, delay);
+        stationHRefreshTimers.add(timer);
       }
 
       function hasName(value, name) {
@@ -1861,6 +1906,11 @@ function mountHandoverStationHApp(Vue) {
 
       onMounted(() => {
         void refreshStatus();
+        scheduleStationHBoundaryRefresh();
+      });
+
+      onBeforeUnmount(() => {
+        clearStationHRefreshTimers();
       });
 
       return {
