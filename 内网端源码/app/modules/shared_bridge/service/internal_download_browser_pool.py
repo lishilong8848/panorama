@@ -50,6 +50,8 @@ class InternalDownloadBrowserPool:
     MAX_JOB_ATTEMPTS = 3
     SUBMIT_READY_TIMEOUT_SEC = 120.0
     RECOVERY_PROBE_INTERVAL_SEC = 60
+    HEALTH_PROBE_INTERVAL_SEC = 90
+    HEALTH_PROBE_FAILURE_THRESHOLD = 2
     RECYCLE_AFTER_AGE_SEC = 12 * 60 * 60
     RECYCLE_AFTER_JOB_COUNT = 100
 
@@ -72,7 +74,9 @@ class InternalDownloadBrowserPool:
         self._browser_slots: Dict[str, Dict[str, Any]] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
         self._recovery_probe_task: asyncio.Task[Any] | None = None
+        self._health_probe_task: asyncio.Task[Any] | None = None
         self._prelogin_tasks: set[asyncio.Task[Any]] = set()
+        self._health_probe_failures: Dict[str, int] = {}
         self._state_lock = threading.Lock()
         self._stopping = False
         self._last_error = ""
@@ -729,6 +733,64 @@ class InternalDownloadBrowserPool:
         except asyncio.CancelledError:
             return
 
+    async def _async_health_probe_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.HEALTH_PROBE_INTERVAL_SEC)
+                if self._stopping:
+                    return
+                for building in self.BUILDINGS:
+                    if self._stopping:
+                        return
+                    slot = self._slot_snapshot(building)
+                    if bool(slot.get("in_use", False)) or bool(slot.get("suspended", False)):
+                        continue
+                    login_state = str(slot.get("login_state", "") or "").strip().lower()
+                    if login_state in {"failed", "expired"}:
+                        continue
+                    lock = self._locks.get(building)
+                    if lock is None or lock.locked():
+                        continue
+                    async with lock:
+                        current = self._slot_snapshot(building)
+                        if bool(current.get("in_use", False)) or bool(current.get("suspended", False)):
+                            continue
+                        slot = self._browser_slots.get(building) or {}
+                        page = slot.get("page")
+                        usable = await self._probe_page_usable(page)
+                        if usable:
+                            self._health_probe_failures[building] = 0
+                            continue
+                        failure_count = int(self._health_probe_failures.get(building, 0) or 0) + 1
+                        self._health_probe_failures[building] = failure_count
+                        self._update_slot(
+                            building,
+                            page_ready=False,
+                            last_error=f"health_probe_failed:{failure_count}",
+                            pending_issue_summary="浏览器页面健康巡检失败，等待自动重建",
+                        )
+                        if failure_count < self.HEALTH_PROBE_FAILURE_THRESHOLD:
+                            self._log(
+                                f"[共享桥接] 楼栋浏览器健康巡检失败: {building}, "
+                                f"failure={failure_count}/{self.HEALTH_PROBE_FAILURE_THRESHOLD}"
+                            )
+                            continue
+                        try:
+                            self._log(f"[共享桥接] 楼栋浏览器健康巡检连续失败，开始重建: {building}")
+                            await self._create_or_replace_slot(building)
+                            self._health_probe_failures[building] = 0
+                            self._log(f"[共享桥接] 楼栋浏览器健康巡检已重建: {building}")
+                        except Exception as exc:  # noqa: BLE001
+                            self._last_error = str(exc)
+                            self._update_slot(
+                                building,
+                                last_error=str(exc),
+                                pending_issue_summary=f"浏览器健康巡检重建失败: {self._format_login_error(exc)}",
+                            )
+                            self._log(f"[共享桥接] 楼栋浏览器健康巡检重建失败: {building}, error={exc}")
+        except asyncio.CancelledError:
+            return
+
     async def _async_prelogin_building(self, building: str) -> None:
         if self._stopping:
             return
@@ -966,9 +1028,17 @@ class InternalDownloadBrowserPool:
         for building in self.BUILDINGS:
             await self._create_or_replace_slot(building)
         self._recovery_probe_task = asyncio.create_task(self._async_recovery_probe_loop())
+        self._health_probe_task = asyncio.create_task(self._async_health_probe_loop())
 
     async def _async_stop(self) -> None:
         self._stopping = True
+        if self._health_probe_task is not None:
+            self._health_probe_task.cancel()
+            try:
+                await self._health_probe_task
+            except Exception:
+                pass
+            self._health_probe_task = None
         if self._recovery_probe_task is not None:
             self._recovery_probe_task.cancel()
             try:
@@ -976,6 +1046,7 @@ class InternalDownloadBrowserPool:
             except Exception:
                 pass
             self._recovery_probe_task = None
+        self._health_probe_failures.clear()
         pending_prelogin_tasks = list(self._prelogin_tasks)
         for task in pending_prelogin_tasks:
             task.cancel()
@@ -1391,6 +1462,12 @@ class InternalDownloadBrowserPool:
             "browser_ready": startup_ready and initial_prelogin_done,
             "startup_ready": startup_ready,
             "initial_prelogin_done": initial_prelogin_done,
+            "health_probe": {
+                "enabled": True,
+                "interval_sec": self.HEALTH_PROBE_INTERVAL_SEC,
+                "failure_threshold": self.HEALTH_PROBE_FAILURE_THRESHOLD,
+                "failure_counts": dict(self._health_probe_failures),
+            },
             "page_slots": page_slots,
             "active_buildings": active_buildings,
             "last_error": self._last_error,
