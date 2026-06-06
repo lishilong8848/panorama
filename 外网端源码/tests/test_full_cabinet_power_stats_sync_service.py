@@ -11,7 +11,7 @@ from handover_log_module.service.branch_power_upload_service import BranchPowerU
 from handover_log_module.service.full_cabinet_power_stats_sync_service import (
     FullCabinetPowerStatsSyncService,
 )
-from handover_log_module.service.power_alert_sync_service import _PowerAlertTable
+from handover_log_module.service.power_alert_sync_service import _PowerAlertTable, _SourceRow
 
 
 def _write_full_cabinet_source(path: Path) -> None:
@@ -155,6 +155,84 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["对侧机列"], "A列-AC019")
         self.assertEqual(rows[0]["对侧机列最大功率"], "99kw")
+
+    def test_threshold_stats_keeps_cross_day_continuity_in_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
+            object_key = service._power_alert_object_key("C楼", "C-301", "H列-DC001")
+
+            previous = service._threshold_stats(
+                [120.0] * 24,
+                107.5,
+                table_key="line_head",
+                object_key=object_key,
+                report_date="2026/05/03",
+                source_hint=object_key,
+            )
+            current_values = (
+                [120.0] * 11
+                + [10.0] * 4
+                + [120.0] * 2
+                + [10.0] * 2
+                + [120.0]
+                + [10.0]
+                + [120.0] * 3
+            )
+            current = service._threshold_stats(
+                current_values,
+                107.5,
+                table_key="line_head",
+                object_key=object_key,
+                report_date="2026/05/04",
+                source_hint=object_key,
+            )
+
+            self.assertEqual(previous["over_count"], 24)
+            self.assertEqual(previous["runs"], 1)
+            self.assertTrue(previous["end_over"])
+            self.assertEqual(current["over_count"], 17)
+            self.assertEqual(current["runs"], 3)
+            self.assertTrue(current["previous_end_over"])
+
+    def test_threshold_stats_ignores_boundary_point_after_24_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
+
+            stats = service._threshold_stats(
+                [120.0] * 25,
+                107.5,
+                previous_end_over=False,
+            )
+
+            self.assertEqual(stats["over_count"], 24)
+            self.assertEqual(stats["runs"], 1)
+            self.assertNotIn(24, stats["over_hours"])
+
+    def test_branch_rows_write_fixed_data_center_name_to_machine_room(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
+            row = _SourceRow(
+                building="A楼",
+                room="A-301包间",
+                room_short="A-301",
+                line_raw="A-301-C列-DC010",
+                line=service._parse_line("A-301-C列-DC010"),
+                pdu="C02-A2",
+                pdu_info=service._parse_pdu("C02-A2"),
+                branch_no="20",
+                powers=[8.28] * 24,
+            )
+
+            rows = service._generate_branch_rows(
+                [row],
+                threshold=6.25,
+                report_date="2026/05/31",
+                data_center_name="EA118",
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["机房"], "EA118")
+            self.assertNotEqual(rows[0]["机房"], "A-301-C列-DC010")
 
     def test_generate_cabinet_rows_backfills_pdu_and_current_from_old_detail_rows(self) -> None:
         service = FullCabinetPowerStatsSyncService({})

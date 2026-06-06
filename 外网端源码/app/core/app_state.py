@@ -200,6 +200,28 @@ class AppStateRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_bridge_source_index_updated
                 ON bridge_source_index(source_family, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS power_alert_daily_stats (
+                table_key TEXT NOT NULL,
+                business_date TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                threshold REAL NOT NULL DEFAULT 0,
+                over_mask INTEGER NOT NULL DEFAULT 0,
+                duration_hours INTEGER NOT NULL DEFAULT 0,
+                run_count INTEGER NOT NULL DEFAULT 0,
+                max_hour INTEGER NOT NULL DEFAULT 0,
+                max_value REAL NOT NULL DEFAULT 0,
+                end_over INTEGER NOT NULL DEFAULT 0,
+                source_hash TEXT NOT NULL DEFAULT '',
+                source_file TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(table_key, business_date, object_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_power_alert_daily_stats_date
+                ON power_alert_daily_stats(table_key, business_date);
+            CREATE INDEX IF NOT EXISTS idx_power_alert_daily_stats_object
+                ON power_alert_daily_stats(table_key, object_key, business_date DESC);
             """
         )
 
@@ -533,6 +555,7 @@ class AppStateRepository:
                 "generated_files",
                 "bridge_tasks",
                 "bridge_source_index",
+                "power_alert_daily_stats",
             ):
                 row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {table_name}").fetchone()
                 table_counts[table_name] = int(row["cnt"] if row else 0)

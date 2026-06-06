@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import time
@@ -11,6 +12,7 @@ from app.modules.alarm_export.core.field_type_converter import build_field_meta_
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
+from handover_log_module.repository.power_alert_stats_repository import PowerAlertStatsRepository
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,8 @@ class PowerAlertSyncService:
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
+        self._stats_repository = PowerAlertStatsRepository.from_config(self.config)
+        self._stats_repository_error_logged = False
 
     def _emit(self, emit_log: Callable[[str], None], text: str) -> None:
         try:
@@ -482,29 +486,159 @@ class PowerAlertSyncService:
     def _max_of(values: List[float]) -> float:
         return max(values) if values else 0.0
 
+    @staticmethod
+    def _stats_business_date_key(value: Any) -> str:
+        text = str(value or "").strip().replace("/", "-")
+        for fmt in ("%Y-%m-%d", "%Y%m%d"):
+            try:
+                return datetime.strptime(text[:10] if fmt == "%Y-%m-%d" else text, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return text[:10]
+
     @classmethod
-    def _threshold_stats(cls, values: List[float], threshold: float) -> Dict[str, Any]:
+    def _stats_previous_date_key(cls, value: Any) -> str:
+        current = datetime.strptime(cls._stats_business_date_key(value), "%Y-%m-%d")
+        return (current - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _power_alert_object_key(*parts: Any) -> str:
+        normalized = [str(part or "").strip() for part in parts]
+        return "||".join(normalized)
+
+    @staticmethod
+    def _stats_source_hash(values: List[float], threshold: float, *, source_hint: str = "") -> str:
+        hour_values = list(values or [])[:24]
+        text = "|".join([str(float(threshold or 0)), str(source_hint or ""), *[f"{float(value or 0):.6f}" for value in hour_values]])
+        return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _lookup_previous_end_over(
+        self,
+        *,
+        table_key: str,
+        object_key: str,
+        report_date: str,
+        emit_log: Callable[[str], None] | None = None,
+    ) -> bool | None:
+        try:
+            return self._stats_repository.get_end_over(
+                table_key=table_key,
+                business_date=self._stats_previous_date_key(report_date),
+                object_key=object_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not self._stats_repository_error_logged:
+                self._stats_repository_error_logged = True
+                if callable(emit_log):
+                    self._emit(emit_log, f"[动环功率统计] 超限状态库读取失败，按当天独立计算: {exc}")
+            return None
+
+    def _persist_threshold_stats(
+        self,
+        stats: Dict[str, Any],
+        *,
+        table_key: str,
+        object_key: str,
+        report_date: str,
+        threshold: float,
+        source_file: str = "",
+        source_hint: str = "",
+        emit_log: Callable[[str], None] | None = None,
+    ) -> None:
+        try:
+            self._stats_repository.upsert_stat(
+                table_key=table_key,
+                business_date=self._stats_business_date_key(report_date),
+                object_key=object_key,
+                threshold=float(threshold or 0),
+                over_mask=int(stats.get("over_mask", 0) or 0),
+                duration_hours=int(stats.get("over_count", 0) or 0),
+                run_count=int(stats.get("runs", 0) or 0),
+                max_hour=int(stats.get("max_hour", 0) or 0),
+                max_value=float(stats.get("max_value", 0) or 0),
+                end_over=bool(stats.get("end_over", False)),
+                source_hash=str(stats.get("source_hash") or source_hint or ""),
+                source_file=source_file,
+                payload={
+                    "over_hours": stats.get("over_hours", []),
+                    "previous_end_over": stats.get("previous_end_over"),
+                    "raw_runs": stats.get("raw_runs", 0),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not self._stats_repository_error_logged:
+                self._stats_repository_error_logged = True
+                if callable(emit_log):
+                    self._emit(emit_log, f"[动环功率统计] 超限状态库写入失败，不阻断上传: {exc}")
+
+    def _threshold_stats(
+        self,
+        values: List[float],
+        threshold: float,
+        *,
+        table_key: str = "",
+        object_key: str = "",
+        report_date: str = "",
+        previous_end_over: bool | None = None,
+        source_file: str = "",
+        source_hint: str = "",
+        emit_log: Callable[[str], None] | None = None,
+    ) -> Dict[str, Any]:
+        hour_values = list(values or [])[:24]
         over_count = 0
         runs = 0
+        raw_runs = 0
         was_over = False
         max_value = -math.inf
         max_hour = 0
-        for hour, value in enumerate(values):
+        over_mask = 0
+        over_hours: List[int] = []
+        for hour, value in enumerate(hour_values):
             over = value > threshold
             if over:
                 over_count += 1
+                over_mask |= 1 << hour
+                over_hours.append(hour)
                 if not was_over:
                     runs += 1
+                    raw_runs += 1
                 if value >= max_value:
                     max_value = value
                     max_hour = hour
             was_over = over
-        return {
+        if previous_end_over is None and table_key and object_key and report_date:
+            previous_end_over = self._lookup_previous_end_over(
+                table_key=table_key,
+                object_key=object_key,
+                report_date=report_date,
+                emit_log=emit_log,
+            )
+        if bool(previous_end_over) and bool(hour_values) and bool(over_mask & 1) and runs > 0:
+            runs -= 1
+        stats = {
             "over_count": over_count,
             "runs": runs,
-            "max_value": max_value if over_count else cls._max_of(values),
+            "raw_runs": raw_runs,
+            "max_value": max_value if over_count else self._max_of(hour_values),
             "max_hour": max_hour,
+            "over_mask": over_mask,
+            "over_hours": over_hours,
+            "end_over": bool(over_mask & (1 << 23)),
+            "previous_end_over": previous_end_over,
         }
+        stats["source_hash"] = self._stats_source_hash(hour_values, threshold, source_hint=source_hint or source_file)
+        if table_key and object_key and report_date:
+            self._persist_threshold_stats(
+                stats,
+                table_key=table_key,
+                object_key=object_key,
+                report_date=report_date,
+                threshold=threshold,
+                source_file=source_file,
+                source_hint=source_hint,
+                emit_log=emit_log,
+            )
+        return stats
 
     @staticmethod
     def _fmt_trim(value: Any, digits: int) -> str:
@@ -707,11 +841,22 @@ class PowerAlertSyncService:
         *,
         threshold: float,
         report_date: str,
+        data_center_name: str = "EA118",
+        emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
         index = self._build_branch_index(rows)
         output: List[Dict[str, Any]] = []
         for row in rows:
-            stats = self._threshold_stats(row.powers, threshold)
+            object_key = self._power_alert_object_key(row.building, row.room, row.pdu, row.branch_no)
+            stats = self._threshold_stats(
+                row.powers,
+                threshold,
+                table_key="branch",
+                object_key=object_key,
+                report_date=report_date,
+                source_hint=object_key,
+                emit_log=emit_log,
+            )
             if not int(stats["over_count"] or 0):
                 continue
             opposite = self._find_opposite_branch(row, index)
@@ -720,7 +865,7 @@ class PowerAlertSyncService:
                 {
                     "序号": len(output) + 1,
                     "数据时间": report_date,
-                    "机房": row.line_raw,
+                    "机房": self._text(data_center_name) or "EA118",
                     "楼栋": row.building,
                     "房间": row.room,
                     "PDU编号": row.pdu,
@@ -742,15 +887,26 @@ class PowerAlertSyncService:
         *,
         threshold: float,
         report_date: str,
+        emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
         groups = self._group_by(rows, lambda row: f"{row.room}||{row.pdu_info.get('col')}{row.pdu_info.get('num_pad2')}")
         output: List[Dict[str, Any]] = []
         for group in groups.values():
-            stats = self._threshold_stats(self._sum_by_hour(group), threshold)
-            if not int(stats["over_count"] or 0):
-                continue
             first = group[0]
             pdu = first.pdu_info
+            cabinet_id = f"{pdu.get('col')}{pdu.get('num_pad2')}"
+            object_key = self._power_alert_object_key(first.building, first.room, cabinet_id)
+            stats = self._threshold_stats(
+                self._sum_by_hour(group),
+                threshold,
+                table_key="cabinet",
+                object_key=object_key,
+                report_date=report_date,
+                source_hint=object_key,
+                emit_log=emit_log,
+            )
+            if not int(stats["over_count"] or 0):
+                continue
             for item in sorted(group, key=self._compare_pdu_key):
                 output.append(
                     {
@@ -778,15 +934,25 @@ class PowerAlertSyncService:
         threshold: float,
         report_date: str,
         data_center_name: str,
+        emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
         groups = self._group_by(rows, lambda row: row.line_raw)
         group_stats = {key: {"group": group, "totals": self._sum_by_hour(group)} for key, group in groups.items()}
         output: List[Dict[str, Any]] = []
         for data in group_stats.values():
-            stats = self._threshold_stats(data["totals"], threshold)
+            first = data["group"][0]
+            object_key = self._power_alert_object_key(first.building, first.room_short, first.line_raw)
+            stats = self._threshold_stats(
+                data["totals"],
+                threshold,
+                table_key="line_head",
+                object_key=object_key,
+                report_date=report_date,
+                source_hint=object_key,
+                emit_log=emit_log,
+            )
             if not int(stats["over_count"] or 0):
                 continue
-            first = data["group"][0]
             opposite = self._find_opposite_line_group(first.line_raw, group_stats)
             opposite_max = self._max_of(opposite["totals"]) if opposite else None
             output.append(
@@ -814,14 +980,25 @@ class PowerAlertSyncService:
         threshold: float,
         report_date: str,
         data_center_name: str,
+        emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
         groups = self._group_by(rows, lambda row: f"{row.room}||{row.line.get('col')}" if row.line else None)
         output: List[Dict[str, Any]] = []
         for group in groups.values():
-            stats = self._threshold_stats(self._sum_by_hour(group), threshold)
+            first = group[0]
+            row_col = first.line.get("col") if first.line else ""
+            object_key = self._power_alert_object_key(first.building, first.room_short, row_col)
+            stats = self._threshold_stats(
+                self._sum_by_hour(group),
+                threshold,
+                table_key="row_line",
+                object_key=object_key,
+                report_date=report_date,
+                source_hint=object_key,
+                emit_log=emit_log,
+            )
             if not int(stats["over_count"] or 0):
                 continue
-            first = group[0]
             output.append(
                 {
                     "序号": len(output) + 1,
@@ -845,6 +1022,7 @@ class PowerAlertSyncService:
         target_tables: List[_PowerAlertTable],
         report_date: str,
         data_center_name: str,
+        emit_log: Callable[[str], None] | None = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
         by_key = {table.key: table for table in target_tables}
         output: Dict[str, List[Dict[str, Any]]] = {}
@@ -853,12 +1031,15 @@ class PowerAlertSyncService:
                 rows,
                 threshold=by_key["branch"].threshold,
                 report_date=report_date,
+                data_center_name=data_center_name,
+                emit_log=emit_log,
             )
         if "cabinet" in by_key:
             output["cabinet"] = self._generate_cabinet_rows(
                 rows,
                 threshold=by_key["cabinet"].threshold,
                 report_date=report_date,
+                emit_log=emit_log,
             )
         if "line_head" in by_key:
             output["line_head"] = self._generate_line_head_rows(
@@ -866,6 +1047,7 @@ class PowerAlertSyncService:
                 threshold=by_key["line_head"].threshold,
                 report_date=report_date,
                 data_center_name=data_center_name,
+                emit_log=emit_log,
             )
         if "row_line" in by_key:
             output["row_line"] = self._generate_row_line_rows(
@@ -873,6 +1055,7 @@ class PowerAlertSyncService:
                 threshold=by_key["row_line"].threshold,
                 report_date=report_date,
                 data_center_name=data_center_name,
+                emit_log=emit_log,
             )
         return output
 
@@ -1162,6 +1345,7 @@ class PowerAlertSyncService:
                 target_tables=target_tables,
                 report_date=report_date_slash,
                 data_center_name=data_center_name,
+                emit_log=emit_log,
             )
             results: Dict[str, Any] = {}
             for table in target_tables:

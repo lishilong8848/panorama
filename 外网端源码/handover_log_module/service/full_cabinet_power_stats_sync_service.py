@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -20,6 +20,7 @@ class _CabinetMetricRow:
     cabinet_col: str
     cabinet_no: str
     powers: List[float]
+    source_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class _LineHeadMetricRow:
     line_raw: str
     line: Dict[str, Any]
     powers: List[float]
+    source_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class _RowLineMetricRow:
     room_short: str
     row_col: str
     powers: List[float]
+    source_file: str = ""
 
 
 class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
@@ -152,6 +155,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                             cabinet_col=item_cabinet_match.group("cabinet")[0].upper(),
                             cabinet_no=item_cabinet_match.group("cabinet")[1:].zfill(2),
                             powers=powers,
+                            source_file=str(file_path),
                         )
                     )
                     continue
@@ -165,6 +169,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                             line_raw=current_group_text,
                             line=parsed_line,
                             powers=powers,
+                            source_file=str(file_path),
                         )
                     )
                     continue
@@ -178,6 +183,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                             room_short=row_line_group.group("room"),
                             row_col=row_line_item.group("col").upper(),
                             powers=powers,
+                            source_file=str(file_path),
                         )
                     )
                     continue
@@ -200,6 +206,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                                 room_short=room_code,
                                 row_col=col,
                                 powers=powers,
+                                source_file=str(file_path),
                             )
                         )
             return {
@@ -260,6 +267,141 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
             groups.setdefault(row.line_raw, []).append(row)
         return {key: {"group": group, "totals": self._sum_by_hour(group)} for key, group in groups.items()}
 
+    def _previous_source_candidate(self, file_path: Path, report_date: str) -> Path:
+        current_dt = datetime.strptime(self._stats_business_date_key(report_date), "%Y-%m-%d")
+        previous_dt = current_dt - timedelta(days=1)
+        current_day = current_dt.strftime("%Y%m%d")
+        previous_day = previous_dt.strftime("%Y%m%d")
+        current_month = current_dt.strftime("%Y%m")
+        previous_month = previous_dt.strftime("%Y%m")
+        text = str(file_path)
+        text = text.replace(current_day, previous_day)
+        if current_month != previous_month:
+            text = text.replace(current_month, previous_month)
+        return Path(text)
+
+    def _cabinet_object_key(self, row: _CabinetMetricRow) -> str:
+        return self._power_alert_object_key(row.building, row.room_code, f"{row.cabinet_col}{row.cabinet_no}")
+
+    def _line_head_object_key(self, row: _LineHeadMetricRow) -> str:
+        return self._power_alert_object_key(row.building, row.room_short, row.line_raw)
+
+    def _row_line_object_key(self, row: _RowLineMetricRow) -> str:
+        return self._power_alert_object_key(row.building, row.room_short, row.row_col)
+
+    def _needs_previous_state(
+        self,
+        *,
+        table_key: str,
+        report_date: str,
+        rows: List[Any],
+        threshold: float,
+        object_key_fn: Callable[[Any], str],
+        emit_log: Callable[[str], None],
+    ) -> bool:
+        for row in rows:
+            powers = getattr(row, "powers", [])
+            if not powers or not self._number_or_zero(powers[0]) > threshold:
+                continue
+            previous = self._lookup_previous_end_over(
+                table_key=table_key,
+                object_key=object_key_fn(row),
+                report_date=report_date,
+                emit_log=emit_log,
+            )
+            if previous is None:
+                return True
+        return False
+
+    def _preload_previous_day_states(
+        self,
+        *,
+        building_file_map: Dict[str, Path],
+        report_date: str,
+        data_center_name: str,
+        thresholds: Dict[str, float],
+        current_rows: Dict[str, List[Any]],
+        emit_log: Callable[[str], None],
+    ) -> None:
+        prev_date = (datetime.strptime(self._stats_business_date_key(report_date), "%Y-%m-%d") - timedelta(days=1)).strftime(
+            "%Y-%m-%d"
+        )
+        needs_previous = any(
+            (
+                self._needs_previous_state(
+                    table_key="cabinet",
+                    report_date=report_date,
+                    rows=current_rows.get("cabinet", []),
+                    threshold=thresholds.get("cabinet", 18.0),
+                    object_key_fn=self._cabinet_object_key,
+                    emit_log=emit_log,
+                ),
+                self._needs_previous_state(
+                    table_key="line_head",
+                    report_date=report_date,
+                    rows=current_rows.get("line_head", []),
+                    threshold=thresholds.get("line_head", 107.5),
+                    object_key_fn=self._line_head_object_key,
+                    emit_log=emit_log,
+                ),
+                self._needs_previous_state(
+                    table_key="row_line",
+                    report_date=report_date,
+                    rows=current_rows.get("row_line", []),
+                    threshold=thresholds.get("row_line", 215.0),
+                    object_key_fn=self._row_line_object_key,
+                    emit_log=emit_log,
+                ),
+            )
+        )
+        if not needs_previous:
+            return
+        parsed_any = False
+        for building, current_file in building_file_map.items():
+            previous_file = self._previous_source_candidate(current_file, report_date)
+            if not previous_file.exists():
+                self._emit(
+                    emit_log,
+                    f"[楼栋全机柜功率统计同步] 前一天源文件不存在，跨日次数按当天独立计算 building={building}, "
+                    f"business_date={prev_date}, file={previous_file}",
+                )
+                continue
+            try:
+                parsed = self._parse_metric_file(file_path=previous_file, building=building, business_date=prev_date)
+            except Exception as exc:  # noqa: BLE001
+                self._emit(
+                    emit_log,
+                    f"[楼栋全机柜功率统计同步] 前一天源文件解析失败，跨日次数按当天独立计算 building={building}, "
+                    f"business_date={prev_date}, error={exc}",
+                )
+                continue
+            parsed_any = True
+            self._generate_cabinet_rows(
+                parsed.get("cabinet", []),
+                detail_index={},
+                threshold=thresholds.get("cabinet", 18.0),
+                report_date=prev_date,
+                data_center_name=data_center_name,
+                emit_log=emit_log,
+            )
+            self._generate_line_head_rows(
+                parsed.get("line_head", []),
+                threshold=thresholds.get("line_head", 107.5),
+                report_date=prev_date,
+                data_center_name=data_center_name,
+                legacy_line_group_stats={},
+                emit_log=emit_log,
+            )
+            self._generate_row_line_rows(
+                parsed.get("row_line", []),
+                threshold=thresholds.get("row_line", 215.0),
+                report_date=prev_date,
+                data_center_name=data_center_name,
+                emit_log=emit_log,
+            )
+        if parsed_any:
+            self._emit(emit_log, f"[楼栋全机柜功率统计同步] 已补写前一天超限状态 business_date={prev_date}")
+
     @staticmethod
     def _cabinet_room_display(room_code: str) -> str:
         text = str(room_code or "").strip()
@@ -282,10 +424,21 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         threshold: float,
         report_date: str,
         data_center_name: str,
+        emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
         output: List[Dict[str, Any]] = []
         for row in rows:
-            stats = self._threshold_stats(row.powers, threshold)
+            object_key = self._cabinet_object_key(row)
+            stats = self._threshold_stats(
+                row.powers,
+                threshold,
+                table_key="cabinet",
+                object_key=object_key,
+                report_date=report_date,
+                source_file=row.source_file,
+                source_hint=object_key,
+                emit_log=emit_log,
+            )
             if not int(stats["over_count"] or 0):
                 continue
             cabinet_id = f"{row.cabinet_col}{row.cabinet_no}"
@@ -340,12 +493,23 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         report_date: str,
         data_center_name: str,
         legacy_line_group_stats: Dict[str, Dict[str, Any]] | None = None,
+        emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
         group_stats = {row.line_raw: {"group": [row], "totals": row.powers} for row in rows}
         legacy_stats = legacy_line_group_stats if isinstance(legacy_line_group_stats, dict) else {}
         output: List[Dict[str, Any]] = []
         for row in rows:
-            stats = self._threshold_stats(row.powers, threshold)
+            object_key = self._line_head_object_key(row)
+            stats = self._threshold_stats(
+                row.powers,
+                threshold,
+                table_key="line_head",
+                object_key=object_key,
+                report_date=report_date,
+                source_file=row.source_file,
+                source_hint=object_key,
+                emit_log=emit_log,
+            )
             if not int(stats["over_count"] or 0):
                 continue
             opposite = self._find_opposite_line_group(row.line_raw, group_stats)
@@ -377,10 +541,21 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         threshold: float,
         report_date: str,
         data_center_name: str,
+        emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
         output: List[Dict[str, Any]] = []
         for row in rows:
-            stats = self._threshold_stats(row.powers, threshold)
+            object_key = self._row_line_object_key(row)
+            stats = self._threshold_stats(
+                row.powers,
+                threshold,
+                table_key="row_line",
+                object_key=object_key,
+                report_date=report_date,
+                source_file=row.source_file,
+                source_hint=object_key,
+                emit_log=emit_log,
+            )
             if not int(stats["over_count"] or 0):
                 continue
             output.append(
@@ -456,26 +631,47 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         if not cabinet_rows and not line_head_rows and not row_line_rows:
             raise RuntimeError("楼栋全机柜功率源文件未解析出任何可用统计数据")
 
+        thresholds = {
+            "cabinet": next((table.threshold for table in target_tables if table.key == "cabinet"), 18.0),
+            "line_head": next((table.threshold for table in target_tables if table.key == "line_head"), 107.5),
+            "row_line": next((table.threshold for table in target_tables if table.key == "row_line"), 215.0),
+        }
+        self._preload_previous_day_states(
+            building_file_map=building_file_map,
+            report_date=report_date_slash,
+            data_center_name=data_center_name,
+            thresholds=thresholds,
+            current_rows={
+                "cabinet": cabinet_rows,
+                "line_head": line_head_rows,
+                "row_line": row_line_rows,
+            },
+            emit_log=emit_log,
+        )
+
         generated = {
             "cabinet": self._generate_cabinet_rows(
                 cabinet_rows,
                 detail_index=detail_index,
-                threshold=next((table.threshold for table in target_tables if table.key == "cabinet"), 18.0),
+                threshold=thresholds["cabinet"],
                 report_date=report_date_slash,
                 data_center_name=data_center_name,
+                emit_log=emit_log,
             ),
             "line_head": self._generate_line_head_rows(
                 line_head_rows,
-                threshold=next((table.threshold for table in target_tables if table.key == "line_head"), 107.5),
+                threshold=thresholds["line_head"],
                 report_date=report_date_slash,
                 data_center_name=data_center_name,
                 legacy_line_group_stats=legacy_line_group_stats,
+                emit_log=emit_log,
             ),
             "row_line": self._generate_row_line_rows(
                 row_line_rows,
-                threshold=next((table.threshold for table in target_tables if table.key == "row_line"), 215.0),
+                threshold=thresholds["row_line"],
                 report_date=report_date_slash,
                 data_center_name=data_center_name,
+                emit_log=emit_log,
             ),
         }
 
