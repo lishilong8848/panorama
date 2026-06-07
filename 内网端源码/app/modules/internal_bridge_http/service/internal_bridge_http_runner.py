@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import threading
 import time
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -67,7 +66,9 @@ class InternalBridgeHttpTaskRunner:
         self._lock = threading.RLock()
         self._store: SharedBridgeStore | None = None
         self._runtime: SharedBridgeRuntimeService | None = None
-        self._workers: Dict[str, threading.Thread] = {}
+        self._dispatcher_thread: threading.Thread | None = None
+        self._recovery_threads: Dict[str, threading.Thread] = {}
+        self._worker_wake = threading.Event()
         self._started_at = time.time()
 
     def _emit(self, text: str) -> None:
@@ -130,6 +131,7 @@ class InternalBridgeHttpTaskRunner:
             )
             self._store = store
             self._runtime = runtime
+            self._ensure_dispatcher_running()
             return runtime
 
     @staticmethod
@@ -212,33 +214,38 @@ class InternalBridgeHttpTaskRunner:
         task_text = str(task_id or "").strip()
         if not task_text:
             return
+        self._ensure_dispatcher_running()
+        self._worker_wake.set()
+
+    def _ensure_dispatcher_running(self) -> None:
         with self._lock:
-            existing = self._workers.get(task_text)
+            existing = self._dispatcher_thread
             if existing is not None and existing.is_alive():
                 return
             worker = threading.Thread(
-                target=self._run_worker,
-                args=(task_text,),
-                name=f"internal-bridge-http-task-{task_text[:8] or uuid.uuid4().hex[:8]}",
+                target=self._run_dispatcher_loop,
+                name="internal-bridge-http-dispatcher",
                 daemon=True,
             )
-            self._workers[task_text] = worker
+            self._dispatcher_thread = worker
             worker.start()
 
-    def _run_worker(self, task_id: str) -> None:
-        runtime = self._ensure_runtime()
-        try:
-            runtime._process_one_task_if_needed()
-        except Exception as exc:  # noqa: BLE001
-            self._emit(f"[内网HTTP桥接] 任务执行线程失败 task_id={task_id}, error={exc}")
-        finally:
+    def _run_dispatcher_loop(self) -> None:
+        while True:
             try:
+                runtime = self._ensure_runtime()
                 store = self._get_store()
-                task = store.get_task(str(task_id or "").strip())
-                if isinstance(task, dict):
-                    self._cache_runtime_task_snapshot(runtime, task)
-            except Exception:  # noqa: BLE001
-                pass
+                counts = store.get_task_counts()
+                pending = int(counts.get("pending_internal", 0) or 0)
+                if pending <= 0:
+                    self._worker_wake.wait(1.0)
+                    self._worker_wake.clear()
+                    continue
+                runtime._process_one_task_if_needed()
+                time.sleep(0.05)
+            except Exception as exc:  # noqa: BLE001
+                self._emit(f"[内网HTTP桥接] 后台任务消费线程异常: {exc}")
+                time.sleep(1.0)
 
     def _cache_runtime_task_snapshot(self, runtime: SharedBridgeRuntimeService, task: Dict[str, Any]) -> None:
         if not isinstance(task, dict):
@@ -361,7 +368,7 @@ class InternalBridgeHttpTaskRunner:
             status=status_filter,
             limit=limit,
         )
-        entries = self._recover_source_index_from_existing_files_if_needed(
+        self._start_source_index_recovery_if_needed(
             entries,
             source_family=source_family,
             building=building,
@@ -392,6 +399,85 @@ class InternalBridgeHttpTaskRunner:
                 continue
             output.append(item)
         return output
+
+    def _start_source_index_recovery_if_needed(
+        self,
+        entries: List[Dict[str, Any]],
+        *,
+        source_family: str = "",
+        building: str = "",
+        bucket_kind: str = "",
+        bucket_key: str = "",
+        duty_date: str = "",
+        duty_shift: str = "",
+        limit: int = 50,
+    ) -> None:
+        if entries:
+            return
+        family = str(source_family or "").strip()
+        building_name = str(building or "").strip()
+        if not family or not building_name:
+            return
+        key = "|".join(
+            [
+                family.lower(),
+                building_name,
+                str(bucket_kind or "").strip().lower(),
+                str(bucket_key or "").strip(),
+                str(duty_date or "").strip(),
+                str(duty_shift or "").strip().lower(),
+            ]
+        )
+        with self._lock:
+            existing = self._recovery_threads.get(key)
+            if existing is not None and existing.is_alive():
+                return
+            worker = threading.Thread(
+                target=self._run_source_index_recovery,
+                kwargs={
+                    "key": key,
+                    "source_family": family,
+                    "building": building_name,
+                    "bucket_kind": bucket_kind,
+                    "bucket_key": bucket_key,
+                    "duty_date": duty_date,
+                    "duty_shift": duty_shift,
+                    "limit": limit,
+                },
+                name=f"internal-source-index-recovery-{len(self._recovery_threads) + 1}",
+                daemon=True,
+            )
+            self._recovery_threads[key] = worker
+            worker.start()
+
+    def _run_source_index_recovery(
+        self,
+        *,
+        key: str,
+        source_family: str,
+        building: str,
+        bucket_kind: str,
+        bucket_key: str,
+        duty_date: str,
+        duty_shift: str,
+        limit: int,
+    ) -> None:
+        try:
+            self._recover_source_index_from_existing_files_if_needed(
+                [],
+                source_family=source_family,
+                building=building,
+                bucket_kind=bucket_kind,
+                bucket_key=bucket_key,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                limit=limit,
+            )
+        finally:
+            with self._lock:
+                current = self._recovery_threads.get(key)
+                if current is threading.current_thread():
+                    self._recovery_threads.pop(key, None)
 
     @staticmethod
     def _source_index_file_accessible(file_path: str) -> bool:
