@@ -2,7 +2,7 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
           <div class="dashboard-module-shell">
             <div class="dashboard-module-intro">
               <h3 class="card-title">TOP5功率文件生成</h3>
-              <div class="hint">保留现有 TOP5 生成功能，并提供月度超功率/超功耗附件获取入口。两个任务独立提交，互不阻塞。</div>
+              <div class="hint">保留现有 TOP5 生成功能，并提供月度超功率/超功耗附件获取和月度超功率统计表生成入口。三个任务独立提交，互不阻塞。</div>
             </div>
 
             <div class="day-metric-top-grid dashboard-module-primary-grid">
@@ -106,6 +106,49 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                 </div>
               </article>
 
+              <article class="task-block task-block-accent">
+                <div class="task-block-head">
+                  <div>
+                    <div class="task-block-kicker">统计表生成卡</div>
+                    <h3 class="card-title">生成月度超功率统计表</h3>
+                  </div>
+                  <span class="status-badge status-badge-soft tone-info">四张多维表</span>
+                </div>
+                <div class="config-form-grid config-form-grid-compact">
+                  <div class="form-row">
+                    <label class="label">年份</label>
+                    <input type="text" v-model="monthlyPowerAlertReportYear" placeholder="2026" />
+                  </div>
+                  <div class="form-row">
+                    <label class="label">月份</label>
+                    <select v-model.number="monthlyPowerAlertReportMonth">
+                      <option v-for="month in 12" :key="'monthly-power-alert-report-month-' + month" :value="month">{{ month }}月</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="ops-focus-card">
+                  <div class="ops-focus-card-label">数据来源</div>
+                  <div class="ops-focus-card-title">单支路、机柜、列头柜、机列超功率多维表</div>
+                  <div class="ops-focus-card-meta">读取所选月份已上传的四类日记录，聚合生成 EA118 月度超功率告警统计表和附表。</div>
+                </div>
+                <div class="btn-line" style="flex-wrap:wrap;">
+                  <button
+                    class="btn btn-primary"
+                    :disabled="!canRun || isActionLocked(actionKeyMonthlyPowerAlertReportRun)"
+                    @click="runMonthlyPowerAlertReport"
+                  >
+                    {{ isActionLocked(actionKeyMonthlyPowerAlertReportRun) ? '提交中...' : '生成统计表' }}
+                  </button>
+                  <button
+                    class="btn btn-success"
+                    :disabled="!canDownloadMonthlyPowerAlertReport()"
+                    @click="downloadMonthlyPowerAlertReportCurrentJob"
+                  >
+                    下载统计表
+                  </button>
+                </div>
+              </article>
+
               <article class="task-block task-block-compact dashboard-module-status-card">
                 <div class="task-block-head">
                   <div>
@@ -163,6 +206,36 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                 <div class="hint">附件包：{{ getTop5OverPowerAttachmentResult().zip_file_name || '-' }}</div>
                 <div class="hint">输出目录：{{ getTop5OverPowerAttachmentResult().output_dir || '-' }}</div>
                 <div class="hint">当前任务：{{ currentJob && currentJob.feature === 'top5_over_power_attachment' ? (currentJob.job_id || '-') : '-' }}</div>
+              </article>
+
+              <article class="task-block task-block-compact dashboard-module-status-card">
+                <div class="task-block-head">
+                  <div>
+                    <div class="task-block-kicker">状态概览</div>
+                    <h3 class="card-title">最近月度统计表任务</h3>
+                  </div>
+                  <span class="status-badge status-badge-soft" :class="'tone-' + getMonthlyPowerAlertReportStatusTone()">
+                    {{ getMonthlyPowerAlertReportStatusText() }}
+                  </span>
+                </div>
+                <div class="status-metric-grid status-metric-grid-compact">
+                  <div class="status-metric">
+                    <div class="status-metric-label">机列</div>
+                    <strong class="status-metric-value">{{ (getMonthlyPowerAlertReportResult().row_counts || {}).row_line || 0 }}</strong>
+                  </div>
+                  <div class="status-metric">
+                    <div class="status-metric-label">列头柜</div>
+                    <strong class="status-metric-value">{{ (getMonthlyPowerAlertReportResult().row_counts || {}).line_head || 0 }}</strong>
+                  </div>
+                  <div class="status-metric">
+                    <div class="status-metric-label">机柜</div>
+                    <strong class="status-metric-value">{{ (getMonthlyPowerAlertReportResult().row_counts || {}).cabinet || 0 }}</strong>
+                  </div>
+                </div>
+                <div class="hint">单支路：{{ (getMonthlyPowerAlertReportResult().row_counts || {}).branch || 0 }} 条</div>
+                <div class="hint">输出文件：{{ getMonthlyPowerAlertReportResult().file_name || '-' }}</div>
+                <div class="hint">输出目录：{{ getMonthlyPowerAlertReportResult().output_dir || '-' }}</div>
+                <div class="hint">当前任务：{{ currentJob && currentJob.feature === 'monthly_power_alert_report' ? (currentJob.job_id || '-') : '-' }}</div>
               </article>
             </div>
           </div>

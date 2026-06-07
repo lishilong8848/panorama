@@ -233,6 +233,7 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["机房"], "EA118")
             self.assertNotEqual(rows[0]["机房"], "A-301-C列-DC010")
+            self.assertEqual(rows[0]["支路编号"], "C列-DC010 #20")
 
     def test_generate_cabinet_rows_backfills_pdu_and_current_from_old_detail_rows(self) -> None:
         service = FullCabinetPowerStatsSyncService({})

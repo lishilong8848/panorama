@@ -187,6 +187,10 @@ export function buildTop5OverPowerAttachmentDownloadUrl(jobId) {
   return `/api/jobs/top5-power-report/over-power/${encodeURIComponent(String(jobId || "").trim())}/download`;
 }
 
+export function buildMonthlyPowerAlertReportDownloadUrl(jobId) {
+  return `/api/jobs/top5-power-report/monthly-power-alert/${encodeURIComponent(String(jobId || "").trim())}/download`;
+}
+
 export async function getJobsApi(params = {}) {
   return apiJson(appendQuery("/api/jobs", params));
 }
@@ -832,6 +836,10 @@ export async function submitTop5PowerReportJob(payload = {}) {
 
 export async function submitTop5OverPowerAttachmentJob(payload = {}) {
   return startJsonJobApi("/api/jobs/top5-power-report/over-power/run", payload || {});
+}
+
+export async function submitMonthlyPowerAlertReportJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/top5-power-report/monthly-power-alert/run", payload || {});
 }
 
 export async function submitDayMetricFromFileJob(form) {

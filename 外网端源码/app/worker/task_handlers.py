@@ -22,6 +22,7 @@ from handover_log_module.service.review_link_delivery_service import ReviewLinkD
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from handover_log_module.service.ali_monthly_over_power_attachment_service import AliMonthlyOverPowerAttachmentService
+from handover_log_module.service.monthly_power_alert_report_service import MonthlyPowerAlertReportService
 from handover_log_module.service.top5_power_report_service import (
     Top5PowerReportBitableUploadService,
     Top5PowerReportService,
@@ -547,6 +548,29 @@ def handle_top5_over_power_attachment(
         return result
     except Exception as exc:  # noqa: BLE001
         notify.send_failure(stage="月度超功率/超功耗附件", detail=str(exc), emit_log=emit_log)
+        raise
+
+
+def handle_monthly_power_alert_report(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+    runtime: Any = None,  # noqa: ANN401
+) -> Dict[str, Any]:
+    notify = WebhookNotifyService(config)
+    now = datetime.now()
+    year = str(payload.get("year", "") or now.year).strip()
+    month = int(payload.get("month", 0) or now.month)
+    try:
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        service = MonthlyPowerAlertReportService(config)
+        result = service.run(year=year, month=month, emit_log=emit_log)
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        notify.send_failure(stage="月度超功率统计表生成", detail=str(exc), emit_log=emit_log)
         raise
 
 
@@ -1104,6 +1128,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "alarm_event_upload": handle_alarm_event_upload,
     "top5_power_report": handle_top5_power_report,
     "top5_over_power_attachment": handle_top5_over_power_attachment,
+    "monthly_power_alert_report": handle_monthly_power_alert_report,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,
     "handover_from_file": handle_handover_from_file,

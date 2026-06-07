@@ -103,6 +103,7 @@ from handover_log_module.service.day_metric_bitable_export_service import DayMet
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
+from handover_log_module.service.monthly_power_alert_report_service import MonthlyPowerAlertReportService
 from handover_log_module.service.monthly_report_delivery_service import MonthlyReportDeliveryService
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
@@ -4676,6 +4677,72 @@ def download_top5_over_power_attachment(job_id: str, request: Request):
         path=zip_path,
         filename=file_name,
         media_type="application/zip",
+    )
+
+
+@router.post("/api/jobs/top5-power-report/monthly-power-alert/run")
+def job_monthly_power_alert_report_run(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端生成月度超功率统计表")
+
+    now = datetime.now()
+    year = str(payload.get("year", "") or now.year).strip()
+    try:
+        month = int(payload.get("month", 0) or now.month)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="月份必须为 1-12 的数字") from exc
+    try:
+        MonthlyPowerAlertReportService.validate_year_month(year, month)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        job = _start_background_job(
+            container,
+            name=f"月度超功率统计表生成 {year}-{month:02d}",
+            run_func=None,
+            worker_handler="monthly_power_alert_report",
+            worker_payload={"year": year, "month": month},
+            resource_keys=_job_resource_keys(f"monthly_power_alert_report:{year}-{month:02d}"),
+            priority="manual",
+            feature="monthly_power_alert_report",
+            dedupe_key=_job_dedupe_key("monthly_power_alert_report", year=year, month=f"{month:02d}"),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: 月度超功率统计表生成 {year}-{month:02d} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/api/jobs/top5-power-report/monthly-power-alert/{job_id}/download")
+def download_monthly_power_alert_report(job_id: str, request: Request):
+    container = request.app.state.container
+    try:
+        job = container.job_service.get_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TaskEngineUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if str(job.get("feature", "") or "").strip() != "monthly_power_alert_report":
+        raise HTTPException(status_code=404, detail="该任务不是月度超功率统计表生成任务")
+    if str(job.get("status", "") or "").strip().lower() != "success":
+        raise HTTPException(status_code=409, detail="月度超功率统计表尚未生成成功，暂不能下载")
+    result = job.get("result", {}) if isinstance(job.get("result", {}), dict) else {}
+    output_file = str(result.get("output_file", "") or "").strip()
+    if not output_file:
+        raise HTTPException(status_code=404, detail="任务结果缺少输出文件路径")
+    output_path = Path(output_file)
+    if not output_path.exists() or not output_path.is_file():
+        raise HTTPException(status_code=404, detail=f"输出文件不存在: {output_path}")
+    file_name = str(result.get("file_name", "") or "").strip() or output_path.name
+    return FileResponse(
+        path=output_path,
+        filename=file_name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 

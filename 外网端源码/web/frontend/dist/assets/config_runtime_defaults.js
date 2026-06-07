@@ -388,6 +388,7 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(download, "export_button_text", "原样导出");
   top5PowerReport.template = top5PowerReport.template || {};
   top5PowerReport.over_power_attachment = top5PowerReport.over_power_attachment || {};
+  top5PowerReport.monthly_power_alert_report = top5PowerReport.monthly_power_alert_report || {};
   setStringDefault(top5PowerReport.template, "source_path", "");
   setStringDefault(top5PowerReport.template, "output_dir", `${businessRoot}\\TOP5功率文件`);
   setStringDefault(top5PowerReport.template, "file_name_pattern", "TOP5功率文件_{timestamp}.xlsx");
@@ -400,6 +401,13 @@ function applyHandoverDefaults(cfg) {
     top5PowerReport.over_power_attachment,
     "zip_file_name_pattern",
     "月度超功率附件_{year}{month}_{timestamp}.zip",
+  );
+  setBooleanDefault(top5PowerReport.monthly_power_alert_report, "enabled", true);
+  setStringDefault(top5PowerReport.monthly_power_alert_report, "output_dir", `${businessRoot}\\月度超功率统计表`);
+  setStringDefault(
+    top5PowerReport.monthly_power_alert_report,
+    "file_name_pattern",
+    "EA118机柜超功耗告警统计{month}月份_{timestamp}.xlsx",
   );
   capacityReport.weather = capacityReport.weather || {};
   capacityReport.weather.provider = "hvac_open_meteo";

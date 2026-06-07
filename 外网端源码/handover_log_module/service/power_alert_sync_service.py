@@ -657,13 +657,16 @@ class PowerAlertSyncService:
         route_text = f"{route}路" if route in {"A", "B"} else ""
         return f"{line.get('col')}列{route_text}-{line.get('type')}{line.get('num')}"
 
-    @classmethod
-    def _make_branch_code(cls, pdu_text: str, branch_no: str) -> str | None:
-        pdu = cls._parse_pdu(pdu_text)
-        if not pdu or not str(branch_no or "").strip():
+    @staticmethod
+    def _make_branch_code(line: Dict[str, Any], branch_no: str) -> str | None:
+        if not line or not str(branch_no or "").strip():
             return None
-        power_type = "AC" if pdu.get("side") == "A" else "DC"
-        return f"{pdu.get('col')}列-{power_type}{str(pdu.get('num')).zfill(3)} #{str(branch_no).strip()}"
+        col = str(line.get("col") or "").strip().upper()
+        power_type = str(line.get("type") or "").strip().upper()
+        number = str(line.get("num") or "").strip()
+        if not col or power_type not in {"AC", "DC"} or not number:
+            return None
+        return f"{col}列-{power_type}{number.zfill(3)} #{str(branch_no).strip()}"
 
     @staticmethod
     def _sum_by_hour(rows: List[_SourceRow]) -> List[float]:
@@ -870,7 +873,7 @@ class PowerAlertSyncService:
                     "房间": row.room,
                     "PDU编号": row.pdu,
                     "支路号": row.branch_no,
-                    "支路编号": self._make_branch_code(row.pdu, row.branch_no),
+                    "支路编号": self._make_branch_code(row.line, row.branch_no),
                     "支路功率": self._fmt_trim(stats["max_value"], 3),
                     "对侧PDU编号": opposite.pdu if opposite else None,
                     "对侧支路功率": self._fmt_trim(opposite.powers[max_hour], 3) if opposite else None,
