@@ -18,9 +18,9 @@ import openpyxl
 from app.modules.shared_bridge.service.alarm_event_page_export_service import (
     build_alarm_event_json_document,
     collect_alarm_event_rows,
+    daily_scheduled_bucket_for_time,
     load_alarm_event_json,
     stream_alarm_event_json_document,
-    scheduled_bucket_for_time,
     write_alarm_event_json,
 )
 from app.modules.shared_bridge.service.alarm_external_selection import build_alarm_external_selection
@@ -2169,7 +2169,7 @@ class SharedSourceCacheService:
         return base_root / info.relative_path
 
     def current_alarm_bucket(self, when: datetime | None = None) -> str:
-        return scheduled_bucket_for_time(when)
+        return daily_scheduled_bucket_for_time(when)
 
     def _auto_alarm_bucket(self, when: datetime | None = None) -> str:
         return self.current_alarm_bucket(when)

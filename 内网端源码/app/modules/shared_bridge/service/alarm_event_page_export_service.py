@@ -16,6 +16,7 @@ ALARM_EVENT_JSON_SCHEMA_VERSION = 1
 ALARM_EVENT_EVENT_PAGE_SIZE = 50
 ALARM_EVENT_COUNT_PAGE_SIZE = 20
 ALARM_EVENT_WINDOW_DAYS = 60
+ALARM_EVENT_DAILY_EXPORT_HOUR = 8
 ALARM_EVENT_EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("level", "级别"),
     ("content", "内容"),
@@ -113,6 +114,20 @@ def _resolve_alarm_query_window(
 def scheduled_bucket_for_time(when: datetime | None = None) -> str:
     now = when or datetime.now()
     return now.strftime("%Y-%m-%d %H")
+
+
+def daily_scheduled_bucket_for_time(when: datetime | None = None) -> str:
+    now = when or datetime.now()
+    bucket_base = now
+    if now.hour < ALARM_EVENT_DAILY_EXPORT_HOUR:
+        bucket_base = now - timedelta(days=1)
+    bucket_dt = bucket_base.replace(
+        hour=ALARM_EVENT_DAILY_EXPORT_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    return bucket_dt.strftime("%Y-%m-%d %H")
 
 
 def _seconds_to_text(value: Any) -> str:
