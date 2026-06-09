@@ -323,7 +323,7 @@
           "state_file": "handover_capacity_oil_cache.json"
         },
         "weather": {
-          "provider": "seniverse",
+          "provider": "hvac_open_meteo",
           "auth_mode": "signed",
           "fallback_locations": [
             "南通"
@@ -1118,8 +1118,8 @@
           "D楼": {
             "cells": {
               "B13": "988",
-              "D13": "545",
-              "F13": "0",
+              "D13": "546",
+              "F13": "1",
               "H13": "0"
             }
           },
@@ -1346,104 +1346,104 @@
         "review_link_recipients_by_building": {
           "110站": [
             {
+              "note": "lsl",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true,
-              "note": "lsl"
+              "enabled": true
             },
             {
+              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true,
-              "note": "m"
+              "enabled": true
             },
             {
+              "note": "110",
               "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
-              "enabled": true,
-              "note": "110"
+              "enabled": true
             }
           ],
           "A楼": [
             {
+              "note": "李世龙A",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true,
-              "note": "李世龙A"
+              "enabled": true
             },
             {
+              "note": "A",
               "open_id": "ou_3e0a9399a037276f8449cc778f18bb8a",
-              "enabled": true,
-              "note": "A"
+              "enabled": true
             },
             {
+              "note": "M",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true,
-              "note": "M"
+              "enabled": true
             }
           ],
           "B楼": [
             {
+              "note": "李世龙B",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true,
-              "note": "李世龙B"
+              "enabled": true
             },
             {
+              "note": "B",
               "open_id": "ou_160e991b0fd811cda7260de056d8a363",
-              "enabled": true,
-              "note": "B"
+              "enabled": true
             },
             {
+              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true,
-              "note": "m"
+              "enabled": true
             }
           ],
           "C楼": [
             {
+              "note": "李世龙C",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true,
-              "note": "李世龙C"
+              "enabled": true
             },
             {
+              "note": "C",
               "open_id": "ou_99391b00c1406917930483d8500af400",
-              "enabled": true,
-              "note": "C"
+              "enabled": true
             },
             {
+              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true,
-              "note": "m"
+              "enabled": true
             }
           ],
           "D楼": [
             {
+              "note": "李世龙D",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true,
-              "note": "李世龙D"
+              "enabled": true
             },
             {
+              "note": "D",
               "open_id": "ou_b9c26b4da3721c2de11ee175c707e756",
-              "enabled": true,
-              "note": "D"
+              "enabled": true
             },
             {
+              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true,
-              "note": "m"
+              "enabled": true
             }
           ],
           "E楼": [
             {
+              "note": "李世龙E",
               "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
-              "enabled": true,
-              "note": "李世龙E"
+              "enabled": true
             },
             {
+              "note": "E",
               "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3",
-              "enabled": true,
-              "note": "E"
+              "enabled": true
             },
             {
+              "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true,
-              "note": "m"
+              "enabled": true
             }
           ]
         }
@@ -2201,10 +2201,7 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电时长",
-                "电池放电后备时间",
-                "放电后备时间",
-                "放电时间"
+                "电池放电时长"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -4015,10 +4012,7 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电后备时间",
-                "电池放电时长",
-                "放电后备时间",
-                "放电时间"
+                "电池放电后备时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",

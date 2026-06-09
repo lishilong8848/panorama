@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 5,
-  "updated_at": "2026-04-30T20:11:01+08:00",
+  "revision": 6,
+  "updated_at": "2026-06-09T15:24:52+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -135,7 +135,10 @@
             "target_cell": "F10",
             "rule_type": "aggregate",
             "d_keywords": [
-              "电池放电后备时间"
+              "电池放电后备时间",
+              "电池放电时长",
+              "放电后备时间",
+              "放电时间"
             ],
             "match_mode": "contains_casefold",
             "agg": "min",
@@ -592,8 +595,8 @@
         "D楼": {
           "cells": {
             "B13": "988",
-            "D13": "545",
-            "F13": "0",
+            "D13": "546",
+            "F13": "1",
             "H13": "0"
           }
         }
