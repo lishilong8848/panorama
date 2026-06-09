@@ -453,18 +453,30 @@ class PowerAlertSyncService:
     def _branch_key(room: str, pdu: str, branch_no: str) -> str:
         return f"{room}||{pdu}||{branch_no}"
 
-    @classmethod
-    def _build_branch_index(cls, rows: List[_SourceRow]) -> Dict[str, _SourceRow]:
-        output: Dict[str, _SourceRow] = {}
-        for row in rows:
-            output.setdefault(cls._branch_key(row.room, row.pdu, row.branch_no), row)
-        return output
+    @staticmethod
+    def _branch_pdu_key(room: str, pdu: str) -> str:
+        return f"{room}||{pdu}"
 
-    def _find_opposite_branch(self, row: _SourceRow, index: Dict[str, _SourceRow]) -> _SourceRow | None:
+    @classmethod
+    def _build_branch_index(cls, rows: List[_SourceRow]) -> Dict[str, Any]:
+        by_branch: Dict[str, _SourceRow] = {}
+        by_pdu: Dict[str, List[_SourceRow]] = {}
+        for row in rows:
+            by_branch.setdefault(cls._branch_key(row.room, row.pdu, row.branch_no), row)
+            by_pdu.setdefault(cls._branch_pdu_key(row.room, row.pdu), []).append(row)
+        return {"by_branch": by_branch, "by_pdu": by_pdu}
+
+    def _find_opposite_branch(self, row: _SourceRow, index: Dict[str, Any]) -> _SourceRow | None:
         pdu = row.pdu_info
         opposite_side = "B" if pdu.get("side") == "A" else "A"
         exact_pdu = f"{pdu.get('col')}{pdu.get('num_pad2')}-{opposite_side}{pdu.get('feed')}"
-        return index.get(self._branch_key(row.room, exact_pdu, row.branch_no))
+        by_branch = index.get("by_branch", {}) if isinstance(index, dict) else {}
+        exact = by_branch.get(self._branch_key(row.room, exact_pdu, row.branch_no))
+        if exact is not None:
+            return exact
+        by_pdu = index.get("by_pdu", {}) if isinstance(index, dict) else {}
+        candidates = by_pdu.get(self._branch_pdu_key(row.room, exact_pdu), [])
+        return candidates[0] if len(candidates) == 1 else None
 
     @staticmethod
     def _expected_opposite_pdu(pdu_info: Dict[str, Any]) -> str:

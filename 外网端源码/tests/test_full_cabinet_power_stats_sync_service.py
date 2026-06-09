@@ -239,7 +239,7 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
 
-            def make_row(pdu: str, branch_no: str) -> _SourceRow:
+            def make_row(pdu: str, branch_no: str, power: float = 7.0) -> _SourceRow:
                 return _SourceRow(
                     building="B楼",
                     room="B-302包间",
@@ -249,7 +249,7 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
                     pdu=pdu,
                     pdu_info=service._parse_pdu(pdu),
                     branch_no=branch_no,
-                    powers=[7.0] * 24,
+                    powers=[power] * 24,
                 )
 
             rows = service._generate_branch_rows(
@@ -257,6 +257,7 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
                     make_row("H01-B1", "5"),
                     make_row("H01-A1", "5"),
                     make_row("H01-A2", "38"),
+                    make_row("H01-B2", "19", 2.4),
                     make_row("H01-B1", "1"),
                 ],
                 threshold=6.25,
@@ -267,8 +268,9 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
             by_key = {(row["PDU编号"], row["支路号"]): row for row in rows}
             self.assertEqual(by_key[("H01-B1", "5")]["对侧PDU编号"], "H01-A1")
             self.assertEqual(by_key[("H01-A1", "5")]["对侧PDU编号"], "H01-B1")
-            self.assertIsNone(by_key[("H01-A2", "38")]["对侧PDU编号"])
-            self.assertIsNone(by_key[("H01-B1", "1")]["对侧PDU编号"])
+            self.assertEqual(by_key[("H01-A2", "38")]["对侧PDU编号"], "H01-B2")
+            self.assertEqual(by_key[("H01-A2", "38")]["对侧支路功率"], "2.4")
+            self.assertEqual(by_key[("H01-B1", "1")]["对侧PDU编号"], "H01-A1")
 
     def test_generate_cabinet_rows_backfills_pdu_and_current_from_old_detail_rows(self) -> None:
         service = FullCabinetPowerStatsSyncService({})
