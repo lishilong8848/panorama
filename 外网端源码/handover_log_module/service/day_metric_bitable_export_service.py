@@ -42,6 +42,13 @@ def _extract_numbers(text: Any) -> List[float]:
     return values
 
 
+def _compact_error_text(text: Any, *, limit: int = 800) -> str:
+    raw = str(text or "").strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit] + "...(truncated)"
+
+
 class DayMetricBitableExportService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
@@ -741,16 +748,29 @@ class DayMetricBitableExportService:
                 if str(item.get("record_id", "")).strip()
             ]
             deleted_count = 0
-            if record_ids:
-                deleted_count = client.batch_delete_records(
-                    table_id=table_id,
-                    record_ids=record_ids,
-                    batch_size=int(source.get("delete_batch_size", 200) or 200),
-                )
+            create_batch_size = min(500, max(batch_size, len(records), 1))
+            client.batch_create_records(table_id=table_id, fields_list=records, batch_size=create_batch_size)
             emit_log(
-                f"[12项独立上传] 删除旧记录完成 building={building}, duty_date={duty_date}, count={deleted_count}"
+                f"[12项独立上传] 新记录创建完成 building={building}, duty_date={duty_date}, created={len(records)}"
             )
-            client.batch_create_records(table_id=table_id, fields_list=records, batch_size=batch_size)
+            if record_ids:
+                try:
+                    deleted_count = client.batch_delete_records(
+                        table_id=table_id,
+                        record_ids=record_ids,
+                        batch_size=int(source.get("delete_batch_size", 200) or 200),
+                    )
+                except Exception as delete_exc:  # noqa: BLE001
+                    emit_log(
+                        "[12项独立上传] 旧记录删除失败，新记录已创建，保留旧记录等待下次重跑清理: "
+                        f"building={building}, duty_date={duty_date}, old_records={len(record_ids)}, "
+                        f"error={_compact_error_text(delete_exc)}"
+                    )
+                    deleted_count = 0
+            if record_ids:
+                emit_log(
+                    f"[12项独立上传] 删除旧记录完成 building={building}, duty_date={duty_date}, count={deleted_count}"
+                )
             emit_log(
                 f"[12项独立上传] 写入完成 building={building}, duty_date={duty_date}, created={len(records)}"
             )
@@ -763,7 +783,15 @@ class DayMetricBitableExportService:
                 "error": "",
             }
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[12项独立上传] 写入失败 error={exc}")
+            sample_fields = records[0] if records else {}
+            sample_keys = ",".join(str(key) for key in list(sample_fields.keys())[:10])
+            sample_type = str(sample_fields.get("类型", "") or sample_fields.get("type", "") or "").strip()
+            emit_log(
+                "[12项独立上传] 写入失败，旧记录未删除: "
+                f"building={building}, duty_date={duty_date}, records={len(records)}, "
+                f"sample_type={sample_type or '-'}, sample_fields={sample_keys or '-'}, "
+                f"error={_compact_error_text(exc)}"
+            )
             return {
                 "status": "failed",
                 "uploaded_count": 0,

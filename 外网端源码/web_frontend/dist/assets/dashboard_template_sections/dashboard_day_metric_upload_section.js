@@ -149,7 +149,7 @@ export const DASHBOARD_DAY_METRIC_UPLOAD_SECTION = `        <section class="cont
                     <div class="task-block-kicker">主流程</div>
                     <h3 class="card-title">使用共享文件上传12项</h3>
                   </div>
-                  <span class="status-badge status-badge-soft tone-warning">删除旧记录后重写</span>
+                  <span class="status-badge status-badge-soft tone-warning">先写新记录再清理旧记录</span>
                 </div>
                 <div class="status-metric-grid status-metric-grid-compact">
                   <div class="status-metric">

@@ -191,7 +191,14 @@ def query_internal_source_index(
         status=status,
         limit=limit,
     )
-    return {"ok": True, "entries": entries}
+    recovering = _runner(request).source_index_recovery_active(
+        source_family=source_family,
+        bucket_or_date=bucket_or_date,
+        building=building,
+        bucket_kind=bucket_kind,
+        duty_shift=duty_shift,
+    )
+    return {"ok": True, "entries": entries, "recovering": recovering}
 
 
 @router.post("/source-index/batch")

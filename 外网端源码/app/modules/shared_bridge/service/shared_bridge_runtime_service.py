@@ -127,6 +127,7 @@ class SharedBridgeRuntimeService:
     STORE_ERROR_LOG_INTERVAL_SEC = 60
     HTTP_BRIDGE_FAILURE_LOG_INTERVAL_SEC = 300
     HTTP_BRIDGE_COOLDOWN_SEC = 60
+    HTTP_SOURCE_INDEX_CACHE_TTL_SEC = 60
     BACKGROUND_TASK_BUSY_RETRY_SEC = 30
 
     def __init__(
@@ -163,6 +164,9 @@ class SharedBridgeRuntimeService:
         self._http_bridge_failure_log_markers: Dict[str, float] = {}
         self._http_bridge_unavailable_until_monotonic = 0.0
         self._http_bridge_last_error = ""
+        self._http_source_index_cache: Dict[str, Dict[str, Any]] = {}
+        self._http_source_index_inflight: Dict[str, threading.Event] = {}
+        self._http_source_index_cache_lock = threading.RLock()
         self._internal_download_pool: InternalDownloadBrowserPool | None = None
         self._source_cache_service: SharedSourceCacheService | None = None
         self._startup_logged = False
@@ -1468,6 +1472,85 @@ class SharedBridgeRuntimeService:
         padded_path = f"/{relative_text}/"
         return any(f"/{segment}/" in padded_path for segment in segments)
 
+    @staticmethod
+    def _http_source_index_cache_key(query_contexts: List[Dict[str, Any]]) -> str:
+        normalized: List[Dict[str, Any]] = []
+        for query in query_contexts if isinstance(query_contexts, list) else []:
+            if not isinstance(query, dict):
+                continue
+            normalized.append(
+                {
+                    "source_family": str(query.get("source_family", "") or "").strip().lower(),
+                    "bucket_or_date": str(query.get("bucket_or_date", "") or "").strip(),
+                    "building": str(query.get("building", "") or "").strip(),
+                    "bucket_kind": str(query.get("bucket_kind", "") or "").strip().lower(),
+                    "duty_shift": str(query.get("duty_shift", "") or "").strip().lower(),
+                    "status": str(query.get("status", "") or "").strip().lower(),
+                    "limit": int(query.get("limit", 0) or 0),
+                }
+            )
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+    def _get_http_source_index_cache(self, cache_key: str) -> List[Dict[str, Any]] | None:
+        key = str(cache_key or "").strip()
+        if not key:
+            return None
+        now_monotonic = time.monotonic()
+        with self._http_source_index_cache_lock:
+            payload = self._http_source_index_cache.get(key)
+            if not isinstance(payload, dict):
+                return None
+            expires_at = float(payload.get("expires_at", 0.0) or 0.0)
+            if expires_at <= now_monotonic:
+                self._http_source_index_cache.pop(key, None)
+                return None
+            rows = payload.get("entries", [])
+            return copy.deepcopy(rows if isinstance(rows, list) else [])
+
+    def _set_http_source_index_cache(self, cache_key: str, entries: List[Dict[str, Any]]) -> None:
+        key = str(cache_key or "").strip()
+        if not key:
+            return
+        with self._http_source_index_cache_lock:
+            self._http_source_index_cache[key] = {
+                "expires_at": time.monotonic() + self.HTTP_SOURCE_INDEX_CACHE_TTL_SEC,
+                "entries": copy.deepcopy(entries if isinstance(entries, list) else []),
+                "cached_at": _now_text(),
+            }
+            if len(self._http_source_index_cache) > 200:
+                expired = [
+                    item_key
+                    for item_key, payload in self._http_source_index_cache.items()
+                    if not isinstance(payload, dict) or float(payload.get("expires_at", 0.0) or 0.0) <= time.monotonic()
+                ]
+                for item_key in expired:
+                    self._http_source_index_cache.pop(item_key, None)
+
+    def _begin_http_source_index_fetch(self, cache_key: str) -> tuple[threading.Event, bool]:
+        key = str(cache_key or "").strip()
+        event = threading.Event()
+        if not key:
+            return event, True
+        with self._http_source_index_cache_lock:
+            existing = self._http_source_index_inflight.get(key)
+            if existing is not None:
+                return existing, False
+            self._http_source_index_inflight[key] = event
+            return event, True
+
+    def _finish_http_source_index_fetch(self, cache_key: str, event: threading.Event | None) -> None:
+        key = str(cache_key or "").strip()
+        if not key:
+            if event is not None:
+                event.set()
+            return
+        with self._http_source_index_cache_lock:
+            current = self._http_source_index_inflight.get(key)
+            if current is event:
+                self._http_source_index_inflight.pop(key, None)
+        if event is not None:
+            event.set()
+
     def _http_source_index_entries(
         self,
         *,
@@ -1507,6 +1590,24 @@ class SharedBridgeRuntimeService:
                             "limit": max(1, int(limit_per_building or 20)),
                         }
                     )
+            batch_reader = getattr(client, "source_index_batch", None)
+            cache_key = self._http_source_index_cache_key(query_contexts)
+            cached_entries = self._get_http_source_index_cache(cache_key)
+            if cached_entries is not None:
+                return cached_entries
+            inflight_event, owns_fetch = self._begin_http_source_index_fetch(cache_key)
+            if not owns_fetch:
+                wait_timeout = max(1.0, min(20.0, float(getattr(client, "read_timeout_sec", 5) or 5) + 2.0))
+                inflight_event.wait(wait_timeout)
+                cached_entries = self._get_http_source_index_cache(cache_key)
+                if cached_entries is not None:
+                    return cached_entries
+                if not inflight_event.is_set():
+                    self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("source-index 同查询仍在等待内网端响应"))
+                else:
+                    self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("source-index 同查询完成但未产生缓存"))
+                return [] if self._http_bridge_forced() else None
+            fetch_event = inflight_event
             batch_reader = getattr(client, "source_index_batch", None)
             if callable(batch_reader):
                 raw_results = batch_reader(query_contexts, default_limit=max(1, int(limit_per_building or 20)))
@@ -1569,7 +1670,12 @@ class SharedBridgeRuntimeService:
                     output.append(item)
                     if target_bucket and building:
                         matched_buildings.add(building)
+            self._set_http_source_index_cache(cache_key, output)
+            self._finish_http_source_index_fetch(cache_key, fetch_event)
+            fetch_event = None
         except Exception as exc:  # noqa: BLE001
+            if "cache_key" in locals() and "fetch_event" in locals():
+                self._finish_http_source_index_fetch(cache_key, fetch_event)
             self._emit_http_bridge_issue_log("读取源文件索引", exc)
             if self._http_bridge_forced():
                 return []

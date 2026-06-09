@@ -78,9 +78,9 @@ class Top5PowerReportServiceTest(unittest.TestCase):
             self.assertEqual(groups.transformers[0].power_kw, 340)
             self.assertEqual(groups.hvdcs[0].identifier, "A-222-HVDC-116")
             self.assertEqual(groups.upss[0].identifier, "A-124-UPS-105_UPS")
-            self.assertEqual(groups.row_lines[0].identifier, "A-201-A列")
+            self.assertEqual(groups.row_lines[0].identifier, "A-201-A列功率和")
             self.assertAlmostEqual(groups.row_lines[0].power_kw, 28.0)
-            self.assertTrue(any(item.identifier == "A-202-A列" for item in groups.row_line_aggregates))
+            self.assertTrue(any(item.identifier == "A-202-A列功率和" for item in groups.row_line_aggregates))
 
     def test_run_writes_summary_and_source_sheets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -120,7 +120,7 @@ class Top5PowerReportServiceTest(unittest.TestCase):
                 self.assertEqual(summary["H2"].value, "机列负载（KW）")
                 self.assertEqual(summary["A3"].value, 1)
                 self.assertEqual(summary["B3"].value, "A")
-                self.assertTrue(summary["G3"].value.endswith("列"))
+                self.assertTrue(str(summary["G3"].value).endswith("列功率和"))
                 self.assertEqual(summary["D3"].number_format, "0.00")
                 self.assertEqual(summary["F3"].number_format, "0.00")
                 self.assertEqual(summary["H3"].number_format, "0.00")
@@ -128,7 +128,7 @@ class Top5PowerReportServiceTest(unittest.TestCase):
                 detail = workbook["A"]
                 self.assertEqual(detail["A1"].value, "地点")
                 self.assertEqual(detail["J1"].value, "地点")
-                self.assertTrue(str(detail["J2"].value).endswith("列"))
+                self.assertTrue(str(detail["J2"].value).endswith("列功率和"))
                 self.assertEqual(detail["K2"].number_format, "0.00")
                 self.assertIn("A楼容量", workbook.sheetnames)
                 self.assertIn("E楼容量", workbook.sheetnames)
@@ -171,11 +171,11 @@ class _FakeBitableClient:
         return [
             {
                 "record_id": "old_top5",
-                "fields": {"子分类": "高功率TOP5", "年度": "2026", "月份": "04"},
+                "fields": {"子分类": "高功率TOP5", "年度": "2026", "月份": "03"},
             },
             {
                 "record_id": "other_category",
-                "fields": {"子分类": "机柜超功耗", "年度": "2026", "月份": "04"},
+                "fields": {"子分类": "机柜超功耗", "年度": "2026", "月份": "03"},
             },
         ]
 
@@ -220,11 +220,11 @@ class Top5PowerReportBitableUploadServiceTest(unittest.TestCase):
 
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["year"], "2026")
-            self.assertEqual(result["month"], "04")
+            self.assertEqual(result["month"], "03")
             self.assertEqual(client.deleted_ids, ["old_top5"])
             self.assertEqual(client.created_fields[0]["子分类"], "高功率TOP5")
             self.assertEqual(client.created_fields[0]["年度"], "2026")
-            self.assertEqual(client.created_fields[0]["月份"], "04")
+            self.assertEqual(client.created_fields[0]["月份"], "03")
             self.assertEqual(client.created_fields[0]["上传文件"], [{"file_token": "file_token_1"}])
             self.assertEqual(client.updated, [("new_top5", {"链接": "https://example.test/top5.xlsx"})])
 

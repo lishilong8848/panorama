@@ -418,15 +418,13 @@ class InternalBridgeHttpTaskRunner:
         building_name = str(building or "").strip()
         if not family or not building_name:
             return
-        key = "|".join(
-            [
-                family.lower(),
-                building_name,
-                str(bucket_kind or "").strip().lower(),
-                str(bucket_key or "").strip(),
-                str(duty_date or "").strip(),
-                str(duty_shift or "").strip().lower(),
-            ]
+        key = self._source_index_recovery_key(
+            source_family=family,
+            building=building_name,
+            bucket_kind=bucket_kind,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
         )
         with self._lock:
             existing = self._recovery_threads.get(key)
@@ -449,6 +447,55 @@ class InternalBridgeHttpTaskRunner:
             )
             self._recovery_threads[key] = worker
             worker.start()
+
+    @staticmethod
+    def _source_index_recovery_key(
+        *,
+        source_family: str = "",
+        building: str = "",
+        bucket_kind: str = "",
+        bucket_key: str = "",
+        duty_date: str = "",
+        duty_shift: str = "",
+    ) -> str:
+        return "|".join(
+            [
+                str(source_family or "").strip().lower(),
+                str(building or "").strip(),
+                str(bucket_kind or "").strip().lower(),
+                str(bucket_key or "").strip(),
+                str(duty_date or "").strip(),
+                str(duty_shift or "").strip().lower(),
+            ]
+        )
+
+    def source_index_recovery_active(
+        self,
+        *,
+        source_family: str = "",
+        bucket_or_date: str = "",
+        building: str = "",
+        bucket_kind: str = "",
+        duty_shift: str = "",
+    ) -> bool:
+        bucket_text = str(bucket_or_date or "").strip()
+        kind_text = str(bucket_kind or "").strip().lower()
+        duty_date = ""
+        bucket_key = bucket_text
+        if kind_text == "date" or (len(bucket_text) == 10 and bucket_text.count("-") == 2):
+            duty_date = bucket_text
+            bucket_key = ""
+        key = self._source_index_recovery_key(
+            source_family=source_family,
+            building=building,
+            bucket_kind=kind_text,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+        )
+        with self._lock:
+            worker = self._recovery_threads.get(key)
+            return bool(worker is not None and worker.is_alive())
 
     def _run_source_index_recovery(
         self,
@@ -1058,7 +1105,14 @@ class InternalBridgeHttpTaskRunner:
                     status=str(query.get("status", "ready") or "ready"),
                     limit=int(query.get("limit", default_limit) or default_limit),
                 )
-                results.append({"index": index, "ok": True, "entries": entries})
+                recovering = self.source_index_recovery_active(
+                    source_family=str(query.get("source_family", "") or ""),
+                    bucket_or_date=str(query.get("bucket_or_date", "") or ""),
+                    building=str(query.get("building", "") or ""),
+                    bucket_kind=str(query.get("bucket_kind", "") or ""),
+                    duty_shift=str(query.get("duty_shift", "") or ""),
+                )
+                results.append({"index": index, "ok": True, "entries": entries, "recovering": recovering})
             except Exception as exc:  # noqa: BLE001
                 results.append({"index": index, "ok": False, "entries": [], "error": str(exc)})
         return results

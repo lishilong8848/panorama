@@ -126,6 +126,17 @@ class EventCategoryPayloadBuilder:
             raw_fields={},
         )
 
+    @staticmethod
+    def _is_record_not_found_error(exc: Exception) -> bool:
+        text = str(exc or "").strip()
+        lowered = text.lower()
+        return (
+            "1254043" in text
+            or "recordidnotfound" in lowered
+            or "record id not found" in lowered
+            or "record_id not found" in lowered
+        )
+
     def _resolve_template_path(self, source_path: str) -> Path:
         path = Path(str(source_path or "").strip())
         if path.is_absolute():
@@ -292,6 +303,7 @@ class EventCategoryPayloadBuilder:
         historical_open_count = 0
         cache_completed_count = 0
         cache_from_snapshot_count = 0
+        stale_cached_record_ids: set[str] = set()
 
         for row in query_result.current_rows:
             progress_text = self._get_new_event_progress_text(
@@ -358,7 +370,10 @@ class EventCategoryPayloadBuilder:
                     try:
                         resolved = self.repo.get_record_by_id(record_id=record_id)
                     except Exception as exc:  # noqa: BLE001
-                        emit_log(f"[交接班][事件分类] 回查record失败 record_id={record_id}: {exc}")
+                        if self._is_record_not_found_error(exc):
+                            stale_cached_record_ids.add(record_id)
+                        else:
+                            emit_log(f"[交接班][事件分类] 回查record失败 record_id={record_id}: {exc}")
                     if resolved is None:
                         cache_from_snapshot_count += 1
                         resolved = self._row_from_snapshot(snap)
@@ -381,17 +396,20 @@ class EventCategoryPayloadBuilder:
                     )
                     # 历史事件跟进要求逐班完整延续：上一班已经展示在“历史事件跟进”的记录，
                     # 即使当前回查后已完成，也继续带入下一班；用 record_id 去重，避免重复行。
-                    pending_next_by_id[record_id] = self._make_pending_snapshot(
-                        row=resolved,
-                        progress_text=progress_text,
-                        work_window_text=work_window_text,
-                    )
-                    cache_completed_count += 1
+                    if record_id not in stale_cached_record_ids:
+                        pending_next_by_id[record_id] = self._make_pending_snapshot(
+                            row=resolved,
+                            progress_text=progress_text,
+                            work_window_text=work_window_text,
+                        )
+                        cache_completed_count += 1
 
                 try:
                     unique_ids = []
                     seen = set()
                     for rid in queried_ids:
+                        if rid in stale_cached_record_ids:
+                            continue
                         if rid in seen:
                             continue
                         seen.add(rid)
@@ -407,6 +425,11 @@ class EventCategoryPayloadBuilder:
                         "[交接班][事件分类] 缓存更新: "
                         f"before={cache_before_count}, after={len(pending_next_by_id)}, carried={cache_completed_count}"
                     )
+                    if stale_cached_record_ids:
+                        emit_log(
+                            "[交接班][事件分类] 已清理失效历史缓存: "
+                            f"building={building}, stale={len(stale_cached_record_ids)}"
+                        )
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班][事件分类] 缓存更新失败: {exc}")
         else:
