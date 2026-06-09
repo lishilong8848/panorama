@@ -450,33 +450,34 @@ class PowerAlertSyncService:
         return rows
 
     @staticmethod
-    def _branch_key(room: str, pdu: str, branch_no: str) -> str:
-        return f"{room}||{pdu}||{branch_no}"
-
-    @staticmethod
     def _branch_pdu_key(room: str, pdu: str) -> str:
         return f"{room}||{pdu}"
 
     @classmethod
     def _build_branch_index(cls, rows: List[_SourceRow]) -> Dict[str, Any]:
-        by_branch: Dict[str, _SourceRow] = {}
         by_pdu: Dict[str, List[_SourceRow]] = {}
         for row in rows:
-            by_branch.setdefault(cls._branch_key(row.room, row.pdu, row.branch_no), row)
             by_pdu.setdefault(cls._branch_pdu_key(row.room, row.pdu), []).append(row)
-        return {"by_branch": by_branch, "by_pdu": by_pdu}
+        return {"by_pdu": by_pdu}
 
-    def _find_opposite_branch(self, row: _SourceRow, index: Dict[str, Any]) -> _SourceRow | None:
+    def _find_opposite_branch(self, row: _SourceRow, index: Dict[str, Any], *, max_hour: int) -> _SourceRow | None:
         pdu = row.pdu_info
         opposite_side = "B" if pdu.get("side") == "A" else "A"
         exact_pdu = f"{pdu.get('col')}{pdu.get('num_pad2')}-{opposite_side}{pdu.get('feed')}"
-        by_branch = index.get("by_branch", {}) if isinstance(index, dict) else {}
-        exact = by_branch.get(self._branch_key(row.room, exact_pdu, row.branch_no))
-        if exact is not None:
-            return exact
         by_pdu = index.get("by_pdu", {}) if isinstance(index, dict) else {}
-        candidates = by_pdu.get(self._branch_pdu_key(row.room, exact_pdu), [])
-        return candidates[0] if len(candidates) == 1 else None
+        candidates = list(by_pdu.get(self._branch_pdu_key(row.room, exact_pdu), []))
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        hour = max(0, min(int(max_hour or 0), 23))
+        non_zero_at_hour = [candidate for candidate in candidates if candidate.powers[hour] > 0]
+        if non_zero_at_hour:
+            return max(non_zero_at_hour, key=lambda candidate: candidate.powers[hour])
+        non_zero_overall = [candidate for candidate in candidates if self._max_of(candidate.powers) > 0]
+        if non_zero_overall:
+            return max(non_zero_overall, key=lambda candidate: self._max_of(candidate.powers))
+        return candidates[0]
 
     @staticmethod
     def _expected_opposite_pdu(pdu_info: Dict[str, Any]) -> str:
@@ -865,16 +866,16 @@ class PowerAlertSyncService:
             )
             if not int(stats["over_count"] or 0):
                 continue
-            opposite = self._find_opposite_branch(row, index)
+            max_hour = int(stats["max_hour"])
+            opposite = self._find_opposite_branch(row, index, max_hour=max_hour)
             if opposite is None and callable(emit_log):
                 expected_opposite = self._expected_opposite_pdu(row.pdu_info)
                 self._emit(
                     emit_log,
-                    "[动环功率统计][单支路] 未找到同柜同路对侧PDU，按空白上传: "
+                    "[动环功率统计][单支路] 未找到同柜对侧PDU，按空白上传: "
                     f"building={row.building}, room={row.room}, pdu={row.pdu}, "
                     f"branch_no={row.branch_no}, expected_opposite={expected_opposite or '-'}",
                 )
-            max_hour = int(stats["max_hour"])
             output.append(
                 {
                     "序号": len(output) + 1,

@@ -271,6 +271,47 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
             self.assertEqual(by_key[("H01-A2", "38")]["对侧PDU编号"], "H01-B2")
             self.assertEqual(by_key[("H01-A2", "38")]["对侧支路功率"], "2.4")
             self.assertEqual(by_key[("H01-B1", "1")]["对侧PDU编号"], "H01-A1")
+            self.assertEqual(by_key[("H01-B1", "1")]["对侧支路功率"], "7")
+
+    def test_branch_rows_pick_nonzero_opposite_pdu_without_same_branch_no(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
+
+            def make_row(pdu: str, branch_no: str, powers: list[float]) -> _SourceRow:
+                return _SourceRow(
+                    building="B楼",
+                    room="B-402包间",
+                    room_short="B-402",
+                    line_raw="B-402-J列-DC010",
+                    line=service._parse_line("B-402-J列-DC010"),
+                    pdu=pdu,
+                    pdu_info=service._parse_pdu(pdu),
+                    branch_no=branch_no,
+                    powers=powers,
+                )
+
+            source_powers = [0.0] * 24
+            source_powers[3] = 6.6
+            opposite_missing_branch_powers = [0.0] * 24
+            opposite_real_branch_powers = [0.0] * 24
+            opposite_real_branch_powers[3] = 0.873
+
+            rows = service._generate_branch_rows(
+                [
+                    make_row("J01-B1", "1", source_powers),
+                    make_row("J01-A1", "1", opposite_missing_branch_powers),
+                    make_row("J01-A1", "31", opposite_real_branch_powers),
+                ],
+                threshold=6.25,
+                report_date="2026/05/31",
+                data_center_name="EA118",
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["PDU编号"], "J01-B1")
+            self.assertEqual(rows[0]["支路号"], "1")
+            self.assertEqual(rows[0]["对侧PDU编号"], "J01-A1")
+            self.assertEqual(rows[0]["对侧支路功率"], "0.873")
 
     def test_generate_cabinet_rows_backfills_pdu_and_current_from_old_detail_rows(self) -> None:
         service = FullCabinetPowerStatsSyncService({})
