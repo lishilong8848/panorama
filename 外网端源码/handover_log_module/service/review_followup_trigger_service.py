@@ -1671,6 +1671,7 @@ class ReviewFollowupTriggerService:
         assignment = None
         selection_has_manual_long_day = str(selection.get("resolved_source", "") or "").strip() == "current"
         long_day_people = self._station_h_split_people(selection.get("long_day_people", []))
+        current_raw = ""
         if not current_names or not next_names or not selection_has_manual_long_day:
             try:
                 assignment = roster_repo.query_assignment(
@@ -1687,8 +1688,18 @@ class ReviewFollowupTriggerService:
                     current_names = station_h_filter_duty_people(current_raw)
                 if not next_names:
                     next_names = station_h_filter_duty_people(assignment.next_people)
-                if not selection_has_manual_long_day:
-                    long_day_people = station_h_default_long_day_people_from_roster(current_raw)
+            if not selection_has_manual_long_day:
+                long_day_raw = ""
+                try:
+                    long_day_raw = roster_repo.query_long_day_people_from_roster_source(
+                        building="H楼",
+                        duty_date=duty_date,
+                        duty_shift=duty_shift,
+                        emit_log=emit_log,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(f"[交接班][H楼云表] H楼长白排班读取失败，将按空白长白岗继续: {exc}")
+                long_day_people = station_h_default_long_day_people_from_roster(long_day_raw)
         current_first = current_names[0] if current_names else ""
         next_first = next_names[0] if next_names else ""
         if not current_names or not next_names or not current_first or not next_first:

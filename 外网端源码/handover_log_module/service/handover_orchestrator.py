@@ -120,6 +120,7 @@ class HandoverOrchestrator:
         self._source_file_cache_service = HandoverSourceFileCacheService(config)
         self._review_session_service = ReviewSessionService(config)
         self._review_link_delivery_service = ReviewLinkDeliveryService(config)
+        self._outdoor_temperature_alert_sent_keys: set[str] = set()
 
     def _deployment_role_mode(self) -> str:
         text = str(self.config.get("_deployment_role_mode", "") or "").strip().lower()
@@ -729,21 +730,125 @@ class HandoverOrchestrator:
                 pass
             return {}
 
+    @staticmethod
+    def _parse_temperature_number(value: Any) -> float | None:
+        text = str(value or "").strip().replace(",", "")
+        if not text:
+            return None
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return None
+
+    def _validate_outdoor_temperature_cells(self, cells: Dict[str, Any]) -> Dict[str, Any]:
+        dry_raw = str((cells or {}).get("B7", "") or "").strip()
+        wet_raw = str((cells or {}).get("D7", "") or "").strip()
+        dry_value = self._parse_temperature_number(dry_raw)
+        wet_value = self._parse_temperature_number(wet_raw)
+        if not dry_raw:
+            return {"valid": False, "reason": "缺干球", "dry_raw": dry_raw, "wet_raw": wet_raw}
+        if not wet_raw:
+            return {"valid": False, "reason": "缺湿球", "dry_raw": dry_raw, "wet_raw": wet_raw}
+        if dry_value is None:
+            return {"valid": False, "reason": "干球数值不可解析", "dry_raw": dry_raw, "wet_raw": wet_raw}
+        if wet_value is None:
+            return {"valid": False, "reason": "湿球数值不可解析", "dry_raw": dry_raw, "wet_raw": wet_raw}
+        if wet_value > dry_value:
+            return {
+                "valid": False,
+                "reason": "湿球大于干球",
+                "dry_raw": dry_raw,
+                "wet_raw": wet_raw,
+                "dry_value": dry_value,
+                "wet_value": wet_value,
+            }
+        return {
+            "valid": True,
+            "reason": "",
+            "dry_raw": dry_raw,
+            "wet_raw": wet_raw,
+            "dry_value": dry_value,
+            "wet_value": wet_value,
+        }
+
+    def _send_outdoor_temperature_anomaly_alerts(
+        self,
+        *,
+        duty_date: str,
+        duty_shift: str,
+        validation_results: List[Dict[str, Any]],
+        selected_building: str,
+        selected_cells: Dict[str, str],
+        emit_log: Callable[[str], None],
+    ) -> None:
+        invalid_results = [
+            item for item in validation_results
+            if isinstance(item, dict) and str(item.get("building", "") or "").strip() and not bool(item.get("valid", False))
+        ]
+        if not invalid_results:
+            return
+        shift_label = "白班" if str(duty_shift or "").strip().lower() == "day" else "夜班"
+        selected_label = str(selected_building or "").strip() or "无有效楼栋"
+        selected_dry = str(selected_cells.get("B7", "") or "").strip() or "空"
+        selected_wet = str(selected_cells.get("D7", "") or "").strip() or "空"
+        client = None
+        for item in invalid_results:
+            building = str(item.get("building", "") or "").strip()
+            reason = str(item.get("reason", "") or "").strip() or "未知异常"
+            dry_raw = str(item.get("dry_raw", "") or "").strip() or "空"
+            wet_raw = str(item.get("wet_raw", "") or "").strip() or "空"
+            dedupe_key = "|".join([str(duty_date or ""), str(duty_shift or ""), building, reason, dry_raw, wet_raw, selected_label])
+            if dedupe_key in self._outdoor_temperature_alert_sent_keys:
+                continue
+            try:
+                snapshot = self._review_link_delivery_service._recipient_snapshot_for_building(building)  # noqa: SLF001
+                recipients = snapshot.get("recipients", []) if isinstance(snapshot, dict) else []
+                enabled_recipients = [row for row in recipients if isinstance(row, dict) and str(row.get("open_id", "") or "").strip()]
+                if not enabled_recipients:
+                    emit_log(f"[交接班][室外温湿度] 异常提醒跳过 building={building}, reason=无审核接收人")
+                    self._outdoor_temperature_alert_sent_keys.add(dedupe_key)
+                    continue
+                if client is None:
+                    client = self._review_link_delivery_service._build_feishu_client()  # noqa: SLF001
+                text = (
+                    "交接班室外干球/湿球温度异常\n"
+                    f"班次：{duty_date} {shift_label}\n"
+                    f"楼栋：{building}\n"
+                    f"异常原因：{reason}\n"
+                    f"原始干球：{dry_raw}\n"
+                    f"原始湿球：{wet_raw}\n"
+                    f"本批次采用：{selected_label} 干球={selected_dry}，湿球={selected_wet}"
+                )
+                for recipient in enabled_recipients:
+                    open_id = str(recipient.get("open_id", "") or "").strip()
+                    receive_id_type = self._review_link_delivery_service._resolve_effective_receive_id_type(open_id, "open_id")  # noqa: SLF001
+                    client.send_text_message(receive_id=open_id, receive_id_type=receive_id_type, text=text)
+                self._outdoor_temperature_alert_sent_keys.add(dedupe_key)
+                emit_log(f"[交接班][室外温湿度] 异常提醒已发送 building={building}, reason={reason}, recipients={len(enabled_recipients)}")
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][室外温湿度] 异常提醒发送失败 building={building}, reason={reason}, error={exc}")
+
     def _resolve_shared_outdoor_temperature_cells(
         self,
         success_items: List[Dict[str, Any]],
         *,
+        duty_date: str = "",
+        duty_shift: str = "",
         emit_log: Callable[[str], None],
     ) -> Dict[str, str]:
-        ordered_items: List[Dict[str, Any]] = []
+        by_building: Dict[str, Dict[str, Any]] = {}
         for item in success_items or []:
-            if str(item.get("building", "") or "").strip() == "A楼":
-                ordered_items.append(item)
-        for item in success_items or []:
-            if item not in ordered_items:
-                ordered_items.append(item)
+            building = str(item.get("building", "") or "").strip()
+            if building and building not in by_building:
+                by_building[building] = item
+        ordered_items = [by_building[building] for building in ("A楼", "B楼", "C楼", "D楼", "E楼") if building in by_building]
 
-        first_values: Dict[str, str] = {}
+        validation_results: List[Dict[str, Any]] = []
+        selected_cells: Dict[str, str] = {"B7": "", "D7": ""}
+        selected_building = ""
         for item in ordered_items:
             building = str(item.get("building", "") or "").strip()
             data_file = str(item.get("file_path", "") or "").strip()
@@ -752,20 +857,40 @@ class HandoverOrchestrator:
                 data_file=data_file,
                 emit_log=emit_log,
             )
-            for cell_name in ("B7", "D7"):
-                if not first_values.get(cell_name) and str(cells.get(cell_name, "") or "").strip():
-                    first_values[cell_name] = str(cells.get(cell_name, "")).strip()
-            if building == "A楼" and all(first_values.get(cell_name) for cell_name in ("B7", "D7")):
-                break
-        if first_values:
-            try:
+            validation = self._validate_outdoor_temperature_cells(cells)
+            validation["building"] = building
+            validation_results.append(validation)
+            if bool(validation.get("valid", False)) and not selected_building:
+                selected_cells = {
+                    "B7": str(cells.get("B7", "") or "").strip(),
+                    "D7": str(cells.get("D7", "") or "").strip(),
+                }
+                selected_building = building
+        try:
+            if selected_building:
                 emit_log(
                     "[交接班][室外温湿度] 已统一本批次共享值 "
-                    f"B7={first_values.get('B7', '-') or '-'}, D7={first_values.get('D7', '-') or '-'}"
+                    f"source={selected_building}, B7={selected_cells.get('B7', '-') or '-'}, "
+                    f"D7={selected_cells.get('D7', '-') or '-'}"
                 )
-            except Exception:  # noqa: BLE001
-                pass
-        return first_values
+            else:
+                emit_log("[交接班][室外温湿度] 五楼均无有效干球/湿球温度，本批次共享值写空")
+        except Exception:  # noqa: BLE001
+            pass
+        self._send_outdoor_temperature_anomaly_alerts(
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            validation_results=validation_results,
+            selected_building=selected_building,
+            selected_cells=selected_cells,
+            emit_log=emit_log,
+        )
+        return {
+            "B7": selected_cells.get("B7", ""),
+            "D7": selected_cells.get("D7", ""),
+            "_selected_building": selected_building,
+            "_resolved": "1",
+        }
 
     @staticmethod
     def _previous_duty_context(*, duty_date: str, duty_shift: str) -> tuple[str, str]:
@@ -1666,16 +1791,33 @@ class HandoverOrchestrator:
                     prebuilt_fixed[building] = (fixed_cell_values, date_ref_override, assignment, alarm_summary_payload)
                 shared_outdoor_cells = self._resolve_shared_outdoor_temperature_cells(
                     success_items,
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
                     emit_log=emit_log,
                 )
-                if shared_outdoor_cells:
+                if shared_outdoor_cells.get("_resolved"):
+                    batch_key = self._review_session_service.build_batch_key(duty_date_text, duty_shift_text)
+                    try:
+                        outdoor_state = self._review_session_service.get_outdoor_temperature_state(batch_key=batch_key)
+                        outdoor_block = (
+                            outdoor_state.get("shared_blocks", {}).get("outdoor_temperature", {})
+                            if isinstance(outdoor_state, dict)
+                            else {}
+                        )
+                        if int(outdoor_block.get("revision", 0) or 0) <= 0:
+                            self._review_session_service.save_outdoor_temperature(
+                                batch_key=batch_key,
+                                building=str(shared_outdoor_cells.get("_selected_building", "") or "system").strip() or "system",
+                                cells={cell: shared_outdoor_cells.get(cell, "") for cell in ("B7", "D7")},
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        emit_log(f"[交接班][室外温湿度] 共享审核块写入失败，继续生成: {exc}")
                     for building_key, prebuilt in list(prebuilt_fixed.items()):
                         fixed_values, date_ref_override, assignment, alarm_summary_payload = prebuilt
                         merged_fixed = dict(fixed_values or {})
                         for cell_name in ("B7", "D7"):
                             value = str(shared_outdoor_cells.get(cell_name, "") or "").strip()
-                            if value:
-                                merged_fixed[cell_name] = value
+                            merged_fixed[cell_name] = value
                         prebuilt_fixed[building_key] = (
                             merged_fixed,
                             date_ref_override,

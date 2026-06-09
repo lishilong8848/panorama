@@ -295,7 +295,15 @@ class SharedBridgeRuntimeService:
                 return str(Path(self.shared_bridge_root) / resolved_relative.replace("/", "\\"))
         return file_text
 
-    def _require_accessible_cached_file(self, file_path: Any, *, description: str, relative_path: Any = "", source_family: str = "") -> str:
+    def _require_accessible_cached_file(
+        self,
+        file_path: Any,
+        *,
+        description: str,
+        relative_path: Any = "",
+        source_family: str = "",
+        verify_external_exists: bool = False,
+    ) -> str:
         file_text = self._external_shared_file_path_text(
             file_path,
             relative_path=relative_path,
@@ -303,7 +311,7 @@ class SharedBridgeRuntimeService:
         )
         if not file_text:
             raise FileNotFoundError(f"{description}不存在或不可访问: {file_text or '-'}")
-        if self.role_mode != "external" and not is_accessible_cached_file_path(file_text):
+        if (self.role_mode != "external" or verify_external_exists) and not is_accessible_cached_file_path(file_text):
             raise FileNotFoundError(f"{description}不存在或不可访问: {file_text or '-'}")
         return file_text
 
@@ -540,7 +548,7 @@ class SharedBridgeRuntimeService:
                 ("支路开关", switch_file),
                 ("楼栋全机柜功率", full_cabinet_power_file),
             ):
-                if not file_path or (self.role_mode != "external" and not is_accessible_cached_file_path(file_path)):
+                if not file_path or not is_accessible_cached_file_path(file_path):
                     raise FileNotFoundError(f"共享目录中的{label}整日源文件不存在或不可访问: {file_path or '-'}")
             metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
             normalized_units.append(
@@ -599,12 +607,25 @@ class SharedBridgeRuntimeService:
                 missing.append(f"{business_date}/{building}/楼栋全机柜功率")
             if not power_entry or not current_entry or not switch_entry or not full_cabinet_entry:
                 continue
-            power_file = self._require_accessible_cached_file(power_entry.get("file_path", ""), description="支路功率整日源文件")
-            current_file = self._require_accessible_cached_file(current_entry.get("file_path", ""), description="支路电流整日源文件")
-            switch_file = self._require_accessible_cached_file(switch_entry.get("file_path", ""), description="支路开关整日源文件")
+            power_file = self._require_accessible_cached_file(
+                power_entry.get("file_path", ""),
+                description="支路功率整日源文件",
+                verify_external_exists=True,
+            )
+            current_file = self._require_accessible_cached_file(
+                current_entry.get("file_path", ""),
+                description="支路电流整日源文件",
+                verify_external_exists=True,
+            )
+            switch_file = self._require_accessible_cached_file(
+                switch_entry.get("file_path", ""),
+                description="支路开关整日源文件",
+                verify_external_exists=True,
+            )
             full_cabinet_power_file = self._require_accessible_cached_file(
                 full_cabinet_entry.get("file_path", ""),
                 description="楼栋全机柜功率整日源文件",
+                verify_external_exists=True,
             )
             metadata = power_entry.get("metadata", {}) if isinstance(power_entry.get("metadata", {}), dict) else {}
             source_units.append(
@@ -704,6 +725,12 @@ class SharedBridgeRuntimeService:
                 self._emit_system_log(
                     f"[共享桥接] 任务={task_id or '-'} 支路信息等待中: bridge_status={status or '-'}, {exc}"
                 )
+            self._reissue_branch_power_waiting_job_if_invalid_ready(
+                job_id=job_id,
+                task=task,
+                status=status,
+                error_text=str(exc),
+            )
             return False
         if binding.get("log_text"):
             self._emit_system_log(str(binding.get("log_text", "")).strip() + f"（bridge_status={status or '-'}）")
@@ -727,15 +754,20 @@ class SharedBridgeRuntimeService:
             )
         return True
 
-    def _retry_stale_branch_power_waiting_job(self, *, job_id: str, task: Dict[str, Any], status: str) -> bool:
+    def _reissue_branch_power_waiting_job(
+        self,
+        *,
+        job_id: str,
+        task: Dict[str, Any],
+        marker_prefix: str,
+        reason: str,
+    ) -> bool:
         if self._job_service is None:
-            return False
-        if str(status or "").strip().lower() != "stale":
             return False
         if str(task.get("feature", "") or "").strip().lower() != "branch_power_upload":
             return False
         old_task_id = str(task.get("task_id", "") or "").strip()
-        marker = f"branch_power_stale_retry:{job_id}:{old_task_id}"
+        marker = f"{marker_prefix}:{job_id}:{old_task_id}"
         now_monotonic = time.monotonic()
         previous = float(self._waiting_job_cache_probe_log_markers.get(marker, 0.0) or 0.0)
         if previous and now_monotonic - previous < 300:
@@ -746,7 +778,7 @@ class SharedBridgeRuntimeService:
         business_date = self._branch_power_business_date_from_task(task)
         buildings = self._branch_power_expected_buildings_from_task(task)
         if not business_date:
-            self._emit_system_log(f"[共享桥接] 任务={old_task_id or '-'} 支路补采已过期，但缺少业务日期，无法自动重派")
+            self._emit_system_log(f"[共享桥接] 任务={old_task_id or '-'} {reason}，但缺少业务日期，无法自动重派")
             return False
         bridge_kwargs = {
             "buildings": buildings,
@@ -766,19 +798,62 @@ class SharedBridgeRuntimeService:
             )
         except Exception as exc:  # noqa: BLE001
             self._emit_system_log(
-                f"[共享桥接] 任务={old_task_id or '-'} 支路补采已过期，重新派发内网补采失败: {exc}"
+                f"[共享桥接] 任务={old_task_id or '-'} {reason}，重新派发内网补采失败: {exc}"
             )
             return False
         new_task_id = str((new_task or {}).get("task_id", "") or "").strip()
         if not new_task_id:
-            self._emit_system_log(f"[共享桥接] 任务={old_task_id or '-'} 支路补采已过期，但新补采任务未返回 task_id")
+            self._emit_system_log(f"[共享桥接] 任务={old_task_id or '-'} {reason}，但新补采任务未返回 task_id")
             return False
         self._job_service.bind_bridge_task(job_id, new_task_id)
         self._emit_system_log(
-            f"[共享桥接] 任务={old_task_id or '-'} 支路补采已过期，已重新派发内网补采 "
+            f"[共享桥接] 任务={old_task_id or '-'} {reason}，已重新派发内网补采 "
             f"new_task_id={new_task_id}, business_date={business_date}, buildings={','.join(buildings) or '-'}"
         )
         return True
+
+    @staticmethod
+    def _branch_power_ready_error_needs_refill(*, status: str, error_text: str) -> bool:
+        status_text = str(status or "").strip().lower()
+        if status_text in {"", "queued", "running", "accepted", "pending", "claimed", "internal_running"}:
+            return False
+        text = str(error_text or "")
+        return any(
+            token in text
+            for token in (
+                "不存在或不可访问",
+                "支路整日共享缓存尚未齐全",
+                "支路整日共享源文件缺少楼栋",
+                "支路整日共享缓存没有可恢复的源文件",
+            )
+        )
+
+    def _reissue_branch_power_waiting_job_if_invalid_ready(
+        self,
+        *,
+        job_id: str,
+        task: Dict[str, Any],
+        status: str,
+        error_text: str,
+    ) -> bool:
+        if not self._branch_power_ready_error_needs_refill(status=status, error_text=error_text):
+            return False
+        return self._reissue_branch_power_waiting_job(
+            job_id=job_id,
+            task=task,
+            marker_prefix="branch_power_invalid_ready_refill",
+            reason="支路整日源文件缺失或索引失效",
+        )
+
+    def _retry_stale_branch_power_waiting_job(self, *, job_id: str, task: Dict[str, Any], status: str) -> bool:
+        if str(status or "").strip().lower() != "stale":
+            return False
+        return self._reissue_branch_power_waiting_job(
+            job_id=job_id,
+            task=task,
+            marker_prefix="branch_power_stale_retry",
+            reason="支路补采已过期",
+        )
 
     def _build_wet_bulb_resume_binding_from_artifacts(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(task.get("task_id", "") or "").strip()
@@ -6749,12 +6824,26 @@ class SharedBridgeRuntimeService:
                 for item in source_units:
                     building = str(item.get("building", "") or "").strip()
                     source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
-                    power_file = str(item.get("power_file", "") or source_files.get("power_file", "") or item.get("file_path", "") or item.get("source_file", "") or "").strip()
-                    current_file = str(item.get("current_file", "") or source_files.get("current_file", "") or "").strip()
-                    switch_file = str(item.get("switch_file", "") or source_files.get("switch_file", "") or "").strip()
-                    full_cabinet_power_file = str(
-                        item.get("full_cabinet_power_file", "") or source_files.get("full_cabinet_power_file", "") or ""
-                    ).strip()
+                    power_file = self._external_shared_file_path_text(
+                        item.get("power_file", "") or source_files.get("power_file", "") or item.get("file_path", "") or item.get("source_file", "") or "",
+                        relative_path=item.get("power_relative_path", "") or source_files.get("power_relative_path", "") or item.get("relative_path", ""),
+                        source_family=FAMILY_BRANCH_POWER,
+                    )
+                    current_file = self._external_shared_file_path_text(
+                        item.get("current_file", "") or source_files.get("current_file", "") or "",
+                        relative_path=item.get("current_relative_path", "") or source_files.get("current_relative_path", ""),
+                        source_family=FAMILY_BRANCH_CURRENT,
+                    )
+                    switch_file = self._external_shared_file_path_text(
+                        item.get("switch_file", "") or source_files.get("switch_file", "") or "",
+                        relative_path=item.get("switch_relative_path", "") or source_files.get("switch_relative_path", ""),
+                        source_family=FAMILY_BRANCH_SWITCH,
+                    )
+                    full_cabinet_power_file = self._external_shared_file_path_text(
+                        item.get("full_cabinet_power_file", "") or source_files.get("full_cabinet_power_file", "") or "",
+                        relative_path=item.get("full_cabinet_power_relative_path", "") or source_files.get("full_cabinet_power_relative_path", ""),
+                        source_family=FAMILY_BUILDING_FULL_CABINET_POWER,
+                    )
                     if not building or not power_file:
                         continue
                     for label, file_path in (
@@ -6763,7 +6852,7 @@ class SharedBridgeRuntimeService:
                         ("支路开关", switch_file),
                         ("楼栋全机柜功率", full_cabinet_power_file),
                     ):
-                        if not file_path or (self.role_mode != "external" and not is_accessible_cached_file_path(file_path)):
+                        if not file_path or not is_accessible_cached_file_path(file_path):
                             raise FileNotFoundError(f"共享目录中的{label}整日源文件不存在或不可访问: {file_path or '-'}")
                     metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
                     normalized_units.append(

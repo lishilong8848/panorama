@@ -3521,19 +3521,31 @@ def _station_h_roster_candidate_people(
     duty_date: str,
     duty_shift: str,
 ) -> tuple[list[str], list[str], list[str], str]:
+    roster_repo = ShiftRosterRepository(handover_cfg)
+    emit_log = getattr(container, "add_system_log", print)
     try:
-        assignment = ShiftRosterRepository(handover_cfg).query_assignment(
+        assignment = roster_repo.query_assignment(
             building="H楼",
             duty_date=duty_date,
             duty_shift=duty_shift,
-            emit_log=getattr(container, "add_system_log", print),
+            emit_log=emit_log,
         )
     except Exception as exc:  # noqa: BLE001
         return [], [], [], f"排班候选读取失败: {exc}"
     current_raw = getattr(assignment, "current_people", "")
+    long_day_raw = ""
+    try:
+        long_day_raw = roster_repo.query_long_day_people_from_roster_source(
+            building="H楼",
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
+        )
+    except Exception as exc:  # noqa: BLE001
+        emit_log(f"[交接班][H楼审核页] H楼长白排班读取失败，将按空白长白岗继续: {exc}")
     current_candidates = station_h_filter_duty_people(current_raw)
     next_candidates = station_h_filter_duty_people(getattr(assignment, "next_people", ""))
-    long_day_candidates = station_h_default_long_day_people_from_roster(current_raw)
+    long_day_candidates = station_h_default_long_day_people_from_roster(long_day_raw)
     return current_candidates, next_candidates, long_day_candidates, ""
 
 
@@ -3615,7 +3627,7 @@ def _station_h_status_payload(
         },
         "rules": {
             "duty_people": "默认使用当前班次排班人员；保存后优先使用本页手动值。",
-            "long_day_people": "默认填写固定长白岗；当天不上班或第二天不上班时可手动清空或改选。",
+            "long_day_people": "默认读取H楼长白排班行；保存后优先使用本页手动值。",
         },
         "candidate_source": {
             "duty_people": "saved" if bool(saved_selection) else "roster_default",

@@ -455,6 +455,26 @@ class ShiftRosterRepository:
         return ""
 
     @staticmethod
+    def _long_day_markers(long_day_cfg: Dict[str, Any] | None) -> List[str]:
+        cfg = long_day_cfg if isinstance(long_day_cfg, dict) else {}
+        raw_values = [
+            cfg.get("shift_value", "长白"),
+            "长白",
+            "常白",
+        ]
+        markers: List[str] = []
+        for value in raw_values:
+            text = str(value or "").strip().casefold()
+            if text and text not in markers:
+                markers.append(text)
+        return markers
+
+    @staticmethod
+    def _contains_long_day_marker(value: Any, markers: List[str]) -> bool:
+        text = _field_text(value).casefold()
+        return bool(text and any(marker in text for marker in markers if marker))
+
+    @staticmethod
     def _match_building(target_building: str, record_building: str, mode: str) -> bool:
         target_text = _normalize_building_text(target_building)
         record_text = _normalize_building_text(record_building)
@@ -674,6 +694,8 @@ class ShiftRosterRepository:
     ) -> ShiftRosterAssignment:
         fields_cfg = cfg.get("fields", {})
         match_cfg = cfg.get("match", {})
+        long_day_cfg = cfg.get("long_day", {}) if isinstance(cfg.get("long_day", {}), dict) else {}
+        long_day_markers = self._long_day_markers(long_day_cfg)
         alias_map = self._build_shift_alias_map(cfg)
         mode = str(match_cfg.get("building_mode", "exact_then_code")).strip().lower() or "exact_then_code"
 
@@ -698,7 +720,14 @@ class ShiftRosterRepository:
             row_building = _field_text(fields.get(str(fields_cfg.get("building", "机楼"))))
             if not self._match_building(building, row_building, mode):
                 continue
-            row_shift = self._normalize_shift(fields.get(str(fields_cfg.get("shift", "班次"))), alias_map)
+            raw_shift = fields.get(str(fields_cfg.get("shift", "班次")))
+            raw_team = fields.get(str(fields_cfg.get("team", "班组")))
+            if self._contains_long_day_marker(raw_shift, long_day_markers) or self._contains_long_day_marker(
+                raw_team,
+                long_day_markers,
+            ):
+                continue
+            row_shift = self._normalize_shift(raw_shift, alias_map)
             if not row_shift:
                 continue
             row = {
@@ -706,7 +735,7 @@ class ShiftRosterRepository:
                 "date": row_date,
                 "shift": row_shift,
                 "building": row_building,
-                "team": _field_text(fields.get(str(fields_cfg.get("team", "班组")))),
+                "team": _field_text(raw_team),
                 "people_text": self._people_text_from_fields(
                     fields=fields,
                     configured_field=fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD),
@@ -758,6 +787,72 @@ class ShiftRosterRepository:
             f"current={'有' if result.current_people else '无'}, next={'有' if result.next_people else '无'}"
         )
         return result
+
+    def query_long_day_people_from_roster_source(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        emit_log: Callable[[str], None] = print,
+    ) -> str:
+        cfg = self._normalize_cfg()
+        if not bool(cfg.get("enabled", True)):
+            return ""
+        records = self._load_records(
+            cfg,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            emit_log=emit_log,
+        )
+        fields_cfg = cfg.get("fields", {})
+        match_cfg = cfg.get("match", {})
+        long_day_cfg = cfg.get("long_day", {}) if isinstance(cfg.get("long_day", {}), dict) else {}
+        mode = str(match_cfg.get("building_mode", "exact_then_code")).strip().lower() or "exact_then_code"
+        duty_day = parse_duty_date(duty_date)
+        normalized_shift = normalize_duty_shift(duty_shift)
+        target_day = duty_day if normalized_shift == "day" else duty_day + timedelta(days=1)
+        target_date_text = target_day.strftime("%Y-%m-%d")
+        shift_field_name = str(fields_cfg.get("shift", "班次") or "班次").strip()
+        team_field_name = str(fields_cfg.get("team", "班组") or "班组").strip()
+        long_day_markers = self._long_day_markers(long_day_cfg)
+        configured_people_field = fields_cfg.get("people_text", self.PREFERRED_PEOPLE_TEXT_FIELD)
+
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            fields = item.get("fields", {})
+            if not isinstance(fields, dict):
+                continue
+            row_date = _normalize_date_text(fields.get(str(fields_cfg.get("duty_date", "排班日期"))))
+            if row_date != target_date_text:
+                continue
+            row_building = _field_text(fields.get(str(fields_cfg.get("building", "机楼"))))
+            if not self._match_building(building, row_building, mode):
+                continue
+            row_shift = fields.get(shift_field_name) if shift_field_name else ""
+            row_team = fields.get(team_field_name) if team_field_name else ""
+            if not (
+                self._contains_long_day_marker(row_shift, long_day_markers)
+                or self._contains_long_day_marker(row_team, long_day_markers)
+            ):
+                continue
+            row_people = self._people_text_from_fields(
+                fields=fields,
+                configured_field=configured_people_field,
+            )
+            if row_people:
+                emit_log(
+                    f"[交接班][H楼长白查询] building={building}, duty={duty_date}/{normalized_shift}, "
+                    f"query_date={target_date_text}, result=命中"
+                )
+                return row_people
+
+        emit_log(
+            f"[交接班][H楼长白查询] building={building}, duty={duty_date}/{normalized_shift}, "
+            f"query_date={target_date_text}, result=未命中"
+        )
+        return ""
 
     def query_assignments(
         self,

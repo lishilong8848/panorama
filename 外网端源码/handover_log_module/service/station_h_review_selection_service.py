@@ -25,19 +25,6 @@ STATION_H_LONG_DAY_ROLE_BY_NAME = {
     "刘小杏": "FOC",
 }
 
-STATION_H_DEFAULT_LONG_DAY_NAMES = [
-    "梅冰冰",
-    "马进宇",
-    "曹李培",
-    "王庆华",
-    "周海祥",
-    "曹毅",
-    "明志勇",
-    "高荣",
-    "李苏琪",
-]
-
-
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -109,12 +96,7 @@ def _matches_station_h_name(candidate: Any, expected_name: str) -> bool:
 
 def station_h_long_day_text(names: Sequence[Any] | Any) -> str:
     selected = split_station_h_people(names)
-    ordered = [
-        name
-        for name in STATION_H_LONG_DAY_ROLE_BY_NAME
-        if any(_matches_station_h_name(item, name) for item in selected)
-    ]
-    return f"常白岗：{' '.join(ordered) if ordered else '/'}"
+    return f"常白岗：{' '.join(selected) if selected else '/'}"
 
 
 def station_h_is_long_day_person(name: Any) -> bool:
@@ -129,12 +111,7 @@ def station_h_filter_duty_people(names: Any) -> List[str]:
 
 
 def station_h_default_long_day_people_from_roster(names: Any) -> List[str]:
-    roster_people = split_station_h_people(names)
-    return [
-        name
-        for name in STATION_H_DEFAULT_LONG_DAY_NAMES
-        if any(_matches_station_h_name(item, name) for item in roster_people)
-    ]
+    return split_station_h_people(names)
 
 
 def _runtime_config_from_handover_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -277,12 +254,7 @@ class StationHReviewSelectionService:
 
     @staticmethod
     def _normalize_long_day_people(value: Any) -> List[str]:
-        selected = split_station_h_people(value)
-        return [
-            name
-            for name in STATION_H_LONG_DAY_ROLE_BY_NAME
-            if any(_matches_station_h_name(item, name) for item in selected)
-        ]
+        return split_station_h_people(value)
 
     @staticmethod
     def _context(duty_day: datetime, duty_shift: str) -> Dict[str, str]:

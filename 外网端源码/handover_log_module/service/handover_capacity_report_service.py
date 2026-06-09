@@ -1351,10 +1351,11 @@ class HandoverCapacityReportService:
             bucket["matched_records"] = int(bucket.get("matched_records", 0) or 0) + 1
             result["matched_count"] = int(result.get("matched_count", 0) or 0) + 1
             month_totals[matched_building] += water_total
-            latest_record_dt = latest_record_dates.get(matched_building)
-            if latest_record_dt is None or record_dt >= latest_record_dt:
-                latest_record_dates[matched_building] = record_dt
-                latest_values[matched_building] = water_total
+            if abs(float(water_total)) > 1e-9:
+                latest_record_dt = latest_record_dates.get(matched_building)
+                if latest_record_dt is None or record_dt >= latest_record_dt:
+                    latest_record_dates[matched_building] = record_dt
+                    latest_values[matched_building] = water_total
 
         for building_name, bucket in result["by_building"].items():
             bucket["month_total"] = format_number(month_totals.get(building_name, 0.0))
@@ -1640,68 +1641,28 @@ class HandoverCapacityReportService:
             "B7": _text((handover_cells if isinstance(handover_cells, dict) else {}).get("B7")),
             "D7": _text((handover_cells if isinstance(handover_cells, dict) else {}).get("D7")),
         }
-        if _text(building) == "A楼":
-            return fallback
-
-        session_id = ReviewSessionService.build_session_id("A楼", _text(duty_date), _text(duty_shift).lower())
-        a_cells: Dict[str, str] = {}
-        if session_id:
+        batch_key = ReviewSessionService.build_batch_key(_text(duty_date), _text(duty_shift).lower())
+        if batch_key:
             try:
-                store = ReviewBuildingDocumentStore(config=self.config, building="A楼")
-                state = store.get_document(session_id)
-                document = state.get("document", {}) if isinstance(state, dict) else {}
-                fixed_cells = self._extract_fixed_cells_from_document(document if isinstance(document, dict) else {})
-                for cell_name in ("B7", "D7"):
-                    value = _text(fixed_cells.get(cell_name))
-                    if value:
-                        a_cells[cell_name] = value
+                outdoor_state = self._review_session_service.get_outdoor_temperature_state(batch_key=batch_key)
+                block = (
+                    outdoor_state.get("shared_blocks", {}).get("outdoor_temperature", {})
+                    if isinstance(outdoor_state, dict)
+                    else {}
+                )
+                cells = block.get("cells", {}) if isinstance(block, dict) else {}
+                shared = {cell_name: _text(cells.get(cell_name)) for cell_name in ("B7", "D7")}
+                if int(block.get("revision", 0) or 0) > 0 or any(shared.values()):
+                    return shared
             except Exception as exc:  # noqa: BLE001
                 try:
                     emit_log(
-                        "[交接班][容量报表][室外温湿度] A楼审核SQLite读取失败，尝试Excel "
-                        f"building={building}, session_id={session_id}, error={exc}"
+                        "[交接班][容量报表][室外温湿度] 共享审核块读取失败，回退当前楼 "
+                        f"building={building}, batch_key={batch_key}, error={exc}"
                     )
                 except Exception:  # noqa: BLE001
                     pass
-
-            if not all(_text(a_cells.get(cell_name)) for cell_name in ("B7", "D7")):
-                try:
-                    session = self._review_session_service.get_or_recover_session_by_id(session_id)
-                    output_file = _text(session.get("output_file")) if isinstance(session, dict) else ""
-                    if output_file:
-                        file_cells = self._read_handover_cells(
-                            output_file,
-                            ["B7", "D7"],
-                            sheet_name=self._handover_sheet_name(),
-                        )
-                        for cell_name in ("B7", "D7"):
-                            value = _text(file_cells.get(cell_name))
-                            if value and not _text(a_cells.get(cell_name)):
-                                a_cells[cell_name] = value
-                except Exception as exc:  # noqa: BLE001
-                    try:
-                        emit_log(
-                            "[交接班][容量报表][室外温湿度] A楼Excel读取失败，回退当前楼 "
-                            f"building={building}, session_id={session_id}, error={exc}"
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-
-        result: Dict[str, str] = {}
-        for cell_name in ("B7", "D7"):
-            value = _text(a_cells.get(cell_name))
-            if value:
-                result[cell_name] = value
-                continue
-            result[cell_name] = fallback.get(cell_name, "")
-            try:
-                emit_log(
-                    "[交接班][容量报表][室外温湿度] A楼值不可用，回退当前楼 "
-                    f"building={building}, duty={duty_date}/{duty_shift}, cell={cell_name}"
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        return result
+        return fallback
 
     def _build_capacity_overlay_values(
         self,

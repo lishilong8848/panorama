@@ -1555,7 +1555,7 @@ def _cached_branch_source_by_building(
             buildings=buildings,
             bucket_key=business_date,
         ),
-        verify_files=False,
+        verify_files=True,
     )
     output: Dict[str, Dict[str, Any]] = {}
     for item in entries:
