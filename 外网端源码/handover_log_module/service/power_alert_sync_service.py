@@ -460,27 +460,18 @@ class PowerAlertSyncService:
             output.setdefault(cls._branch_key(row.room, row.pdu, row.branch_no), row)
         return output
 
-    @staticmethod
-    def _branch_complement(key: str) -> Dict[str, str] | None:
-        return {
-            "A2|38": {"side": "B", "feed": "1", "branch_no": "1"},
-            "B1|1": {"side": "A", "feed": "2", "branch_no": "38"},
-            "A1|37": {"side": "B", "feed": "2", "branch_no": "19"},
-            "B2|19": {"side": "A", "feed": "1", "branch_no": "37"},
-        }.get(key)
-
     def _find_opposite_branch(self, row: _SourceRow, index: Dict[str, _SourceRow]) -> _SourceRow | None:
         pdu = row.pdu_info
         opposite_side = "B" if pdu.get("side") == "A" else "A"
         exact_pdu = f"{pdu.get('col')}{pdu.get('num_pad2')}-{opposite_side}{pdu.get('feed')}"
-        exact = index.get(self._branch_key(row.room, exact_pdu, row.branch_no))
-        if exact:
-            return exact
-        complement = self._branch_complement(f"{pdu.get('side')}{pdu.get('feed')}|{row.branch_no}")
-        if not complement:
-            return None
-        complement_pdu = f"{pdu.get('col')}{pdu.get('num_pad2')}-{complement['side']}{complement['feed']}"
-        return index.get(self._branch_key(row.room, complement_pdu, complement["branch_no"]))
+        return index.get(self._branch_key(row.room, exact_pdu, row.branch_no))
+
+    @staticmethod
+    def _expected_opposite_pdu(pdu_info: Dict[str, Any]) -> str:
+        if not pdu_info:
+            return ""
+        opposite_side = "B" if pdu_info.get("side") == "A" else "A"
+        return f"{pdu_info.get('col')}{pdu_info.get('num_pad2')}-{opposite_side}{pdu_info.get('feed')}"
 
     @staticmethod
     def _max_of(values: List[float]) -> float:
@@ -863,6 +854,14 @@ class PowerAlertSyncService:
             if not int(stats["over_count"] or 0):
                 continue
             opposite = self._find_opposite_branch(row, index)
+            if opposite is None and callable(emit_log):
+                expected_opposite = self._expected_opposite_pdu(row.pdu_info)
+                self._emit(
+                    emit_log,
+                    "[动环功率统计][单支路] 未找到同柜同路对侧PDU，按空白上传: "
+                    f"building={row.building}, room={row.room}, pdu={row.pdu}, "
+                    f"branch_no={row.branch_no}, expected_opposite={expected_opposite or '-'}",
+                )
             max_hour = int(stats["max_hour"])
             output.append(
                 {

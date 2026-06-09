@@ -59,6 +59,7 @@ from handover_log_module.service.station_h_review_selection_service import (
     split_station_h_people,
     station_h_build_batch_key,
     station_h_filter_duty_people,
+    station_h_normalize_duty_people,
 )
 
 
@@ -3566,8 +3567,10 @@ def _station_h_status_payload(
     selected_current = resolved_selection.get("current_people", [])
     selected_next = resolved_selection.get("next_people", [])
     selected_long_day = resolved_selection.get("long_day_people", [])
-    selected_current_people = split_station_h_people(selected_current)
-    selected_next_people = split_station_h_people(selected_next)
+    selected_current_people = station_h_normalize_duty_people(selected_current)
+    selected_next_people = station_h_normalize_duty_people(selected_next)
+    selected_current = selected_current_people
+    selected_next = selected_next_people
     roster_current_candidates: list[str] = []
     roster_next_candidates: list[str] = []
     roster_long_day_candidates: list[str] = []
@@ -3586,10 +3589,12 @@ def _station_h_status_payload(
         )
         if not selected_current_people:
             selected_current = roster_current_candidates
-            selected_current_people = split_station_h_people(selected_current)
+            selected_current_people = station_h_normalize_duty_people(selected_current)
+            selected_current = selected_current_people
         if not selected_next_people:
             selected_next = roster_next_candidates
-            selected_next_people = split_station_h_people(selected_next)
+            selected_next_people = station_h_normalize_duty_people(selected_next)
+            selected_next = selected_next_people
         if not bool(saved_selection):
             selected_long_day = roster_long_day_candidates
     selected_long_day_people = split_station_h_people(selected_long_day)

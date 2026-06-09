@@ -114,6 +114,11 @@ def station_h_default_long_day_people_from_roster(names: Any) -> List[str]:
     return split_station_h_people(names)
 
 
+def station_h_normalize_duty_people(names: Any) -> List[str]:
+    """H楼值班/接班人员不得混入长白岗人员。"""
+    return station_h_filter_duty_people(names)
+
+
 def _runtime_config_from_handover_config(config: Dict[str, Any]) -> Dict[str, Any]:
     payload = config if isinstance(config, dict) else {}
     paths = payload.get("paths", {}) if isinstance(payload.get("paths", {}), dict) else {}
@@ -183,8 +188,8 @@ class StationHReviewSelectionService:
             "duty_date": duty_date_text,
             "duty_shift": duty_shift_text,
             "batch_key": station_h_build_batch_key(duty_date_text, duty_shift_text),
-            "current_people": split_station_h_people(current_people),
-            "next_people": split_station_h_people(next_people),
+            "current_people": station_h_normalize_duty_people(current_people),
+            "next_people": station_h_normalize_duty_people(next_people),
             "long_day_people": self._normalize_long_day_people(long_day_people),
             "source": str(source or "manual").strip() or "manual",
             "updated_at": _now_text(),
@@ -231,8 +236,8 @@ class StationHReviewSelectionService:
         raw = payload if isinstance(payload, dict) else {}
         duty_date = str(raw.get("duty_date", "") or "").strip()
         duty_shift = _normalize_duty_shift(str(raw.get("duty_shift", "") or "").strip())
-        current_people = split_station_h_people(raw.get("current_people", raw.get("current_people_text", "")))
-        next_people = split_station_h_people(raw.get("next_people", raw.get("next_people_text", "")))
+        current_people = station_h_normalize_duty_people(raw.get("current_people", raw.get("current_people_text", "")))
+        next_people = station_h_normalize_duty_people(raw.get("next_people", raw.get("next_people_text", "")))
         long_day_people = self._normalize_long_day_people(raw.get("long_day_people", raw.get("long_day_people_text", "")))
         return {
             **raw,

@@ -235,6 +235,41 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
             self.assertNotEqual(rows[0]["机房"], "A-301-C列-DC010")
             self.assertEqual(rows[0]["支路编号"], "C列-DC010 #20")
 
+    def test_branch_rows_only_use_same_feed_opposite_pdu(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
+
+            def make_row(pdu: str, branch_no: str) -> _SourceRow:
+                return _SourceRow(
+                    building="B楼",
+                    room="B-302包间",
+                    room_short="B-302",
+                    line_raw="B-302-H列-DC012",
+                    line=service._parse_line("B-302-H列-DC012"),
+                    pdu=pdu,
+                    pdu_info=service._parse_pdu(pdu),
+                    branch_no=branch_no,
+                    powers=[7.0] * 24,
+                )
+
+            rows = service._generate_branch_rows(
+                [
+                    make_row("H01-B1", "5"),
+                    make_row("H01-A1", "5"),
+                    make_row("H01-A2", "38"),
+                    make_row("H01-B1", "1"),
+                ],
+                threshold=6.25,
+                report_date="2026/05/31",
+                data_center_name="EA118",
+            )
+
+            by_key = {(row["PDU编号"], row["支路号"]): row for row in rows}
+            self.assertEqual(by_key[("H01-B1", "5")]["对侧PDU编号"], "H01-A1")
+            self.assertEqual(by_key[("H01-A1", "5")]["对侧PDU编号"], "H01-B1")
+            self.assertIsNone(by_key[("H01-A2", "38")]["对侧PDU编号"])
+            self.assertIsNone(by_key[("H01-B1", "1")]["对侧PDU编号"])
+
     def test_generate_cabinet_rows_backfills_pdu_and_current_from_old_detail_rows(self) -> None:
         service = FullCabinetPowerStatsSyncService({})
         cabinet_row = service._parse_metric_file(

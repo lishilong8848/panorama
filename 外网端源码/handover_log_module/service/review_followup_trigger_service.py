@@ -28,6 +28,7 @@ from handover_log_module.service.station_h_review_selection_service import (
     station_h_default_long_day_people_from_roster,
     station_h_filter_duty_people,
     station_h_long_day_text,
+    station_h_normalize_duty_people,
 )
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
@@ -1664,8 +1665,8 @@ class ReviewFollowupTriggerService:
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[交接班][H楼云表] 审核页保存值读取失败，将使用排班兜底: {exc}")
             selection = {}
-        current_names = self._station_h_split_people(selection.get("current_people", []))
-        next_names = self._station_h_split_people(selection.get("next_people", []))
+        current_names = station_h_normalize_duty_people(selection.get("current_people", []))
+        next_names = station_h_normalize_duty_people(selection.get("next_people", []))
 
         roster_repo = ShiftRosterRepository(self.config)
         assignment = None
@@ -1700,6 +1701,8 @@ class ReviewFollowupTriggerService:
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班][H楼云表] H楼长白排班读取失败，将按空白长白岗继续: {exc}")
                 long_day_people = station_h_default_long_day_people_from_roster(long_day_raw)
+        current_names = station_h_normalize_duty_people(current_names)
+        next_names = station_h_normalize_duty_people(next_names)
         current_first = current_names[0] if current_names else ""
         next_first = next_names[0] if next_names else ""
         if not current_names or not next_names or not current_first or not next_first:
