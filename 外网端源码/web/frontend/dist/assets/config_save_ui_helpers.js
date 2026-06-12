@@ -7,6 +7,7 @@ export function createConfigSaveUiHelpers(options = {}) {
     currentView,
     activeConfigTab,
     handoverConfigBuilding,
+    handoverReviewRecipientBuilding,
     handoverConfigBuildingRevision,
     configSaveStatus,
     configSaveSuspendDepth,
@@ -32,6 +33,8 @@ export function createConfigSaveUiHelpers(options = {}) {
 
   const HANDOVER_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
   const STATION_110_BUILDING = "110站";
+  const H_BUILDING = "H楼";
+  const COMMON_REVIEW_RECIPIENT_BUILDINGS = [STATION_110_BUILDING, H_BUILDING];
 
   function updateConfigSaveStatus(patch = {}) {
     if (!configSaveStatus || typeof configSaveStatus !== "object") return;
@@ -182,8 +185,10 @@ export function createConfigSaveUiHelpers(options = {}) {
 
   function syncSavedHandoverCommonSignature() {
     lastSavedHandoverCommonSignature = serializeCurrentHandoverCommonDraft();
-    lastSavedHandoverReviewRecipientSignatures[STATION_110_BUILDING] =
-      serializeCurrentHandoverReviewRecipientDraft(STATION_110_BUILDING);
+    for (const building of COMMON_REVIEW_RECIPIENT_BUILDINGS) {
+      lastSavedHandoverReviewRecipientSignatures[building] =
+        serializeCurrentHandoverReviewRecipientDraft(building);
+    }
   }
 
   function syncSavedHandoverBuildingSignature(building = handoverConfigBuilding?.value, options = {}) {
@@ -438,7 +443,10 @@ export function createConfigSaveUiHelpers(options = {}) {
   }
 
   async function sendHandoverReviewLink(building, options = {}) {
-    const targetBuilding = String(building || "").trim() || String(handoverConfigBuilding?.value || "").trim() || "A楼";
+    const targetBuilding = String(building || "").trim()
+      || String(handoverReviewRecipientBuilding?.value || "").trim()
+      || String(handoverConfigBuilding?.value || "").trim()
+      || "A楼";
     const shouldCheckPendingConfig =
       String(currentView?.value || "").trim() === "config"
       && String(activeConfigTab?.value || "").trim() === "feature_handover";
@@ -472,10 +480,12 @@ export function createConfigSaveUiHelpers(options = {}) {
   }
 
   async function onHandoverReviewRecipientBuildingChange(nextBuilding) {
-    const currentBuilding = String(handoverConfigBuilding?.value || "").trim() || "A楼";
+    const currentBuilding = String(handoverReviewRecipientBuilding?.value || "").trim() || "A楼";
     const targetBuilding = String(nextBuilding || "").trim() || currentBuilding;
     if (targetBuilding === currentBuilding) return;
-    if (hasPendingHandoverCommonChanges() || hasPendingHandoverBuildingMetaChanges(currentBuilding)) {
+    const currentIsBuildingSegment = HANDOVER_BUILDINGS.includes(currentBuilding);
+    const targetIsBuildingSegment = HANDOVER_BUILDINGS.includes(targetBuilding);
+    if (hasPendingHandoverCommonChanges() || (currentIsBuildingSegment && hasPendingHandoverBuildingMetaChanges(currentBuilding))) {
       if (message) message.value = "当前交接班配置有未保存修改，请先点击保存配置";
       return;
     }
@@ -485,40 +495,27 @@ export function createConfigSaveUiHelpers(options = {}) {
     }
     if (hasPendingHandoverReviewRecipientChanges(targetBuilding)) {
       skipNextHandoverBuildingSignatureSync[targetBuilding] = true;
-      if (handoverConfigBuilding) {
-        handoverConfigBuilding.value = targetBuilding;
+      if (handoverReviewRecipientBuilding) {
+        handoverReviewRecipientBuilding.value = targetBuilding;
       }
       setTimeout(() => {
         delete skipNextHandoverBuildingSignatureSync[targetBuilding];
       }, 0);
-      if (handoverConfigBuildingRevision && Object.prototype.hasOwnProperty.call(handoverBuildingRevisionByBuilding, targetBuilding)) {
-        handoverConfigBuildingRevision.value = handoverBuildingRevisionByBuilding[targetBuilding];
-      }
       return;
     }
-    if (targetBuilding === STATION_110_BUILDING) {
-      if (handoverConfigBuilding) {
-        handoverConfigBuilding.value = targetBuilding;
-      }
-      const handover = config?.value?.handover_log && typeof config.value.handover_log === "object"
-        ? config.value.handover_log
-        : {};
-      if (!handover.review_ui || typeof handover.review_ui !== "object") {
-        handover.review_ui = {};
-      }
-      const reviewUi = handover.review_ui;
-      reviewUi.review_link_recipients_by_building = reviewUi.review_link_recipients_by_building
-        && typeof reviewUi.review_link_recipients_by_building === "object"
-        ? reviewUi.review_link_recipients_by_building
-        : {};
-      if (!Array.isArray(reviewUi.review_link_recipients_by_building[targetBuilding])) {
-        reviewUi.review_link_recipients_by_building[targetBuilding] = [];
+    if (!targetIsBuildingSegment) {
+      if (handoverReviewRecipientBuilding) {
+        handoverReviewRecipientBuilding.value = targetBuilding;
       }
       lastSavedHandoverReviewRecipientSignatures[targetBuilding] =
         serializeCurrentHandoverReviewRecipientDraft(targetBuilding);
       return;
     }
-    const data = await fetchHandoverBuildingConfigSegment?.(targetBuilding);
+    const data = await fetchHandoverBuildingConfigSegment?.(targetBuilding, { preserveSelection: true });
+    if (!data) return;
+    if (handoverReviewRecipientBuilding) {
+      handoverReviewRecipientBuilding.value = targetBuilding;
+    }
     if (data?.revision !== undefined) {
       handoverBuildingRevisionByBuilding[targetBuilding] =
         Number.parseInt(String(data.revision || 0), 10) || 0;

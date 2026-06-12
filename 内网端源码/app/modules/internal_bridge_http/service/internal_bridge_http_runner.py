@@ -368,19 +368,10 @@ class InternalBridgeHttpTaskRunner:
             status=status_filter,
             limit=limit,
         )
-        self._start_source_index_recovery_if_needed(
-            entries,
-            source_family=source_family,
-            building=building,
-            bucket_kind=kind_text,
-            bucket_key=bucket_key,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            limit=limit,
-        )
         shared_root_text = str(getattr(self._main_service, "shared_bridge_root", "") or "").strip()
         shared_root = Path(shared_root_text) if shared_root_text else None
         output: List[Dict[str, Any]] = []
+        filtered_missing = False
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -390,14 +381,35 @@ class InternalBridgeHttpTaskRunner:
                 item.setdefault("file_path", str(shared_root / relative.replace("/", "\\")))
             file_path_text = str(item.get("file_path", "") or "").strip()
             item_status = str(item.get("status", "") or "").strip().lower()
-            if item_status == "ready" and not self._source_index_file_accessible(file_path_text):
+            file_verified = self._source_index_file_accessible(file_path_text) if item_status == "ready" else False
+            if item_status == "ready" and not file_verified:
+                filtered_missing = True
+                self._mark_source_index_entry_missing(
+                    item,
+                    reason="indexed_file_missing",
+                    detail=f"source-index 指向文件不可访问: {file_path_text or '-'}",
+                )
                 self._emit(
                     "[内网HTTP桥接] source-index 已过滤不可访问源文件: "
                     f"family={source_family or '-'}, building={item.get('building') or building or '-'}, "
                     f"bucket={item.get('bucket_key') or bucket_key or duty_date or '-'}, path={file_path_text or '-'}"
                 )
                 continue
+            if item_status == "ready":
+                item["file_verified"] = True
+                item["file_verified_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             output.append(item)
+        if not output or filtered_missing:
+            self._start_source_index_recovery_if_needed(
+                output,
+                source_family=source_family,
+                building=building,
+                bucket_kind=kind_text,
+                bucket_key=bucket_key,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                limit=limit,
+            )
         return output
 
     def _start_source_index_recovery_if_needed(
@@ -536,6 +548,26 @@ class InternalBridgeHttpTaskRunner:
             return candidate.is_file()
         except OSError:
             return False
+
+    def _mark_source_index_entry_missing(self, entry: Dict[str, Any], *, reason: str, detail: str) -> None:
+        store = self._store
+        if store is None:
+            return
+        entry_id = str((entry or {}).get("entry_id", "") or "").strip()
+        if not entry_id:
+            return
+        try:
+            store.update_source_cache_entry_status(
+                entry_id,
+                status="missing",
+                metadata_update={
+                    "missing_reason": str(reason or "").strip() or "missing",
+                    "missing_detail": str(detail or "").strip(),
+                    "missing_detected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit(f"[内网HTTP桥接] 标记 source-index 缺失失败 entry_id={entry_id}, error={exc}")
 
     def _list_source_cache_entries_fast(
         self,

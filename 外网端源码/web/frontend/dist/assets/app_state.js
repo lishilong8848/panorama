@@ -832,6 +832,7 @@ export function createAppState(vueApi) {
     },
   });
   const handoverConfigBuilding = ref("A楼");
+  const handoverReviewRecipientBuilding = ref("A楼");
   const handoverConfigCommonRevision = ref(0);
   const handoverConfigCommonUpdatedAt = ref("");
   const handoverConfigBuildingRevision = ref(0);
@@ -2051,6 +2052,7 @@ export function createAppState(vueApi) {
     handoverEngineerLoading,
     handoverDailyReportContext,
     handoverConfigBuilding,
+    handoverReviewRecipientBuilding,
     handoverConfigCommonRevision,
     handoverConfigCommonUpdatedAt,
     handoverConfigBuildingRevision,

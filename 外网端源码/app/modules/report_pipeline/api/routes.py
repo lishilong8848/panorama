@@ -1421,6 +1421,7 @@ def _run_external_day_metric_shared_flow(
     cached_entries = _filter_accessible_cached_entries(bridge_service.get_day_metric_by_date_cache_entries(
         selected_dates=selected_dates,
         buildings=target_buildings,
+        require_fresh=True,
     ), verify_files=False)
     expected_count = len(selected_dates) * len(target_buildings)
     if len(cached_entries) < expected_count:
@@ -1554,6 +1555,7 @@ def _cached_branch_source_by_building(
             source_family=source_family,
             buildings=buildings,
             bucket_key=business_date,
+            require_fresh=True,
         ),
         verify_files=True,
     )
@@ -2266,6 +2268,7 @@ def _run_external_multi_date_shared_flow(
     cached_entries = _filter_accessible_cached_entries(bridge_service.get_monthly_by_date_cache_entries(
         selected_dates=selected_dates,
         buildings=target_buildings,
+        require_fresh=True,
     ), verify_files=False)
     cached_entry_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
     for item in cached_entries:
@@ -2379,12 +2382,14 @@ def _run_external_handover_shared_flow(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             buildings=target_buildings,
+            require_fresh=True,
         ), verify_files=False)
         capacity_cached_entries = _filter_accessible_cached_entries(
             bridge_service.get_handover_capacity_by_date_cache_entries(
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
                 buildings=target_buildings,
+                require_fresh=True,
             ),
             verify_files=False,
         )
@@ -2457,6 +2462,7 @@ def _run_external_handover_shared_flow(
                     duty_date=duty_date_value,
                     duty_shift=duty_shift_value,
                     buildings=[building],
+                    require_fresh=True,
                 ),
                 verify_files=False,
             )
@@ -5451,6 +5457,7 @@ async def job_handover_from_file(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     buildings=[building],
+                    require_fresh=True,
                 ),
                 verify_files=False,
             )
@@ -5565,6 +5572,7 @@ async def job_handover_from_files(
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     buildings=building_list,
+                    require_fresh=True,
                 ),
                 verify_files=False,
             )

@@ -340,6 +340,14 @@ def _accepted_waiting_job_response(job, task: Dict[str, Any] | None = None) -> D
     return payload
 
 
+def _get_alarm_event_upload_selection(service, *, building: str = "", require_fresh: bool = False) -> Dict[str, Any]:
+    getter = getattr(service, "get_alarm_event_upload_selection")
+    try:
+        return getter(building=building, require_fresh=require_fresh)
+    except TypeError:
+        return getter(building=building)
+
+
 def _alarm_event_upload_waiting_response_if_missing(
     *,
     container,
@@ -353,8 +361,10 @@ def _alarm_event_upload_waiting_response_if_missing(
     building_text = str(building or "").strip()
     target_buildings = [building_text] if normalized_mode == "single_building" and building_text else service.get_source_cache_buildings()
     target_buildings = [item for item in target_buildings if str(item or "").strip()]
-    selection = service.get_alarm_event_upload_selection(
+    selection = _get_alarm_event_upload_selection(
+        service,
         building=building_text if normalized_mode == "single_building" else "",
+        require_fresh=True,
     )
     selected_entries = [
         item
@@ -452,8 +462,10 @@ def _run_external_alarm_upload_shared_flow(
         "[告警信息上传] 开始读取内网 HTTP source-index: "
         f"mode={normalized_mode}, buildings={','.join(target_buildings) or '-'}"
     )
-    selection = service.get_alarm_event_upload_selection(
+    selection = _get_alarm_event_upload_selection(
+        service,
         building=building if normalized_mode == "single_building" else "",
+        require_fresh=True,
     )
     selected_entries = [
         item

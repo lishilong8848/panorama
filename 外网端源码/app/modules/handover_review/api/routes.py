@@ -1749,6 +1749,7 @@ def _resolve_regenerate_source_files(container, session: Dict[str, Any], *, buil
                         duty_date=duty_date,
                         duty_shift=duty_shift,
                         buildings=[building],
+                        require_fresh=True,
                     ),
                     building,
                 )
@@ -1761,6 +1762,7 @@ def _resolve_regenerate_source_files(container, session: Dict[str, Any], *, buil
                         duty_date=duty_date,
                         duty_shift=duty_shift,
                         buildings=[building],
+                        require_fresh=True,
                     ),
                     building,
                 )

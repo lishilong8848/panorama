@@ -16,6 +16,9 @@ from handover_log_module.service.handover_cabinet_shift_record_bitable_export_se
 )
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
+from handover_log_module.service.handover_110_main_transformer_bitable_sync_service import (
+    Handover110MainTransformerBitableSyncService,
+)
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.handover_summary_message_service import HandoverSummaryMessageService
 from handover_log_module.service.review_document_state_service import (
@@ -149,6 +152,7 @@ class ReviewFollowupTriggerService:
         self._source_data_attachment_export_service = SourceDataAttachmentBitableExportService(self.config)
         self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(self.config)
         self._station_110_upload_service = Handover110StationUploadService(self.config)
+        self._station_110_transformer_bitable_sync_service = Handover110MainTransformerBitableSyncService(self.config)
         self._daily_report_state_service = HandoverDailyReportStateService(self.config)
         self._daily_report_bitable_export_service = HandoverDailyReportBitableExportService(self.config)
         self._cabinet_shift_record_export_service = HandoverCabinetShiftRecordBitableExportService(self.config)
@@ -984,15 +988,16 @@ class ReviewFollowupTriggerService:
                 extra_labels = {
                     "station_h_sync": "H楼云文档同步",
                     "abcdeh_work_content_sync": "ABCDEH工作内容同步",
+                    "station_110_transformer_bitable": "110主变多维同步",
                 }
-                for extra_field in ("station_h_sync", "abcdeh_work_content_sync"):
+                for extra_field in ("station_h_sync", "abcdeh_work_content_sync", "station_110_transformer_bitable"):
                     extra_state = batch_meta.get(extra_field, {}) if isinstance(batch_meta, dict) else {}
                     extra_status = (
                         str(extra_state.get("status", "")).strip().lower()
                         if isinstance(extra_state, dict)
                         else ""
                     )
-                    if extra_status == "success":
+                    if extra_status in {"success", "skipped"}:
                         continue
                     if extra_status == "failed":
                         extra_sheet_failed += 1
@@ -2065,6 +2070,71 @@ class ReviewFollowupTriggerService:
             emit_log(f"[交接班][ABCDEH工作内容云表] 跟随云文档上传完成 batch={batch_key}, status={status}")
         return result
 
+    def _persist_station_110_transformer_bitable_result(self, *, batch_key: str, sync_result: Dict[str, Any]) -> None:
+        payload = dict(sync_result) if isinstance(sync_result, dict) else {}
+        payload["updated_at"] = self._now_text()
+        self._review_service.update_cloud_batch_extra_state(
+            batch_key=batch_key,
+            field="station_110_transformer_bitable",
+            value=payload,
+        )
+
+    def _attach_station_110_transformer_bitable_result(
+        self,
+        *,
+        batch_key: str,
+        cloud_result: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        result = cloud_result if isinstance(cloud_result, dict) else {}
+        cloud_status = str(result.get("status", "")).strip().lower()
+        if cloud_status == "failed":
+            result["station_110_transformer_bitable"] = {"status": "skipped", "reason": "cloud_upload_failed"}
+            return result
+        if cloud_status not in {"ok", "skipped"}:
+            result["station_110_transformer_bitable"] = {
+                "status": "skipped",
+                "reason": "cloud_upload_not_complete",
+            }
+            return result
+
+        batch_meta = self._review_service.get_cloud_batch(batch_key) or {}
+        existing = batch_meta.get("station_110_transformer_bitable", {}) if isinstance(batch_meta, dict) else {}
+        if isinstance(existing, dict) and str(existing.get("status", "")).strip().lower() == "success":
+            result["station_110_transformer_bitable"] = {**existing, "reason": "already_synced_once"}
+            return result
+
+        duty_date, duty_shift = self._review_service.parse_batch_key(batch_key)
+        if not duty_date or duty_shift not in {"day", "night"}:
+            sync_result = {
+                "status": "skipped",
+                "reason": "missing_duty_context",
+                "error": "缺少日期/班次",
+            }
+            result["station_110_transformer_bitable"] = sync_result
+            self._persist_station_110_transformer_bitable_result(batch_key=batch_key, sync_result=sync_result)
+            return result
+
+        try:
+            upload_status = self._station_110_upload_service.status(duty_date=duty_date, duty_shift=duty_shift)
+            upload_state = upload_status.get("upload", {}) if isinstance(upload_status, dict) else {}
+            sync_result = self._station_110_transformer_bitable_sync_service.sync_from_upload_state(
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                upload_state=upload_state,
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            sync_result = {"status": "failed", "error": str(exc)}
+            emit_log(f"[交接班][110主变多维] 同步异常 batch={batch_key}, error={exc}")
+        result["station_110_transformer_bitable"] = sync_result
+        status = str(sync_result.get("status", "")).strip().lower()
+        if status in {"success", "failed", "skipped"}:
+            self._persist_station_110_transformer_bitable_result(batch_key=batch_key, sync_result=sync_result)
+        if status and status != "skipped":
+            emit_log(f"[交接班][110主变多维] 跟随H楼云文档上传完成 batch={batch_key}, status={status}")
+        return result
+
     def _attach_station_110_sync_result(
         self,
         *,
@@ -2108,6 +2178,11 @@ class ReviewFollowupTriggerService:
         result = self._attach_abcdeh_work_content_sync_result_after_final_building_upload(
             batch_key=batch_key,
             sessions=sessions,
+            cloud_result=result,
+            emit_log=emit_log,
+        )
+        result = self._attach_station_110_transformer_bitable_result(
+            batch_key=batch_key,
             cloud_result=result,
             emit_log=emit_log,
         )

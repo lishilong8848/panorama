@@ -291,6 +291,8 @@ class HandoverSummaryMessageService:
             "完成情况",
             "演练完成情况",
             "维护完成情况",
+            "演练类型",
+            "维护类型",
             "进度",
             "状态",
             "执行方",
@@ -313,7 +315,6 @@ class HandoverSummaryMessageService:
             "工作",
             "描述",
             "名称",
-            "类型",
         )
         normalized_detail_tokens = [cls._normalize_section_or_column_name(token) for token in detail_tokens]
         return any(token and token in normalized for token in normalized_detail_tokens)

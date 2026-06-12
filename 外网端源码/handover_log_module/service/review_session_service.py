@@ -727,6 +727,16 @@ class ReviewSessionService:
                 if isinstance(payload.get("station_h_sync", {}), dict)
                 else {}
             ),
+            "abcdeh_work_content_sync": (
+                dict(payload.get("abcdeh_work_content_sync", {}))
+                if isinstance(payload.get("abcdeh_work_content_sync", {}), dict)
+                else {}
+            ),
+            "station_110_transformer_bitable": (
+                dict(payload.get("station_110_transformer_bitable", {}))
+                if isinstance(payload.get("station_110_transformer_bitable", {}), dict)
+                else {}
+            ),
             "station_110_sync": (
                 dict(payload.get("station_110_sync", {}))
                 if isinstance(payload.get("station_110_sync", {}), dict)

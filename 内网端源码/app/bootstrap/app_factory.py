@@ -154,10 +154,17 @@ def _install_windows_asyncio_exception_filter(container) -> None:
     def _handler(loop_obj, context):  # noqa: ANN001
         exception = context.get("exception")
         handle_text = str(context.get("handle", "") or "")
+        future_text = str(context.get("future", "") or "")
         if (
             isinstance(exception, ConnectionResetError)
             and getattr(exception, "winerror", None) == 10054
             and "_ProactorBasePipeTransport._call_connection_lost" in handle_text
+        ):
+            return
+        if (
+            isinstance(exception, OSError)
+            and getattr(exception, "winerror", None) == 64
+            and "accept_coro" in future_text
         ):
             return
         if previous_handler is not None:

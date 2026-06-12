@@ -509,14 +509,14 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
           <div class="hint">当前楼栋支持配置多位收件人；系统会按 open_id 发送审核链接文本消息。</div>
           <div class="form-row">
             <label class="label">当前楼栋</label>
-            <select :value="handoverConfigBuilding" @change="onHandoverReviewRecipientBuildingChange($event.target.value)">
+            <select :value="handoverReviewRecipientBuilding" @change="onHandoverReviewRecipientBuildingChange($event.target.value)">
               <option v-for="opt in handoverReviewRecipientBuildingOptions" :key="'handover-review-recipient-' + opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </div>
           <div class="btn-line" style="margin-bottom:8px;">
             <button
               class="btn btn-secondary"
-              @click="(config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || (config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] = [])).push({ note: '', open_id: '', enabled: true })"
+              @click="(config.handover_log.review_ui.review_link_recipients_by_building[handoverReviewRecipientBuilding] || (config.handover_log.review_ui.review_link_recipients_by_building[handoverReviewRecipientBuilding] = [])).push({ note: '', open_id: '', enabled: true })"
             >新增接收人</button>
           </div>
           <div class="config-editor-scroll">
@@ -531,15 +531,15 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
               </thead>
               <tbody>
                 <tr
-                  v-for="(row, idx) in (config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || [])"
-                  :key="'handover-review-recipient-row-' + handoverConfigBuilding + '-' + idx"
+                  v-for="(row, idx) in (config.handover_log.review_ui.review_link_recipients_by_building[handoverReviewRecipientBuilding] || [])"
+                  :key="'handover-review-recipient-row-' + handoverReviewRecipientBuilding + '-' + idx"
                 >
                   <td><input type="text" v-model="row.note" placeholder="例如 值班经理" /></td>
                   <td><input type="text" v-model="row.open_id" placeholder="例如 ou_xxx" /></td>
                   <td>
                     <button
                       class="btn btn-danger"
-                      @click="config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding].splice(idx, 1)"
+                      @click="config.handover_log.review_ui.review_link_recipients_by_building[handoverReviewRecipientBuilding].splice(idx, 1)"
                     >删除</button>
                   </td>
                   <td>
@@ -554,7 +554,7 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
                   </td>
                 </tr>
                 <tr
-                  v-if="!(config.handover_log.review_ui.review_link_recipients_by_building[handoverConfigBuilding] || []).length"
+                  v-if="!(config.handover_log.review_ui.review_link_recipients_by_building[handoverReviewRecipientBuilding] || []).length"
                   class="config-editor-empty-row"
                 >
                   <td colspan="4" class="hint">当前楼还没有审核链接接收人；没有启用且有效的接收人时，自动发送会跳过。</td>

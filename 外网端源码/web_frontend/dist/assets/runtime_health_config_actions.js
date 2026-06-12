@@ -3290,16 +3290,17 @@ export function createRuntimeHealthConfigActions(ctx) {
       const nextRevision = Number.parseInt(String(data?.revision || 0), 10) || 0;
       handoverBuildingSegmentRevisions[buildingText] = nextRevision;
       withConfigSaveSuspended(() => {
-        if (handoverConfigBuilding) {
+        const preserveSelection = Boolean(options?.preserveSelection);
+        if (!preserveSelection && handoverConfigBuilding) {
           handoverConfigBuilding.value = buildingText;
         }
-        if (handoverConfigBuildingRevision) {
+        if (!preserveSelection && handoverConfigBuildingRevision) {
           handoverConfigBuildingRevision.value = nextRevision;
         }
-        if (handoverConfigBuildingUpdatedAt) {
+        if (!preserveSelection && handoverConfigBuildingUpdatedAt) {
           handoverConfigBuildingUpdatedAt.value = String(data?.updated_at || "").trim();
         }
-        if (handoverRuleScope && String(handoverRuleScope.value || "").trim() !== "default") {
+        if (!preserveSelection && handoverRuleScope && String(handoverRuleScope.value || "").trim() !== "default") {
           handoverRuleScope.value = buildingText;
         }
         applyHandoverBuildingSegmentData(buildingText, data?.data || {});
