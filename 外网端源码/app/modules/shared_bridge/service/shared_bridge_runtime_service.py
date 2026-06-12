@@ -1516,6 +1516,27 @@ class SharedBridgeRuntimeService:
             item["file_path"] = absolute_hint
         return item
 
+    def _ensure_http_source_index_entry_file_verified(self, item: Dict[str, Any]) -> bool:
+        """Accept old internal source-index rows after checking their exact file path.
+
+        Newer internal builds return ``file_verified`` after checking the file on
+        the internal machine. Older internal builds do not include that flag,
+        which would make the external side ignore otherwise valid ready rows.
+        This fallback does not scan directories; it only checks the explicit
+        path returned by source-index and then lets the normal upload flow read
+        the same file.
+        """
+        if bool(item.get("file_verified", False)) is True:
+            return True
+        file_path = str(item.get("file_path", "") or "").strip()
+        if not file_path:
+            return False
+        if not is_accessible_cached_file_path(file_path):
+            return False
+        item["file_verified"] = True
+        item["file_verified_by"] = "external_explicit_path"
+        return True
+
     def _shared_relative_path_from_index_path(self, path_text: str, *, source_family: str = "") -> str:
         text = str(path_text or "").strip().replace("\\", "/")
         text = re.sub(r"/+", "/", text).strip("/")
@@ -1777,11 +1798,11 @@ class SharedBridgeRuntimeService:
                     item_status = str(item.get("status", "") or "").strip().lower()
                     if not status_filter_all and item_status != status_text:
                         continue
-                    if item_status == "ready" and bool(item.get("file_verified", False)) is not True:
+                    if item_status == "ready" and not self._ensure_http_source_index_entry_file_verified(item):
                         self._emit_http_bridge_issue_log(
                             "读取源文件索引",
                             RuntimeError(
-                                "source-index ready 条目未经内网端文件存在性校验，已忽略: "
+                                "source-index ready 条目文件不可访问，已忽略: "
                                 f"family={source_family or '-'}, building={building or '-'}"
                             ),
                         )
