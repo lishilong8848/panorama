@@ -211,6 +211,7 @@ class SharedSourceCacheService:
     EXTERNAL_FULL_SNAPSHOT_MAX_AGE_SEC = 15.0
     REFRESHING_ENTRY_TIMEOUT_SEC = 600.0
     REPAIR_SWEEP_COOLDOWN_SEC = 30.0
+    FAILED_ENTRY_RETRY_COOLDOWN_SEC = 90.0
     ORPHAN_FILE_RETENTION_DAYS = 60
 
     def __init__(
@@ -3245,22 +3246,27 @@ class SharedSourceCacheService:
             and len(selected_entries) == len(target_buildings),
         }
 
-    @staticmethod
-    def _should_retry_failed_latest_entry(entry: Dict[str, Any] | None) -> bool:
+    @classmethod
+    def _should_retry_failed_latest_entry(cls, entry: Dict[str, Any] | None) -> bool:
         if not isinstance(entry, dict):
             return False
         metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
         error_text = str(metadata.get("error", "") or "").strip()
         if not error_text:
             return False
-        return any(
+        if any(
             marker in error_text
             for marker in (
                 "共享缓存根目录未配置",
                 "共享缓存临时目录未配置",
                 "共享缓存存储未初始化",
             )
-        )
+        ):
+            return True
+        failed_at = _parse_datetime_text(entry.get("downloaded_at", ""))
+        if failed_at is None:
+            return True
+        return (datetime.now() - failed_at).total_seconds() >= cls.FAILED_ENTRY_RETRY_COOLDOWN_SEC
 
     def get_latest_ready_entries(self, *, source_family: str, buildings: List[str] | None = None, bucket_key: str | None = None) -> List[Dict[str, Any]]:
         if self.store is None:
@@ -6082,7 +6088,8 @@ class SharedSourceCacheService:
                         },
                     )
                 continue
-            if entry_exists and not force_retry_failed and not self._should_retry_failed_latest_entry(failed_entry):
+            should_retry_failed_entry = self._should_retry_failed_latest_entry(failed_entry)
+            if entry_exists and not force_retry_failed and not should_retry_failed_entry:
                 failed_buildings.append(building)
                 with self._lock:
                     if failed_entry:
@@ -6112,6 +6119,11 @@ class SharedSourceCacheService:
                             },
                         )
                 continue
+            if failed_entry and (force_retry_failed or should_retry_failed_entry):
+                self._emit(
+                    "[共享缓存] 失败源文件进入自动重试: "
+                    f"family={normalized_family}, building={building}, bucket={bucket_key}"
+                )
             pending_buildings.append(building)
         future_map: Dict[concurrent.futures.Future[Any], tuple[str, tuple[str, str, str, str]]] = {}
         if pending_buildings:

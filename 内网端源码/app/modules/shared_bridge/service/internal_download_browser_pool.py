@@ -301,6 +301,68 @@ class InternalDownloadBrowserPool:
         }
         return mapping.get(normalized, "页面异常")
 
+    @staticmethod
+    def _runner_result_failed(result: Any) -> bool:
+        return isinstance(result, dict) and result.get("success") is False
+
+    @staticmethod
+    def _runner_result_error_text(result: Any) -> str:
+        if not isinstance(result, dict):
+            return ""
+        return str(result.get("error") or result.get("message") or "下载任务返回失败").strip() or "下载任务返回失败"
+
+    async def _rebuild_slot_after_job_failure(self, building: str, error_text: str, *, final: bool) -> None:
+        reason = str(error_text or "").strip() or "下载任务失败"
+        phase = "最终失败后" if final else "失败重试前"
+        try:
+            self._log(f"[共享桥接] 楼栋浏览器{phase}重建开始: {building}, reason={reason}")
+            page = await self._create_or_replace_slot(building)
+            try:
+                await self._ensure_logged_in(building, page)
+            except Exception as login_exc:  # noqa: BLE001
+                login_error = self._format_login_error(login_exc)
+                self._last_error = str(login_exc)
+                self._update_slot(
+                    building,
+                    in_use=False,
+                    login_state="failed",
+                    login_error=login_error,
+                    last_error=str(login_exc),
+                    last_result="failed",
+                    pending_issue_summary=f"下载失败后重建完成，但重新登录失败: {login_error}",
+                )
+                self._log(
+                    f"[共享桥接] 楼栋浏览器{phase}重建后登录失败: "
+                    f"{building}, error={login_error}"
+                )
+                return
+            self._clear_issue_state(building)
+            self._update_slot(
+                building,
+                in_use=False,
+                login_state="ready",
+                login_error="",
+                last_error="",
+                last_result="ready",
+                last_login_at=_now_text(),
+                pending_issue_summary="",
+            )
+            self._log(f"[共享桥接] 楼栋浏览器{phase}重建完成: {building}")
+        except Exception as rebuild_exc:  # noqa: BLE001
+            rebuild_error = str(rebuild_exc)
+            self._last_error = rebuild_error
+            self._update_slot(
+                building,
+                in_use=False,
+                last_error=rebuild_error,
+                last_result="failed",
+                pending_issue_summary=f"下载失败后重建浏览器失败: {self._format_login_error(rebuild_error)}",
+            )
+            self._log(
+                f"[共享桥接] 楼栋浏览器{phase}重建失败: "
+                f"{building}, error={rebuild_error}"
+            )
+
     def _clear_issue_state(self, building: str) -> None:
         self._update_slot(
             building,
@@ -1233,6 +1295,28 @@ class InternalDownloadBrowserPool:
                 )
                 try:
                     result = await runner(page)
+                    if self._runner_result_failed(result):
+                        error_text = self._runner_result_error_text(result)
+                        self._last_error = error_text
+                        self._update_slot(
+                            building,
+                            in_use=False,
+                            last_used_at=_now_text(),
+                            last_result="failed",
+                            last_error=error_text,
+                            pending_issue_summary="下载失败，已准备重建该楼浏览器后重试",
+                        )
+                        if attempt < self.MAX_JOB_ATTEMPTS - 1:
+                            self._log(
+                                f"[共享桥接] 楼栋源文件下载失败，重建浏览器后重试: "
+                                f"{building}, attempt={attempt + 1}/{self.MAX_JOB_ATTEMPTS}, error={error_text}"
+                            )
+                            await self._rebuild_slot_after_job_failure(building, error_text, final=False)
+                            last_exc = RuntimeError(error_text)
+                            continue
+                        self._log(f"[共享桥接] 楼栋源文件下载失败，已停止重试: {building}, error={error_text}")
+                        await self._rebuild_slot_after_job_failure(building, error_text, final=True)
+                        return result
                     refreshed_page = await self._ensure_page(building)
                     if refreshed_page is not page:
                         self._log(f"[共享桥接] 楼栋浏览器异常，已重建: {building}")
@@ -1256,6 +1340,22 @@ class InternalDownloadBrowserPool:
                     error_text = str(exc)
                     self._last_error = error_text
                     failure_kind = self._classify_failure_kind(error_text)
+                    if failure_kind == "unknown" and attempt < self.MAX_JOB_ATTEMPTS - 1:
+                        self._update_slot(
+                            building,
+                            in_use=False,
+                            last_used_at=_now_text(),
+                            last_result="failed",
+                            last_error=error_text,
+                            pending_issue_summary="下载异常，已准备重建该楼浏览器后重试",
+                        )
+                        self._log(
+                            f"[共享桥接] 楼栋源文件下载异常，重建浏览器后重试: "
+                            f"{building}, attempt={attempt + 1}/{self.MAX_JOB_ATTEMPTS}, error={error_text}"
+                        )
+                        await self._rebuild_slot_after_job_failure(building, error_text, final=False)
+                        last_exc = exc if isinstance(exc, Exception) else RuntimeError(error_text)
+                        continue
                     if failure_kind != "unknown":
                         recovered = await self._attempt_building_recovery(
                             building,
@@ -1287,6 +1387,7 @@ class InternalDownloadBrowserPool:
                         last_result="failed",
                         last_error=error_text,
                     )
+                    await self._rebuild_slot_after_job_failure(building, error_text, final=True)
                     raise
             if last_exc is not None:
                 raise last_exc
