@@ -1353,7 +1353,7 @@
             {
               "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": false
             },
             {
               "note": "110",
@@ -1361,6 +1361,7 @@
               "enabled": true
             }
           ],
+          "H楼": [],
           "A楼": [
             {
               "note": "李世龙A",
@@ -1375,7 +1376,7 @@
             {
               "note": "M",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": false
             }
           ],
           "B楼": [
@@ -1392,7 +1393,7 @@
             {
               "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": false
             }
           ],
           "C楼": [
@@ -1409,7 +1410,7 @@
             {
               "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": false
             }
           ],
           "D楼": [
@@ -1426,7 +1427,7 @@
             {
               "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": false
             }
           ],
           "E楼": [
@@ -1443,7 +1444,7 @@
             {
               "note": "m",
               "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-              "enabled": true
+              "enabled": false
             }
           ]
         }
@@ -2201,7 +2202,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电时长"
+                "电池放电时长",
+                "电池放电后备时间",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -4012,7 +4016,10 @@
               "target_cell": "F10",
               "rule_type": "aggregate",
               "d_keywords": [
-                "电池放电后备时间"
+                "电池放电后备时间",
+                "电池放电时长",
+                "放电后备时间",
+                "放电时间"
               ],
               "match_mode": "contains_casefold",
               "agg": "min",
@@ -4464,15 +4471,20 @@
         "over_power_attachment": {
           "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
           "enabled": true,
-          "output_dir": "C:\\Users\\HP\\Desktop\\自建app\\全景平台程序\\QJPT_V3\\外网端源码\\QLDownload\\月度超功率附件",
+          "output_dir": "D:\\QLDownload\\月度超功率附件",
           "table_id": "tblkh6YCMYtS8nHa",
           "view_id": "vewrHJHl3v",
           "zip_file_name_pattern": "月度超功率附件_{year}{month}_{timestamp}.zip"
         },
         "template": {
           "file_name_pattern": "TOP5功率文件_{timestamp}.xlsx",
-          "output_dir": "C:\\Users\\HP\\Desktop\\自建app\\全景平台程序\\QJPT_V3\\外网端源码\\QLDownload\\TOP5功率文件",
+          "output_dir": "D:\\QLDownload\\TOP5功率文件",
           "source_path": ""
+        },
+        "monthly_power_alert_report": {
+          "enabled": true,
+          "output_dir": "D:\\QLDownload\\月度超功率统计表",
+          "file_name_pattern": "EA118机柜超功耗告警统计{month}月份_{timestamp}.xlsx"
         }
       }
     },

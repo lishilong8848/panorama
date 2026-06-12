@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 12,
-  "updated_at": "2026-05-13T00:58:17+08:00",
+  "revision": 13,
+  "updated_at": "2026-06-12T19:06:44+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
@@ -8,6 +8,9 @@
       "auto_start_in_gui": true,
       "morning_time": "02:00:00",
       "afternoon_time": "12:00:00",
+      "cloud_catchup_enabled": true,
+      "cloud_catchup_morning_time": "08:00:00",
+      "cloud_catchup_afternoon_time": "17:30:00",
       "check_interval_sec": 30,
       "catch_up_if_missed": false,
       "retry_failed_in_same_period": false,
@@ -98,7 +101,17 @@
         "state_file": "handover_capacity_oil_cache.json"
       },
       "weather": {
-        "provider": "hvac_open_meteo"
+        "provider": "hvac_open_meteo",
+        "auth_mode": "signed",
+        "fallback_locations": [
+          "南通"
+        ],
+        "language": "zh-Hans",
+        "location": "崇川区",
+        "seniverse_private_key": "SwWfUI324UukiuVs2",
+        "seniverse_public_key": "Pw-nkmTzcCorv7Dey",
+        "timeout_sec": 8,
+        "unit": "c"
       }
     },
     "template": {
@@ -672,7 +685,8 @@
         "date": "日期",
         "shift": "班次",
         "report_link": "交接班日报"
-      }
+      },
+      "browser_profile_directory": ""
     },
     "cabinet_shift_record_bitable_export": {
       "enabled": true,
@@ -860,14 +874,15 @@
           {
             "note": "m",
             "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
-            "enabled": true
+            "enabled": false
           },
           {
             "note": "110",
             "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
             "enabled": true
           }
-        ]
+        ],
+        "H楼": []
       }
     },
     "cell_rules": {
@@ -1493,6 +1508,26 @@
       ],
       "building_rows": {}
     },
-    "sites": []
+    "sites": [],
+    "top5_power_report": {
+      "over_power_attachment": {
+        "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
+        "enabled": true,
+        "output_dir": "D:\\QLDownload\\月度超功率附件",
+        "table_id": "tblkh6YCMYtS8nHa",
+        "view_id": "vewrHJHl3v",
+        "zip_file_name_pattern": "月度超功率附件_{year}{month}_{timestamp}.zip"
+      },
+      "template": {
+        "file_name_pattern": "TOP5功率文件_{timestamp}.xlsx",
+        "output_dir": "D:\\QLDownload\\TOP5功率文件",
+        "source_path": ""
+      },
+      "monthly_power_alert_report": {
+        "enabled": true,
+        "output_dir": "D:\\QLDownload\\月度超功率统计表",
+        "file_name_pattern": "EA118机柜超功耗告警统计{month}月份_{timestamp}.xlsx"
+      }
+    }
   }
 }
