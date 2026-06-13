@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import copy
+import asyncio
 import json
 import re
 import sys
@@ -28,6 +29,7 @@ from app.modules.scheduler.service.daily_scheduler_service import DailyAutoSched
 from app.modules.scheduler.service.handover_scheduler_manager import HandoverSchedulerManager
 from app.modules.scheduler.service.interval_scheduler_service import IntervalSchedulerService
 from app.modules.scheduler.service.monthly_scheduler_service import MonthlySchedulerService
+from app.modules.alarm_rule_export.service.alarm_rule_export_service import run_alarm_rule_export
 from app.modules.updater.service.updater_service import UpdaterService
 from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
 from app.shared.utils.file_utils import (
@@ -105,6 +107,8 @@ class AppContainer:
     monthly_change_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_event_report_scheduler: MonthlySchedulerService | None = None
     monthly_event_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    alarm_rule_export_scheduler: MonthlySchedulerService | None = None
+    alarm_rule_export_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     updater_service: UpdaterService | None = None
     updater_restart_callback: Callable[[Dict[str, Any]], tuple[bool, str]] | None = None
     alert_log_uploader: SystemAlertLogUploadService | None = None
@@ -205,6 +209,9 @@ class AppContainer:
             if not self.shared_bridge_service:
                 _report_progress("building_shared_bridge_service")
                 self.shared_bridge_service = self._build_shared_bridge_service()
+            if not self.alarm_rule_export_scheduler:
+                _report_progress("building_alarm_rule_export_scheduler")
+                self.alarm_rule_export_scheduler = self._build_alarm_rule_export_scheduler()
             _report_progress("runtime_dependencies_initialized")
             return
         if not self.scheduler:
@@ -274,6 +281,9 @@ class AppContainer:
         if self.monthly_event_report_scheduler_callback and self.monthly_event_report_scheduler:
             _report_progress("binding_monthly_event_scheduler_callback")
             self.monthly_event_report_scheduler.run_callback = self.monthly_event_report_scheduler_callback
+        if self.alarm_rule_export_scheduler_callback and self.alarm_rule_export_scheduler:
+            _report_progress("binding_alarm_rule_export_scheduler_callback")
+            self.alarm_rule_export_scheduler.run_callback = self.alarm_rule_export_scheduler_callback
         if self.updater_restart_callback and self.updater_service:
             _report_progress("binding_updater_restart_callback")
             self.updater_service.restart_callback = self.updater_restart_callback
@@ -506,6 +516,25 @@ class AppContainer:
             source_name="月度事件统计表处理",
         )
 
+    def _build_alarm_rule_export_scheduler(self) -> MonthlySchedulerService:
+        cfg = self.runtime_config.get("alarm_rule_export", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        scheduler_cfg = cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
+        runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip() if isinstance(paths_cfg, dict) else ""
+        return MonthlySchedulerService(
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=runtime_state_root,
+            emit_log=self.add_system_log,
+            run_callback=self.alarm_rule_export_scheduler_callback or self._alarm_rule_export_scheduler_run_callback,
+            is_busy=lambda: False,
+            thread_name="alarm-rule-export-monthly-scheduler",
+            source_name="告警规则导出",
+        )
+
     def _build_updater_service(self) -> UpdaterService:
         return UpdaterService(
             config=self.runtime_config,
@@ -548,6 +577,41 @@ class AppContainer:
 
     def _monthly_event_report_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"月度事件统计表调度回调尚未绑定执行器(source={source})"
+
+    def _alarm_rule_export_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        cfg = self.runtime_config.get("alarm_rule_export", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        if cfg.get("enabled") is False:
+            return True, "告警规则导出已禁用"
+        parallel = int(cfg.get("parallel", 5) or 5)
+        keep_open_sec = int(cfg.get("keep_open_sec", 1) or 1)
+        headless = bool(cfg.get("headless", False))
+        kwargs: Dict[str, Any] = {
+            "generate_poll_interval_sec": float(cfg.get("generate_poll_interval_sec", 3600) or 3600),
+            "export_generate_timeout_ms": int(cfg.get("export_generate_timeout_ms", 172800000) or 172800000),
+        }
+        state_file = str(cfg.get("state_file", "") or "").strip() or None
+        download_root = str(cfg.get("download_root", "") or "").strip() or None
+        screenshots_dir = str(cfg.get("screenshots_dir", "") or "").strip() or None
+        try:
+            exit_code = asyncio.run(
+                run_alarm_rule_export(
+                    config=self.runtime_config,
+                    parallel=parallel,
+                    state_file=state_file,
+                    download_root=download_root,
+                    screenshots_dir=screenshots_dir,
+                    keep_open_sec=keep_open_sec,
+                    headless=headless,
+                    **kwargs,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"告警规则导出失败: {exc}"
+        if exit_code == 0:
+            return True, f"{source}完成"
+        return False, f"告警规则导出退出码={exit_code}"
 
     def _is_placeholder_callback(self, callback: Any, placeholder: Any | None = None) -> bool:
         if callback is None:
@@ -1152,6 +1216,19 @@ class AppContainer:
             self.runtime_services_armed = True
             _report_progress("starting_shared_bridge")
             self.start_shared_bridge(source=source)
+            alarm_rule_export_cfg = self.runtime_config.get("alarm_rule_export", {})
+            if not isinstance(alarm_rule_export_cfg, dict):
+                alarm_rule_export_cfg = {}
+            alarm_rule_scheduler_cfg = alarm_rule_export_cfg.get("scheduler", {})
+            if not isinstance(alarm_rule_scheduler_cfg, dict):
+                alarm_rule_scheduler_cfg = {}
+            if bool(alarm_rule_export_cfg.get("enabled", True)) and bool(
+                alarm_rule_scheduler_cfg.get("auto_start_in_gui", True)
+            ):
+                _report_progress("starting_alarm_rule_export_scheduler")
+                self.start_alarm_rule_export_scheduler(source=source)
+            else:
+                self.add_system_log("[告警规则导出调度] 启动时未自动开启")
             _report_progress("runtime_services_started")
             return {
                 "ok": True,
@@ -1492,6 +1569,7 @@ class AppContainer:
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
             ("monthly_change_report_scheduler", self.stop_monthly_change_report_scheduler),
             ("monthly_event_report_scheduler", self.stop_monthly_event_report_scheduler),
+            ("alarm_rule_export_scheduler", self.stop_alarm_rule_export_scheduler),
             ("updater", self.stop_updater),
             ("alert_log_uploader", self.stop_alert_log_uploader),
             ("shared_bridge", self.stop_shared_bridge),
@@ -1670,6 +1748,27 @@ class AppContainer:
             result = {"stopped": False, "running": False, "reason": "not_initialized"}
         self.add_system_log(
             f"[月度事件统计表调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_alarm_rule_export_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.alarm_rule_export_scheduler:
+            self.alarm_rule_export_scheduler = self._build_alarm_rule_export_scheduler()
+        result = self.alarm_rule_export_scheduler.start()
+        self.add_system_log(
+            f"[告警规则导出调度] {source}启动请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def stop_alarm_rule_export_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.alarm_rule_export_scheduler:
+            result = self.alarm_rule_export_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[告警规则导出调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
             f"running={bool(result.get('running', False))}"
         )
         return result

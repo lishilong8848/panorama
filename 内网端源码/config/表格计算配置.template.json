@@ -24,5 +24,28 @@
     "internal_source_sites": [],
     "internal_source_cache": {},
     "shared_bridge": {}
+  },
+  "features": {
+    "alarm_rule_export": {
+      "enabled": true,
+      "parallel": 5,
+      "download_root": "",
+      "state_file": ".runtime\\alarm_rule_export\\export_records.json",
+      "screenshots_dir": ".runtime\\alarm_rule_export\\screenshots",
+      "generate_poll_interval_sec": 3600,
+      "export_generate_timeout_ms": 172800000,
+      "keep_open_sec": 1,
+      "headless": false,
+      "scheduler": {
+        "enabled": true,
+        "auto_start_in_gui": true,
+        "day_of_month": 1,
+        "run_time": "03:30:00",
+        "check_interval_sec": 60,
+        "retry_failed_in_same_period": true,
+        "retry_interval_sec": 3600,
+        "state_file": "alarm_rule_export_scheduler_state.json"
+      }
+    }
   }
 }

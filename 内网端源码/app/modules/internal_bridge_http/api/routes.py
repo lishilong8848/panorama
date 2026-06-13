@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import FileResponse
 
+from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
+    list_alarm_rule_export_files,
+    resolve_alarm_rule_export_file,
+)
 from app.modules.internal_bridge_http.service.internal_bridge_http_runner import InternalBridgeHttpTaskRunner
 
 
@@ -67,6 +72,19 @@ def _runner(request: Request) -> InternalBridgeHttpTaskRunner:
     )
     setattr(request.app.state, _RUNNER_ATTR, runner)
     return runner
+
+
+def _runtime_config(request: Request) -> Dict[str, Any]:
+    container = getattr(request.app.state, "container", None)
+    runtime_config = getattr(container, "runtime_config", {}) if container is not None else {}
+    return runtime_config if isinstance(runtime_config, dict) else {}
+
+
+def _alarm_rule_export_state_file(config: Dict[str, Any]) -> str | None:
+    feature_cfg = config.get("alarm_rule_export", {}) if isinstance(config, dict) else {}
+    if not isinstance(feature_cfg, dict):
+        return None
+    return str(feature_cfg.get("state_file", "") or "").strip() or None
 
 
 @router.get("/health")
@@ -199,6 +217,49 @@ def query_internal_source_index(
         duty_shift=duty_shift,
     )
     return {"ok": True, "entries": entries, "recovering": recovering}
+
+
+@router.get("/alarm-rule-export/files")
+def list_internal_alarm_rule_export_files(
+    request: Request,
+    period: str = "",
+    building: str = "",
+    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
+) -> Dict[str, Any]:
+    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    config = _runtime_config(request)
+    return {
+        "ok": True,
+        **list_alarm_rule_export_files(
+            config=config,
+            period=period or None,
+            building=building,
+            state_file=_alarm_rule_export_state_file(config),
+        ),
+    }
+
+
+@router.get("/alarm-rule-export/files/download")
+def download_internal_alarm_rule_export_file(
+    request: Request,
+    period: str,
+    building: str,
+    file_name: str,
+    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
+) -> FileResponse:
+    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    config = _runtime_config(request)
+    try:
+        path, _metadata = resolve_alarm_rule_export_file(
+            config=config,
+            period=period,
+            building=building,
+            file_name=file_name,
+            state_file=_alarm_rule_export_state_file(config),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=str(path), filename=path.name)
 
 
 @router.post("/source-index/batch")

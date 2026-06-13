@@ -723,6 +723,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "handover_log": runtime_handover_log,
         "day_metric_upload": copy.deepcopy(day_metric_upload),
         "alarm_export": copy.deepcopy(alarm_export),
+        "alarm_rule_export": copy.deepcopy(_dict(features.get("alarm_rule_export"))),
         "manual_upload_gui": copy.deepcopy(manual_upload_gui),
         "web": copy.deepcopy(console),
     }
@@ -832,6 +833,10 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         _dict(runtime.get("alarm_export")),
         _dict(features.get("alarm_export")),
     ))
+    features["alarm_rule_export"] = deep_merge_defaults(
+        _dict(runtime.get("alarm_rule_export")),
+        _dict(features.get("alarm_rule_export")),
+    )
     features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
         _dict(features.get("wet_bulb_collection"))
     )

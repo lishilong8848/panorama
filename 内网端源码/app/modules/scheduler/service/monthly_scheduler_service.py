@@ -54,17 +54,22 @@ class MonthlySchedulerService:
         raw = scheduler_cfg if isinstance(scheduler_cfg, dict) else {}
         day_of_month = int(raw.get("day_of_month", 1) or 1)
         check_interval_sec = int(raw.get("check_interval_sec", 30) or 30)
+        retry_interval_sec = int(raw.get("retry_interval_sec", 3600) or 3600)
         run_time = str(raw.get("run_time", "") or "").strip() or "01:00:00"
         state_file = str(raw.get("state_file", "") or "").strip() or "monthly_event_report_scheduler_state.json"
         if day_of_month < 1 or day_of_month > 31:
             raise ValueError("配置错误: day_of_month 必须在 1 到 31 之间")
         if check_interval_sec <= 0:
             raise ValueError("配置错误: check_interval_sec 必须大于 0")
+        if retry_interval_sec <= 0:
+            raise ValueError("配置错误: retry_interval_sec 必须大于 0")
         if not _valid_time(run_time):
             raise ValueError("配置错误: run_time 必须是 HH:MM:SS")
         return {
             "enabled": bool(raw.get("enabled", False)),
             "auto_start_in_gui": bool(raw.get("auto_start_in_gui", False)),
+            "retry_failed_in_same_period": bool(raw.get("retry_failed_in_same_period", False)),
+            "retry_interval_sec": retry_interval_sec,
             "day_of_month": day_of_month,
             "run_time": run_time,
             "check_interval_sec": check_interval_sec,
@@ -159,6 +164,18 @@ class MonthlySchedulerService:
         if now < self._scheduled_datetime_for_month(now.year, now.month):
             return False, period, "before_schedule_time"
         if self.state.get("last_attempt_period", "") == period:
+            if self.cfg.get("retry_failed_in_same_period") and self.state.get("last_status", "") == "failed":
+                last_run_text = str(self.state.get("last_run_at", "") or "").strip()
+                try:
+                    last_run_at = datetime.strptime(last_run_text, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    last_run_at = None
+                if last_run_at is None:
+                    return True, period, "due_retry_after_failed"
+                elapsed = (now - last_run_at).total_seconds()
+                if elapsed >= int(self.cfg.get("retry_interval_sec", 3600) or 3600):
+                    return True, period, "due_retry_after_failed"
+                return False, period, "failed_retry_waiting"
             return False, period, "already_attempted_this_month"
         return True, period, "due"
 

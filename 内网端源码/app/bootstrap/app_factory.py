@@ -29,6 +29,7 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
 )
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
 from app.modules.internal_bridge_http.api.routes import router as internal_bridge_http_router
+from app.modules.alarm_rule_export.api.routes import router as alarm_rule_export_router
 from app.modules.shared_bridge.service.runtime_status_coordinator import RuntimeStatusCoordinator
 from app.modules.user.api.routes import router as user_router
 from app.modules.websocket.api.log_stream_routes import router as logs_router
@@ -178,6 +179,7 @@ def _register_common_routes(app: FastAPI) -> None:
     app.include_router(logs_router)
     app.include_router(shared_bridge_router)
     app.include_router(internal_bridge_http_router)
+    app.include_router(alarm_rule_export_router)
     app.include_router(user_router)
 
 
@@ -451,6 +453,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_monthly_change_report_scheduler(source="关闭自动")
             if container.monthly_event_report_scheduler:
                 container.stop_monthly_event_report_scheduler(source="关闭自动")
+            if getattr(container, "alarm_rule_export_scheduler", None):
+                container.stop_alarm_rule_export_scheduler(source="关闭自动")
             if container.updater_service:
                 container.stop_updater(source="关闭自动")
             if container.alert_log_uploader:
