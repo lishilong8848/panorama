@@ -213,3 +213,93 @@ def test_sync_from_upload_state_replaces_same_duty_records_without_network(tmp_p
     assert fake_client.created[0]["主变名称"] == "1号主变"
     assert fake_client.created[0]["负载（KW）"] == 14770
     assert fake_client.created[2]["所属线路"] == "阿家线"
+
+
+def test_sync_from_upload_state_prefers_saved_transformer_rows(tmp_path):
+    missing_source = tmp_path / "missing.xlsx"
+
+    class FakeClient:
+        def __init__(self):
+            self.created = []
+
+        def list_fields(self, table_id):
+            assert table_id == "tbl8Ni54taYGeWAa"
+            return [{"field_name": name} for name in Handover110MainTransformerBitableSyncService.REQUIRED_FIELDS]
+
+        def list_records(self, **_kwargs):
+            return []
+
+        def batch_create_records(self, *, table_id, fields_list, batch_size):
+            assert table_id == "tbl8Ni54taYGeWAa"
+            self.created.extend(fields_list)
+            return [{"data": {"records": [{"record_id": f"rec_new_{index}"} for index, _ in enumerate(fields_list, 1)]}}]
+
+        def batch_delete_records(self, *, table_id, record_ids, batch_size):
+            return len(record_ids)
+
+    fake_client = FakeClient()
+
+    class Service(Handover110MainTransformerBitableSyncService):
+        def _new_client(self, cfg):
+            return fake_client
+
+    saved_rows = [
+        {
+            "transformer_name": "1号主变",
+            "line_name": "阿开线",
+            "oil_temp": "51",
+            "tap_position": "3",
+            "load_kw": 15500,
+            "current_a": 858.82,
+            "load_rate": "31.00%",
+            "gis_status": "正常",
+        },
+        {
+            "transformer_name": "2号主变",
+            "line_name": "阿开线",
+            "oil_temp": "45",
+            "tap_position": "3",
+            "load_kw": 6450,
+            "current_a": 365.22,
+            "load_rate": "13.03%",
+            "gis_status": "正常",
+        },
+        {
+            "transformer_name": "3号主变",
+            "line_name": "阿家线",
+            "oil_temp": "45",
+            "tap_position": "4",
+            "load_kw": 6850,
+            "current_a": 370.2,
+            "load_rate": "13.84%",
+            "gis_status": "正常",
+        },
+        {
+            "transformer_name": "4号主变",
+            "line_name": "阿家线",
+            "oil_temp": "53",
+            "tap_position": "4",
+            "load_kw": 13270,
+            "current_a": 738.64,
+            "load_rate": "26.54%",
+            "gis_status": "正常",
+        },
+    ]
+
+    service = Service({})
+    result = service.sync_from_upload_state(
+        duty_date="2026-05-11",
+        duty_shift="day",
+        upload_state={
+            "status": "success",
+            "stored_path": str(missing_source),
+            "parsed_main_transformer_rows": saved_rows,
+        },
+        emit_log=lambda _message: None,
+    )
+
+    assert result["status"] == "success"
+    assert len(fake_client.created) == 4
+    assert fake_client.created[0]["负载（KW）"] == 15500
+    assert fake_client.created[0]["电流（A）"] == 858.82
+    assert fake_client.created[0]["班次"] == "白班"

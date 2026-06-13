@@ -2952,6 +2952,29 @@ button:disabled,
   padding: 7px 9px;
 }
 
+.review-alert {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.review-alert-warning {
+  color: #8a4b00;
+  background: #fff7e6;
+  border-color: #f5d08a;
+}
+
+.review-inline-warning {
+  margin-top: 4px;
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
 .review-pump-fields {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }

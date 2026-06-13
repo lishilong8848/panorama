@@ -693,6 +693,13 @@ export async function retryHandoverReview110StationCloudSyncApi(payload = {}) {
   });
 }
 
+export async function saveHandoverReview110StationParsedRowsApi(payload = {}) {
+  return apiJson("/api/handover/review/110-station/parsed-rows", {
+    method: "PUT",
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 export function buildHandoverReviewDownloadUrl(buildingCode, sessionId, params = {}) {
   return appendQuery(`/api/handover/review/${encodeURIComponent(buildingCode)}/download`, {
     session_id: sessionId,

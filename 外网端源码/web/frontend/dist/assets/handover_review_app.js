@@ -21,6 +21,7 @@ import {
   releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
   refreshHandoverReviewEventSectionsApi,
+  saveHandoverReview110StationParsedRowsApi,
   saveHandoverReviewApi,
   saveHandoverReview110kvApi,
   saveHandoverReviewStationHApi,
@@ -74,6 +75,21 @@ const SUBSTATION_110KV_ROWS = [
   { row_id: "transformer_4", label: "4#主变", group: "transformer" },
 ];
 const SUBSTATION_110KV_VALUE_KEYS = ["line_voltage", "current", "power_kw", "power_factor", "load_rate"];
+const STATION_110_MAIN_TRANSFORMER_ROWS = [
+  { transformer_name: "1号主变", line_name: "阿开线" },
+  { transformer_name: "2号主变", line_name: "阿开线" },
+  { transformer_name: "3号主变", line_name: "阿家线" },
+  { transformer_name: "4号主变", line_name: "阿家线" },
+];
+const STATION_110_MAIN_TRANSFORMER_VALUE_KEYS = [
+  "line_name",
+  "current_a",
+  "load_kw",
+  "load_rate",
+  "oil_temp",
+  "tap_position",
+  "gis_status",
+];
 
 function shiftTextFromCode(shift) {
   const normalized = String(shift || "").trim().toLowerCase();
@@ -484,7 +500,15 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
         </article>
 
         <article class="review-card">
-          <div class="review-card-head"><h2>110KV识别结果</h2></div>
+          <div class="review-card-head review-card-head-actions">
+            <div>
+              <h2>110KV识别结果</h2>
+              <p class="review-card-subtitle">解析后可直接修改，保存后同步给各楼审核页110KV卡片。</p>
+            </div>
+            <button class="btn btn-primary btn-mini" type="button" :disabled="!canSaveParsedRows" @click="saveParsedRows">
+              {{ savingParsedRows ? "保存中..." : (parsedRowsDirty || mainTransformerRowsDirty) ? "保存识别结果" : "已保存" }}
+            </button>
+          </div>
           <div v-if="!parsedRows.length" class="review-empty-inline">暂无已解析的110KV数据</div>
           <div v-else class="review-table-wrap station-110-table-wrap">
             <table class="review-table review-substation-table station-110-preview-table">
@@ -499,13 +523,82 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="row in parsedRows" :key="row.row_id">
+                <tr v-for="(row, rowIndex) in parsedRows" :key="row.row_id">
                   <th>{{ row.label }}</th>
-                  <td>{{ row.line_voltage || "-" }}</td>
-                  <td>{{ row.current || "-" }}</td>
-                  <td>{{ row.power_kw || "-" }}</td>
-                  <td>{{ row.power_factor || "-" }}</td>
-                  <td>{{ row.load_rate || "-" }}</td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.line_voltage" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateParsedRowCell(rowIndex, 'line_voltage', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.current" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateParsedRowCell(rowIndex, 'current', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.power_kw" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateParsedRowCell(rowIndex, 'power_kw', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.power_factor" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateParsedRowCell(rowIndex, 'power_factor', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.load_rate" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateParsedRowCell(rowIndex, 'load_rate', $event.target.value)" />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="review-card">
+          <div class="review-card-head">
+            <div>
+              <h2>110主变多维识别结果</h2>
+              <p class="review-card-subtitle">跟随H楼云文档同步上传到110主变多维表；缺失项可在此修正后保存。</p>
+            </div>
+          </div>
+          <div v-if="upload.main_transformer_parse_error" class="review-alert review-alert-warning">
+            {{ upload.main_transformer_parse_error }}
+          </div>
+          <div class="review-table-wrap station-110-table-wrap">
+            <table class="review-table review-substation-table station-110-preview-table">
+              <thead>
+                <tr>
+                  <th>主变</th>
+                  <th>所属线路</th>
+                  <th>电流(A)</th>
+                  <th>负载(KW)</th>
+                  <th>负载率</th>
+                  <th>油温</th>
+                  <th>档位</th>
+                  <th>GIS压力</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, rowIndex) in mainTransformerRows" :key="row.transformer_name">
+                  <th>
+                    {{ row.transformer_name }}
+                    <div v-if="row.missing_fields && row.missing_fields.length" class="review-inline-warning">
+                      缺：{{ row.missing_fields.join("、") }}
+                    </div>
+                  </th>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.line_name" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateMainTransformerCell(rowIndex, 'line_name', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.current_a" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateMainTransformerCell(rowIndex, 'current_a', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.load_kw" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateMainTransformerCell(rowIndex, 'load_kw', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.load_rate" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateMainTransformerCell(rowIndex, 'load_rate', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.oil_temp" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateMainTransformerCell(rowIndex, 'oil_temp', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.tap_position" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateMainTransformerCell(rowIndex, 'tap_position', $event.target.value)" />
+                  </td>
+                  <td>
+                    <input class="review-input review-compact-input" :value="row.gis_status" :disabled="savingParsedRows || parsing || uploading || retrying" @input="updateMainTransformerCell(rowIndex, 'gis_status', $event.target.value)" />
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -702,6 +795,36 @@ function normalizeSubstation110kvBlock(raw = {}) {
       return row;
     }),
   };
+}
+
+function normalizeStation110ParsedRows(rows = []) {
+  return normalizeSubstation110kvBlock({ rows: Array.isArray(rows) ? rows : [] }).rows;
+}
+
+function normalizeStation110MainTransformerRows(rows = []) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const byName = new Map();
+  sourceRows.forEach((row) => {
+    if (!row || typeof row !== "object") return;
+    const name = String(row.transformer_name || "").trim();
+    if (name) byName.set(name, row);
+  });
+  return STATION_110_MAIN_TRANSFORMER_ROWS.map((base) => {
+    const source = byName.get(base.transformer_name) || {};
+    const row = {
+      transformer_name: base.transformer_name,
+      line_name: String(source.line_name || base.line_name || "").trim(),
+      current_a: String(source.current_a ?? ""),
+      load_kw: String(source.load_kw ?? ""),
+      load_rate: String(source.load_rate ?? ""),
+      oil_temp: String(source.oil_temp ?? ""),
+      tap_position: String(source.tap_position ?? ""),
+      gis_status: String(source.gis_status ?? ""),
+      missing_fields: Array.isArray(source.missing_fields) ? source.missing_fields : [],
+    };
+    if (!row.line_name) row.line_name = base.line_name;
+    return row;
+  });
 }
 
 function normalizeSectionColumn(column, index, fallbackHeader = "") {
@@ -988,6 +1111,8 @@ function normalizeStation110State(raw = {}) {
       source_sheet: upload.source_sheet && typeof upload.source_sheet === "object" ? upload.source_sheet : {},
       substation_sheet: upload.substation_sheet && typeof upload.substation_sheet === "object" ? upload.substation_sheet : {},
       parsed_110kv_rows: Array.isArray(upload.parsed_110kv_rows) ? upload.parsed_110kv_rows : [],
+      parsed_main_transformer_rows: normalizeStation110MainTransformerRows(upload.parsed_main_transformer_rows),
+      main_transformer_parse_error: String(upload.main_transformer_parse_error || "").trim(),
       cloud_sync: {
         status: String(cloudSync.status || "").trim().toLowerCase(),
         spreadsheet_url: String(cloudSync.spreadsheet_url || "").trim(),
@@ -1514,6 +1639,7 @@ function mountHandover110StationApp(Vue) {
       const parsing = ref(false);
       const uploading = ref(false);
       const retrying = ref(false);
+      const savingParsedRows = ref(false);
       const errorText = ref("");
       const statusText = ref("");
       const dutyDate = ref(String(initialSelection.dutyDate || "").trim());
@@ -1523,6 +1649,10 @@ function mountHandover110StationApp(Vue) {
       const station110ManualDutySelection = ref(hasExplicitDutySelection);
       const selectedFile = ref(null);
       const state = ref(normalizeStation110State({}));
+      const editableParsedRows = ref([]);
+      const parsedRowsDirty = ref(false);
+      const editableMainTransformerRows = ref([]);
+      const mainTransformerRowsDirty = ref(false);
       let station110RefreshTimer = null;
 
       const batchText = computed(() => {
@@ -1543,7 +1673,18 @@ function mountHandover110StationApp(Vue) {
         return "neutral";
       });
       const canRetryCloudSync = computed(() => Boolean(upload.value.status === "success" && !loading.value && !parsing.value && !uploading.value && !retrying.value));
-      const parsedRows = computed(() => Array.isArray(upload.value.parsed_110kv_rows) ? upload.value.parsed_110kv_rows : []);
+      const parsedRows = computed(() => editableParsedRows.value);
+      const mainTransformerRows = computed(() => editableMainTransformerRows.value);
+      const canSaveParsedRows = computed(() => Boolean(
+        (parsedRowsDirty.value || mainTransformerRowsDirty.value)
+        && parsedRows.value.length
+        && mainTransformerRows.value.length
+        && !loading.value
+        && !parsing.value
+        && !uploading.value
+        && !retrying.value
+        && !savingParsedRows.value,
+      ));
       const sourceSheetText = computed(() => {
         const sheet = upload.value.source_sheet || {};
         const rowCount = Number.parseInt(String(sheet.recognized_row_count ?? sheet.data_row_count ?? sheet.max_row ?? 0), 10) || 0;
@@ -1560,11 +1701,19 @@ function mountHandover110StationApp(Vue) {
         return `${prefix}${title ? `：${title}` : ""} (${rowCount}行已识别)`;
       });
 
-      function applyState(raw) {
+      function applyState(raw, { forceParsedRows = false } = {}) {
         const normalized = normalizeStation110State(raw || {});
         state.value = normalized;
         if (normalized.batch.duty_date) dutyDate.value = normalized.batch.duty_date;
         if (["day", "night"].includes(normalized.batch.duty_shift)) dutyShift.value = normalized.batch.duty_shift;
+        if (forceParsedRows || !parsedRowsDirty.value) {
+          editableParsedRows.value = normalizeStation110ParsedRows(normalized.upload.parsed_110kv_rows);
+          parsedRowsDirty.value = false;
+        }
+        if (forceParsedRows || !mainTransformerRowsDirty.value) {
+          editableMainTransformerRows.value = normalizeStation110MainTransformerRows(normalized.upload.parsed_main_transformer_rows);
+          mainTransformerRowsDirty.value = false;
+        }
       }
 
       function buildStation110ContextPayload() {
@@ -1579,7 +1728,63 @@ function mountHandover110StationApp(Vue) {
 
       function onStation110DutyChange() {
         station110ManualDutySelection.value = true;
+        editableParsedRows.value = [];
+        parsedRowsDirty.value = false;
+        editableMainTransformerRows.value = [];
+        mainTransformerRowsDirty.value = false;
         void refreshStatus();
+      }
+
+      function buildStation110SaveContextPayload() {
+        return {
+          duty_date: dutyDate.value || state.value.batch.duty_date || "",
+          duty_shift: dutyShift.value || state.value.batch.duty_shift || "",
+        };
+      }
+
+      function updateParsedRowCell(rowIndex, key, value) {
+        if (!SUBSTATION_110KV_VALUE_KEYS.includes(key)) return;
+        const index = Number.parseInt(String(rowIndex), 10);
+        if (Number.isNaN(index) || index < 0 || index >= editableParsedRows.value.length) return;
+        const nextRows = editableParsedRows.value.map((row, currentIndex) => {
+          if (currentIndex !== index) return row;
+          return { ...row, [key]: String(value ?? "") };
+        });
+        editableParsedRows.value = nextRows;
+        parsedRowsDirty.value = true;
+      }
+
+      function updateMainTransformerCell(rowIndex, key, value) {
+        if (!STATION_110_MAIN_TRANSFORMER_VALUE_KEYS.includes(key)) return;
+        const index = Number.parseInt(String(rowIndex), 10);
+        if (Number.isNaN(index) || index < 0 || index >= editableMainTransformerRows.value.length) return;
+        const nextRows = editableMainTransformerRows.value.map((row, currentIndex) => {
+          if (currentIndex !== index) return row;
+          return { ...row, [key]: String(value ?? ""), missing_fields: [] };
+        });
+        editableMainTransformerRows.value = nextRows;
+        mainTransformerRowsDirty.value = true;
+      }
+
+      async function saveParsedRows() {
+        if (!canSaveParsedRows.value) return;
+        savingParsedRows.value = true;
+        errorText.value = "";
+        statusText.value = "正在保存110KV识别结果...";
+        try {
+          const response = await saveHandoverReview110StationParsedRowsApi({
+            ...buildStation110SaveContextPayload(),
+            rows: normalizeStation110ParsedRows(editableParsedRows.value),
+            main_transformer_rows: normalizeStation110MainTransformerRows(editableMainTransformerRows.value),
+          });
+          applyState(response, { forceParsedRows: true });
+          statusText.value = "110KV识别结果已保存，各楼审核页刷新后可查看。";
+        } catch (error) {
+          errorText.value = String(error?.message || error || "110KV识别结果保存失败");
+          statusText.value = "";
+        } finally {
+          savingParsedRows.value = false;
+        }
       }
 
       function appendStation110Context(form) {
@@ -1630,7 +1835,7 @@ function mountHandover110StationApp(Vue) {
           appendStation110Context(form);
           form.append("file", selectedFile.value);
           const response = await uploadHandoverReview110StationFileApi(form);
-          applyState(response);
+          applyState(response, { forceParsedRows: true });
           if (response?.ok === false) {
             errorText.value = String(response?.error || response?.upload?.error || "110站文件解析失败");
             statusText.value = "";
@@ -1666,7 +1871,7 @@ function mountHandover110StationApp(Vue) {
           appendStation110Context(form);
           form.append("file", selectedFile.value);
           const response = await parseHandoverReview110StationFileApi(form);
-          applyState(response);
+          applyState(response, { forceParsedRows: true });
           if (response?.ok === false) {
             errorText.value = String(response?.error || response?.upload?.error || "110站文件解析失败");
             statusText.value = "";
@@ -1696,7 +1901,7 @@ function mountHandover110StationApp(Vue) {
           const response = await retryHandoverReview110StationCloudSyncApi({
             ...buildStation110ContextPayload(),
           });
-          applyState(response);
+          applyState(response, { forceParsedRows: true });
           if (response?.ok === false) {
             errorText.value = String(response?.error || response?.upload?.cloud_sync?.error || "110站云文档同步失败");
             statusText.value = "";
@@ -1715,7 +1920,7 @@ function mountHandover110StationApp(Vue) {
         void refreshStatus();
         if (!hasExplicitDutySelection) {
           station110RefreshTimer = window.setInterval(() => {
-            if (!loading.value && !parsing.value && !uploading.value && !retrying.value) {
+            if (!loading.value && !parsing.value && !uploading.value && !retrying.value && !savingParsedRows.value) {
               void refreshStatus({ background: true });
             }
           }, 60 * 1000);
@@ -1734,6 +1939,7 @@ function mountHandover110StationApp(Vue) {
         parsing,
         uploading,
         retrying,
+        savingParsedRows,
         errorText,
         statusText,
         dutyDate,
@@ -1746,11 +1952,18 @@ function mountHandover110StationApp(Vue) {
         cloudStatusText,
         cloudTone,
         canRetryCloudSync,
+        canSaveParsedRows,
         parsedRows,
+        parsedRowsDirty,
+        mainTransformerRows,
+        mainTransformerRowsDirty,
         sourceSheetText,
         substationSheetText,
         refreshStatus,
         onStation110DutyChange,
+        updateParsedRowCell,
+        updateMainTransformerCell,
+        saveParsedRows,
         onFileChange,
         parseFile,
         uploadFile,

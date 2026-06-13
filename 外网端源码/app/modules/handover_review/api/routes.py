@@ -3813,6 +3813,35 @@ def handover_review_110_station_cloud_sync_retry(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.put("/api/handover/review/110-station/parsed-rows")
+def handover_review_110_station_parsed_rows_save(
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    container = request.app.state.container
+    service = _build_station_110_upload_service(container)
+    try:
+        return service.update_parsed_rows(
+            duty_date=str(body.get("duty_date", "")).strip(),
+            duty_shift=str(body.get("duty_shift", "")).strip(),
+            rows=body.get("rows", []) if isinstance(body.get("rows", []), list) else [],
+            main_transformer_rows=(
+                body.get("main_transformer_rows")
+                if isinstance(body.get("main_transformer_rows"), list)
+                else None
+            ),
+            emit_log=container.add_system_log,
+        )
+    except ReviewSessionStoreUnavailableError as exc:
+        _raise_review_store_http_error(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        container.add_system_log(f"[交接班][110站解析] 前端修改保存失败: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/api/handover/review/batch/{batch_key}/status")
 def handover_review_batch_status(batch_key: str, request: Request) -> Dict[str, Any]:
     container = request.app.state.container

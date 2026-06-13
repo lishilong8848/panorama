@@ -11,6 +11,11 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from handover_log_module.repository.excel_reader import load_workbook_quietly
+from handover_log_module.service.handover_110_main_transformer_parser import (
+    missing_110_main_transformer_fields,
+    normalize_110_main_transformer_rows,
+    parse_110_main_transformer_rows,
+)
 from handover_log_module.service.handover_110_station_upload_service import _resolve_runtime_file_path
 
 
@@ -208,58 +213,7 @@ class Handover110MainTransformerBitableSyncService:
 
     @classmethod
     def parse_workbook(cls, source_file: str | Path) -> List[Dict[str, Any]]:
-        path = Path(source_file)
-        if not path.exists():
-            raise FileNotFoundError(f"110站上传文件不存在: {path}")
-        workbook = load_workbook_quietly(path, data_only=True)
-        try:
-            if not workbook.worksheets:
-                raise ValueError("110站文件缺少工作表")
-            worksheet = workbook.worksheets[0]
-            gis_statuses = cls._gis_statuses(worksheet)
-            row_map = {
-                "current": cls._find_transformer_metric_row(worksheet, "输出电流", fallback=31),
-                "max_load": cls._find_transformer_metric_row(worksheet, "本班最大负载", fallback=34),
-                "load_rate": cls._find_transformer_metric_row(worksheet, "负载率", fallback=35),
-                "oil_temp": cls._find_transformer_metric_row(worksheet, "油温", fallback=39),
-                "tap_position": cls._find_transformer_metric_row(worksheet, "档位", fallback=41),
-            }
-            rows: List[Dict[str, Any]] = []
-            for index, column in enumerate(cls.TRANSFORMER_COLUMNS):
-                current_a = cls._number(worksheet.cell(row=row_map["current"], column=column).value)
-                max_load_mw = cls._number(worksheet.cell(row=row_map["max_load"], column=column).value)
-                load_rate = cls._format_percent(worksheet.cell(row=row_map["load_rate"], column=column).value)
-                oil_temp = cls._text(worksheet.cell(row=row_map["oil_temp"], column=column).value)
-                tap_position = cls._text(worksheet.cell(row=row_map["tap_position"], column=column).value)
-                missing = cls._missing_transformer_fields(
-                    worksheet=worksheet,
-                    column=column,
-                    row_map=row_map,
-                    current_a=current_a,
-                    max_load_mw=max_load_mw,
-                    load_rate=load_rate,
-                )
-                if missing:
-                    raise ValueError(
-                        f"{cls.TRANSFORMER_NAMES[index]} 主变关键数据缺失: {', '.join(missing)}"
-                    )
-                rows.append(
-                    {
-                        "transformer_name": cls.TRANSFORMER_NAMES[index],
-                        "line_name": cls.LINE_NAMES[index],
-                        "oil_temp": oil_temp,
-                        "tap_position": tap_position,
-                        "load_kw": round(max_load_mw * 1000),
-                        "current_a": round(current_a, 2),
-                        "load_rate": load_rate,
-                        "gis_status": gis_statuses[index],
-                    }
-                )
-            if len(rows) != 4:
-                raise ValueError(f"110主变数据不完整: {len(rows)}/4")
-            return rows
-        finally:
-            workbook.close()
+        return parse_110_main_transformer_rows(source_file, strict=True)
 
     @staticmethod
     def _normalize_select_text(value: Any) -> str:
@@ -396,9 +350,17 @@ class Handover110MainTransformerBitableSyncService:
                 "updated_at": self._now_text(),
             }
         source_file = _resolve_runtime_file_path(self.handover_cfg, stored_path_text)
-        rows = self.parse_workbook(source_file)
+        state_rows = (
+            state.get("parsed_main_transformer_rows", [])
+            if isinstance(state.get("parsed_main_transformer_rows", []), list)
+            else []
+        )
+        rows = normalize_110_main_transformer_rows(state_rows) if state_rows else self.parse_workbook(source_file)
         if len(rows) != 4:
             raise ValueError(f"110主变数据不完整: {len(rows)}/4")
+        missing_fields = missing_110_main_transformer_fields(rows)
+        if missing_fields:
+            raise ValueError(f"110主变关键数据缺失: {', '.join(missing_fields)}")
         payloads = self._payload_fields(duty_date=duty_date, duty_shift=duty_shift, rows=rows)
         if len(payloads) != 4 or any(not row.get("主变名称") for row in payloads):
             raise ValueError("110主变多维写入 payload 不完整")

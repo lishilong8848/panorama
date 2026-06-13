@@ -1884,6 +1884,74 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
 
+    def trigger_station_h_sync_after_generation(
+        self,
+        *,
+        batch_key: str = "",
+        duty_date: str = "",
+        duty_shift: str = "",
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        target_batch = str(batch_key or "").strip()
+        duty_date_text = str(duty_date or "").strip()
+        duty_shift_text = str(duty_shift or "").strip().lower()
+        if not target_batch and duty_date_text and duty_shift_text:
+            target_batch = self._review_service.build_batch_key(duty_date_text, duty_shift_text)
+        if not target_batch:
+            return {"status": "skipped", "reason": "missing_batch_key"}
+
+        with self._station_110_upload_service.batch_lock(target_batch):
+            sessions = self._review_service.list_batch_sessions(target_batch)
+            if not sessions:
+                return {
+                    "status": "skipped",
+                    "reason": "missing_sessions",
+                    "batch_key": target_batch,
+                    "station_h_sync": {"status": "skipped", "reason": "missing_sessions"},
+                }
+
+            batch_meta = self._resolve_cloud_batch_meta(
+                batch_key=target_batch,
+                sessions=sessions,
+                emit_log=emit_log,
+            )
+            batch_status = str(batch_meta.get("status", "")).strip().lower()
+            if batch_status == "disabled":
+                return {
+                    "status": "skipped",
+                    "reason": "disabled",
+                    "batch_key": target_batch,
+                    "station_h_sync": {"status": "skipped", "reason": "disabled"},
+                }
+
+            cloud_result = {
+                "status": "skipped",
+                "spreadsheet_token": str(batch_meta.get("spreadsheet_token", "")).strip(),
+                "spreadsheet_url": str(batch_meta.get("spreadsheet_url", "")).strip(),
+                "spreadsheet_title": str(batch_meta.get("spreadsheet_title", "")).strip(),
+                "uploaded_buildings": [],
+                "skipped_buildings": [],
+                "failed_buildings": [],
+                "details": {},
+                "trigger": "after_generation",
+            }
+            result = self._attach_station_h_sync_result(
+                batch_key=target_batch,
+                sessions=sessions,
+                cloud_result=cloud_result,
+                emit_log=emit_log,
+            )
+            station_result = result.get("station_h_sync", {}) if isinstance(result, dict) else {}
+            station_status = str(station_result.get("status", "") if isinstance(station_result, dict) else "").strip().lower()
+            return {
+                "status": station_status or "skipped",
+                "batch_key": target_batch,
+                "station_h_sync": station_result if isinstance(station_result, dict) else {},
+                "spreadsheet_token": str(result.get("spreadsheet_token", "")).strip() if isinstance(result, dict) else "",
+                "spreadsheet_url": str(result.get("spreadsheet_url", "")).strip() if isinstance(result, dict) else "",
+                "spreadsheet_title": str(result.get("spreadsheet_title", "")).strip() if isinstance(result, dict) else "",
+            }
+
     @staticmethod
     def _previous_abcdeh_work_content_duty(*, duty_date: str, duty_shift: str) -> tuple[str, str]:
         duty_date_text = str(duty_date or "").strip()

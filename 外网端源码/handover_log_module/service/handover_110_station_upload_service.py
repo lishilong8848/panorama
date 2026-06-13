@@ -9,6 +9,10 @@ from typing import Any, Callable, Dict, List, Sequence
 from handover_log_module.core.shift_window import format_duty_date_text
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.review_session_state_store import ReviewSessionStateStore
+from handover_log_module.service.handover_110_main_transformer_parser import (
+    normalize_110_main_transformer_rows,
+    parse_110_main_transformer_rows,
+)
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
@@ -201,6 +205,12 @@ def _normalize_upload_state(raw: Dict[str, Any] | None, *, batch_key: str = "") 
         "source_sheet": dict(payload.get("source_sheet", {})) if isinstance(payload.get("source_sheet", {}), dict) else {},
         "substation_sheet": dict(payload.get("substation_sheet", {})) if isinstance(payload.get("substation_sheet", {}), dict) else {},
         "parsed_110kv_rows": payload.get("parsed_110kv_rows", []) if isinstance(payload.get("parsed_110kv_rows", []), list) else [],
+        "parsed_main_transformer_rows": normalize_110_main_transformer_rows(
+            payload.get("parsed_main_transformer_rows", [])
+            if isinstance(payload.get("parsed_main_transformer_rows", []), list)
+            else []
+        ),
+        "main_transformer_parse_error": str(payload.get("main_transformer_parse_error", "")).strip(),
         "cloud_sync": {
             **_empty_cloud_sync(),
             **{
@@ -337,6 +347,12 @@ class Handover110StationUploadService:
                 if isinstance(parsed.get("parsed_110kv_rows", []), list)
                 else []
             )
+            payload["parsed_main_transformer_rows"] = normalize_110_main_transformer_rows(
+                parsed.get("parsed_main_transformer_rows", [])
+                if isinstance(parsed.get("parsed_main_transformer_rows", []), list)
+                else []
+            )
+            payload["main_transformer_parse_error"] = str(parsed.get("main_transformer_parse_error", "") or "").strip()
         return payload
 
     @staticmethod
@@ -372,6 +388,12 @@ class Handover110StationUploadService:
                 label_columns=layout["label_columns"],
                 value_columns=layout["value_columns"],
             )
+            main_transformer_parse_error = ""
+            try:
+                main_transformer_rows = parse_110_main_transformer_rows(path, strict=False)
+            except Exception as exc:  # noqa: BLE001
+                main_transformer_rows = normalize_110_main_transformer_rows([])
+                main_transformer_parse_error = str(exc)
             return {
                 "source_sheet": {
                     "title": str(first_ws.title or "").strip(),
@@ -391,6 +413,8 @@ class Handover110StationUploadService:
                     "parsed_row_count": len(parsed_rows),
                 },
                 "parsed_110kv_rows": parsed_rows,
+                "parsed_main_transformer_rows": main_transformer_rows,
+                "main_transformer_parse_error": main_transformer_parse_error,
             }
         finally:
             workbook.close()
@@ -537,6 +561,51 @@ class Handover110StationUploadService:
             "cloud_batch": cloud_batch,
         }
 
+    def update_parsed_rows(
+        self,
+        *,
+        duty_date: str = "",
+        duty_shift: str = "",
+        rows: List[Dict[str, Any]],
+        main_transformer_rows: List[Dict[str, Any]] | None = None,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        context = self.resolve_context(duty_date=duty_date, duty_shift=duty_shift)
+        batch_key = context["batch_key"]
+        next_rows = [dict(item) for item in (rows or []) if isinstance(item, dict)]
+        if not next_rows:
+            raise ValueError("110站识别结果不能为空")
+        with _batch_lock(batch_key):
+            current = self._load_state(batch_key)
+            current_status = str(current.get("status", "") or "").strip().lower()
+            payload = {
+                **current,
+                "batch_key": batch_key,
+                "duty_date": context["duty_date"],
+                "duty_shift": context["duty_shift"],
+                "status": current_status or "parsed",
+                "error": "" if current_status != "failed" else str(current.get("error", "") or "").strip(),
+                "parsed_110kv_rows": next_rows,
+                "parsed_main_transformer_rows": normalize_110_main_transformer_rows(
+                    main_transformer_rows
+                    if isinstance(main_transformer_rows, list)
+                    else current.get("parsed_main_transformer_rows", [])
+                ),
+                "main_transformer_parse_error": "",
+                "updated_at": _now_text(),
+            }
+            saved_state = self._save_state(batch_key, payload)
+            self._save_substation_rows(batch_key=batch_key, rows=next_rows)
+            emit_log(
+                f"[交接班][110站解析] 前端修改已保存 batch={batch_key}, rows={len(next_rows)}"
+            )
+            return {
+                "ok": True,
+                "batch": context,
+                "upload": saved_state,
+                "cloud_batch": self._review_service.get_cloud_batch(batch_key) or {},
+            }
+
     def parse(
         self,
         *,
@@ -595,6 +664,8 @@ class Handover110StationUploadService:
                     "source_sheet": parsed["source_sheet"],
                     "substation_sheet": parsed["substation_sheet"],
                     "parsed_110kv_rows": parsed["parsed_110kv_rows"],
+                    "parsed_main_transformer_rows": parsed["parsed_main_transformer_rows"],
+                    "main_transformer_parse_error": parsed.get("main_transformer_parse_error", ""),
                     "cloud_sync": _empty_cloud_sync(),
                 },
             )
@@ -673,6 +744,8 @@ class Handover110StationUploadService:
                     "source_sheet": parsed["source_sheet"],
                     "substation_sheet": parsed["substation_sheet"],
                     "parsed_110kv_rows": parsed["parsed_110kv_rows"],
+                    "parsed_main_transformer_rows": parsed["parsed_main_transformer_rows"],
+                    "main_transformer_parse_error": parsed.get("main_transformer_parse_error", ""),
                     "cloud_sync": _empty_cloud_sync("pending"),
                 },
             )

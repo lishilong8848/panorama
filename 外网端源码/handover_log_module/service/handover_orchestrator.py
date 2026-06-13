@@ -1500,6 +1500,87 @@ class HandoverOrchestrator:
                 f"duty_date={duty_date_text}, duty_shift={duty_shift_text}, error={exc}"
             )
 
+    def _trigger_station_h_sync_after_generation(
+        self,
+        result_summary: Dict[str, Any],
+        *,
+        duty_date: str = "",
+        duty_shift: str = "",
+        source: str,
+        emit_log: Callable[[str], None],
+    ) -> None:
+        if not isinstance(result_summary, dict):
+            return
+        try:
+            if int(result_summary.get("success_count", 0) or 0) <= 0:
+                return
+        except Exception:
+            return
+
+        duty_date_text = str(duty_date or result_summary.get("duty_date", "") or "").strip()
+        duty_shift_text = str(duty_shift or result_summary.get("duty_shift", "") or "").strip().lower()
+        if not duty_date_text or duty_shift_text not in {"day", "night"}:
+            rows = result_summary.get("results", []) if isinstance(result_summary.get("results", []), list) else []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                session = row.get("review_session", {}) if isinstance(row.get("review_session", {}), dict) else {}
+                if not duty_date_text:
+                    duty_date_text = str(session.get("duty_date", "") or "").strip()
+                if duty_shift_text not in {"day", "night"}:
+                    duty_shift_text = str(session.get("duty_shift", "") or "").strip().lower()
+                if duty_date_text and duty_shift_text in {"day", "night"}:
+                    break
+        if not duty_date_text or duty_shift_text not in {"day", "night"}:
+            result_summary["station_h_generation_sync"] = {
+                "status": "skipped",
+                "reason": "missing_duty_context",
+                "source": source,
+            }
+            emit_log(
+                "[交接班][H楼云表] 生成后同步跳过: "
+                f"班次上下文不完整 duty_date={duty_date_text or '-'}, duty_shift={duty_shift_text or '-'}"
+            )
+            return
+
+        batch_key = str(
+            result_summary.get("batch_key", "")
+            or self._review_session_service.build_batch_key(duty_date_text, duty_shift_text)
+        ).strip()
+        try:
+            from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
+
+            sync_result = ReviewFollowupTriggerService(self.config).trigger_station_h_sync_after_generation(
+                batch_key=batch_key,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                emit_log=emit_log,
+            )
+            sync_result["source"] = source
+            result_summary["station_h_generation_sync"] = sync_result
+            station_result = (
+                sync_result.get("station_h_sync", {})
+                if isinstance(sync_result.get("station_h_sync", {}), dict)
+                else {}
+            )
+            status = str(station_result.get("status", sync_result.get("status", "")) or "").strip().lower()
+            reason = str(station_result.get("reason", sync_result.get("reason", "")) or "").strip()
+            if status == "success":
+                emit_log(f"[交接班][H楼云表] 已在交接班生成后同步 batch={batch_key}")
+            elif reason and reason != "already_synced_once":
+                emit_log(
+                    f"[交接班][H楼云表] 生成后同步暂未执行 batch={batch_key}, "
+                    f"status={status or '-'}, reason={reason}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            result_summary["station_h_generation_sync"] = {
+                "status": "failed",
+                "error": str(exc),
+                "batch_key": batch_key,
+                "source": source,
+            }
+            emit_log(f"[交接班][H楼云表] 生成后同步失败但不阻断主流程 batch={batch_key}, error={exc}")
+
     def run_from_existing_files(
         self,
         *,
@@ -1649,6 +1730,13 @@ class HandoverOrchestrator:
                 source="auto_with_handover_batch",
                 emit_log=emit_log,
             )
+        self._trigger_station_h_sync_after_generation(
+            result_summary,
+            duty_date=str(duty_date or "").strip(),
+            duty_shift=str(duty_shift or "").strip().lower(),
+            source="handover_generation_batch",
+            emit_log=emit_log,
+        )
         return result_summary
 
     def run_from_download(
@@ -1963,6 +2051,13 @@ class HandoverOrchestrator:
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             source="auto_with_handover_download",
+            emit_log=emit_log,
+        )
+        self._trigger_station_h_sync_after_generation(
+            result_summary,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            source="handover_generation_download",
             emit_log=emit_log,
         )
         return result_summary
