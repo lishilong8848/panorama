@@ -8,9 +8,6 @@ from handover_log_module.service.handover_daily_report_asset_service import Hand
 from handover_log_module.service.handover_daily_report_bitable_export_service import (
     HandoverDailyReportBitableExportService,
 )
-from handover_log_module.service.handover_daily_report_screenshot_service import (
-    HandoverDailyReportScreenshotService,
-)
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.review_document_state_service import (
@@ -143,7 +140,6 @@ class ReviewFollowupTriggerService:
         self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(self.config)
         self._daily_report_state_service = HandoverDailyReportStateService(self.config)
         self._daily_report_asset_service = HandoverDailyReportAssetService(self.config)
-        self._daily_report_screenshot_service = HandoverDailyReportScreenshotService(self.config)
         self._daily_report_bitable_export_service = HandoverDailyReportBitableExportService(self.config)
         self._review_document_state_service = ReviewDocumentStateService(self.config)
 

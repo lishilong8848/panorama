@@ -40,9 +40,6 @@ from app.shared.utils.frontend_cache import (
 from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.api.facade import load_handover_config
-from handover_log_module.service.handover_daily_report_screenshot_service import (
-    HandoverDailyReportScreenshotService,
-)
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
 from pipeline_utils import get_app_dir, get_app_root_dir

@@ -186,6 +186,8 @@ class FeishuImFileMessageClient:
         path = Path(str(image_path or "").strip())
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(f"待发送图片不存在: {path}")
+        if path.stat().st_size <= 0:
+            raise ValueError(f"待发送图片为空文件: {path}")
         mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
         with path.open("rb") as handle:
             body = self._request_json_with_auth_retry(

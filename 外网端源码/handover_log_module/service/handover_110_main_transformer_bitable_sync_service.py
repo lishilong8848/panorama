@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from openpyxl.utils import get_column_letter
+
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
@@ -160,6 +162,50 @@ class Handover110MainTransformerBitableSyncService:
             statuses.append("正常" if seen and ok else "异常")
         return statuses
 
+    @staticmethod
+    def _label_text(value: Any) -> str:
+        return str(value or "").strip().replace(" ", "").replace("\n", "")
+
+    @classmethod
+    def _find_transformer_metric_row(cls, worksheet: Any, keyword: str, *, fallback: int) -> int:
+        """Find the row for the main-transformer block by its H-column label.
+
+        110 station day/night files use the same I:L data columns but the metric
+        rows can shift by one row. The H column labels are stable, so use them
+        instead of a single hard-coded row map.
+        """
+        target = cls._label_text(keyword)
+        for row_idx in range(28, 46):
+            label = cls._label_text(worksheet.cell(row=row_idx, column=8).value)
+            if target and target in label:
+                return row_idx
+        return fallback
+
+    @classmethod
+    def _missing_transformer_fields(
+        cls,
+        *,
+        worksheet: Any,
+        column: int,
+        row_map: Dict[str, int],
+        current_a: float | None,
+        max_load_mw: float | None,
+        load_rate: str,
+    ) -> List[str]:
+        checks = [
+            ("电流", current_a, row_map.get("current")),
+            ("本班最大负载", max_load_mw, row_map.get("max_load")),
+            ("负载率", load_rate, row_map.get("load_rate")),
+        ]
+        missing: List[str] = []
+        col_letter = get_column_letter(column)
+        for label, parsed, row_idx in checks:
+            if parsed not in (None, ""):
+                continue
+            raw = worksheet.cell(row=int(row_idx or 0), column=column).value if row_idx else None
+            missing.append(f"{label}({col_letter}{row_idx}={cls._text(raw) or '空'})")
+        return missing
+
     @classmethod
     def parse_workbook(cls, source_file: str | Path) -> List[Dict[str, Any]]:
         path = Path(source_file)
@@ -171,15 +217,32 @@ class Handover110MainTransformerBitableSyncService:
                 raise ValueError("110站文件缺少工作表")
             worksheet = workbook.worksheets[0]
             gis_statuses = cls._gis_statuses(worksheet)
+            row_map = {
+                "current": cls._find_transformer_metric_row(worksheet, "输出电流", fallback=31),
+                "max_load": cls._find_transformer_metric_row(worksheet, "本班最大负载", fallback=34),
+                "load_rate": cls._find_transformer_metric_row(worksheet, "负载率", fallback=35),
+                "oil_temp": cls._find_transformer_metric_row(worksheet, "油温", fallback=39),
+                "tap_position": cls._find_transformer_metric_row(worksheet, "档位", fallback=41),
+            }
             rows: List[Dict[str, Any]] = []
             for index, column in enumerate(cls.TRANSFORMER_COLUMNS):
-                current_a = cls._number(worksheet.cell(row=31, column=column).value)
-                max_load_mw = cls._number(worksheet.cell(row=34, column=column).value)
-                load_rate = cls._format_percent(worksheet.cell(row=35, column=column).value)
-                oil_temp = cls._text(worksheet.cell(row=39, column=column).value)
-                tap_position = cls._text(worksheet.cell(row=41, column=column).value)
-                if current_a is None or max_load_mw is None or not load_rate:
-                    raise ValueError(f"{cls.TRANSFORMER_NAMES[index]} 主变关键数据缺失")
+                current_a = cls._number(worksheet.cell(row=row_map["current"], column=column).value)
+                max_load_mw = cls._number(worksheet.cell(row=row_map["max_load"], column=column).value)
+                load_rate = cls._format_percent(worksheet.cell(row=row_map["load_rate"], column=column).value)
+                oil_temp = cls._text(worksheet.cell(row=row_map["oil_temp"], column=column).value)
+                tap_position = cls._text(worksheet.cell(row=row_map["tap_position"], column=column).value)
+                missing = cls._missing_transformer_fields(
+                    worksheet=worksheet,
+                    column=column,
+                    row_map=row_map,
+                    current_a=current_a,
+                    max_load_mw=max_load_mw,
+                    load_rate=load_rate,
+                )
+                if missing:
+                    raise ValueError(
+                        f"{cls.TRANSFORMER_NAMES[index]} 主变关键数据缺失: {', '.join(missing)}"
+                    )
                 rows.append(
                     {
                         "transformer_name": cls.TRANSFORMER_NAMES[index],

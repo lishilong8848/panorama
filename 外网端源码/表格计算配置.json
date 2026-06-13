@@ -323,17 +323,7 @@
           "state_file": "handover_capacity_oil_cache.json"
         },
         "weather": {
-          "provider": "hvac_open_meteo",
-          "auth_mode": "signed",
-          "fallback_locations": [
-            "南通"
-          ],
-          "language": "zh-Hans",
-          "location": "崇川区",
-          "seniverse_private_key": "SwWfUI324UukiuVs2",
-          "seniverse_public_key": "Pw-nkmTzcCorv7Dey",
-          "timeout_sec": 8,
-          "unit": "c"
+          "provider": "hvac_open_meteo"
         }
       },
       "template": {

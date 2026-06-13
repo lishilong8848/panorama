@@ -1321,7 +1321,9 @@ class AppContainer:
         else:
             self.add_system_log("[月度事件统计表调度] 已禁用")
 
-        if self.updater_service and self.updater_service.enabled:
+        if role_mode == "internal":
+            self.add_system_log("[更新] 当前为内网端，启动时不自动开启")
+        elif self.updater_service and self.updater_service.enabled:
             _report_progress("starting_updater")
             self.start_updater(source=source)
         else:

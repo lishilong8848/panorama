@@ -26,9 +26,6 @@ from handover_log_module.service.cabinet_power_defaults_service import CabinetPo
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.handover_daily_report_asset_service import HandoverDailyReportAssetService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
-from handover_log_module.service.handover_daily_report_screenshot_service import (
-    HandoverDailyReportScreenshotService,
-)
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_state_service import (
@@ -47,6 +44,30 @@ from handover_log_module.service.review_session_service import (
 
 
 router = APIRouter(tags=["handover_review"])
+
+
+class DisabledDailyReportCaptureService:
+    """Disabled compatibility facade for the removed daily screenshot workflow."""
+
+    def __init__(self, _config: Dict[str, Any] | None = None) -> None:
+        pass
+
+    def check_auth_status(self, **_kwargs: Any) -> Dict[str, Any]:
+        return {"status": "disabled", "error": "日报多维截图功能已停用"}
+
+    async def check_auth_status_async(self, **_kwargs: Any) -> Dict[str, Any]:
+        return self.check_auth_status(**_kwargs)
+
+    def open_login_browser(self, **_kwargs: Any) -> Dict[str, Any]:
+        return {"ok": False, "status": "disabled", "message": "日报多维截图功能已停用"}
+
+    def capture_summary_sheet(self, **_kwargs: Any) -> Dict[str, Any]:
+        return {"status": "disabled", "error": "日报多维截图功能已停用"}
+
+    def capture_external_page(self, **_kwargs: Any) -> Dict[str, Any]:
+        return {"status": "disabled", "error": "日报多维截图功能已停用"}
+
+
 _REVIEW_DEFAULT_CONFIG_LOCK_GUARD = threading.Lock()
 _REVIEW_DEFAULT_CONFIG_LOCKS: dict[str, threading.RLock] = {}
 _REVIEW_DOCUMENT_CACHE_GUARD = threading.Lock()
@@ -937,13 +958,13 @@ def _start_handover_background_job(
 
 def _build_daily_report_services(
     container,
-) -> tuple[ReviewSessionService, HandoverDailyReportStateService, HandoverDailyReportAssetService, HandoverDailyReportScreenshotService]:
+) -> tuple[ReviewSessionService, HandoverDailyReportStateService, HandoverDailyReportAssetService, DisabledDailyReportCaptureService]:
     handover_cfg = _handover_cfg(container)
     return (
         ReviewSessionService(handover_cfg),
         HandoverDailyReportStateService(handover_cfg),
         HandoverDailyReportAssetService(handover_cfg),
-        HandoverDailyReportScreenshotService(handover_cfg),
+        DisabledDailyReportCaptureService(handover_cfg),
     )
 
 
@@ -975,7 +996,7 @@ def _build_daily_report_context_payload(
     review_service: ReviewSessionService,
     state_service: HandoverDailyReportStateService,
     asset_service: HandoverDailyReportAssetService,
-    screenshot_service: HandoverDailyReportScreenshotService,
+    screenshot_service: DisabledDailyReportCaptureService,
     duty_date: str,
     duty_shift: str,
 ) -> Dict[str, Any]:
@@ -1011,7 +1032,7 @@ async def _build_daily_report_context_payload_async(
     review_service: ReviewSessionService,
     state_service: HandoverDailyReportStateService,
     asset_service: HandoverDailyReportAssetService,
-    screenshot_service: HandoverDailyReportScreenshotService,
+    screenshot_service: DisabledDailyReportCaptureService,
     duty_date: str,
     duty_shift: str,
 ) -> Dict[str, Any]:
@@ -2758,41 +2779,7 @@ def handover_daily_report_open_screenshot_auth(
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
 ) -> Dict[str, Any]:
-    return {"ok": False, "status": "disabled", "message": "日报截图功能已停用"}
-
-    duty_date_text, duty_shift_text = _normalize_duty_context(
-        str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",
-        str(payload.get("duty_shift", "")).strip() if isinstance(payload, dict) else "",
-    )
-    if not duty_date_text or not duty_shift_text:
-        raise HTTPException(status_code=400, detail="duty_date / duty_shift 参数错误")
-
-    container = request.app.state.container
-    batch_key = f"{duty_date_text}|{duty_shift_text}"
-
-    def _run(emit_log) -> Dict[str, Any]:
-        _, _, _, screenshot_service = _build_daily_report_services(container)
-        result = screenshot_service.open_login_browser(emit_log=emit_log)
-        return {
-            "ok": bool(result.get("ok", False)),
-            "status": str(result.get("status", "")).strip() or "failed",
-            "message": str(result.get("message", "")).strip(),
-            "profile_dir": str(result.get("profile_dir", "")).strip(),
-        }
-
-    job = _start_handover_background_job(
-        container,
-        name=f"日报截图登录态初始化-{batch_key}",
-        run_func=_run,
-        worker_handler="daily_report_auth_open",
-        worker_payload={"duty_date": duty_date_text, "duty_shift": duty_shift_text},
-        resource_keys=_handover_resource_keys("browser:controlled", batch_key=batch_key),
-        priority="manual",
-        feature="daily_report_auth_open",
-        submitted_by="manual",
-    )
-    container.add_system_log(f"[任务] 已提交: 日报截图登录态初始化 batch={batch_key} ({job.job_id})")
-    return _accepted_job_response(job)
+    return {"ok": False, "status": "disabled", "message": "日报多维截图功能已停用"}
 
 
 @router.post("/api/handover/daily-report/screenshot-test")
@@ -2800,7 +2787,7 @@ def handover_daily_report_screenshot_test(
     request: Request,
     payload: Dict[str, Any] = Body(default={}),
 ) -> Dict[str, Any]:
-    return {"ok": False, "status": "disabled", "message": "日报截图功能已停用"}
+    return {"ok": False, "status": "disabled", "message": "日报多维截图功能已停用"}
 
     duty_date_text, duty_shift_text = _normalize_duty_context(
         str(payload.get("duty_date", "")).strip() if isinstance(payload, dict) else "",

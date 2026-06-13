@@ -13,10 +13,7 @@
 
     body.app-boot-pending {
       overflow: hidden;
-      background:
-        radial-gradient(1200px 520px at 12% -6%, rgba(0, 126, 167, 0.14), transparent 56%),
-        radial-gradient(900px 460px at 100% 0%, rgba(0, 103, 209, 0.12), transparent 52%),
-        #e9eff3;
+      background: linear-gradient(180deg, #eef4ff 0%, #f8fbff 48%, #eef5ff 100%);
     }
 
     #app-boot-overlay {
@@ -55,11 +52,11 @@
       max-width: 440px;
       padding: 30px 34px;
       border-radius: 22px;
-      border: 1px solid rgba(255, 255, 255, 0.58);
-      background: linear-gradient(135deg, rgba(255, 255, 255, 0.68), rgba(255, 255, 255, 0.40));
-      box-shadow: 0 26px 60px rgba(16, 38, 53, 0.18);
+      border: 1px solid rgba(216, 229, 247, 0.88);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 251, 255, 0.92));
+      box-shadow: 0 26px 60px rgba(20, 65, 135, 0.16);
       text-align: center;
-      color: #173247;
+      color: #0f172a;
     }
 
     .app-runtime-overlay-kicker {
@@ -69,13 +66,13 @@
       min-height: 28px;
       padding: 0 12px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.48);
-      border: 1px solid rgba(255, 255, 255, 0.56);
+      background: #eaf2ff;
+      border: 1px solid #d8e5f7;
       font-size: 11px;
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: rgba(23, 50, 71, 0.74);
+      color: #005bff;
     }
 
     .app-runtime-overlay-title {
@@ -91,7 +88,7 @@
       font-family: "Source Han Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
       font-size: 14px;
       line-height: 1.6;
-      color: rgba(23, 50, 71, 0.74);
+      color: #334155;
     }
 
     .app-runtime-overlay-progress {
@@ -101,7 +98,7 @@
       height: 8px;
       margin: 22px 0 0;
       border-radius: 999px;
-      background: rgba(23, 50, 71, 0.10);
+      background: rgba(0, 91, 255, 0.10);
     }
 
     .app-runtime-overlay-progress::after {
@@ -110,7 +107,7 @@
       inset: 0;
       width: 42%;
       border-radius: inherit;
-      background: linear-gradient(90deg, #007ea7, #0067d1);
+      background: linear-gradient(90deg, #2d73ff, #1e63ff);
       animation: app-boot-progress 1.15s ease-in-out infinite;
     }
 

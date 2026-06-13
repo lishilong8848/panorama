@@ -830,9 +830,12 @@ class CapacityReportImageDeliveryService:
         try:
             validate_image_file(path)
             stat = path.stat()
+            current_size = int(getattr(stat, "st_size", 0) or 0)
+            if current_size <= 0:
+                return None
             stored_size = int(delivery.get("image_file_size", 0) or 0)
             stored_mtime = int(delivery.get("image_file_mtime_ns", 0) or 0)
-            if stored_size and stored_size != int(getattr(stat, "st_size", 0) or 0):
+            if stored_size and stored_size != current_size:
                 return None
             current_mtime = int(getattr(stat, "st_mtime_ns", 0) or int(getattr(stat, "st_mtime", 0) or 0))
             if stored_mtime and stored_mtime != current_mtime:

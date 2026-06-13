@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import base64
 import hashlib
-import hmac
-import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 import openpyxl
 from openpyxl.utils import get_column_letter, range_boundaries
@@ -92,9 +86,6 @@ _WEATHER_PHENOMENON_PRIORITY = (
     "雾",
     "霾",
 )
-_SENIVERSE_DAILY_WEATHER_ENDPOINT = "https://api.seniverse.com/v3/weather/daily.json"
-_SENIVERSE_SIGN_TTL_SEC = 1800
-_SENIVERSE_MAX_DAYS = 15
 _LEGACY_CAPACITY_TEMPLATE_NAME = "交接班容量报表空模板.xlsx"
 _CAPACITY_TEMPLATE_BY_FAMILY = {
     "other_buildings": "其他楼交接班容量报表空模板.xlsx",
@@ -762,270 +753,13 @@ class HandoverCapacityReportService:
             return _text(numbers[0]), _text(numbers[1])
         return "", ""
 
-    @staticmethod
-    def _weather_keyword_from_html(html: str) -> str:
-        text = str(html or "")
-        match = re.search(r"天气的关键词是[“\"]([^”\"<]{1,20})", text)
-        if match:
-            source = _text(match.group(1))
-        else:
-            source = ""
-        if not source:
-            source = _text(text)
-        for keyword in _WEATHER_PHENOMENON_PRIORITY:
-            if keyword in source:
-                return keyword
-            if keyword in text:
-                return keyword
-        return ""
-
-    @staticmethod
-    def _weather_humidity_from_html(html: str) -> str:
-        text = str(html or "")
-        match = re.search(r"湿度\s*([0-9]{1,3}\s*%)", text)
-        if match:
-            return _text(match.group(1)).replace(" ", "")
-        match = re.search(r"相对.*?湿度\s*([0-9]{1,3}\s*%)", text, flags=re.DOTALL)
-        if match:
-            return _text(match.group(1)).replace(" ", "")
-        return ""
-
-    def _legacy_fetch_weather_payload_for_duty_date(
-        self,
-        *,
-        duty_date: str,
-        emit_log: Callable[[str], None],
-    ) -> Dict[str, str]:
-        duty_date_text = _text(duty_date)
-        if not duty_date_text:
-            return {"text": "", "humidity": ""}
-        cache_key = f"legacy_html:{duty_date_text}"
-        if cache_key in self._weather_payload_cache:
-            return dict(self._weather_payload_cache[cache_key])
-        try:
-            duty_day = parse_duty_date(duty_date_text)
-            date_token = duty_day.strftime("%Y%m%d")
-            url = f"https://www.tianqi.com/tianqi/chongchuanqu/{date_token}.html"
-            req = Request(url=url, headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(req, timeout=8) as resp:  # noqa: S310
-                content = resp.read().decode("utf-8", errors="ignore")
-            payload = {
-                "text": self._weather_keyword_from_html(content),
-                "humidity": self._weather_humidity_from_html(content),
-            }
-            if payload["text"] or payload["humidity"]:
-                emit_log(
-                    "[交接班][容量报表][天气] 查询完成 "
-                    f"duty_date={duty_date_text}, provider=legacy_html, weather={payload.get('text') or '-'}, humidity={payload.get('humidity') or '-'}"
-                )
-                self._weather_payload_cache[cache_key] = dict(payload)
-                return payload
-            emit_log(
-                "[交接班][容量报表][天气] 查询失败 "
-                f"duty_date={duty_date_text}, provider=legacy_html, reason=页面未解析到天气现象/湿度"
-            )
-            self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
-            return {"text": "", "humidity": ""}
-        except (ValueError, OSError, TimeoutError, URLError) as exc:
-            emit_log(
-                "[交接班][容量报表][天气] 查询失败 "
-                f"duty_date={duty_date_text}, provider=legacy_html, error={exc}"
-            )
-            self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
-            return {"text": "", "humidity": ""}
-
-    @staticmethod
-    def _format_seniverse_humidity(value: Any) -> str:
-        text = _text(value)
-        if not text:
-            return ""
-        return text if text.endswith("%") else f"{text}%"
-
-    def _build_seniverse_signed_query_params(self) -> Dict[str, str]:
-        weather_cfg = self._weather_cfg()
-        uid = _text(weather_cfg.get("seniverse_public_key"))
-        key = _text(weather_cfg.get("seniverse_private_key"))
-        if not uid or not key:
-            raise ValueError("心知天气鉴权配置缺失: seniverse_public_key/seniverse_private_key")
-        ts = str(int(datetime.now().timestamp()))
-        ttl = str(_SENIVERSE_SIGN_TTL_SEC)
-        signing_text = f"ts={ts}&ttl={ttl}&uid={uid}"
-        digest = hmac.new(
-            key.encode("utf-8"),
-            signing_text.encode("utf-8"),
-            hashlib.sha1,
-        ).digest()
-        signature = base64.b64encode(digest).decode("utf-8")
-        return {
-            "ts": ts,
-            "ttl": ttl,
-            "uid": uid,
-            "sig": signature,
-        }
-
-    def _seniverse_candidate_locations(self) -> List[str]:
-        weather_cfg = self._weather_cfg()
-        candidates: List[str] = []
-        raw_fallback_locations = weather_cfg.get("fallback_locations")
-        for raw_value in [
-            weather_cfg.get("location"),
-            *(raw_fallback_locations if isinstance(raw_fallback_locations, list) else []),
-        ]:
-            text = self._normalize_seniverse_location(raw_value)
-            if text and text not in candidates:
-                candidates.append(text)
-        if not candidates:
-            candidates = ["31.98:120.89", "南通"]
-        elif "南通" not in candidates:
-            candidates.append("南通")
-        return candidates
-
-    @staticmethod
-    def _normalize_seniverse_location(value: Any) -> str:
-        text = _text(value)
-        if not text:
-            return ""
-        normalized = text.replace(" ", "").casefold()
-        if normalized in {"崇川区", "崇川"}:
-            return "31.98:120.89"
-        return text
-
-    @staticmethod
-    def _parse_seniverse_error_body(body_text: str) -> str:
-        text = _text(body_text)
-        if not text:
-            return ""
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return text
-        if not isinstance(payload, dict):
-            return text
-        status = _text(payload.get("status"))
-        status_code = _text(payload.get("status_code"))
-        if status_code and status:
-            return f"{status_code}: {status}"
-        return status_code or status or text
-
-    def _fetch_seniverse_weather_payload_for_duty_date(
-        self,
-        *,
-        duty_date: str,
-        emit_log: Callable[[str], None],
-    ) -> Dict[str, str]:
-        duty_date_text = _text(duty_date)
-        if not duty_date_text:
-            return {"text": "", "humidity": ""}
-        candidate_locations = self._seniverse_candidate_locations()
-        cache_key = f"seniverse:{duty_date_text}:{'|'.join(candidate_locations)}"
-        if cache_key in self._weather_payload_cache:
-            return dict(self._weather_payload_cache[cache_key])
-        try:
-            duty_day = parse_duty_date(duty_date_text)
-            today = self._today_local_date()
-            day_offset = (duty_day - today).days
-            if day_offset < 0:
-                emit_log(
-                    "[交接班][容量报表][天气] 查询失败 "
-                    f"duty_date={duty_date_text}, provider=seniverse, reason=历史日期无可用天气数据"
-                )
-                self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
-                return {"text": "", "humidity": ""}
-            weather_cfg = self._weather_cfg()
-            timeout_sec = int(weather_cfg.get("timeout_sec") or 8)
-            primary_location = _text(weather_cfg.get("location")) or "崇川区"
-            attempted_errors: List[str] = []
-            for request_location in candidate_locations:
-                try:
-                    query_params = {
-                        **self._build_seniverse_signed_query_params(),
-                        "location": request_location,
-                        "language": _text(weather_cfg.get("language")) or "zh-Hans",
-                        "unit": _text(weather_cfg.get("unit")) or "c",
-                        "start": "0",
-                        "days": str(max(1, min(day_offset + 1, _SENIVERSE_MAX_DAYS))),
-                    }
-                    url = f"{_SENIVERSE_DAILY_WEATHER_ENDPOINT}?{urlencode(query_params)}"
-                    request = Request(url=url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
-                    with urlopen(request, timeout=timeout_sec) as resp:  # noqa: S310
-                        status_code = getattr(resp, "status", None) or getattr(resp, "code", None) or 200
-                        if int(status_code) != 200:
-                            raise OSError(f"HTTP {status_code}")
-                        payload_json = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                    results = payload_json.get("results") if isinstance(payload_json, dict) else None
-                    result = results[0] if isinstance(results, list) and results else {}
-                    daily_rows = result.get("daily") if isinstance(result, dict) else None
-                    target_row = next(
-                        (
-                            item for item in (daily_rows if isinstance(daily_rows, list) else [])
-                            if isinstance(item, dict) and _text(item.get("date")) == duty_date_text
-                        ),
-                        None,
-                    )
-                    if not isinstance(target_row, dict):
-                        attempted_errors.append(f"{request_location}: 未匹配到目标日期天气")
-                        continue
-                    payload = {
-                        "text": _text(target_row.get("text_day")) or _text(target_row.get("text_night")),
-                        "humidity": self._format_seniverse_humidity(target_row.get("humidity")),
-                    }
-                    if payload["text"] or payload["humidity"]:
-                        emit_log(
-                            "[交接班][容量报表][天气] 查询完成 "
-                            f"duty_date={duty_date_text}, provider=seniverse, location={primary_location}, "
-                            f"request_location={request_location}, weather={payload.get('text') or '-'}, humidity={payload.get('humidity') or '-'}"
-                        )
-                        self._weather_payload_cache[cache_key] = dict(payload)
-                        return payload
-                    attempted_errors.append(f"{request_location}: 未解析到天气现象/湿度")
-                except HTTPError as exc:
-                    error_body = exc.read().decode("utf-8", errors="ignore")
-                    attempted_errors.append(
-                        f"{request_location}: HTTP {exc.code} {self._parse_seniverse_error_body(error_body) or exc.reason or ''}".strip()
-                    )
-                except (ValueError, OSError, TimeoutError, URLError, json.JSONDecodeError) as exc:
-                    attempted_errors.append(f"{request_location}: {exc}")
-            emit_log(
-                "[交接班][容量报表][天气] 查询失败 "
-                f"duty_date={duty_date_text}, provider=seniverse, attempted_locations={candidate_locations}, "
-                f"error={' | '.join(attempted_errors) if attempted_errors else '未知错误'}"
-            )
-            self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
-            return {"text": "", "humidity": ""}
-        except (ValueError, OSError, TimeoutError, URLError, json.JSONDecodeError) as exc:
-            emit_log(
-                "[交接班][容量报表][天气] 查询失败 "
-                f"duty_date={duty_date_text}, provider=seniverse, error={exc}"
-            )
-            self._weather_payload_cache[cache_key] = {"text": "", "humidity": ""}
-            return {"text": "", "humidity": ""}
-
     def _fetch_weather_payload_for_duty_date(
         self,
         *,
         duty_date: str,
         emit_log: Callable[[str], None],
     ) -> Dict[str, str]:
-        duty_date_text = _text(duty_date)
-        if not duty_date_text:
-            return {"text": "", "humidity": ""}
-        try:
-            duty_day = parse_duty_date(duty_date_text)
-        except ValueError as exc:
-            emit_log(
-                "[交接班][容量报表][天气] 查询失败 "
-                f"duty_date={duty_date_text}, error={exc}"
-            )
-            return {"text": "", "humidity": ""}
-        if duty_day < self._today_local_date():
-            return self._legacy_fetch_weather_payload_for_duty_date(
-                duty_date=duty_date_text,
-                emit_log=emit_log,
-            )
-        return self._fetch_seniverse_weather_payload_for_duty_date(
-            duty_date=duty_date_text,
-            emit_log=emit_log,
-        )
+        return {"text": "", "humidity": ""}
 
     def _fetch_weather_text_for_duty_date(
         self,

@@ -31,7 +31,8 @@ def build_frontend_assets(project_dir: Path) -> None:
     if missing:
         raise FileNotFoundError(f"缺少前端源码文件: {missing}")
 
-    asset_sources = sorted([path for path in src_dir.iterdir() if path.is_file() and path.suffix in {".js", ".css"}])
+    asset_suffixes = {".js", ".css", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico"}
+    asset_sources = sorted([path for path in src_dir.iterdir() if path.is_file() and path.suffix.lower() in asset_suffixes])
 
     dist_assets = dist_dir / "assets"
     dist_assets.mkdir(parents=True, exist_ok=True)

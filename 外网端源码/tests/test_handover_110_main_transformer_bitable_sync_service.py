@@ -43,6 +43,41 @@ def _write_sample_110_workbook(path: Path) -> None:
     wb.close()
 
 
+def _write_shifted_day_110_workbook(path: Path) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "EA118中天变白班"
+    for index, column in enumerate((9, 10, 11, 12), start=1):
+        ws.cell(row=30, column=column, value=f"#{index}主变10{index}\n（50MW）")
+    labels = {
+        31: "运行情况",
+        32: "输出电流（A）",
+        35: "本班最大负载（MW）",
+        36: "负载率",
+        40: "油温（℃）",
+        42: "档位",
+    }
+    for row_idx, label in labels.items():
+        ws.cell(row=row_idx, column=8, value=label)
+    values = {
+        32: [858.82, 365.22, 370.2, 738.64],
+        35: [15.5, 6.45, 6.85, 13.27],
+        36: [0.31, 0.13030303030303, 0.138383838383838, 0.2654],
+        40: [51, 45, 45, 53],
+        42: [3, 3, 4, 4],
+    }
+    for row_idx, row_values in values.items():
+        for column, value in zip((9, 10, 11, 12), row_values):
+            ws.cell(row=row_idx, column=column, value=value)
+
+    for row_idx in range(132, 138):
+        ws.cell(row=row_idx, column=6, value="主变避雷器（A/B/C）")
+        for column in (7, 8, 9, 10):
+            ws.cell(row=row_idx, column=column, value=0.50)
+    wb.save(path)
+    wb.close()
+
+
 def test_parse_workbook_builds_four_transformer_rows(tmp_path):
     path = tmp_path / "110.xlsx"
     _write_sample_110_workbook(path)
@@ -55,6 +90,19 @@ def test_parse_workbook_builds_four_transformer_rows(tmp_path):
     assert rows[3]["current_a"] == 738.64
     assert rows[0]["load_rate"] == "29.54%"
     assert all(row["gis_status"] == "正常" for row in rows)
+
+
+def test_parse_workbook_uses_labels_for_shifted_day_rows(tmp_path):
+    path = tmp_path / "110_day.xlsx"
+    _write_shifted_day_110_workbook(path)
+
+    rows = Handover110MainTransformerBitableSyncService.parse_workbook(path)
+
+    assert rows[0]["current_a"] == 858.82
+    assert rows[0]["load_kw"] == 15500
+    assert rows[0]["load_rate"] == "31.00%"
+    assert rows[0]["oil_temp"] == "51"
+    assert rows[0]["tap_position"] == "3"
 
 
 def test_payload_and_existing_record_match_use_selected_duty_context():
