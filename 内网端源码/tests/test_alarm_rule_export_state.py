@@ -9,6 +9,7 @@ from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     _pending_state_records,
     _upsert_export_state_record,
     _default_download_root,
+    _filename_has_period_date,
     list_alarm_rule_export_files,
     resolve_alarm_rule_export_file,
     build_default_args,
@@ -136,6 +137,18 @@ def test_default_download_root_reads_common_shared_bridge_root():
     )
 
     assert str(root) == r"D:\share"
+
+
+def test_filename_has_period_date_supports_legacy_names():
+    assert _filename_has_period_date("A楼_202606_告警规则.xlsx", "2026-06")
+    assert _filename_has_period_date("A楼_20260613_告警规则.xlsx", "2026-06")
+    assert _filename_has_period_date("A楼-2026-06-13-告警规则.xlsx", "2026-06")
+    assert _filename_has_period_date("A楼_2026年6月13日_告警规则.xlsx", "2026-06")
+    assert _filename_has_period_date("E楼_001_南通阿里保税A区E楼_0612085913-20260612085913", "2026-06")
+    assert _filename_has_period_date("E楼_告警规则_0531164438-20260531164438", "2026-05")
+    assert not _filename_has_period_date("E楼_告警规则_0531164438-20260531164438", "2026-06")
+    assert not _filename_has_period_date("A楼_20260531_告警规则.xlsx", "2026-06")
+    assert not _filename_has_period_date("A楼_无日期_告警规则.xlsx", "2026-06")
 
 
 def test_list_and_resolve_downloaded_files_by_exact_name(tmp_path):

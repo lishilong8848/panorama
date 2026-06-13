@@ -247,6 +247,31 @@ class MonthlySchedulerService:
             "last_error": str(self.state.get("last_error", "")),
         }
 
+    def record_current_period_result(
+        self,
+        *,
+        ok: bool,
+        detail: str = "",
+        now: datetime | None = None,
+    ) -> Dict[str, Any]:
+        current = now or datetime.now()
+        period = self._period(current)
+        self.state["last_attempt_period"] = period
+        self.state["last_run_at"] = current.strftime("%Y-%m-%d %H:%M:%S")
+        self.state["last_status"] = "success" if ok else "failed"
+        self.state["last_error"] = "" if ok else str(detail or "").strip()
+        if ok:
+            self.state["last_success_period"] = period
+        self._save_state()
+        self.runtime["last_trigger_at"] = self.state["last_run_at"]
+        self.runtime["last_trigger_result"] = self.state["last_status"]
+        self.runtime["last_decision"] = "run:startup_check"
+        return {
+            "period": period,
+            "status": self.state["last_status"],
+            "state_path": str(self.state_path),
+        }
+
     def _loop(self) -> None:
         interval_sec = int(self.cfg["check_interval_sec"])
         while not self._stop.is_set():

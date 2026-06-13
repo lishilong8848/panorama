@@ -90,6 +90,8 @@ def run_alarm_rule_export_now(request: Request, payload: AlarmRuleExportRunReque
     container = _container(request)
     config = getattr(container, "runtime_config", None) or getattr(container, "config", {}) or {}
     runtime = _runtime(request)
+    container_lock = getattr(container, "_alarm_rule_export_run_lock", None)
+    acquired_container_lock = False
 
     with runtime["lock"]:
         thread = runtime.get("thread")
@@ -100,6 +102,15 @@ def run_alarm_rule_export_now(request: Request, payload: AlarmRuleExportRunReque
                 "reason": "already_running",
                 "started_at": str(runtime.get("started_at") or ""),
             }
+        if container_lock is not None:
+            acquired_container_lock = bool(container_lock.acquire(blocking=False))
+            if not acquired_container_lock:
+                return {
+                    "ok": True,
+                    "accepted": False,
+                    "reason": "already_running",
+                    "started_at": str(runtime.get("started_at") or ""),
+                }
         runtime.update(
             {
                 "running": True,
@@ -130,7 +141,7 @@ def run_alarm_rule_export_now(request: Request, payload: AlarmRuleExportRunReque
                     screenshots_dir=str(feature_cfg.get("screenshots_dir", "") or "") or None,
                     keep_open_sec=payload.keep_open_sec,
                     headless=payload.headless,
-                    generate_poll_interval_sec=float(feature_cfg.get("generate_poll_interval_sec", 3600) or 3600),
+                    generate_poll_interval_sec=max(86400.0, float(feature_cfg.get("generate_poll_interval_sec", 86400) or 86400)),
                     export_generate_timeout_ms=int(feature_cfg.get("export_generate_timeout_ms", 172800000) or 172800000),
                 )
             )
@@ -142,6 +153,8 @@ def run_alarm_rule_export_now(request: Request, payload: AlarmRuleExportRunReque
             if container is not None:
                 container.add_system_log(f"[告警规则导出] 手动运行失败: {exc}")
         finally:
+            if acquired_container_lock and container_lock is not None:
+                container_lock.release()
             runtime["running"] = False
             runtime["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

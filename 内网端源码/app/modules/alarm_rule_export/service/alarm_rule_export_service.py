@@ -474,6 +474,46 @@ ROW_STATUS_SCRIPT = """prefix => {
 }"""
 
 
+EXPORT_LIST_ROWS_SCRIPT = """() => {
+    const rows = Array.from(document.querySelectorAll(".c-table__tbody tbody tr"));
+    return rows.map(row => {
+        const fileCell = row.querySelector("td:nth-child(2)");
+        const operationCell = row.querySelector("td:nth-child(4)");
+        const downloadLink = row.querySelector('a[data-type="xz"]');
+        const operationText = operationCell ? operationCell.textContent.trim() : "";
+        return {
+            fileName: fileCell ? fileCell.textContent.trim() : "",
+            operationText,
+            isGenerating: operationText.includes("正在生成"),
+            hasDownload: !!downloadLink,
+        };
+    }).filter(item => item.fileName);
+}"""
+
+
+def _filename_has_period_date(file_name: str, period: str) -> bool:
+    text = str(file_name or "")
+    if not text:
+        return False
+    year_text, month_text = str(period or "").split("-", 1)
+    year = int(year_text)
+    month = int(month_text)
+
+    compact_pattern = re.compile(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(?:[0-3]\d)?(?:[0-2]\d[0-5]\d[0-5]\d)?(?!\d)")
+    for match in compact_pattern.finditer(text):
+        if int(match.group(1)) == year and int(match.group(2)) == month:
+            return True
+
+    separated_pattern = re.compile(
+        r"(?<!\d)(20\d{2})\s*(?:年|[-_/\.])\s*(1[0-2]|0?[1-9])"
+        r"(?:\s*(?:月|[-_/\.])\s*([0-3]?\d)\s*(?:日)?)?(?!\d)"
+    )
+    for match in separated_pattern.finditer(text):
+        if int(match.group(1)) == year and int(match.group(2)) == month:
+            return True
+    return False
+
+
 def _xpath_literal(value: str) -> str:
     text = str(value or "")
     if "'" not in text:
@@ -733,7 +773,10 @@ async def _collect_export_tasks(frame: Any, site: SiteConfig, args: argparse.Nam
 
 
 async def _wait_export_row(frame: Any, file_prefix: str, args: argparse.Namespace) -> str:
-    await frame.wait_for_function(ROW_FILE_NAME_SCRIPT, arg=file_prefix, timeout=args.export_generate_timeout_ms)
+    timeout_ms = args.export_generate_timeout_ms
+    if bool(getattr(args, "single_check_only", True)):
+        timeout_ms = max(int(getattr(args, "export_timeout_ms", 30000) or 30000), 30000)
+    await frame.wait_for_function(ROW_FILE_NAME_SCRIPT, arg=file_prefix, timeout=timeout_ms)
     file_name = await frame.evaluate(ROW_FILE_NAME_SCRIPT, file_prefix)
     if not file_name:
         raise RuntimeError(f"导出后未在列表中找到文件: {file_prefix}")
@@ -848,7 +891,7 @@ async def _download_and_delete_when_ready(
     site: SiteConfig,
     records: list[dict[str, Any]],
     args: argparse.Namespace,
-) -> tuple[list[Path], int, int]:
+) -> tuple[list[Path], int, int, int]:
     pending = list(records)
     downloaded_paths: list[Path] = []
     skipped_downloads = 0
@@ -907,10 +950,12 @@ async def _download_and_delete_when_ready(
         if pending:
             if asyncio.get_running_loop().time() >= deadline:
                 raise TimeoutError(f"等待导出文件生成超时，剩余 {len(pending)} 个")
+            if bool(getattr(args, "single_check_only", True)):
+                return downloaded_paths, skipped_downloads, deleted_count, len(pending)
             print(f"[{site.building}] 仍有 {len(pending)} 个文件未完成，{args.generate_poll_interval_sec} 秒后再次检查", flush=True)
             await asyncio.sleep(args.generate_poll_interval_sec)
 
-    return downloaded_paths, skipped_downloads, deleted_count
+    return downloaded_paths, skipped_downloads, deleted_count, 0
 
 
 async def _existing_export_records(frame: Any, site: SiteConfig, args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -933,6 +978,7 @@ async def _existing_export_records(frame: Any, site: SiteConfig, args: argparse.
         else:
             operation_text = "列表中未找到该持久化文件名"
             _update_export_state_record(args, site, file_name, "missing", operation_text)
+            continue
         records.append(
             {
                 "task": {"kind": "existing", "order": index, "text": "历史导出"},
@@ -944,6 +990,52 @@ async def _existing_export_records(frame: Any, site: SiteConfig, args: argparse.
             }
         )
     return records
+
+
+async def _current_month_export_records(frame: Any, site: SiteConfig, args: argparse.Namespace) -> list[dict[str, Any]]:
+    period = _period_from_args(args)
+    rows = await frame.evaluate(EXPORT_LIST_ROWS_SCRIPT)
+    candidates: list[dict[str, Any]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        file_name = str(row.get("fileName") or "").strip()
+        if not _filename_has_period_date(file_name, period):
+            continue
+        operation_text = str(row.get("operationText") or "")
+        if row.get("isGenerating"):
+            status = "generating"
+        elif row.get("hasDownload"):
+            status = "ready"
+        else:
+            status = "missing"
+        _upsert_export_state_record(
+            args,
+            site,
+            {"file_name": file_name, "file_prefix": file_name},
+            status,
+        )
+        _update_export_state_record(args, site, file_name, status, operation_text)
+        candidates.append(
+            {
+                "task": {"kind": "current_month_existing", "order": len(candidates) + 1, "text": "本月已有导出"},
+                "file_prefix": file_name,
+                "file_name": file_name,
+                "status": status,
+                "downloaded": False,
+                "deleted": False,
+                "operation_text": operation_text,
+            }
+        )
+    if not candidates:
+        return []
+    candidates.sort(
+        key=lambda item: (
+            0 if item.get("status") == "ready" else 1 if item.get("status") == "generating" else 2,
+            str(item.get("file_name") or ""),
+        )
+    )
+    return candidates[:1]
 
 
 async def _ensure_main_page_loaded(page: Any, site: SiteConfig, args: argparse.Namespace) -> None:
@@ -1047,7 +1139,16 @@ async def export_alarm_rules(browser: Any, site: SiteConfig, args: argparse.Name
                     flush=True,
                 )
         else:
-            print(f"[{site.building}] 未发现历史生成中的导出记录，开始创建整栋楼导出", flush=True)
+            records = await _current_month_export_records(frame, site, args)
+            used_existing_records = bool(records)
+            if records:
+                print(
+                    f"[{site.building}] 页面已存在本月导出文件，跳过重复创建并直接等待下载: {records[0]['file_name']}",
+                    flush=True,
+                )
+
+        if not records:
+            print(f"[{site.building}] 未发现本月导出文件，开始创建整栋楼导出", flush=True)
             tasks = await _collect_export_tasks(frame, site, args)
             if not tasks:
                 raise RuntimeError("导出树中没有需要导出的节点")
@@ -1056,9 +1157,9 @@ async def export_alarm_rules(browser: Any, site: SiteConfig, args: argparse.Name
             for task in tasks:
                 records.append(await _create_export_for_task(frame, site, task, args))
 
-            print(f"[{site.building}] 已生成 {len(records)} 个导出记录，开始按小时检查下载状态", flush=True)
+            print(f"[{site.building}] 已生成 {len(records)} 个导出记录，开始检查下载状态", flush=True)
 
-        downloaded_paths, skipped_downloads, deleted_count = await _download_and_delete_when_ready(
+        downloaded_paths, skipped_downloads, deleted_count, pending_count = await _download_and_delete_when_ready(
             page,
             frame,
             site,
@@ -1070,11 +1171,16 @@ async def export_alarm_rules(browser: Any, site: SiteConfig, args: argparse.Name
             await asyncio.sleep(args.export_wait_sec)
 
         result["status"] = "exported"
+        if pending_count:
+            result["status"] = "pending"
         action_text = "复用历史" if used_existing_records else "已生成"
-        result["message"] = f"{action_text} {len(records)} 个导出记录，下载 {len(downloaded_paths)} 个，删除 {deleted_count} 个，跳过 {skipped_downloads} 个"
+        result["message"] = (
+            f"{action_text} {len(records)} 个导出记录，下载 {len(downloaded_paths)} 个，"
+            f"删除 {deleted_count} 个，跳过 {skipped_downloads} 个，待完成 {pending_count} 个"
+        )
         print(
             f"[{site.building}] 完成：{action_text} {len(records)} 个导出记录，"
-            f"下载 {len(downloaded_paths)} 个，删除 {deleted_count} 个，跳过 {skipped_downloads} 个",
+            f"下载 {len(downloaded_paths)} 个，删除 {deleted_count} 个，跳过 {skipped_downloads} 个，待完成 {pending_count} 个",
             flush=True,
         )
         return result
@@ -1103,6 +1209,8 @@ async def _run(args: argparse.Namespace) -> int:
         raise RuntimeError("没有可用楼栋配置，请检查 common.internal_source_sites")
 
     args.period = _resolve_period(getattr(args, "period", None))
+    if not hasattr(args, "single_check_only"):
+        args.single_check_only = not bool(getattr(args, "wait_until_ready", False))
     if not str(getattr(args, "download_root", "") or "").strip():
         args.download_root = str(_default_download_root(config))
     print(f"读取配置: {config_path}", flush=True)
@@ -1155,8 +1263,11 @@ async def _run(args: argparse.Namespace) -> int:
 
             results = await asyncio.gather(*(one(site) for site in sites))
             ok = [item for item in results if item["status"] == "exported"]
-            failed = [item for item in results if item["status"] != "exported"]
-            print(f"完成: exported={len(ok)}/{len(results)}, failed={len(failed)}", flush=True)
+            pending = [item for item in results if item["status"] == "pending"]
+            failed = [item for item in results if item["status"] not in {"exported", "pending"}]
+            print(f"完成: exported={len(ok)}/{len(results)}, pending={len(pending)}, failed={len(failed)}", flush=True)
+            for item in pending:
+                print(f"  - {item['building']}: {item['message']}", flush=True)
             for item in failed:
                 print(f"  - {item['building']}: {item['message']}", flush=True)
 
@@ -1166,7 +1277,7 @@ async def _run(args: argparse.Namespace) -> int:
             else:
                 print("浏览器将保持打开。按 Ctrl+C 退出。", flush=True)
                 await asyncio.Event().wait()
-            return 0 if not failed else 1
+            return 0 if not failed and not pending else 1
         finally:
             for browser in opened_browsers:
                 try:
@@ -1198,7 +1309,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iframe-stabilize-sec", type=float, default=1.0, help="导出弹窗 iframe 出现后等待稳定的秒数，默认 1")
     parser.add_argument("--frame-operation-retries", type=int, default=2, help="导出弹窗 iframe 刷新导致操作失败时的重试次数")
     parser.add_argument("--export-generate-timeout-ms", type=int, default=172800000, help="确认导出后等待列表生成文件的毫秒数，默认 48 小时")
-    parser.add_argument("--generate-poll-interval-sec", type=float, default=3600.0, help="导出生成状态检查间隔秒数，默认 3600 秒")
+    parser.add_argument("--generate-poll-interval-sec", type=float, default=86400.0, help="导出生成状态检查间隔秒数，默认 86400 秒")
+    parser.add_argument("--wait-until-ready", action="store_true", help="持续等待导出生成完成；默认只检查一次，未完成交给下次日常检查")
     parser.add_argument("--download-button-timeout-ms", type=int, default=3000, help="单行下载按钮可见性等待毫秒数；超时则跳过该文件")
     parser.add_argument("--download-timeout-ms", type=int, default=60000, help="点击下载后等待文件下载的毫秒数")
     parser.add_argument("--delete-timeout-ms", type=int, default=10000, help="下载后点击删除并等待列表变化的毫秒数")

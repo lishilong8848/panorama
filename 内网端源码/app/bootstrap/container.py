@@ -29,7 +29,11 @@ from app.modules.scheduler.service.daily_scheduler_service import DailyAutoSched
 from app.modules.scheduler.service.handover_scheduler_manager import HandoverSchedulerManager
 from app.modules.scheduler.service.interval_scheduler_service import IntervalSchedulerService
 from app.modules.scheduler.service.monthly_scheduler_service import MonthlySchedulerService
-from app.modules.alarm_rule_export.service.alarm_rule_export_service import run_alarm_rule_export
+from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
+    alarm_rule_export_status,
+    list_alarm_rule_export_sites,
+    run_alarm_rule_export,
+)
 from app.modules.updater.service.updater_service import UpdaterService
 from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
 from app.shared.utils.file_utils import (
@@ -120,6 +124,7 @@ class AppContainer:
     runtime_services_armed: bool = False
     external_scheduler_autostart_runtime_state: Dict[str, Any] = field(default_factory=dict)
     _system_log_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _alarm_rule_export_run_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _system_log_next_id: int = 0
 
     def _configured_deployment_snapshot(self) -> Dict[str, Any]:
@@ -523,6 +528,8 @@ class AppContainer:
         scheduler_cfg = cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
+        scheduler_cfg = dict(scheduler_cfg)
+        scheduler_cfg["retry_interval_sec"] = max(86400, int(scheduler_cfg.get("retry_interval_sec", 86400) or 86400))
         paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
         runtime_state_root = str(paths_cfg.get("runtime_state_root", "") or "").strip() if isinstance(paths_cfg, dict) else ""
         return MonthlySchedulerService(
@@ -584,11 +591,15 @@ class AppContainer:
             cfg = {}
         if cfg.get("enabled") is False:
             return True, "告警规则导出已禁用"
+        if self._alarm_rule_export_current_period_complete():
+            return True, "本月告警规则导出文件已齐全"
+        if not self._alarm_rule_export_run_lock.acquire(blocking=False):
+            return False, "告警规则导出已有运行实例，本次等待现有实例完成"
         parallel = int(cfg.get("parallel", 5) or 5)
         keep_open_sec = int(cfg.get("keep_open_sec", 1) or 1)
         headless = bool(cfg.get("headless", False))
         kwargs: Dict[str, Any] = {
-            "generate_poll_interval_sec": float(cfg.get("generate_poll_interval_sec", 3600) or 3600),
+            "generate_poll_interval_sec": max(86400.0, float(cfg.get("generate_poll_interval_sec", 86400) or 86400)),
             "export_generate_timeout_ms": int(cfg.get("export_generate_timeout_ms", 172800000) or 172800000),
         }
         state_file = str(cfg.get("state_file", "") or "").strip() or None
@@ -609,9 +620,61 @@ class AppContainer:
             )
         except Exception as exc:  # noqa: BLE001
             return False, f"告警规则导出失败: {exc}"
+        finally:
+            self._alarm_rule_export_run_lock.release()
         if exit_code == 0:
             return True, f"{source}完成"
         return False, f"告警规则导出退出码={exit_code}"
+
+    def _alarm_rule_export_current_period_complete(self) -> bool:
+        cfg = self.runtime_config.get("alarm_rule_export", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        state_file = str(cfg.get("state_file", "") or "").strip() or None
+        try:
+            sites = list_alarm_rule_export_sites(config=self.runtime_config)
+            status = alarm_rule_export_status(config=self.runtime_config, state_file=state_file)
+        except Exception as exc:  # noqa: BLE001
+            self.add_system_log(f"[告警规则导出调度] 启动检查读取状态失败，按未完成处理: {exc}")
+            return False
+        buildings = [str(item.get("building") or "").strip() for item in sites if isinstance(item, dict)]
+        buildings = [item for item in buildings if item]
+        if not buildings:
+            return True
+        by_building = status.get("by_building", {}) if isinstance(status, dict) else {}
+        if not isinstance(by_building, dict):
+            return False
+        for building in buildings:
+            records = by_building.get(building, [])
+            if not any(isinstance(item, dict) and item.get("status") == "downloaded" for item in records):
+                return False
+        return True
+
+    def _start_alarm_rule_export_startup_check(self, source: str) -> None:
+        cfg = self.runtime_config.get("alarm_rule_export", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        if cfg.get("enabled") is False:
+            return
+        if self._alarm_rule_export_current_period_complete():
+            self.add_system_log("[告警规则导出调度] 启动检查：本月文件已齐全，跳过")
+            return
+
+        def _worker() -> None:
+            self.add_system_log("[告警规则导出调度] 启动检查：本月文件未齐全，开始检查页面已有文件或创建导出")
+            ok, detail = self._alarm_rule_export_scheduler_run_callback("启动补查")
+            if self.alarm_rule_export_scheduler:
+                try:
+                    self.alarm_rule_export_scheduler.record_current_period_result(ok=ok, detail=detail)
+                except Exception as exc:  # noqa: BLE001
+                    self.add_system_log(f"[告警规则导出调度] 启动补查状态写入失败: {exc}")
+            self.add_system_log(f"[告警规则导出调度] 启动补查完成: ok={ok}, detail={detail}")
+
+        threading.Thread(
+            target=_worker,
+            name="alarm-rule-export-startup-check",
+            daemon=True,
+        ).start()
 
     def _is_placeholder_callback(self, callback: Any, placeholder: Any | None = None) -> bool:
         if callback is None:
@@ -1227,6 +1290,7 @@ class AppContainer:
             ):
                 _report_progress("starting_alarm_rule_export_scheduler")
                 self.start_alarm_rule_export_scheduler(source=source)
+                self._start_alarm_rule_export_startup_check(source=source)
             else:
                 self.add_system_log("[告警规则导出调度] 启动时未自动开启")
             _report_progress("runtime_services_started")
