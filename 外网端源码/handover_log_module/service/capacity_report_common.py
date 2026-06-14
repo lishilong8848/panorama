@@ -827,6 +827,7 @@ def build_common_capacity_cell_values(context: Dict[str, Any]) -> Dict[str, str]
         "P6": _text(roster.get("next_team")),
         "U6": _text(handover_cells.get("G3")),
         "S7": _text(handover_cells.get("B4" if duty_shift == "day" else "F4")),
+        "AC24": _text(handover_cells.get("D8")),
         "G8": f"接班未恢复告警：{_alarm_count(previous_alarm.get('unrecovered_count'))}",
         "L8": _alarm_count(previous_alarm.get("total_count")),
         "S8": _text(previous_alarm.get("accept_description")) or "/",

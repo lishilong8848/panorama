@@ -64,6 +64,23 @@ def _is_file_in_use(exc: BaseException) -> bool:
     return False
 
 
+def _cleanup_indexed_siblings(base_path: Path, *, emit_log: Callable[[str], None] = print) -> None:
+    stem = base_path.stem
+    suffix = base_path.suffix
+    parent = base_path.parent
+    if not stem or not suffix or not parent.exists():
+        return
+    for candidate in parent.glob(f"{stem}_*{suffix}"):
+        index_text = candidate.stem.removeprefix(f"{stem}_")
+        if not index_text.isdigit():
+            continue
+        try:
+            candidate.unlink()
+            emit_log(f"[交接班][模板填充] 已清理同班次重复输出文件: {candidate}")
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][模板填充] 重复输出文件清理跳过: {candidate}, error={exc}")
+
+
 def _normalize_payload_rows(value: Any) -> list[Any]:
     if not isinstance(value, list):
         return []
@@ -220,6 +237,18 @@ def copy_template_and_fill(
         base_path = output_dir / base_name
 
     last_err: BaseException | None = None
+    if str(duty_date or "").strip() and str(duty_shift or "").strip():
+        _write_workbook(
+            source_path=source_path,
+            out_path=base_path,
+            sheet_name=sheet_name,
+            cell_values=cell_values,
+            category_payloads=category_payloads,
+            emit_log=emit_log,
+        )
+        _cleanup_indexed_siblings(base_path, emit_log=emit_log)
+        return base_path
+
     for idx in range(1, 1000):
         out_path = with_index(base_path, idx)
         out_path.parent.mkdir(parents=True, exist_ok=True)

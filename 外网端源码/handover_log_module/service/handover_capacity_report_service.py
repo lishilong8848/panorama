@@ -116,6 +116,8 @@ _CAPACITY_WATER_RESERVE_SOURCE_CELL_ALIASES = {
     "AC28": ("AC28",),
 }
 _CAPACITY_WATER_RESERVE_NUMBER_FORMAT = "0.00"
+_CAPACITY_C_BUILDING_TANK_LEVEL_SCALE_CELLS = ("AC26", "AC27", "AC28")
+_CAPACITY_C_BUILDING_TANK_LEVEL_SCALE_FACTOR = 100.0
 _CAPACITY_WATER_RESERVE_FACTOR_BY_BUILDING = {
     "A楼": 150.6,
     "B楼": 150.6,
@@ -261,6 +263,23 @@ def _with_index(path: Path, idx: int) -> Path:
     if idx <= 1:
         return path
     return path.with_name(f"{path.stem}_{idx}{path.suffix}")
+
+
+def _cleanup_indexed_siblings(base_path: Path, *, emit_log: Callable[[str], None] = print) -> None:
+    stem = base_path.stem
+    suffix = base_path.suffix
+    parent = base_path.parent
+    if not stem or not suffix or not parent.exists():
+        return
+    for candidate in parent.glob(f"{stem}_*{suffix}"):
+        index_text = candidate.stem.removeprefix(f"{stem}_")
+        if not index_text.isdigit():
+            continue
+        try:
+            candidate.unlink()
+            emit_log(f"[交接班][容量报表] 已清理同班次重复输出文件: {candidate}")
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][容量报表] 重复输出文件清理跳过: {candidate}, error={exc}")
 
 
 def _field_text(value: Any) -> str:
@@ -1711,6 +1730,7 @@ class HandoverCapacityReportService:
             "M6": _text(handover.get("C3")),
             "U6": _text(handover.get("G3")),
             "S7": _text(handover.get(long_day_cell)),
+            "AC24": _text(handover.get("D8")),
             "U15": _text(handover.get("H6")),
             "AD22": west_tank,
             "AD23": east_tank,
@@ -1764,6 +1784,35 @@ class HandoverCapacityReportService:
         if not building_text.endswith("楼") and len(building_text) == 1:
             building_text = f"{building_text.upper()}楼"
         return _CAPACITY_WATER_RESERVE_FACTOR_BY_BUILDING.get(building_text)
+
+    @classmethod
+    def _apply_capacity_cell_adjustments(
+        cls,
+        cell_values: Dict[str, Any],
+        *,
+        building: Any,
+        emit_log: Callable[[str], None] = print,
+    ) -> None:
+        building_text = _text(building).replace(" ", "")
+        if not building_text.endswith("楼") and len(building_text) == 1:
+            building_text = f"{building_text.upper()}楼"
+        if building_text != "C楼":
+            return
+        values_by_cell = {_text(cell).upper(): cell for cell in (cell_values or {}) if _text(cell)}
+        for target_cell in _CAPACITY_C_BUILDING_TANK_LEVEL_SCALE_CELLS:
+            actual_cell = values_by_cell.get(target_cell)
+            if not actual_cell:
+                continue
+            raw_value = cell_values.get(actual_cell)
+            number = cls._to_float_cell_value(raw_value)
+            if number is None:
+                continue
+            scaled_value = number / _CAPACITY_C_BUILDING_TANK_LEVEL_SCALE_FACTOR
+            cell_values[actual_cell] = format_number(scaled_value, 4)
+            emit_log(
+                "[交接班][容量报表][C楼水池液位] 已按百分比写入前缩放 "
+                f"cell={target_cell}, raw={_text(raw_value) or '-'}, value={cell_values[actual_cell]}"
+            )
 
     @classmethod
     def _inject_capacity_water_reserve_value(
@@ -2159,6 +2208,7 @@ class HandoverCapacityReportService:
             emit_log=emit_log,
         )
         overlay_values.update(load_rate_values)
+        self._apply_capacity_cell_adjustments(overlay_values, building=building, emit_log=emit_log)
         self._inject_capacity_water_reserve_value(
             overlay_values,
             building=building,
@@ -2621,6 +2671,7 @@ class HandoverCapacityReportService:
                     )
                     if self._is_current_load_rate_warning(load_rate_warning):
                         load_rate_blocking_error = load_rate_warning
+                self._apply_capacity_cell_adjustments(overlay_values, building=building, emit_log=emit_log)
                 self._inject_capacity_water_reserve_value(
                     overlay_values,
                     building=building,
@@ -2713,7 +2764,7 @@ class HandoverCapacityReportService:
         if not building_text or not duty_date_text or duty_shift_text not in {"day", "night"}:
             raise ValueError("生成交接班容量报表缺少楼栋或班次上下文")
 
-        output_file = self._next_available_output_path(
+        output_file = self._build_output_path(
             building=building_text,
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
@@ -2900,6 +2951,7 @@ class HandoverCapacityReportService:
                 warnings.append(load_rate_warning)
                 if self._is_current_load_rate_warning(load_rate_warning):
                     load_rate_blocking_error = load_rate_warning
+            self._apply_capacity_cell_adjustments(cell_values, building=building_text, emit_log=emit_log)
             self._inject_capacity_water_reserve_value(
                 cell_values,
                 building=building_text,
@@ -2911,6 +2963,7 @@ class HandoverCapacityReportService:
             sheet[_CAPACITY_WATER_RESERVE_CELL].number_format = _CAPACITY_WATER_RESERVE_NUMBER_FORMAT
             self._apply_load_rate_number_format(sheet)
             atomic_save_workbook(workbook, output_file)
+            _cleanup_indexed_siblings(output_file, emit_log=emit_log)
             self._save_current_capacity_display_oil_values(
                 building=building_text,
                 duty_date=duty_date_text,
