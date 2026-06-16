@@ -129,6 +129,13 @@ class HandoverSummaryMessageService:
         output = self._read_output_context(output_path)
         current_people = _text(output.get("current_people"))
         next_people = _text(output.get("next_people"))
+        if not current_people or not next_people:
+            emit_log(
+                "[交接班][审核文本] 人员信息不完整，跳过发送 "
+                f"building={building}, session_id={_text(payload.get('session_id')) or '-'}, "
+                f"current_people={current_people or '-'}, next_people={next_people or '-'}"
+            )
+            return ""
         current_names = _split_people(current_people)
         next_names = _split_people(next_people)
         phone_map = self._lookup_contact_phones(current_names + [name for name in next_names if name not in current_names], emit_log=emit_log)

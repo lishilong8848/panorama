@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from copy import copy
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -33,8 +34,9 @@ _LIBREOFFICE_CONVERT_TIMEOUT_SEC = 180
 _DEPENDENCY_INSTALL_TIMEOUT_SEC = 900
 _LIBREOFFICE_DOWNLOAD_READ_TIMEOUT_SEC = 120
 _DEFAULT_PDF_RENDER_SCALE = 4.0
-_CAPACITY_IMAGE_RENDER_VERSION = "capacity_image_hires_v2"
+_CAPACITY_IMAGE_RENDER_VERSION = "capacity_image_hires_v3_cjk_font_guard"
 _CAPACITY_IMAGE_RENDER_SCALE_ENV = "QJPT_CAPACITY_IMAGE_RENDER_SCALE"
+_CAPACITY_IMAGE_CJK_FONT_NAME = "宋体"
 _CAPACITY_REPORT_SHEET_NAME = "本班组"
 _LIBREOFFICE_INSTALLER_MIN_BYTES = 100 * 1024 * 1024
 _LIBREOFFICE_SUCCESS_CODES = {0, 3010}
@@ -819,6 +821,29 @@ class CapacityReportImageDeliveryService:
         }
 
     @staticmethod
+    def _validate_rendered_image_content(path: Path) -> None:
+        from PIL import Image, ImageChops
+
+        validate_image_file(path)
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+            if width < 300 or height < 200:
+                raise ValueError(f"容量表截图尺寸异常: {width}x{height}")
+            background = Image.new("RGB", rgb.size, "white")
+            diff = ImageChops.difference(rgb, background)
+            bbox = diff.getbbox()
+            if not bbox:
+                raise ValueError("容量表截图为空白图片")
+            non_white_area = max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
+            total_area = max(1, width * height)
+            if non_white_area < 20000 or (non_white_area / total_area) < 0.005:
+                raise ValueError(
+                    "容量表截图有效内容过少: "
+                    f"content_area={non_white_area}, image_area={total_area}"
+                )
+
+    @staticmethod
     def _cached_image_valid(delivery: Dict[str, Any], signature: str, *, emit_log: Callable[[str], None]) -> Path | None:
         image_signature = _text(delivery.get("image_signature"))
         image_path_text = _text(delivery.get("image_path"))
@@ -828,7 +853,7 @@ class CapacityReportImageDeliveryService:
         if not path.exists() or not path.is_file():
             return None
         try:
-            validate_image_file(path)
+            CapacityReportImageDeliveryService._validate_rendered_image_content(path)
             stat = path.stat()
             current_size = int(getattr(stat, "st_size", 0) or 0)
             if current_size <= 0:
@@ -947,11 +972,25 @@ class CapacityReportImageDeliveryService:
             for sheet in list(workbook.worksheets):
                 if sheet.title != configured_sheet:
                     workbook.remove(sheet)
+            changed_fonts = 0
+            for row in target_sheet.iter_rows():
+                for cell in row:
+                    if cell.value is None:
+                        continue
+                    try:
+                        next_font = copy(cell.font)
+                        if getattr(next_font, "name", "") != _CAPACITY_IMAGE_CJK_FONT_NAME:
+                            next_font.name = _CAPACITY_IMAGE_CJK_FONT_NAME
+                            cell.font = next_font
+                            changed_fonts += 1
+                    except Exception:
+                        continue
             target_path.parent.mkdir(parents=True, exist_ok=True)
             workbook.save(target_path)
             emit_log(
                 "[交接班][容量表图片发送] 已生成单Sheet截图临时表 "
-                f"sheet={configured_sheet}, temp={target_path}"
+                f"sheet={configured_sheet}, temp={target_path}, cjk_font={_CAPACITY_IMAGE_CJK_FONT_NAME}, "
+                f"font_cells={changed_fonts}"
             )
             return configured_sheet
         finally:
@@ -1070,6 +1109,7 @@ class CapacityReportImageDeliveryService:
         combined.save(buffer, format="PNG", optimize=True)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_bytes(output_path, buffer.getvalue(), validator=validate_image_file, temp_suffix=".tmp")
+        self._validate_rendered_image_content(output_path)
         stat = output_path.stat()
         emit_log(
             "[交接班][容量表图片发送] LibreOffice截图生成成功 "
@@ -1136,39 +1176,6 @@ class CapacityReportImageDeliveryService:
             emit_log(f"[交接班][容量表图片发送] 状态更新失败 session_id={session_id}, error={exc}")
             return delivery
 
-    def _persist_review_delivery(
-        self,
-        *,
-        session: Dict[str, Any],
-        status: str,
-        attempt_at: str,
-        successful_recipients: List[str],
-        failed_recipients: List[Dict[str, str]],
-        error: str,
-        emit_log: Callable[[str], None],
-    ) -> Dict[str, Any]:
-        session_id = _text(session.get("session_id"))
-        previous = session.get("review_link_delivery", {}) if isinstance(session.get("review_link_delivery", {}), dict) else {}
-        payload = {
-            **previous,
-            "status": status,
-            "last_attempt_at": attempt_at,
-            "last_sent_at": attempt_at if status == "success" else _text(previous.get("last_sent_at")),
-            "error": error,
-            "successful_recipients": successful_recipients,
-            "failed_recipients": failed_recipients,
-            "source": "capacity_image_send",
-        }
-        try:
-            updated = self.review_service.update_review_link_delivery(
-                session_id=session_id,
-                review_link_delivery=payload,
-            )
-            return updated.get("review_link_delivery", payload) if isinstance(updated, dict) else payload
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][容量表图片发送] 审核文本发送状态更新失败 session_id={session_id}, error={exc}")
-            return payload
-
     def _fail(
         self,
         *,
@@ -1178,7 +1185,6 @@ class CapacityReportImageDeliveryService:
         error: str,
         failed_recipients: List[Dict[str, str]] | None = None,
         emit_log: Callable[[str], None],
-        update_review_delivery: bool = False,
     ) -> Dict[str, Any]:
         session_id = _text(session.get("session_id"))
         building = _text(session.get("building"))
@@ -1192,22 +1198,11 @@ class CapacityReportImageDeliveryService:
             "source": "manual",
         }
         persisted = self._persist_delivery(session_id=session_id, delivery=next_delivery, emit_log=emit_log)
-        if update_review_delivery:
-            review_delivery = self._persist_review_delivery(
-                session=session,
-                status="failed",
-                attempt_at=attempt_at,
-                successful_recipients=[],
-                failed_recipients=failed,
-                error=error,
-                emit_log=emit_log,
-            )
-        else:
-            review_delivery = (
-                dict(session.get("review_link_delivery", {}))
-                if isinstance(session.get("review_link_delivery", {}), dict)
-                else {}
-            )
+        review_delivery = (
+            dict(session.get("review_link_delivery", {}))
+            if isinstance(session.get("review_link_delivery", {}), dict)
+            else {}
+        )
         emit_log(
             "[交接班][容量表图片发送] 失败 "
             f"building={building}, session_id={session_id}, error={error}, failed_recipients={failed}"
@@ -1304,6 +1299,14 @@ class CapacityReportImageDeliveryService:
                 delivery=delivery_state,
                 attempt_at=attempt_at,
                 error="交接班日志全文生成失败，未发送",
+                emit_log=emit_log,
+            )
+        if "审核链接：" in message_text or "/handover/review/" in message_text:
+            return self._fail(
+                session=current_session,
+                delivery=delivery_state,
+                attempt_at=attempt_at,
+                error="交接班文本异常包含审核页链接，已阻止发送",
                 emit_log=emit_log,
             )
         emit_log(
@@ -1459,6 +1462,7 @@ class CapacityReportImageDeliveryService:
                 emit_log=emit_log,
             )
 
+        text_successful_recipients: List[str] = []
         successful_recipients: List[str] = []
         failed_recipients: List[Dict[str, str]] = []
         for recipient in recipients:
@@ -1475,6 +1479,7 @@ class CapacityReportImageDeliveryService:
                     receive_id_type=receive_id_type,
                     text=message_text,
                 )
+                text_successful_recipients.append(open_id)
                 emit_log(
                     "[交接班][容量表图片发送] 文本发送成功 "
                     f"building={building_text}, session_id={session_id}, open_id={open_id}, receive_id_type={receive_id_type}, note={note or '-'}"
@@ -1518,18 +1523,16 @@ class CapacityReportImageDeliveryService:
             "error": error,
             "image_key": image_key,
             "successful_recipients": successful_recipients,
+            "text_successful_recipients": text_successful_recipients,
+            "image_successful_recipients": successful_recipients,
             "failed_recipients": failed_recipients,
             "source": "manual",
         }
         persisted_delivery = self._persist_delivery(session_id=session_id, delivery=final_delivery, emit_log=emit_log)
-        review_delivery = self._persist_review_delivery(
-            session=current_session,
-            status=status,
-            attempt_at=attempt_at,
-            successful_recipients=successful_recipients,
-            failed_recipients=failed_recipients,
-            error=error,
-            emit_log=emit_log,
+        review_delivery = (
+            dict(current_session.get("review_link_delivery", {}))
+            if isinstance(current_session.get("review_link_delivery", {}), dict)
+            else {}
         )
         emit_log(
             "[交接班][容量表图片发送] 完成 "
