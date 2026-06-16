@@ -29,6 +29,9 @@ class WebhookNotifyService:
         emit_log: Callable[[str], None] | None = None,
         category: str = "upload",
     ) -> None:
+        if emit_log:
+            emit_log("[Webhook] 内网端已禁用飞书机器人通知，跳过发送")
+        return
         notify_cfg = self._notify_config()
         if not bool(notify_cfg.get("enable_webhook", False)):
             return

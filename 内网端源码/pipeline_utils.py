@@ -278,6 +278,7 @@ def send_feishu_webhook(
     keyword: str = DEFAULT_WEBHOOK_KEYWORD,
     timeout: int = 10,
 ) -> Tuple[bool, str]:
+    return False, "内网端已禁用飞书机器人通知"
     if not webhook_url:
         return False, "Webhook is not configured."
     payload = {"msg_type": "text", "content": {"text": ensure_keyword(text, keyword)}}

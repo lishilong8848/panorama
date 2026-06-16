@@ -2013,7 +2013,7 @@ def _repair_critical_settings_from_backups(
 ) -> tuple[Dict[str, Any], List[str]]:
     repaired = ensure_v3_config(copy.deepcopy(cfg))
     repaired_notes: List[str] = []
-    needs_feishu_auth = not _has_meaningful_feishu_auth(repaired)
+    needs_feishu_auth = False
     needs_day_metric = _normalized_day_metric_upload(repaired) == _default_day_metric_upload()
     needs_notify = False
     if _text(_normalized_notify_config(repaired).get("feishu_webhook_url")):

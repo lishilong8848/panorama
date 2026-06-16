@@ -11,6 +11,9 @@ import requests
 from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
 
 
+_INTERNAL_FEISHU_MESSAGE_DISABLED = "内网端已禁用飞书消息发送"
+
+
 class FeishuImFileMessageClient:
     AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     UPLOAD_FILE_URL = "https://open.feishu.cn/open-apis/im/v1/files"
@@ -40,8 +43,6 @@ class FeishuImFileMessageClient:
         self.request_retry_count = max(0, int(auth.get("request_retry_count", 0) or 0))
         self.request_retry_interval_sec = max(0.0, float(auth.get("request_retry_interval_sec", 0.0) or 0.0))
         self._tenant_access_token: Optional[str] = None
-        if not self.app_id or not self.app_secret:
-            raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
 
     @staticmethod
     def _is_retryable_exception(exc: Exception) -> bool:
@@ -93,6 +94,7 @@ class FeishuImFileMessageClient:
         raise RuntimeError("飞书请求失败: 未知错误")
 
     def refresh_token(self, force: bool = False) -> str:
+        raise RuntimeError(_INTERNAL_FEISHU_MESSAGE_DISABLED)
         if self._tenant_access_token and not force:
             return self._tenant_access_token
         response = self._request_with_retry(
@@ -159,6 +161,7 @@ class FeishuImFileMessageClient:
         raise RuntimeError("飞书接口调用失败: 鉴权重试后仍失败")
 
     def upload_file(self, file_path: str) -> Dict[str, Any]:
+        raise RuntimeError(_INTERNAL_FEISHU_MESSAGE_DISABLED)
         path = Path(str(file_path or "").strip())
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(f"待发送文件不存在: {path}")
@@ -183,6 +186,7 @@ class FeishuImFileMessageClient:
         receive_id_type: str,
         file_key: str,
     ) -> Dict[str, Any]:
+        raise RuntimeError(_INTERNAL_FEISHU_MESSAGE_DISABLED)
         receive_id_text = str(receive_id or "").strip()
         receive_id_type_text = str(receive_id_type or "").strip() or "user_id"
         file_key_text = str(file_key or "").strip()
@@ -214,6 +218,7 @@ class FeishuImFileMessageClient:
         receive_id_type: str,
         text: str,
     ) -> Dict[str, Any]:
+        raise RuntimeError(_INTERNAL_FEISHU_MESSAGE_DISABLED)
         receive_id_text = str(receive_id or "").strip()
         receive_id_type_text = str(receive_id_type or "").strip() or "open_id"
         text_value = str(text or "").strip()

@@ -717,7 +717,20 @@ export function buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, 
 export async function sendHandoverReviewCapacityImageApi(buildingCode, payload = {}) {
   return apiJson(`/api/handover/review/${buildingCode}/capacity-image/send`, {
     method: "POST",
-    body: JSON.stringify(payload || {}),
+    body: JSON.stringify({
+      trigger_source: "capacity_image_send_button",
+      ...(payload || {}),
+    }),
+  });
+}
+
+export async function prepareHandoverReviewCapacityImageApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${buildingCode}/capacity-image/prepare`, {
+    method: "POST",
+    body: JSON.stringify({
+      trigger_source: "capacity_image_send_button",
+      ...(payload || {}),
+    }),
   });
 }
 

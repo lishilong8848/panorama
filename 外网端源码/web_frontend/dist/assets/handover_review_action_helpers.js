@@ -56,6 +56,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     confirmHandoverReviewApi,
     retryHandoverReviewCloudSyncApi,
     updateHandoverReviewCloudSyncApi,
+    prepareHandoverReviewCapacityImageApi,
     sendHandoverReviewCapacityImageApi,
     regenerateHandoverReviewApi,
     buildHandoverReviewDownloadUrl,
@@ -422,10 +423,20 @@ export function createHandoverReviewActionHelpers(options = {}) {
     errorText.value = "";
     statusText.value = "正在生成并发送审核文本和容量表图片...";
     try {
+      const prepared = await prepareHandoverReviewCapacityImageApi(buildingCode, {
+        session_id: sessionId,
+        client_id: reviewClientId,
+        trigger_source: "capacity_image_send_button",
+      });
+      const sendToken = String(prepared?.send_token || "").trim();
+      if (!sendToken) {
+        throw new Error("发送确认令牌获取失败，请刷新审核页后重试");
+      }
       const response = await sendHandoverReviewCapacityImageApi(buildingCode, {
         session_id: sessionId,
         client_id: reviewClientId,
         trigger_source: "capacity_image_send_button",
+        send_token: sendToken,
       });
       try {
         await loadReviewData({ background: true });

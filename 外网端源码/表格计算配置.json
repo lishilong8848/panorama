@@ -68,7 +68,7 @@
     },
     "feishu_auth": {
       "app_id": "cli_a9d1c9fe9d381cee",
-      "app_secret": "PCZSOMI9ITqFWUkqT5TtQcVljP0Sx48y",
+      "app_secret": "yMkwlYHHRjzaZecdAM1CocpBQkUtQMIw",
       "request_retry_count": 3,
       "request_retry_interval_sec": 2,
       "timeout": 30

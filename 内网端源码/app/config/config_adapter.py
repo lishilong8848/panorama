@@ -108,33 +108,7 @@ def _resolve_runtime_state_root(common_paths: Dict[str, Any]) -> str:
 
 def _backfill_common_feishu_auth_from_legacy(cfg: Dict[str, Any]) -> None:
     common = _dict(cfg.get("common"))
-    current_auth = _dict(common.get("feishu_auth"))
-    current_app_id = str(current_auth.get("app_id", "") or "").strip()
-    current_app_secret = str(current_auth.get("app_secret", "") or "").strip()
-    if current_app_id and current_app_secret:
-        cfg["common"] = common
-        return
-
-    candidates: List[Dict[str, Any]] = []
-    common_legacy = _dict(common.get("feishu"))
-    if common_legacy:
-        candidates.append(common_legacy)
-    top_level_legacy = _dict(cfg.get("feishu"))
-    if top_level_legacy:
-        candidates.append(top_level_legacy)
-
-    for candidate in candidates:
-        app_id = str(candidate.get("app_id", "") or "").strip()
-        app_secret = str(candidate.get("app_secret", "") or "").strip()
-        if not app_id or not app_secret:
-            continue
-        current_auth["app_id"] = app_id
-        current_auth["app_secret"] = app_secret
-        for key in ("request_retry_count", "request_retry_interval_sec", "timeout"):
-            if key in candidate:
-                current_auth[key] = candidate.get(key)
-        common["feishu_auth"] = current_auth
-        break
+    common["feishu_auth"] = {}
     cfg["common"] = common
 
 
@@ -351,16 +325,7 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     common["scheduler"] = deep_merge_defaults(legacy_scheduler, common.get("scheduler", {}))
     common["notify"] = deep_merge_defaults(legacy_notify, common.get("notify", {}))
     common["console"] = deep_merge_defaults(legacy_web, common.get("console", {}))
-    auth = _dict(common.get("feishu_auth"))
-    auth["app_id"] = str(legacy_feishu.get("app_id", auth.get("app_id", "")) or "").strip()
-    auth["app_secret"] = str(legacy_feishu.get("app_secret", auth.get("app_secret", "")) or "").strip()
-    if "request_retry_count" in legacy_feishu:
-        auth["request_retry_count"] = legacy_feishu.get("request_retry_count")
-    if "request_retry_interval_sec" in legacy_feishu:
-        auth["request_retry_interval_sec"] = legacy_feishu.get("request_retry_interval_sec")
-    if "timeout" in legacy_feishu:
-        auth["timeout"] = legacy_feishu.get("timeout")
-    common["feishu_auth"] = deep_merge_defaults(auth, common.get("feishu_auth", {}))
+    common["feishu_auth"] = {}
 
     features = cfg["features"]
     monthly = _dict(features.get("monthly_report"))
@@ -803,12 +768,7 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         if monthly_save_dir:
             common_paths["business_root_dir"] = monthly_save_dir
     common["paths"] = common_paths
-    feishu_auth = _dict(common.get("feishu_auth"))
-    runtime_feishu = _dict(runtime.get("feishu"))
-    for key in ("app_id", "app_secret", "request_retry_count", "request_retry_interval_sec", "timeout"):
-        if key in runtime_feishu:
-            feishu_auth[key] = runtime_feishu.get(key)
-    common["feishu_auth"] = feishu_auth
+    common["feishu_auth"] = {}
 
     handover = _dict(features.get("handover_log"))
     day_metric_upload = sanitize_day_metric_upload_config(

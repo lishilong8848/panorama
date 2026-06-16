@@ -23,7 +23,8 @@
     },
     "internal_source_sites": [],
     "internal_source_cache": {},
-    "shared_bridge": {}
+    "shared_bridge": {},
+    "feishu_auth": {}
   },
   "features": {
     "alarm_rule_export": {

@@ -1,10 +1,15 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import functools
+import hashlib
+import hmac
 import inspect
+import json
 import re
+import secrets
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -78,6 +83,70 @@ _HEALTH_COMPONENT_CACHE_ATTR = "_health_component_cache"
 _HEALTH_COMPONENT_CACHE_LOCK_ATTR = "_health_component_cache_lock"
 _HANDOVER_REVIEW_HEALTH_CACHE_STATUS_PREFIX = "handover_review_status:"
 _HANDOVER_REVIEW_HEALTH_CACHE_ACCESS_PREFIX = "handover_review_access:"
+_CAPACITY_IMAGE_SEND_TOKEN_TTL_SEC = 180
+_CAPACITY_IMAGE_SEND_TOKEN_SECRET = secrets.token_bytes(32)
+
+
+def _capacity_image_token_b64_encode(payload: bytes) -> str:
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _capacity_image_token_b64_decode(payload: str) -> bytes:
+    padding = "=" * (-len(payload) % 4)
+    return base64.urlsafe_b64decode((payload + padding).encode("ascii"))
+
+
+def _issue_capacity_image_send_token(*, building: str, session_id: str, client_id: str) -> str:
+    issued_at = int(time.time())
+    payload = {
+        "building": str(building or "").strip(),
+        "session_id": str(session_id or "").strip(),
+        "client_id": str(client_id or "").strip(),
+        "issued_at": issued_at,
+        "nonce": secrets.token_urlsafe(16),
+        "purpose": "capacity_image_send",
+    }
+    body = _capacity_image_token_b64_encode(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    signature = _capacity_image_token_b64_encode(
+        hmac.new(_CAPACITY_IMAGE_SEND_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest()
+    )
+    return f"{body}.{signature}"
+
+
+def _verify_capacity_image_send_token(
+    token: str,
+    *,
+    building: str,
+    session_id: str,
+    client_id: str,
+) -> str:
+    token_text = str(token or "").strip()
+    if not token_text or "." not in token_text:
+        return "缺少容量表图片发送确认令牌，请刷新审核页后点击按钮重试"
+    body, signature = token_text.rsplit(".", 1)
+    expected_signature = _capacity_image_token_b64_encode(
+        hmac.new(_CAPACITY_IMAGE_SEND_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest()
+    )
+    if not hmac.compare_digest(signature, expected_signature):
+        return "容量表图片发送确认令牌无效，请刷新审核页后点击按钮重试"
+    try:
+        payload = json.loads(_capacity_image_token_b64_decode(body).decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return "容量表图片发送确认令牌解析失败，请刷新审核页后点击按钮重试"
+    if str(payload.get("purpose", "") or "") != "capacity_image_send":
+        return "容量表图片发送确认令牌用途不匹配，请刷新审核页后点击按钮重试"
+    issued_at = int(payload.get("issued_at", 0) or 0)
+    if issued_at <= 0 or time.time() - issued_at > _CAPACITY_IMAGE_SEND_TOKEN_TTL_SEC:
+        return "容量表图片发送确认令牌已过期，请重新点击按钮发送"
+    if str(payload.get("building", "") or "").strip() != str(building or "").strip():
+        return "容量表图片发送确认令牌楼栋不匹配，请刷新审核页后点击按钮重试"
+    if str(payload.get("session_id", "") or "").strip() != str(session_id or "").strip():
+        return "容量表图片发送确认令牌会话不匹配，请刷新审核页后点击按钮重试"
+    if str(payload.get("client_id", "") or "").strip() != str(client_id or "").strip():
+        return "容量表图片发送确认令牌终端不匹配，请刷新审核页后点击按钮重试"
+    return ""
 _REVIEW_API_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="handover-review-api")
 _REVIEW_SLOW_LOG_INTERVAL_SEC = 60.0
 _REVIEW_SLOW_LOG_LOCK = threading.Lock()
@@ -4601,6 +4670,44 @@ def handover_review_capacity_download(
     )
 
 
+@router.post("/api/handover/review/{building_code}/capacity-image/prepare")
+def handover_review_capacity_image_prepare(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service, _, _, _ = _build_review_services(container)
+    building = _resolve_building_or_404(service, building_code)
+
+    session_id_text = str(payload.get("session_id", "") or "").strip()
+    client_id = str(payload.get("client_id", "") or "").strip()
+    trigger_source = str(payload.get("trigger_source", "") or "").strip()
+    if not session_id_text:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if trigger_source != "capacity_image_send_button":
+        raise HTTPException(status_code=400, detail="容量表图片发送仅允许审核页按钮手动触发")
+    _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
+    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    if not str(target.get("capacity_output_file", "") or "").strip():
+        raise HTTPException(status_code=409, detail="当前交接班容量报表尚未生成")
+    token = _issue_capacity_image_send_token(
+        building=building,
+        session_id=session_id_text,
+        client_id=client_id,
+    )
+    container.add_system_log(
+        f"[交接班][容量表图片发送] 已签发手动发送令牌 building={building}, session_id={session_id_text}, client_id={client_id or '-'}"
+    )
+    return {
+        "ok": True,
+        "building": building,
+        "session_id": session_id_text,
+        "send_token": token,
+        "expires_in_sec": _CAPACITY_IMAGE_SEND_TOKEN_TTL_SEC,
+    }
+
+
 @router.post("/api/handover/review/{building_code}/capacity-image/send")
 def handover_review_capacity_image_send(
     building_code: str,
@@ -4619,6 +4726,14 @@ def handover_review_capacity_image_send(
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     if trigger_source != "capacity_image_send_button":
         raise HTTPException(status_code=400, detail="容量表图片发送仅允许审核页按钮手动触发")
+    token_error = _verify_capacity_image_send_token(
+        str(payload.get("send_token", "") or "").strip(),
+        building=building,
+        session_id=session_id_text,
+        client_id=client_id,
+    )
+    if token_error:
+        raise HTTPException(status_code=400, detail=token_error)
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
     if not str(target.get("capacity_output_file", "") or "").strip():

@@ -483,6 +483,25 @@ class MonthlyReportDeliveryService:
     ) -> Dict[str, Any]:
         normalized_report_type = self.normalize_report_type(report_type)
         normalized_scope, normalized_building = self.normalize_scope(scope, building)
+        started_at = datetime.now()
+        result = self._build_result_payload(
+            started_at=started_at,
+            status="skipped",
+            report_type=normalized_report_type,
+            scope=normalized_scope,
+            building=normalized_building or "",
+            target_month="",
+            successful_buildings=[],
+            failed_buildings=[],
+            message_ids={},
+            error="内网端已禁用飞书月度统计表发送",
+        )
+        self._save_last_run_snapshot(normalized_report_type, result)
+        emit_log(
+            f"[月度统计表发送] 内网端跳过发送: report_type={normalized_report_type}, "
+            f"scope={normalized_scope}, building={normalized_building or 'all'}, source={source}"
+        )
+        return result
         selected_buildings = [normalized_building] if normalized_scope == "building" and normalized_building else self.all_buildings()
         report_snapshot = self._resolve_report_generation_snapshot(normalized_report_type)
         target_month = str(report_snapshot.get("target_month", "") or "").strip()
@@ -589,6 +608,22 @@ class MonthlyReportDeliveryService:
         source: str = "manual_test",
     ) -> Dict[str, Any]:
         normalized_report_type = self.normalize_report_type(report_type)
+        started_at = datetime.now()
+        result = self._build_result_payload(
+            started_at=started_at,
+            status="skipped",
+            report_type=normalized_report_type,
+            scope="test",
+            building="",
+            target_month="",
+            successful_buildings=[],
+            failed_buildings=[],
+            message_ids={},
+            error="内网端已禁用飞书月度统计表测试发送",
+        )
+        self._save_last_run_snapshot(normalized_report_type, result)
+        emit_log(f"[月度统计表测试发送] 内网端跳过发送: report_type={normalized_report_type}, source={source}")
+        return result
         target_receive_ids = self.normalize_receive_ids(receive_ids)
         configured_receive_id_type = str(receive_id_type or "").strip().lower() or "open_id"
         if not target_receive_ids:

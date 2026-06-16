@@ -81,6 +81,7 @@
       "stale_task_timeout_sec": 1800,
       "artifact_retention_days": 7,
       "sqlite_busy_timeout_ms": 15000
-    }
+    },
+    "feishu_auth": {}
   }
 }

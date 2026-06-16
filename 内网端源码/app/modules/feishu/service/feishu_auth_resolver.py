@@ -77,6 +77,7 @@ def _load_from_config(config_path: str | Path | None = None) -> Dict[str, Any]:
 
 
 def resolve_feishu_auth_settings(source: Any = None, *, config_path: str | Path | None = None) -> Dict[str, Any]:
+    return _normalize_auth({})
     primary = _extract_from_source(source)
     if _has_meaningful_auth(primary):
         return _normalize_auth(primary)
@@ -87,5 +88,5 @@ def resolve_feishu_auth_settings(source: Any = None, *, config_path: str | Path 
 def require_feishu_auth_settings(source: Any = None, *, config_path: str | Path | None = None) -> Dict[str, Any]:
     resolved = resolve_feishu_auth_settings(source, config_path=config_path)
     if not _has_meaningful_auth(resolved):
-        raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
+        raise ValueError("内网端已禁用飞书应用凭据")
     return resolved

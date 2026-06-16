@@ -431,6 +431,21 @@ class ReviewLinkDeliveryService:
 
         source_text = str(source or "auto").strip().lower() or "auto"
         delivery_state = _normalize_delivery_state(normalized_session.get("review_link_delivery", {}))
+        next_state = {
+            **delivery_state,
+            "status": "skipped",
+            "last_attempt_at": _now_text(),
+            "error": "内网端已禁用飞书审核链接发送",
+            "source": source_text,
+            "auto_attempted": bool(delivery_state.get("auto_attempted", False)) or source_text == "auto",
+            "auto_attempted_at": _now_text() if source_text == "auto" else str(delivery_state.get("auto_attempted_at", "") or "").strip(),
+        }
+        self._persist_delivery_state(session_id, next_state)
+        emit_log(
+            "[交接班][审核链接发送] 内网端跳过发送 "
+            f"building={building}, session_id={session_id}, source={source_text}"
+        )
+        return next_state
         if source_text == "auto" and delivery_state["auto_attempted"] and not force:
             emit_log(
                 "[交接班][审核链接发送] 跳过自动发送 "
@@ -681,6 +696,20 @@ class ReviewLinkDeliveryService:
         batch_key_text = str(batch_key or "").strip()
         if not building_text:
             raise ValueError("building 不能为空")
+        emit_log(
+            "[交接班][审核链接发送测试] 内网端跳过发送 "
+            f"building={building_text}, batch={batch_key_text or '-'}"
+        )
+        return {
+            "batch_key": batch_key_text,
+            "building": building_text,
+            "status": "skipped",
+            "error": "内网端已禁用飞书审核链接测试发送",
+            "message_text": "",
+            "successful_recipients": [],
+            "failed_recipients": [],
+            "review_url": "",
+        }
         recipient_snapshot = self._recipient_snapshot_for_building(building_text)
         recipients = list(recipient_snapshot.get("recipients", []))
         if not recipients:
