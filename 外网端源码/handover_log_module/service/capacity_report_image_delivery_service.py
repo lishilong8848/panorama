@@ -37,6 +37,7 @@ _DEFAULT_PDF_RENDER_SCALE = 4.0
 _CAPACITY_IMAGE_RENDER_VERSION = "capacity_image_hires_v3_cjk_font_guard"
 _CAPACITY_IMAGE_RENDER_SCALE_ENV = "QJPT_CAPACITY_IMAGE_RENDER_SCALE"
 _CAPACITY_IMAGE_CJK_FONT_NAME = "宋体"
+_CAPACITY_IMAGE_REQUIRED_EXPECTED_CELLS = ("M6", "U6", "U15", "V62", "O62", "S62", "AB58", "AC58")
 _CAPACITY_REPORT_SHEET_NAME = "本班组"
 _LIBREOFFICE_INSTALLER_MIN_BYTES = 100 * 1024 * 1024
 _LIBREOFFICE_SUCCESS_CODES = {0, 3010}
@@ -843,6 +844,66 @@ class CapacityReportImageDeliveryService:
                     f"content_area={non_white_area}, image_area={total_area}"
                 )
 
+    def _validate_capacity_workbook_ready_for_image(
+        self,
+        *,
+        source_path: Path,
+        signature_info: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> None:
+        from handover_log_module.repository.excel_reader import load_workbook_quietly
+
+        def _cell_value_matches(expected_value: str, actual_value: str) -> bool:
+            expected_text = _text(expected_value)
+            actual_text = _text(actual_value)
+            if expected_text == actual_text:
+                return True
+            if re.sub(r"\s+", "", expected_text) == re.sub(r"\s+", "", actual_text):
+                return True
+            expected_number = re.search(r"-?\d+(?:\.\d+)?", expected_text.replace(",", ""))
+            actual_number = re.search(r"-?\d+(?:\.\d+)?", actual_text.replace(",", ""))
+            if expected_number and actual_number:
+                try:
+                    return abs(float(expected_number.group(0)) - float(actual_number.group(0))) < 0.000001
+                except Exception:  # noqa: BLE001
+                    return False
+            return False
+
+        values = signature_info.get("values", {}) if isinstance(signature_info, dict) else {}
+        expected_values = {
+            _text(cell).upper(): _text(value)
+            for cell, value in (values.items() if isinstance(values, dict) else [])
+            if _text(cell)
+        }
+        missing_expected = [
+            cell
+            for cell in _CAPACITY_IMAGE_REQUIRED_EXPECTED_CELLS
+            if not _text(expected_values.get(cell))
+        ]
+        if missing_expected:
+            raise ValueError(f"容量表截图发送前校验失败: 缺少待写入关键值 {','.join(missing_expected)}")
+
+        workbook = load_workbook_quietly(source_path, data_only=False)
+        try:
+            sheet_name = self._configured_sheet_name()
+            if sheet_name not in workbook.sheetnames:
+                raise ValueError(f"容量表截图发送前校验失败: 工作表不存在 {sheet_name}")
+            sheet = workbook[sheet_name]
+            mismatch: List[str] = []
+            for cell in _CAPACITY_IMAGE_REQUIRED_EXPECTED_CELLS:
+                expected = _text(expected_values.get(cell))
+                actual = _text(sheet[cell].value)
+                if not _cell_value_matches(expected, actual):
+                    mismatch.append(f"{cell}: expected={expected or '-'}, actual={actual or '-'}")
+            if mismatch:
+                raise ValueError("容量表截图发送前校验失败: 关键单元格未写入最新数据 " + "；".join(mismatch[:8]))
+            emit_log(
+                "[交接班][容量表图片发送] 容量表关键单元格校验通过 "
+                f"file={source_path}, cells={','.join(_CAPACITY_IMAGE_REQUIRED_EXPECTED_CELLS)}"
+            )
+        finally:
+            workbook.close()
+
     @staticmethod
     def _cached_image_valid(delivery: Dict[str, Any], signature: str, *, emit_log: Callable[[str], None]) -> Path | None:
         image_signature = _text(delivery.get("image_signature"))
@@ -1229,6 +1290,7 @@ class CapacityReportImageDeliveryService:
         cooling_pump_pressures: Dict[str, Any] | None = None,
         client_id: str = "",
         ensure_capacity_ready: Callable[[], Dict[str, Any]] | None = None,
+        manual_trigger: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         current_session = dict(session if isinstance(session, dict) else {})
@@ -1236,6 +1298,26 @@ class CapacityReportImageDeliveryService:
         building_text = _text(building) or _text(current_session.get("building"))
         current_session["building"] = building_text
         attempt_at = _now_text()
+        if not bool(manual_trigger):
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": "容量表图片发送仅允许审核页按钮手动触发",
+                "building": building_text,
+                "session_id": session_id,
+                "successful_recipients": [],
+                "failed_recipients": [],
+                "capacity_image_delivery": (
+                    dict(current_session.get("capacity_image_delivery", {}))
+                    if isinstance(current_session.get("capacity_image_delivery", {}), dict)
+                    else {}
+                ),
+                "review_link_delivery": (
+                    dict(current_session.get("review_link_delivery", {}))
+                    if isinstance(current_session.get("review_link_delivery", {}), dict)
+                    else {}
+                ),
+            }
         delivery_state = (
             dict(current_session.get("capacity_image_delivery", {}))
             if isinstance(current_session.get("capacity_image_delivery", {}), dict)
@@ -1333,6 +1415,29 @@ class CapacityReportImageDeliveryService:
             and _text(sync_state.get("input_signature")) == _text(signature_info.get("input_signature"))
         )
         cached_image = self._cached_image_valid(delivery_state, target_signature, emit_log=emit_log) if sync_ready else None
+        if not bool(signature_info.get("valid", False)):
+            return self._fail(
+                session=current_session,
+                delivery=delivery_state,
+                attempt_at=attempt_at,
+                error=_text(signature_info.get("error")) or "容量报表补写输入不完整，未发送",
+                emit_log=emit_log,
+            )
+        if sync_ready:
+            try:
+                self._validate_capacity_workbook_ready_for_image(
+                    source_path=capacity_path,
+                    signature_info=signature_info,
+                    emit_log=emit_log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return self._fail(
+                    session=current_session,
+                    delivery=delivery_state,
+                    attempt_at=attempt_at,
+                    error=str(exc),
+                    emit_log=emit_log,
+                )
         emit_log(
             "[交接班][容量表图片发送] 容量图片签名检查 "
             f"building={building_text}, session={session_id}, signature={target_signature[:12]}, "
@@ -1406,6 +1511,20 @@ class CapacityReportImageDeliveryService:
                     delivery=delivery_state,
                     attempt_at=attempt_at,
                     error=_text(signature_info.get("error")) or "容量报表补写输入不完整，未发送",
+                    emit_log=emit_log,
+                )
+            try:
+                self._validate_capacity_workbook_ready_for_image(
+                    source_path=capacity_path,
+                    signature_info=signature_info,
+                    emit_log=emit_log,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return self._fail(
+                    session=current_session,
+                    delivery=delivery_state,
+                    attempt_at=attempt_at,
+                    error=str(exc),
                     emit_log=emit_log,
                 )
             output_image = self._output_image_path(session=current_session, signature=target_signature)

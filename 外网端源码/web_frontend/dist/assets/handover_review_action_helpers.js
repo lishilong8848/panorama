@@ -425,6 +425,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       const response = await sendHandoverReviewCapacityImageApi(buildingCode, {
         session_id: sessionId,
         client_id: reviewClientId,
+        trigger_source: "capacity_image_send_button",
       });
       try {
         await loadReviewData({ background: true });

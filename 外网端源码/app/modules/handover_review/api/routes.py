@@ -4614,8 +4614,11 @@ def handover_review_capacity_image_send(
 
     session_id_text = str(payload.get("session_id", "") or "").strip()
     client_id = str(payload.get("client_id", "") or "").strip()
+    trigger_source = str(payload.get("trigger_source", "") or "").strip()
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
+    if trigger_source != "capacity_image_send_button":
+        raise HTTPException(status_code=400, detail="容量表图片发送仅允许审核页按钮手动触发")
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
     if not str(target.get("capacity_output_file", "") or "").strip():
@@ -4751,6 +4754,7 @@ def handover_review_capacity_image_send(
             cooling_pump_pressures=cooling_pump_pressures if isinstance(cooling_pump_pressures, dict) else {},
             client_id=client_id,
             ensure_capacity_ready=_ensure_capacity_ready_for_send,
+            manual_trigger=True,
             emit_log=container.add_system_log,
         )
     except Exception as exc:  # noqa: BLE001

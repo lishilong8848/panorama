@@ -134,7 +134,12 @@ def test_capacity_image_send_rejects_handover_text_containing_review_link(tmp_pa
     )
 
     session = _session(tmp_path)
-    result = service.send_for_session(session, ensure_capacity_ready=lambda: session, emit_log=lambda _text: None)
+    result = service.send_for_session(
+        session,
+        ensure_capacity_ready=lambda: session,
+        manual_trigger=True,
+        emit_log=lambda _text: None,
+    )
 
     assert result["ok"] is False
     assert "审核页链接" in result["error"]
@@ -165,9 +170,15 @@ def test_capacity_image_send_success_does_not_mutate_review_link_delivery(monkey
         return output_path
 
     monkeypatch.setattr(service, "_render_capacity_report_image", _render_image)
+    monkeypatch.setattr(service, "_validate_capacity_workbook_ready_for_image", lambda **_kwargs: None)
 
     session = _session(tmp_path)
-    result = service.send_for_session(session, ensure_capacity_ready=lambda: session, emit_log=lambda _text: None)
+    result = service.send_for_session(
+        session,
+        ensure_capacity_ready=lambda: session,
+        manual_trigger=True,
+        emit_log=lambda _text: None,
+    )
 
     assert result["ok"] is True, result
     assert review_service.review_updates == []
@@ -183,3 +194,24 @@ def test_rendered_capacity_image_rejects_blank_png(tmp_path):
 
     with pytest.raises(ValueError, match="空白图片"):
         CapacityReportImageDeliveryService._validate_rendered_image_content(blank)
+
+
+def test_capacity_image_send_requires_manual_trigger(tmp_path):
+    review_service = _ReviewService()
+    link_client = _LinkClient()
+    service = CapacityReportImageDeliveryService(
+        {},
+        review_service=review_service,
+        link_service=_LinkService(link_client),
+        capacity_service=_CapacityService(),
+        summary_service=_SummaryService("【A楼世纪互联 白班】\n【交班人员】张三\n【接班人员】李四"),
+    )
+
+    result = service.send_for_session(_session(tmp_path), emit_log=lambda _text: None)
+
+    assert result["ok"] is False
+    assert "仅允许审核页按钮手动触发" in result["error"]
+    assert review_service.capacity_updates == []
+    assert review_service.review_updates == []
+    assert link_client.text_messages == []
+    assert link_client.image_messages == []
