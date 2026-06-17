@@ -9,6 +9,7 @@ SUMMARY_SOURCE = ROOT / "handover_log_module" / "service" / "handover_summary_me
 ROUTES_SOURCE = ROOT / "app" / "modules" / "handover_review" / "api" / "routes.py"
 REVIEW_LINK_SOURCE = ROOT / "handover_log_module" / "service" / "review_link_delivery_service.py"
 ORCHESTRATOR_SOURCE = ROOT / "handover_log_module" / "service" / "handover_orchestrator.py"
+REVIEW_FOLLOWUP_SOURCE = ROOT / "handover_log_module" / "service" / "review_followup_trigger_service.py"
 
 
 def _read(path: Path) -> str:
@@ -79,3 +80,12 @@ def test_handover_existing_file_generation_preseeds_shared_outdoor_temperature()
     assert "self._persist_shared_outdoor_temperature_cells(" in source
     assert "self._merge_shared_outdoor_cells_into_prebuilt(prebuilt_fixed, shared_outdoor_cells)" in source
     assert "fixed_cell_values=fixed_cell_values" in source
+
+
+def test_station_h_patrol_cells_use_two_current_duty_people():
+    source = _read(REVIEW_FOLLOWUP_SOURCE)
+
+    assert 'current_second = current_names[1] if len(current_names) >= 2 else ""' in source
+    assert '"H15": current_first' in source
+    assert '"H16": current_second' in source
+    assert '"H16": current_first' not in source

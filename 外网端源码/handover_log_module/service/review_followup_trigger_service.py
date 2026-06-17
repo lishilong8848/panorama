@@ -1709,6 +1709,7 @@ class ReviewFollowupTriggerService:
         current_names = station_h_normalize_duty_people(current_names)
         next_names = station_h_normalize_duty_people(next_names)
         current_first = current_names[0] if current_names else ""
+        current_second = current_names[1] if len(current_names) >= 2 else ""
         next_first = next_names[0] if next_names else ""
         if not current_names or not next_names or not current_first or not next_first:
             emit_log("[交接班][H楼云表] 值班/接班人员为空，按空白人员信息继续写入")
@@ -1741,7 +1742,7 @@ class ReviewFollowupTriggerService:
             "B15": patrol_times[0],
             "B16": patrol_times[1],
             "H15": current_first,
-            "H16": current_first,
+            "H16": current_second,
         }
         for cell in ("H40", "H41", "H42", "H45", "H46", "H47", "H48"):
             cells[cell] = next_first
