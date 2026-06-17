@@ -1370,6 +1370,7 @@ class ReviewLinkDeliveryService:
                 continue
             delivery = session.get("review_link_delivery", {}) if isinstance(session.get("review_link_delivery", {}), dict) else {}
             status = str(delivery.get("status", "") or "").strip().lower()
+            source = str(delivery.get("source", "") or "").strip().lower()
             building = str(session.get("building", "") or "").strip()
             recipient_snapshot = self._recipient_snapshot_for_building(building)
             open_ids = [
@@ -1379,16 +1380,14 @@ class ReviewLinkDeliveryService:
             ]
             if not open_ids:
                 continue
-            if status == "pending_access" and not bool(delivery.get("auto_attempted", False)):
-                pending_sessions.append(session)
-                continue
             session_batch_key = str(session.get("batch_key", "") or "").strip()
-            if (
-                latest_batch_key
-                and session_batch_key == latest_batch_key
-                and status in {"success", "partial_failed", "failed"}
-                and not _delivery_covers_recipients(delivery, open_ids)
-            ):
+            if not latest_batch_key or session_batch_key != latest_batch_key:
+                continue
+            if status == "skipped_auto_disabled" or source == "auto_disabled":
+                continue
+            if _delivery_covers_recipients(delivery, open_ids):
+                continue
+            if status in {"", "success", "partial_failed", "failed", "pending_access", "disabled", "unconfigured"}:
                 pending_sessions.append(session)
         results: List[Dict[str, Any]] = []
         for session in pending_sessions:

@@ -18,6 +18,8 @@ from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
 
 def test_state_records_are_scoped_by_period(tmp_path):
     state_file = tmp_path / "export_records.json"
+    downloaded_file = tmp_path / "old.xlsx"
+    downloaded_file.write_text("ok", encoding="utf-8")
     state_file.write_text(
         json.dumps(
             {
@@ -27,6 +29,7 @@ def test_state_records_are_scoped_by_period(tmp_path):
                         "building": "A楼",
                         "file_name": "old.xlsx",
                         "status": "downloaded",
+                        "downloaded_path": str(downloaded_file),
                     },
                     {
                         "building": "A楼",
@@ -54,7 +57,7 @@ def test_state_records_are_scoped_by_period(tmp_path):
     migrated = [item for item in state["records"] if item["file_name"] == "old.xlsx"][0]
     assert migrated["period"] == "2026-06"
     assert [item["file_name"] for item in _completed_state_records(args, site)] == ["old.xlsx"]
-    assert [item["file_name"] for item in _pending_state_records(args, site)] == ["june.xlsx"]
+    assert [item["file_name"] for item in _pending_state_records(args, site)] == []
 
 
 def test_upsert_uses_building_period_and_exact_file_name(tmp_path):
@@ -85,6 +88,8 @@ def test_upsert_uses_building_period_and_exact_file_name(tmp_path):
 
 def test_downloaded_record_takes_precedence_for_same_month(tmp_path):
     state_file = tmp_path / "export_records.json"
+    downloaded_file = tmp_path / "done.xlsx"
+    downloaded_file.write_text("ok", encoding="utf-8")
     state_file.write_text(
         json.dumps(
             {
@@ -95,6 +100,7 @@ def test_downloaded_record_takes_precedence_for_same_month(tmp_path):
                         "period": "2026-06",
                         "file_name": "done.xlsx",
                         "status": "downloaded",
+                        "downloaded_path": str(downloaded_file),
                     },
                     {
                         "building": "C楼",
@@ -112,7 +118,27 @@ def test_downloaded_record_takes_precedence_for_same_month(tmp_path):
     site = SiteConfig(building="C楼", host="127.0.0.1", username="u", password="p")
 
     assert [item["file_name"] for item in _completed_state_records(args, site)] == ["done.xlsx"]
-    assert [item["file_name"] for item in _pending_state_records(args, site)] == ["old_pending.xlsx"]
+    assert [item["file_name"] for item in _pending_state_records(args, site)] == []
+
+
+def test_existing_local_file_recovers_downloaded_state_after_restart(tmp_path):
+    state_file = tmp_path / "export_records.json"
+    download_root = tmp_path / "share"
+    target_dir = download_root / "告警规则导出" / "2026-06" / "A楼"
+    target_dir.mkdir(parents=True)
+    exported_file = target_dir / "A楼_202606_001_alarm.xlsx"
+    exported_file.write_text("ok", encoding="utf-8")
+    state_file.write_text(json.dumps({"version": 2, "records": []}, ensure_ascii=False), encoding="utf-8")
+    args = build_default_args(state_file=str(state_file), period="2026-06", download_root=str(download_root))
+    site = SiteConfig(building="A楼", host="127.0.0.1", username="u", password="p")
+
+    completed = _completed_state_records(args, site)
+    records = json.loads(state_file.read_text(encoding="utf-8"))["records"]
+
+    assert [item["file_name"] for item in completed] == [exported_file.name]
+    assert records[0]["status"] == "downloaded"
+    assert records[0]["recovered_from_local_file"] is True
+    assert records[0]["downloaded_path"] == str(exported_file)
 
 
 def test_default_download_root_prefers_shared_bridge_root():

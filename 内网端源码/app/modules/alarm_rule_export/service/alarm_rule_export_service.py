@@ -141,6 +141,19 @@ def _default_download_root(config: dict[str, Any] | None = None) -> Path:
     return Path(configured) if configured else DEFAULT_DOWNLOAD_ROOT
 
 
+def _resolve_config_path(config: dict[str, Any] | None, configured: str | Path | None, default_path: Path) -> Path:
+    if configured:
+        path = Path(configured)
+        if path.is_absolute():
+            return path
+        runtime_root = _default_runtime_root(config or {})
+        parts = path.parts
+        if parts and parts[0].lower() in {".runtime", runtime_root.name.lower()}:
+            return runtime_root.parent.joinpath(*parts)
+        return runtime_root / path
+    return default_path
+
+
 def _is_transient_frame_error(exc: Exception) -> bool:
     message = str(exc)
     return (
@@ -211,9 +224,7 @@ def _export_file_prefix(site: SiteConfig, task: dict[str, Any], args: argparse.N
 
 
 def _download_path(site: SiteConfig, suggested_filename: str, args: argparse.Namespace) -> Path:
-    period = _period_from_args(args)
-    root = Path(getattr(args, "download_root", "") or DEFAULT_DOWNLOAD_ROOT)
-    download_dir = root / ALARM_RULE_EXPORT_DIR_NAME / period / site.building
+    download_dir = _download_dir(site, args)
     download_dir.mkdir(parents=True, exist_ok=True)
     path = download_dir / suggested_filename
     if not path.exists():
@@ -227,8 +238,196 @@ def _download_path(site: SiteConfig, suggested_filename: str, args: argparse.Nam
     return download_dir / f"{stem}_{datetime.now():%Y%m%d%H%M%S}{suffix}"
 
 
+def _download_dir(site: SiteConfig, args: argparse.Namespace) -> Path:
+    period = _period_from_args(args)
+    root = Path(getattr(args, "download_root", "") or DEFAULT_DOWNLOAD_ROOT)
+    return root / ALARM_RULE_EXPORT_DIR_NAME / period / site.building
+
+
 def _state_file(args: argparse.Namespace) -> Path:
     return Path(args.state_file) if args.state_file else DEFAULT_STATE_FILE
+
+
+def _run_lock_path(args: argparse.Namespace) -> Path:
+    return _state_file(args).with_suffix(".run.lock")
+
+
+def _run_lock_owner_alive(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        match = re.search(r"pid=(\d+)", text)
+        if not match:
+            return False
+        pid = int(match.group(1))
+        if pid <= 0:
+            return False
+        if pid == os.getpid():
+            return True
+        if os.name == "nt":
+            import ctypes
+
+            process_query_limited_information = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    except Exception:
+        return False
+
+
+def _acquire_run_lock(args: argparse.Namespace, stale_after_sec: int = 72 * 3600) -> int | None:
+    path = _run_lock_path(args)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+    payload = f"pid={os.getpid()} started_at={datetime.now().isoformat(timespec='seconds')}\n".encode("utf-8")
+    try:
+        fd = os.open(str(path), flags)
+        os.write(fd, payload)
+        return fd
+    except FileExistsError:
+        try:
+            if not _run_lock_owner_alive(path):
+                path.unlink(missing_ok=True)
+                fd = os.open(str(path), flags)
+                os.write(fd, payload)
+                return fd
+            age = datetime.now().timestamp() - path.stat().st_mtime
+            if age > stale_after_sec:
+                path.unlink(missing_ok=True)
+                fd = os.open(str(path), flags)
+                os.write(fd, payload)
+                return fd
+        except Exception:
+            return None
+        return None
+
+
+def _release_run_lock(args: argparse.Namespace, fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except Exception:
+        pass
+    try:
+        _run_lock_path(args).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _downloaded_file_exists(path_text: Any) -> bool:
+    text = str(path_text or "").strip()
+    if not text:
+        return False
+    try:
+        path = Path(text)
+        return path.exists() and path.is_file() and path.stat().st_size > 0
+    except Exception:
+        return False
+
+
+def _downloaded_file_sort_key(record: dict[str, Any]) -> tuple[str, float, str]:
+    downloaded_at = str(record.get("downloaded_at") or record.get("updated_at") or record.get("created_at") or "")
+    path_text = str(record.get("downloaded_path") or "").strip()
+    mtime = 0.0
+    if path_text:
+        try:
+            path = Path(path_text)
+            if path.exists():
+                mtime = path.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+    return downloaded_at, mtime, str(record.get("file_name") or "")
+
+
+def _local_downloaded_files(args: argparse.Namespace, site: SiteConfig) -> list[Path]:
+    download_dir = _download_dir(site, args)
+    if not download_dir.exists() or not download_dir.is_dir():
+        return []
+    files: list[Path] = []
+    try:
+        for path in download_dir.iterdir():
+            if path.is_file() and path.stat().st_size > 0:
+                files.append(path)
+    except Exception:
+        return []
+    return sorted(files, key=lambda item: (item.stat().st_mtime, item.name), reverse=True)
+
+
+def _ensure_single_downloaded_record(args: argparse.Namespace, site: SiteConfig) -> list[dict[str, Any]]:
+    state = _load_export_state(args)
+    period = _period_from_args(args)
+    records = [item for item in state.get("records", []) if isinstance(item, dict)]
+    relevant = [
+        item
+        for item in records
+        if item.get("building") == site.building and item.get("period") == period
+    ]
+    valid_downloaded = [
+        item
+        for item in relevant
+        if item.get("status") == "downloaded" and _downloaded_file_exists(item.get("downloaded_path"))
+    ]
+    changed = False
+    now = datetime.now().isoformat(timespec="seconds")
+    if not valid_downloaded:
+        local_files = _local_downloaded_files(args, site)
+        if local_files:
+            path = local_files[0]
+            existing = next(
+                (
+                    item
+                    for item in relevant
+                    if str(item.get("file_name") or "").strip() == path.name
+                ),
+                None,
+            )
+            payload = {
+                "building": site.building,
+                "period": period,
+                "url": site.target_url,
+                "file_prefix": path.name,
+                "file_name": path.name,
+                "status": "downloaded",
+                "downloaded_path": str(path),
+                "downloaded_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+                "updated_at": now,
+                "recovered_from_local_file": True,
+            }
+            if existing is not None:
+                existing.update(payload)
+            else:
+                payload["created_at"] = now
+                records.append(payload)
+            valid_downloaded = [existing or payload]
+            changed = True
+
+    if not valid_downloaded:
+        return []
+
+    chosen = sorted(valid_downloaded, key=_downloaded_file_sort_key, reverse=True)[0]
+    chosen_file_name = str(chosen.get("file_name") or "").strip()
+    for item in records:
+        if item.get("building") != site.building or item.get("period") != period:
+            continue
+        if item is chosen:
+            continue
+        status = str(item.get("status") or "").strip()
+        if status in {"downloaded", "created", "generating", "ready", "missing", "skipped"}:
+            item["status"] = "superseded_by_downloaded"
+            item["superseded_by"] = chosen_file_name
+            item["updated_at"] = now
+            changed = True
+    if changed:
+        state["records"] = records
+        _save_export_state(args, state)
+    return [chosen]
 
 
 def _load_export_state(args: argparse.Namespace) -> dict[str, Any]:
@@ -362,22 +561,7 @@ def _pending_state_records(args: argparse.Namespace, site: SiteConfig) -> list[d
 
 
 def _completed_state_records(args: argparse.Namespace, site: SiteConfig) -> list[dict[str, Any]]:
-    state = _load_export_state(args)
-    period = _period_from_args(args)
-    records: list[dict[str, Any]] = []
-    for item in state.get("records", []):
-        if not isinstance(item, dict):
-            continue
-        if item.get("building") != site.building:
-            continue
-        if item.get("period") != period:
-            continue
-        if item.get("status") != "downloaded":
-            continue
-        file_name = str(item.get("file_name") or "").strip()
-        if file_name:
-            records.append(item)
-    return records
+    return _ensure_single_downloaded_record(args, site)
 
 
 async def _is_visible(locator: Any, timeout_ms: int) -> bool:
@@ -902,6 +1086,16 @@ async def _download_and_delete_when_ready(
         next_pending: list[dict[str, Any]] = []
         for record in pending:
             file_name = str(record["file_name"])
+            if downloaded_paths:
+                _update_export_state_record(
+                    args,
+                    site,
+                    file_name,
+                    "superseded_by_downloaded",
+                    f"本月已有文件下载完成: {downloaded_paths[0].name}",
+                    {"superseded_by": downloaded_paths[0].name},
+                )
+                continue
             status = await frame.evaluate(ROW_STATUS_SCRIPT, file_name)
             if not status:
                 print(f"[{site.building}] 未找到导出记录，暂缓: {file_name}", flush=True)
@@ -1009,13 +1203,6 @@ async def _current_month_export_records(frame: Any, site: SiteConfig, args: argp
             status = "ready"
         else:
             status = "missing"
-        _upsert_export_state_record(
-            args,
-            site,
-            {"file_name": file_name, "file_prefix": file_name},
-            status,
-        )
-        _update_export_state_record(args, site, file_name, status, operation_text)
         candidates.append(
             {
                 "task": {"kind": "current_month_existing", "order": len(candidates) + 1, "text": "本月已有导出"},
@@ -1035,7 +1222,19 @@ async def _current_month_export_records(frame: Any, site: SiteConfig, args: argp
             str(item.get("file_name") or ""),
         )
     )
-    return candidates[:1]
+    chosen = candidates[:1]
+    for item in chosen:
+        file_name = str(item.get("file_name") or "").strip()
+        status = str(item.get("status") or "").strip() or "missing"
+        operation_text = str(item.get("operation_text") or "")
+        _upsert_export_state_record(
+            args,
+            site,
+            {"file_name": file_name, "file_prefix": file_name},
+            status,
+        )
+        _update_export_state_record(args, site, file_name, status, operation_text)
+    return chosen
 
 
 async def _ensure_main_page_loaded(page: Any, site: SiteConfig, args: argparse.Namespace) -> None:
@@ -1221,69 +1420,88 @@ async def _run(args: argparse.Namespace) -> int:
             print(f"{site.building}: {site.target_url}", flush=True)
         return 0
 
+    run_lock_fd = _acquire_run_lock(args)
+    if run_lock_fd is None:
+        print("已有告警规则导出运行实例，本次跳过以避免重复导出。", flush=True)
+        return 0
+
     try:
         from playwright.async_api import async_playwright
     except Exception:
+        _release_run_lock(args, run_lock_fd)
         print("缺少 playwright，请先执行: python -m pip install playwright && python -m playwright install chromium")
         return 2
 
     Path(getattr(args, "screenshots_dir", "") or DEFAULT_SCREENSHOT_DIR).mkdir(parents=True, exist_ok=True)
 
-    async with async_playwright() as p:
-        launch_options: dict[str, Any] = {
-            "headless": args.headless,
-            "slow_mo": args.slow_mo_ms,
-            "args": ["--start-maximized"],
-        }
-        browser_executable = None if args.use_playwright_chromium else _resolve_browser_executable(args.browser_executable)
-        if browser_executable:
-            launch_options["executable_path"] = str(browser_executable)
-            print(f"使用本机浏览器: {browser_executable}", flush=True)
-        else:
-            print("未找到本机 Chrome/Edge，尝试使用 Playwright 自带 Chromium。", flush=True)
-
-        opened_browsers: list[Any] = []
-        try:
-            semaphore = asyncio.Semaphore(max(1, args.parallel))
-
-            async def one(site: SiteConfig) -> dict[str, Any]:
-                async with semaphore:
-                    site_browser = None
-                    try:
-                        site_browser = await p.chromium.launch(**dict(launch_options))
-                        opened_browsers.append(site_browser)
-                        return await export_alarm_rules(site_browser, site, args)
-                    except Exception as exc:
-                        return {
-                            "building": site.building,
-                            "url": site.target_url,
-                            "status": "failed",
-                            "message": str(exc),
-                        }
-
-            results = await asyncio.gather(*(one(site) for site in sites))
-            ok = [item for item in results if item["status"] == "exported"]
-            pending = [item for item in results if item["status"] == "pending"]
-            failed = [item for item in results if item["status"] not in {"exported", "pending"}]
-            print(f"完成: exported={len(ok)}/{len(results)}, pending={len(pending)}, failed={len(failed)}", flush=True)
-            for item in pending:
-                print(f"  - {item['building']}: {item['message']}", flush=True)
-            for item in failed:
-                print(f"  - {item['building']}: {item['message']}", flush=True)
-
-            if args.keep_open_sec > 0:
-                print(f"浏览器保留 {args.keep_open_sec} 秒后退出。", flush=True)
-                await asyncio.sleep(args.keep_open_sec)
+    try:
+        async with async_playwright() as p:
+            launch_options: dict[str, Any] = {
+                "headless": args.headless,
+                "slow_mo": args.slow_mo_ms,
+                "args": ["--start-maximized"],
+            }
+            browser_executable = None if args.use_playwright_chromium else _resolve_browser_executable(args.browser_executable)
+            if browser_executable:
+                launch_options["executable_path"] = str(browser_executable)
+                print(f"使用本机浏览器: {browser_executable}", flush=True)
             else:
-                print("浏览器将保持打开。按 Ctrl+C 退出。", flush=True)
-                await asyncio.Event().wait()
-            return 0 if not failed and not pending else 1
-        finally:
-            for browser in opened_browsers:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
+                print("未找到本机 Chrome/Edge，尝试使用 Playwright 自带 Chromium。", flush=True)
+
+            opened_browsers: list[Any] = []
+            try:
+                semaphore = asyncio.Semaphore(max(1, args.parallel))
+
+                async def one(site: SiteConfig) -> dict[str, Any]:
+                    async with semaphore:
+                        completed_records = _completed_state_records(args, site)
+                        if completed_records:
+                            message = f"本月已有 {len(completed_records)} 个有效导出文件，启动浏览器前跳过"
+                            print(f"[{site.building}] {message}: {completed_records[0].get('file_name')}", flush=True)
+                            return {
+                                "building": site.building,
+                                "url": site.target_url,
+                                "status": "exported",
+                                "message": message,
+                            }
+                        site_browser = None
+                        try:
+                            site_browser = await p.chromium.launch(**dict(launch_options))
+                            opened_browsers.append(site_browser)
+                            return await export_alarm_rules(site_browser, site, args)
+                        except Exception as exc:
+                            return {
+                                "building": site.building,
+                                "url": site.target_url,
+                                "status": "failed",
+                                "message": str(exc),
+                            }
+
+                results = await asyncio.gather(*(one(site) for site in sites))
+                ok = [item for item in results if item["status"] == "exported"]
+                pending = [item for item in results if item["status"] == "pending"]
+                failed = [item for item in results if item["status"] not in {"exported", "pending"}]
+                print(f"完成: exported={len(ok)}/{len(results)}, pending={len(pending)}, failed={len(failed)}", flush=True)
+                for item in pending:
+                    print(f"  - {item['building']}: {item['message']}", flush=True)
+                for item in failed:
+                    print(f"  - {item['building']}: {item['message']}", flush=True)
+
+                if args.keep_open_sec > 0:
+                    print(f"浏览器保留 {args.keep_open_sec} 秒后退出。", flush=True)
+                    await asyncio.sleep(args.keep_open_sec)
+                else:
+                    print("浏览器将保持打开。按 Ctrl+C 退出。", flush=True)
+                    await asyncio.Event().wait()
+                return 0 if not failed and not pending else 1
+            finally:
+                for browser in opened_browsers:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+    finally:
+        _release_run_lock(args, run_lock_fd)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1350,8 +1568,20 @@ async def run_alarm_rule_export(
         runtime_root = _default_runtime_root(config_payload)
         if default_state_file is None:
             default_state_file = runtime_root / "alarm_rule_export" / "export_records.json"
+        else:
+            default_state_file = _resolve_config_path(
+                config_payload,
+                default_state_file,
+                runtime_root / "alarm_rule_export" / "export_records.json",
+            )
         if default_screenshots_dir is None:
             default_screenshots_dir = runtime_root / "alarm_rule_export" / "screenshots"
+        else:
+            default_screenshots_dir = _resolve_config_path(
+                config_payload,
+                default_screenshots_dir,
+                runtime_root / "alarm_rule_export" / "screenshots",
+            )
         if default_download_root is None:
             default_download_root = _default_download_root(config_payload)
     args = build_default_args(
@@ -1399,8 +1629,26 @@ def alarm_rule_export_status(
 ) -> dict[str, Any]:
     payload = config if isinstance(config, dict) else {}
     runtime_root = _default_runtime_root(payload)
-    path = Path(state_file) if state_file else runtime_root / "alarm_rule_export" / "export_records.json"
-    args = build_default_args(period=_resolve_period(period), state_file=str(path))
+    path = _resolve_config_path(
+        payload,
+        state_file,
+        runtime_root / "alarm_rule_export" / "export_records.json",
+    )
+    args = build_default_args(
+        period=_resolve_period(period),
+        state_file=str(path),
+        download_root=str(_default_download_root(payload)),
+    )
+    try:
+        for site in _extract_sites(payload):
+            _completed_state_records(args, site)
+    except Exception:
+        pass
+    args = build_default_args(
+        period=_resolve_period(period),
+        state_file=str(path),
+        download_root=str(_default_download_root(payload)),
+    )
     state = _load_export_state(args)
     selected_period = _period_from_args(args)
     records = [
@@ -1528,7 +1776,11 @@ def reset_alarm_rule_export_building(
 ) -> dict[str, Any]:
     payload = config if isinstance(config, dict) else {}
     runtime_root = _default_runtime_root(payload)
-    path = Path(state_file) if state_file else runtime_root / "alarm_rule_export" / "export_records.json"
+    path = _resolve_config_path(
+        payload,
+        state_file,
+        runtime_root / "alarm_rule_export" / "export_records.json",
+    )
     args = build_default_args(period=_resolve_period(period), state_file=str(path))
     state = _load_export_state(args)
     selected_period = _period_from_args(args)

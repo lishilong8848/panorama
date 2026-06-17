@@ -892,6 +892,50 @@ class HandoverOrchestrator:
             "_resolved": "1",
         }
 
+    def _persist_shared_outdoor_temperature_cells(
+        self,
+        *,
+        batch_key: str,
+        shared_outdoor_cells: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> None:
+        if not str(batch_key or "").strip() or not shared_outdoor_cells.get("_resolved"):
+            return
+        try:
+            outdoor_state = self._review_session_service.get_outdoor_temperature_state(batch_key=batch_key)
+            outdoor_block = (
+                outdoor_state.get("shared_blocks", {}).get("outdoor_temperature", {})
+                if isinstance(outdoor_state, dict)
+                else {}
+            )
+            if int(outdoor_block.get("revision", 0) or 0) <= 0:
+                self._review_session_service.save_outdoor_temperature(
+                    batch_key=batch_key,
+                    building=str(shared_outdoor_cells.get("_selected_building", "") or "system").strip() or "system",
+                    cells={cell: shared_outdoor_cells.get(cell, "") for cell in ("B7", "D7")},
+                )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][室外温湿度] 共享审核块写入失败，继续生成: {exc}")
+
+    @staticmethod
+    def _merge_shared_outdoor_cells_into_prebuilt(
+        prebuilt_fixed: Dict[str, tuple[Dict[str, str], datetime, ShiftRosterAssignment | None, Dict[str, Any]]],
+        shared_outdoor_cells: Dict[str, Any],
+    ) -> None:
+        if not shared_outdoor_cells.get("_resolved"):
+            return
+        for building_key, prebuilt in list(prebuilt_fixed.items()):
+            fixed_values, date_ref_override, assignment, alarm_summary_payload = prebuilt
+            merged_fixed = dict(fixed_values or {})
+            for cell_name in ("B7", "D7"):
+                merged_fixed[cell_name] = str(shared_outdoor_cells.get(cell_name, "") or "").strip()
+            prebuilt_fixed[building_key] = (
+                merged_fixed,
+                date_ref_override,
+                assignment,
+                alarm_summary_payload,
+            )
+
     @staticmethod
     def _previous_duty_context(*, duty_date: str, duty_shift: str) -> tuple[str, str]:
         duty_day = parse_duty_date(duty_date)
@@ -1387,6 +1431,30 @@ class HandoverOrchestrator:
                                 f"building={building}, error={exc}"
                             )
                     else:
+                        skipped_delivery_state = {
+                            "status": "skipped_auto_disabled",
+                            "last_attempt_at": "",
+                            "last_sent_at": "",
+                            "error": "本次生成已显式关闭审核链接自动发送",
+                            "url": "",
+                            "successful_recipients": [],
+                            "failed_recipients": [],
+                            "source": "auto_disabled",
+                            "auto_attempted": False,
+                            "auto_attempted_at": "",
+                        }
+                        try:
+                            self._review_session_service.update_review_link_delivery(
+                                session_id=str(review_session.get("session_id", "") or "").strip(),
+                                review_link_delivery=skipped_delivery_state,
+                            )
+                            review_session["review_link_delivery"] = skipped_delivery_state
+                            result.review_session = review_session
+                        except Exception as exc:  # noqa: BLE001
+                            emit_log(
+                                "[交接班][审核链接发送] 自动发送跳过状态写入失败 "
+                                f"building={building}, session_id={review_session.get('session_id', '-')}, error={exc}"
+                            )
                         emit_log(
                             "[交接班][审核链接发送] 已跳过自动发送 "
                             f"building={building}, session_id={review_session.get('session_id', '-')}"
@@ -1650,15 +1718,73 @@ class HandoverOrchestrator:
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][告警JSON] 批量选源快照构建失败，后续按单楼兜底: {exc}")
 
+        prebuilt_fixed: Dict[str, tuple[Dict[str, str], datetime, ShiftRosterAssignment | None, Dict[str, Any]]] = {}
+        prebuilt_start_time = ""
+        prebuilt_end_time = ""
+        if query_context.duty_date and query_context.duty_shift:
+            duty_window = self._build_alarm_duty_window(
+                duty_date=query_context.duty_date,
+                duty_shift=query_context.duty_shift,
+            )
+            prebuilt_start_time = duty_window.start_time
+            prebuilt_end_time = duty_window.end_time
+            for building, _data_file in normalized_files:
+                assignment = query_context.roster_assignments.get(building)
+                try:
+                    fixed_cell_values, date_ref_override, alarm_summary_payload = self._build_fixed_values_with_alarm(
+                        building=building,
+                        duty_date=query_context.duty_date,
+                        duty_shift=query_context.duty_shift,
+                        start_time=duty_window.start_time,
+                        end_time=duty_window.end_time,
+                        emit_log=emit_log,
+                        roster_assignment=assignment,
+                        include_roster=False,
+                        preloaded_long_day_values=query_context.long_day_values_by_building.get(building),
+                        alarm_selection_snapshot=alarm_selection_snapshot,
+                        alarm_document_cache=alarm_document_cache,
+                    )
+                    prebuilt_fixed[building] = (fixed_cell_values, date_ref_override, assignment, alarm_summary_payload)
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(f"[交接班][已有数据表批量] building={building} 固定值预构建失败，按单楼兜底: {exc}")
+
+            shared_outdoor_cells = self._resolve_shared_outdoor_temperature_cells(
+                [{"building": building, "file_path": data_file} for building, data_file in normalized_files],
+                duty_date=query_context.duty_date,
+                duty_shift=query_context.duty_shift,
+                emit_log=emit_log,
+            )
+            if shared_outdoor_cells.get("_resolved"):
+                batch_key = self._review_session_service.build_batch_key(
+                    query_context.duty_date,
+                    query_context.duty_shift,
+                )
+                self._persist_shared_outdoor_temperature_cells(
+                    batch_key=batch_key,
+                    shared_outdoor_cells=shared_outdoor_cells,
+                    emit_log=emit_log,
+                )
+                self._merge_shared_outdoor_cells_into_prebuilt(prebuilt_fixed, shared_outdoor_cells)
+
         for building, data_file in normalized_files:
             try:
+                fixed_cell_values: Dict[str, str] | None = None
+                date_ref_override: datetime | None = None
+                alarm_summary_payload: Dict[str, Any] | None = None
+                assignment = query_context.roster_assignments.get(building)
+                prebuilt = prebuilt_fixed.get(building)
+                if prebuilt is not None:
+                    fixed_cell_values, date_ref_override, assignment, alarm_summary_payload = prebuilt
                 one = self.run_from_existing_file(
                     building=building,
                     data_file=data_file,
-                    end_time=end_time,
+                    end_time=end_time or prebuilt_end_time or None,
                     duty_date=duty_date,
                     duty_shift=duty_shift,
-                    roster_assignment=query_context.roster_assignments.get(building),
+                    start_time=prebuilt_start_time or None,
+                    fixed_cell_values=fixed_cell_values,
+                    date_ref_override=date_ref_override,
+                    roster_assignment=assignment,
                     event_query_by_building=query_context.event_query_by_building,
                     change_rows_by_building=query_context.change_rows_by_building,
                     exercise_rows_by_building=query_context.exercise_rows_by_building,
@@ -1668,6 +1794,7 @@ class HandoverOrchestrator:
                     engineer_directory_records=query_context.engineer_directory_records,
                     alarm_selection_snapshot=alarm_selection_snapshot,
                     alarm_document_cache=alarm_document_cache,
+                    alarm_summary_payload=alarm_summary_payload,
                     capacity_source_file=capacity_file_map.get(building),
                     source_mode="from_file",
                     auto_send_review_link=auto_send_review_link,
@@ -1885,33 +2012,12 @@ class HandoverOrchestrator:
                 )
                 if shared_outdoor_cells.get("_resolved"):
                     batch_key = self._review_session_service.build_batch_key(duty_date_text, duty_shift_text)
-                    try:
-                        outdoor_state = self._review_session_service.get_outdoor_temperature_state(batch_key=batch_key)
-                        outdoor_block = (
-                            outdoor_state.get("shared_blocks", {}).get("outdoor_temperature", {})
-                            if isinstance(outdoor_state, dict)
-                            else {}
-                        )
-                        if int(outdoor_block.get("revision", 0) or 0) <= 0:
-                            self._review_session_service.save_outdoor_temperature(
-                                batch_key=batch_key,
-                                building=str(shared_outdoor_cells.get("_selected_building", "") or "system").strip() or "system",
-                                cells={cell: shared_outdoor_cells.get(cell, "") for cell in ("B7", "D7")},
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        emit_log(f"[交接班][室外温湿度] 共享审核块写入失败，继续生成: {exc}")
-                    for building_key, prebuilt in list(prebuilt_fixed.items()):
-                        fixed_values, date_ref_override, assignment, alarm_summary_payload = prebuilt
-                        merged_fixed = dict(fixed_values or {})
-                        for cell_name in ("B7", "D7"):
-                            value = str(shared_outdoor_cells.get(cell_name, "") or "").strip()
-                            merged_fixed[cell_name] = value
-                        prebuilt_fixed[building_key] = (
-                            merged_fixed,
-                            date_ref_override,
-                            assignment,
-                            alarm_summary_payload,
-                        )
+                    self._persist_shared_outdoor_temperature_cells(
+                        batch_key=batch_key,
+                        shared_outdoor_cells=shared_outdoor_cells,
+                        emit_log=emit_log,
+                    )
+                    self._merge_shared_outdoor_cells_into_prebuilt(prebuilt_fixed, shared_outdoor_cells)
 
             # 内网下载和告警查询完成后优先切回外网，再执行飞书相关填充。
             if success_items:
