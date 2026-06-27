@@ -16,6 +16,11 @@ from app.shared.utils.playwright_page_reuse import (
     apply_report_page_view,
     prepare_reusable_page,
 )
+from app.shared.runtime.building_browser_locks import (
+    acquire_building_browser_lock,
+    building_browser_lock_snapshot,
+    release_building_browser_lock,
+)
 
 
 def _now_text() -> str:
@@ -54,6 +59,8 @@ class InternalDownloadBrowserPool:
     HEALTH_PROBE_FAILURE_THRESHOLD = 2
     RECYCLE_AFTER_AGE_SEC = 12 * 60 * 60
     RECYCLE_AFTER_JOB_COUNT = 100
+    BUILDING_RESOURCE_LOCK_TIMEOUT_SEC = 300.0
+    BROWSER_CREATE_TIMEOUT_SEC = 60.0
 
     def __init__(
         self,
@@ -89,6 +96,7 @@ class InternalDownloadBrowserPool:
                 "last_login_at": "",
                 "login_error": "",
                 "in_use": False,
+                "current_task": "",
                 "last_used_at": "",
                 "last_result": "",
                 "last_error": "",
@@ -158,6 +166,7 @@ class InternalDownloadBrowserPool:
             "recovery_attempts",
             "next_probe_at",
             "pending_issue_summary",
+            "current_task",
         }
         changed = False
         with self._state_lock:
@@ -948,6 +957,7 @@ class InternalDownloadBrowserPool:
             last_login_at="",
             login_error="",
             in_use=False,
+            current_task="",
             suspended=False,
             suspend_reason="",
             failure_kind="",
@@ -968,19 +978,36 @@ class InternalDownloadBrowserPool:
         recycled_at = _now_text()
         launch_kwargs = self._resolve_browser_options()
         try:
-            browser = await self._playwright.chromium.launch(**launch_kwargs)
-        except Exception:
+            browser = await asyncio.wait_for(
+                self._playwright.chromium.launch(**launch_kwargs),
+                timeout=self.BROWSER_CREATE_TIMEOUT_SEC,
+            )
+        except Exception as exc:
             if "channel" in launch_kwargs:
                 launch_kwargs.pop("channel", None)
-                browser = await self._playwright.chromium.launch(**launch_kwargs)
+                try:
+                    browser = await asyncio.wait_for(
+                        self._playwright.chromium.launch(**launch_kwargs),
+                        timeout=self.BROWSER_CREATE_TIMEOUT_SEC,
+                    )
+                except Exception as fallback_exc:
+                    raise RuntimeError(
+                        f"{building} 浏览器启动超时或失败: primary={exc}; fallback={fallback_exc}"
+                    ) from fallback_exc
             else:
-                raise
-        context = await browser.new_context(
-            accept_downloads=True,
-            viewport={"width": 1600, "height": 1000},
-            device_scale_factor=DEFAULT_REPORT_DEVICE_SCALE_FACTOR,
+                raise RuntimeError(f"{building} 浏览器启动超时或失败: {exc}") from exc
+        context = await asyncio.wait_for(
+            browser.new_context(
+                accept_downloads=True,
+                viewport={"width": 1600, "height": 1000},
+                device_scale_factor=DEFAULT_REPORT_DEVICE_SCALE_FACTOR,
+            ),
+            timeout=self.BROWSER_CREATE_TIMEOUT_SEC,
         )
-        page = await context.new_page()
+        page = await asyncio.wait_for(
+            context.new_page(),
+            timeout=self.BROWSER_CREATE_TIMEOUT_SEC,
+        )
         await apply_report_page_view(page)
         self._browser_slots[building] = {
             "browser": browser,
@@ -1258,105 +1285,243 @@ class InternalDownloadBrowserPool:
         lock = self._locks.get(building)
         if lock is None:
             raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
+        resource_acquired = await asyncio.to_thread(
+            acquire_building_browser_lock,
+            building,
+            owner="source_file_download",
+            timeout_sec=self.BUILDING_RESOURCE_LOCK_TIMEOUT_SEC,
+        )
+        if not resource_acquired:
+            raise RuntimeError(f"{building} 浏览器资源正在被其他任务占用，等待超时")
         async with lock:
-            self._mark_slot_recycle_pending_if_needed(building)
-            await self._recycle_slot_if_needed(building)
-            last_exc: Exception | None = None
-            for attempt in range(self.MAX_JOB_ATTEMPTS):
-                page = await self._ensure_page(building)
-                await self._fail_if_login_not_ready(building, page)
-                try:
-                    await self._ensure_logged_in(building, page)
-                except Exception as exc:  # noqa: BLE001
-                    failure_kind = self._classify_failure_kind(exc, login_state=self._slot_login_state(building))
-                    if failure_kind == "unknown":
-                        raise
-                    recovered = await self._attempt_building_recovery(
-                        building,
-                        base_reason=str(exc),
-                        failure_kind=failure_kind or "browser_issue",
-                        from_probe=False,
-                    )
-                    if not recovered:
-                        pause_info = self.get_building_pause_info(building)
-                        raise BuildingPausedError(
+            try:
+                self._mark_slot_recycle_pending_if_needed(building)
+                await self._recycle_slot_if_needed(building)
+                last_exc: Exception | None = None
+                for attempt in range(self.MAX_JOB_ATTEMPTS):
+                    page = await self._ensure_page(building)
+                    await self._fail_if_login_not_ready(building, page)
+                    try:
+                        await self._ensure_logged_in(building, page)
+                    except Exception as exc:  # noqa: BLE001
+                        failure_kind = self._classify_failure_kind(exc, login_state=self._slot_login_state(building))
+                        if failure_kind == "unknown":
+                            raise
+                        recovered = await self._attempt_building_recovery(
                             building,
-                            str(pause_info.get("suspend_reason", "") or str(exc)).strip(),
-                            failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
-                        ) from exc
-                    last_exc = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
-                    continue
-                self._update_slot(
-                    building,
-                    in_use=True,
-                    last_used_at=_now_text(),
-                    last_result="running",
-                    last_error="",
-                )
-                try:
-                    result = await runner(page)
-                    if self._runner_result_failed(result):
-                        error_text = self._runner_result_error_text(result)
-                        self._last_error = error_text
+                            base_reason=str(exc),
+                            failure_kind=failure_kind or "browser_issue",
+                            from_probe=False,
+                        )
+                        if not recovered:
+                            pause_info = self.get_building_pause_info(building)
+                            raise BuildingPausedError(
+                                building,
+                                str(pause_info.get("suspend_reason", "") or str(exc)).strip(),
+                                failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
+                            ) from exc
+                        last_exc = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+                        continue
+                    self._update_slot(
+                        building,
+                        in_use=True,
+                        current_task="source_file_download",
+                        last_used_at=_now_text(),
+                        last_result="running",
+                        last_error="",
+                    )
+                    try:
+                        result = await runner(page)
+                        if self._runner_result_failed(result):
+                            error_text = self._runner_result_error_text(result)
+                            self._last_error = error_text
+                            self._update_slot(
+                                building,
+                                in_use=False,
+                                last_used_at=_now_text(),
+                                last_result="failed",
+                                last_error=error_text,
+                                current_task="",
+                                pending_issue_summary="下载失败，已准备重建该楼浏览器后重试",
+                            )
+                            if attempt < self.MAX_JOB_ATTEMPTS - 1:
+                                self._log(
+                                    f"[共享桥接] 楼栋源文件下载失败，重建浏览器后重试: "
+                                    f"{building}, attempt={attempt + 1}/{self.MAX_JOB_ATTEMPTS}, error={error_text}"
+                                )
+                                await self._rebuild_slot_after_job_failure(building, error_text, final=False)
+                                last_exc = RuntimeError(error_text)
+                                continue
+                            self._log(f"[共享桥接] 楼栋源文件下载失败，已停止重试: {building}, error={error_text}")
+                            await self._rebuild_slot_after_job_failure(building, error_text, final=True)
+                            return result
+                        refreshed_page = await self._ensure_page(building)
+                        if refreshed_page is not page:
+                            self._log(f"[共享桥接] 楼栋浏览器异常，已重建: {building}")
+                            await self._ensure_logged_in(building, refreshed_page)
                         self._update_slot(
                             building,
                             in_use=False,
+                            current_task="",
+                            login_state="ready",
+                            login_error="",
                             last_used_at=_now_text(),
-                            last_result="failed",
-                            last_error=error_text,
-                            pending_issue_summary="下载失败，已准备重建该楼浏览器后重试",
+                            last_login_at=_now_text(),
+                            last_result="success",
+                            last_error="",
+                            jobs_since_recycle=int(self._slot_snapshot(building).get("jobs_since_recycle", 0) or 0) + 1,
                         )
-                        if attempt < self.MAX_JOB_ATTEMPTS - 1:
+                        self._mark_slot_recycle_pending_if_needed(building)
+                        await self._recycle_slot_if_needed(building)
+                        self._log(f"[共享桥接] 楼栋浏览器复用成功: {building}")
+                        return result
+                    except Exception as exc:  # noqa: BLE001
+                        error_text = str(exc)
+                        self._last_error = error_text
+                        failure_kind = self._classify_failure_kind(error_text)
+                        if failure_kind == "unknown" and attempt < self.MAX_JOB_ATTEMPTS - 1:
+                            self._update_slot(
+                                building,
+                                in_use=False,
+                                current_task="",
+                                last_used_at=_now_text(),
+                                last_result="failed",
+                                last_error=error_text,
+                                pending_issue_summary="下载异常，已准备重建该楼浏览器后重试",
+                            )
                             self._log(
-                                f"[共享桥接] 楼栋源文件下载失败，重建浏览器后重试: "
+                                f"[共享桥接] 楼栋源文件下载异常，重建浏览器后重试: "
                                 f"{building}, attempt={attempt + 1}/{self.MAX_JOB_ATTEMPTS}, error={error_text}"
                             )
                             await self._rebuild_slot_after_job_failure(building, error_text, final=False)
-                            last_exc = RuntimeError(error_text)
+                            last_exc = exc if isinstance(exc, Exception) else RuntimeError(error_text)
                             continue
-                        self._log(f"[共享桥接] 楼栋源文件下载失败，已停止重试: {building}, error={error_text}")
-                        await self._rebuild_slot_after_job_failure(building, error_text, final=True)
-                        return result
-                    refreshed_page = await self._ensure_page(building)
-                    if refreshed_page is not page:
-                        self._log(f"[共享桥接] 楼栋浏览器异常，已重建: {building}")
-                        await self._ensure_logged_in(building, refreshed_page)
-                    self._update_slot(
-                        building,
-                        in_use=False,
-                        login_state="ready",
-                        login_error="",
-                        last_used_at=_now_text(),
-                        last_login_at=_now_text(),
-                        last_result="success",
-                        last_error="",
-                        jobs_since_recycle=int(self._slot_snapshot(building).get("jobs_since_recycle", 0) or 0) + 1,
-                    )
-                    self._mark_slot_recycle_pending_if_needed(building)
-                    await self._recycle_slot_if_needed(building)
-                    self._log(f"[共享桥接] 楼栋浏览器复用成功: {building}")
-                    return result
-                except Exception as exc:  # noqa: BLE001
-                    error_text = str(exc)
-                    self._last_error = error_text
-                    failure_kind = self._classify_failure_kind(error_text)
-                    if failure_kind == "unknown" and attempt < self.MAX_JOB_ATTEMPTS - 1:
+                        if failure_kind != "unknown":
+                            recovered = await self._attempt_building_recovery(
+                                building,
+                                base_reason=error_text,
+                                failure_kind=failure_kind or "browser_issue",
+                                from_probe=False,
+                            )
+                            if recovered and attempt < self.MAX_JOB_ATTEMPTS - 1:
+                                last_exc = exc if isinstance(exc, Exception) else RuntimeError(error_text)
+                                continue
+                            if not recovered:
+                                pause_info = self.get_building_pause_info(building)
+                                self._update_slot(
+                                    building,
+                                    in_use=False,
+                                    current_task="",
+                                    last_used_at=_now_text(),
+                                    last_result="failed",
+                                    last_error=str(pause_info.get("suspend_reason", "") or error_text).strip(),
+                                )
+                                raise BuildingPausedError(
+                                    building,
+                                    str(pause_info.get("suspend_reason", "") or error_text).strip(),
+                                    failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
+                                ) from exc
                         self._update_slot(
                             building,
                             in_use=False,
+                            current_task="",
                             last_used_at=_now_text(),
                             last_result="failed",
                             last_error=error_text,
-                            pending_issue_summary="下载异常，已准备重建该楼浏览器后重试",
                         )
-                        self._log(
-                            f"[共享桥接] 楼栋源文件下载异常，重建浏览器后重试: "
-                            f"{building}, attempt={attempt + 1}/{self.MAX_JOB_ATTEMPTS}, error={error_text}"
+                        await self._rebuild_slot_after_job_failure(building, error_text, final=True)
+                        raise
+                if last_exc is not None:
+                    raise last_exc
+                raise RuntimeError(f"{building} 下载未能开始")
+            finally:
+                self._update_slot(building, in_use=False, current_task="")
+                await asyncio.to_thread(release_building_browser_lock, building)
+
+    async def _run_building_alarm_job(
+        self,
+        building: str,
+        runner: Callable[[APIRequestContext, str], Awaitable[Any]],
+    ) -> Any:
+        if building not in self.BUILDINGS:
+            raise ValueError(f"不支持的内网下载楼栋: {building}")
+        lock = self._locks.get(building)
+        if lock is None:
+            raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
+        resource_acquired = await asyncio.to_thread(
+            acquire_building_browser_lock,
+            building,
+            owner="alarm_event_export",
+            timeout_sec=self.BUILDING_RESOURCE_LOCK_TIMEOUT_SEC,
+        )
+        if not resource_acquired:
+            raise RuntimeError(f"{building} 浏览器资源正在被其他任务占用，等待超时")
+        async with lock:
+            try:
+                self._mark_slot_recycle_pending_if_needed(building)
+                await self._recycle_slot_if_needed(building)
+                last_exc: Exception | None = None
+                for attempt in range(self.MAX_JOB_ATTEMPTS):
+                    page = await self._ensure_page(building)
+                    await self._fail_if_login_not_ready(building, page)
+                    try:
+                        await self._ensure_logged_in(building, page)
+                    except Exception as exc:  # noqa: BLE001
+                        failure_kind = self._classify_failure_kind(exc, login_state=self._slot_login_state(building))
+                        if failure_kind == "unknown":
+                            raise
+                        recovered = await self._attempt_building_recovery(
+                            building,
+                            base_reason=str(exc),
+                            failure_kind=failure_kind or "browser_issue",
+                            from_probe=False,
                         )
-                        await self._rebuild_slot_after_job_failure(building, error_text, final=False)
-                        last_exc = exc if isinstance(exc, Exception) else RuntimeError(error_text)
+                        if not recovered:
+                            pause_info = self.get_building_pause_info(building)
+                            raise BuildingPausedError(
+                                building,
+                                str(pause_info.get("suspend_reason", "") or str(exc)).strip(),
+                                failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
+                            ) from exc
+                        last_exc = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
                         continue
-                    if failure_kind != "unknown":
+                    self._update_slot(
+                        building,
+                        in_use=True,
+                        current_task="alarm_event_export",
+                        last_used_at=_now_text(),
+                        last_result="running",
+                        last_error="",
+                    )
+                    request_context: APIRequestContext | None = None
+                    try:
+                        request_context, base_url = await self._create_alarm_api_request_context(building)
+                        result = await runner(request_context, base_url)
+                        refreshed_page = await self._ensure_page(building)
+                        if refreshed_page is not page:
+                            self._log(f"[共享桥接] 楼栋浏览器异常，已重建: {building}")
+                            await self._ensure_logged_in(building, refreshed_page)
+                        self._update_slot(
+                            building,
+                            in_use=False,
+                            current_task="",
+                            login_state="ready",
+                            login_error="",
+                            last_used_at=_now_text(),
+                            last_login_at=_now_text(),
+                            last_result="success",
+                            last_error="",
+                            jobs_since_recycle=int(self._slot_snapshot(building).get("jobs_since_recycle", 0) or 0) + 1,
+                        )
+                        self._mark_slot_recycle_pending_if_needed(building)
+                        await self._recycle_slot_if_needed(building)
+                        return result
+                    except Exception as exc:  # noqa: BLE001
+                        error_text = str(exc)
+                        self._last_error = error_text
+                        failure_kind = self._classify_failure_kind(error_text)
+                        if failure_kind == "unknown":
+                            failure_kind = "alarm_query_failed"
                         recovered = await self._attempt_building_recovery(
                             building,
                             base_reason=error_text,
@@ -1371,6 +1536,7 @@ class InternalDownloadBrowserPool:
                             self._update_slot(
                                 building,
                                 in_use=False,
+                                current_task="",
                                 last_used_at=_now_text(),
                                 last_result="failed",
                                 last_error=str(pause_info.get("suspend_reason", "") or error_text).strip(),
@@ -1380,132 +1546,27 @@ class InternalDownloadBrowserPool:
                                 str(pause_info.get("suspend_reason", "") or error_text).strip(),
                                 failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
                             ) from exc
-                    self._update_slot(
-                        building,
-                        in_use=False,
-                        last_used_at=_now_text(),
-                        last_result="failed",
-                        last_error=error_text,
-                    )
-                    await self._rebuild_slot_after_job_failure(building, error_text, final=True)
-                    raise
-            if last_exc is not None:
-                raise last_exc
-            raise RuntimeError(f"{building} 下载未能开始")
-
-    async def _run_building_alarm_job(
-        self,
-        building: str,
-        runner: Callable[[APIRequestContext, str], Awaitable[Any]],
-    ) -> Any:
-        if building not in self.BUILDINGS:
-            raise ValueError(f"不支持的内网下载楼栋: {building}")
-        lock = self._locks.get(building)
-        if lock is None:
-            raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
-        async with lock:
-            self._mark_slot_recycle_pending_if_needed(building)
-            await self._recycle_slot_if_needed(building)
-            last_exc: Exception | None = None
-            for attempt in range(self.MAX_JOB_ATTEMPTS):
-                page = await self._ensure_page(building)
-                await self._fail_if_login_not_ready(building, page)
-                try:
-                    await self._ensure_logged_in(building, page)
-                except Exception as exc:  # noqa: BLE001
-                    failure_kind = self._classify_failure_kind(exc, login_state=self._slot_login_state(building))
-                    if failure_kind == "unknown":
-                        raise
-                    recovered = await self._attempt_building_recovery(
-                        building,
-                        base_reason=str(exc),
-                        failure_kind=failure_kind or "browser_issue",
-                        from_probe=False,
-                    )
-                    if not recovered:
-                        pause_info = self.get_building_pause_info(building)
-                        raise BuildingPausedError(
-                            building,
-                            str(pause_info.get("suspend_reason", "") or str(exc)).strip(),
-                            failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
-                        ) from exc
-                    last_exc = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
-                    continue
-                self._update_slot(
-                    building,
-                    in_use=True,
-                    last_used_at=_now_text(),
-                    last_result="running",
-                    last_error="",
-                )
-                request_context: APIRequestContext | None = None
-                try:
-                    request_context, base_url = await self._create_alarm_api_request_context(building)
-                    result = await runner(request_context, base_url)
-                    refreshed_page = await self._ensure_page(building)
-                    if refreshed_page is not page:
-                        self._log(f"[共享桥接] 楼栋浏览器异常，已重建: {building}")
-                        await self._ensure_logged_in(building, refreshed_page)
-                    self._update_slot(
-                        building,
-                        in_use=False,
-                        login_state="ready",
-                        login_error="",
-                        last_used_at=_now_text(),
-                        last_login_at=_now_text(),
-                        last_result="success",
-                        last_error="",
-                        jobs_since_recycle=int(self._slot_snapshot(building).get("jobs_since_recycle", 0) or 0) + 1,
-                    )
-                    self._mark_slot_recycle_pending_if_needed(building)
-                    await self._recycle_slot_if_needed(building)
-                    return result
-                except Exception as exc:  # noqa: BLE001
-                    error_text = str(exc)
-                    self._last_error = error_text
-                    failure_kind = self._classify_failure_kind(error_text)
-                    if failure_kind == "unknown":
-                        failure_kind = "alarm_query_failed"
-                    recovered = await self._attempt_building_recovery(
-                        building,
-                        base_reason=error_text,
-                        failure_kind=failure_kind or "browser_issue",
-                        from_probe=False,
-                    )
-                    if recovered and attempt < self.MAX_JOB_ATTEMPTS - 1:
-                        last_exc = exc if isinstance(exc, Exception) else RuntimeError(error_text)
-                        continue
-                    if not recovered:
-                        pause_info = self.get_building_pause_info(building)
                         self._update_slot(
                             building,
                             in_use=False,
+                            current_task="",
                             last_used_at=_now_text(),
                             last_result="failed",
-                            last_error=str(pause_info.get("suspend_reason", "") or error_text).strip(),
+                            last_error=error_text,
                         )
-                        raise BuildingPausedError(
-                            building,
-                            str(pause_info.get("suspend_reason", "") or error_text).strip(),
-                            failure_kind=str(pause_info.get("failure_kind", "") or failure_kind).strip() or "browser_issue",
-                        ) from exc
-                    self._update_slot(
-                        building,
-                        in_use=False,
-                        last_used_at=_now_text(),
-                        last_result="failed",
-                        last_error=error_text,
-                    )
-                    raise
-                finally:
-                    if request_context is not None:
-                        try:
-                            await request_context.dispose()
-                        except Exception:
-                            pass
-            if last_exc is not None:
-                raise last_exc
-            raise RuntimeError(f"{building} 告警信息导出未能开始")
+                        raise
+                    finally:
+                        if request_context is not None:
+                            try:
+                                await request_context.dispose()
+                            except Exception:
+                                pass
+                if last_exc is not None:
+                    raise last_exc
+                raise RuntimeError(f"{building} 告警信息导出未能开始")
+            finally:
+                self._update_slot(building, in_use=False, current_task="")
+                await asyncio.to_thread(release_building_browser_lock, building)
 
     def submit_building_job(
         self,
@@ -1571,5 +1632,6 @@ class InternalDownloadBrowserPool:
             },
             "page_slots": page_slots,
             "active_buildings": active_buildings,
+            "browser_resource_locks": building_browser_lock_snapshot(),
             "last_error": self._last_error,
         }

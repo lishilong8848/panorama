@@ -21,6 +21,11 @@ _TERMINAL_STATUSES = {"success", "failed", "partial_failed", "cancelled", "stale
 _READY_FOR_EXTERNAL = "ready_for_external"
 
 
+def _is_potentially_blocking_path(path_text: str) -> bool:
+    normalized = str(path_text or "").strip().replace("/", "\\")
+    return normalized.startswith("\\\\")
+
+
 class InternalBridgeHttpTaskRunner:
     """HTTP bridge facade backed by an internal-only local bridge store.
 
@@ -69,7 +74,9 @@ class InternalBridgeHttpTaskRunner:
         self._dispatcher_thread: threading.Thread | None = None
         self._recovery_threads: Dict[str, threading.Thread] = {}
         self._worker_wake = threading.Event()
+        self._stop_event = threading.Event()
         self._started_at = time.time()
+        self._max_source_index_recovery_threads = 2
 
     def _emit(self, text: str) -> None:
         line = str(text or "").strip()
@@ -156,25 +163,59 @@ class InternalBridgeHttpTaskRunner:
         return self._store
 
     def health(self) -> Dict[str, Any]:
-        store = self._get_store()
-        counts = store.get_task_counts()
+        runtime = self._ensure_runtime()
+        store = self._store
+        cached_reader = getattr(runtime, "get_cached_tasks", None)
+        cached_tasks = cached_reader(limit=500) if callable(cached_reader) else []
+        pending_internal = 0
+        active_tasks = 0
+        for task in cached_tasks if isinstance(cached_tasks, list) else []:
+            if not isinstance(task, dict):
+                continue
+            status = str(task.get("status", "") or "").strip().lower()
+            if status in _TERMINAL_STATUSES:
+                continue
+            active_tasks += 1
+            if status in {"pending_internal", "queued_for_internal", "internal_claimed", "internal_running", "queued", "running"}:
+                pending_internal += 1
+        counts = {
+            "pending_internal": pending_internal,
+            "active_cached": active_tasks,
+        }
         pool = getattr(self._main_service, "_internal_download_pool", None)
         browser_pool_ready = False
         if pool is not None:
             try:
-                snapshot = pool.get_runtime_snapshot() if hasattr(pool, "get_runtime_snapshot") else {}
-                browser_pool_ready = bool(snapshot.get("ready", False)) if isinstance(snapshot, dict) else True
+                if hasattr(pool, "get_health_snapshot"):
+                    snapshot = pool.get_health_snapshot()
+                    browser_pool_ready = bool(snapshot.get("browser_ready", False)) if isinstance(snapshot, dict) else True
+                elif hasattr(pool, "get_runtime_snapshot"):
+                    snapshot = pool.get_runtime_snapshot()
+                    browser_pool_ready = bool(snapshot.get("ready", False)) if isinstance(snapshot, dict) else True
+                else:
+                    browser_pool_ready = True
             except Exception:
                 browser_pool_ready = False
+        with self._lock:
+            recovery_active = {
+                key: worker.name
+                for key, worker in self._recovery_threads.items()
+                if worker is not None and worker.is_alive()
+            }
         return {
             "ok": True,
             "role": "internal",
             "version": str(getattr(self._main_service, "app_version", "") or ""),
             "browser_pool_ready": browser_pool_ready,
-            "active_tasks": int(counts.get("pending_internal", 0) or 0),
+            "active_tasks": active_tasks,
             "task_counts": counts,
             "db_path": str(getattr(store, "db_path", "") or ""),
             "uptime_sec": int(time.time() - self._started_at),
+            "source_index_recovery": {
+                "active_count": len(recovery_active),
+                "max_active": self._max_source_index_recovery_threads,
+                "active_keys": sorted(recovery_active),
+            },
         }
 
     def create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -222,6 +263,7 @@ class InternalBridgeHttpTaskRunner:
             existing = self._dispatcher_thread
             if existing is not None and existing.is_alive():
                 return
+            self._stop_event.clear()
             worker = threading.Thread(
                 target=self._run_dispatcher_loop,
                 name="internal-bridge-http-dispatcher",
@@ -230,8 +272,23 @@ class InternalBridgeHttpTaskRunner:
             self._dispatcher_thread = worker
             worker.start()
 
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._worker_wake.set()
+        with self._lock:
+            dispatcher_thread = self._dispatcher_thread
+            recovery_threads = list(self._recovery_threads.values())
+        if dispatcher_thread is not None and dispatcher_thread.is_alive():
+            dispatcher_thread.join(timeout=5)
+        for worker in recovery_threads:
+            if worker is not None and worker.is_alive():
+                worker.join(timeout=1)
+        with self._lock:
+            if self._dispatcher_thread is dispatcher_thread:
+                self._dispatcher_thread = None
+
     def _run_dispatcher_loop(self) -> None:
-        while True:
+        while not self._stop_event.is_set():
             try:
                 runtime = self._ensure_runtime()
                 store = self._get_store()
@@ -381,22 +438,35 @@ class InternalBridgeHttpTaskRunner:
                 item.setdefault("file_path", str(shared_root / relative.replace("/", "\\")))
             file_path_text = str(item.get("file_path", "") or "").strip()
             item_status = str(item.get("status", "") or "").strip().lower()
-            file_verified = self._source_index_file_accessible(file_path_text) if item_status == "ready" else False
-            if item_status == "ready" and not file_verified:
-                filtered_missing = True
-                self._mark_source_index_entry_missing(
-                    item,
-                    reason="indexed_file_missing",
-                    detail=f"source-index 指向文件不可访问: {file_path_text or '-'}",
-                )
-                self._emit(
-                    "[内网HTTP桥接] source-index 已过滤不可访问源文件: "
-                    f"family={source_family or '-'}, building={item.get('building') or building or '-'}, "
-                    f"bucket={item.get('bucket_key') or bucket_key or duty_date or '-'}, path={file_path_text or '-'}"
-                )
-                continue
             if item_status == "ready":
-                item["file_verified"] = True
+                if not file_path_text:
+                    filtered_missing = True
+                    self._mark_source_index_entry_missing(
+                        item,
+                        reason="indexed_file_missing",
+                        detail="source-index 未给出文件路径",
+                    )
+                    continue
+                if _is_potentially_blocking_path(file_path_text):
+                    item["file_verified"] = True
+                    item["file_verified_by"] = "internal_index_only_no_request_path_probe"
+                    item["file_verification_skipped_reason"] = "network_path_request_probe_disabled"
+                elif not self._source_index_file_accessible(file_path_text):
+                    filtered_missing = True
+                    self._mark_source_index_entry_missing(
+                        item,
+                        reason="indexed_file_missing",
+                        detail=f"source-index 指向文件不可访问: {file_path_text or '-'}",
+                    )
+                    self._emit(
+                        "[内网HTTP桥接] source-index 已过滤不可访问源文件: "
+                        f"family={source_family or '-'}, building={item.get('building') or building or '-'}, "
+                        f"bucket={item.get('bucket_key') or bucket_key or duty_date or '-'}, path={file_path_text or '-'}"
+                    )
+                    continue
+                else:
+                    item["file_verified"] = True
+                    item["file_verified_by"] = "internal_request_path_probe"
                 item["file_verified_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             output.append(item)
         if not output or filtered_missing:
@@ -441,6 +511,17 @@ class InternalBridgeHttpTaskRunner:
         with self._lock:
             existing = self._recovery_threads.get(key)
             if existing is not None and existing.is_alive():
+                return
+            self._recovery_threads = {
+                item_key: worker
+                for item_key, worker in self._recovery_threads.items()
+                if worker is not None and worker.is_alive()
+            }
+            if len(self._recovery_threads) >= self._max_source_index_recovery_threads:
+                self._emit(
+                    f"[内网HTTP桥接] source-index 后台恢复已达并发上限，稍后重试: "
+                    f"family={family}, building={building_name}, bucket={bucket_key or duty_date}"
+                )
                 return
             worker = threading.Thread(
                 target=self._run_source_index_recovery,

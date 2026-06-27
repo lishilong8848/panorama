@@ -34,7 +34,6 @@ from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     list_alarm_rule_export_sites,
     run_alarm_rule_export,
 )
-from app.modules.updater.service.updater_service import UpdaterService
 from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
 from app.shared.utils.file_utils import (
     canonicalize_windows_path_for_compare,
@@ -113,8 +112,7 @@ class AppContainer:
     monthly_event_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     alarm_rule_export_scheduler: MonthlySchedulerService | None = None
     alarm_rule_export_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
-    updater_service: UpdaterService | None = None
-    updater_restart_callback: Callable[[Dict[str, Any]], tuple[bool, str]] | None = None
+    updater_service: Any | None = None
     alert_log_uploader: SystemAlertLogUploadService | None = None
     shared_bridge_service: SharedBridgeRuntimeService | None = None
     runtime_status_coordinator: Any | None = None
@@ -289,9 +287,6 @@ class AppContainer:
         if self.alarm_rule_export_scheduler_callback and self.alarm_rule_export_scheduler:
             _report_progress("binding_alarm_rule_export_scheduler_callback")
             self.alarm_rule_export_scheduler.run_callback = self.alarm_rule_export_scheduler_callback
-        if self.updater_restart_callback and self.updater_service:
-            _report_progress("binding_updater_restart_callback")
-            self.updater_service.restart_callback = self.updater_restart_callback
         _report_progress("runtime_dependencies_initialized")
 
     def _console_cfg(self) -> Dict[str, Any]:
@@ -542,11 +537,13 @@ class AppContainer:
             source_name="告警规则导出",
         )
 
-    def _build_updater_service(self) -> UpdaterService:
+    def _build_updater_service(self) -> Any:
+        from app.modules.updater.service.updater_service import UpdaterService
+
         return UpdaterService(
             config=self.runtime_config,
             emit_log=self.add_system_log,
-            restart_callback=self.updater_restart_callback,
+            restart_callback=None,
             is_busy=self.job_service.has_running_jobs,
         )
 
@@ -859,16 +856,8 @@ class AppContainer:
         if self.monthly_event_report_scheduler:
             self.monthly_event_report_scheduler.run_callback = callback
 
-    def set_updater_restart_callback(self, callback: Callable[[Dict[str, Any]], tuple[bool, str]]) -> None:
-        self.updater_restart_callback = callback
-        if self.updater_service:
-            self.updater_service.restart_callback = callback
-
     def request_app_restart(self, context: Dict[str, Any] | None = None) -> tuple[bool, str]:
-        callback = self.updater_restart_callback
-        if callback is None:
-            return False, "当前未绑定程序重启回调"
-        return callback(dict(context or {}))
+        return False, "内网端已移除程序重启回调"
 
     def _startup_role_handoff_path(self) -> Path:
         runtime_state_root = resolve_runtime_state_root(
@@ -1838,6 +1827,10 @@ class AppContainer:
         return result
 
     def start_updater(self, source: str = "自动") -> Dict[str, Any]:
+        if normalize_role_mode(self._configured_deployment_snapshot().get("role_mode", "")) == "internal":
+            result = {"started": False, "running": False, "reason": "disabled_on_internal"}
+            self.add_system_log("[更新] 内网端已禁用 updater，忽略启动请求")
+            return result
         self.ensure_updater_service()
         result = self.updater_service.start()
         self.add_system_log(
@@ -1846,11 +1839,11 @@ class AppContainer:
         )
         return result
 
-    def ensure_updater_service(self) -> UpdaterService:
+    def ensure_updater_service(self) -> Any:
+        if normalize_role_mode(self._configured_deployment_snapshot().get("role_mode", "")) == "internal":
+            raise RuntimeError("内网端已禁用 updater")
         if not self.updater_service:
             self.updater_service = self._build_updater_service()
-            if self.updater_restart_callback:
-                self.updater_service.restart_callback = self.updater_restart_callback
         return self.updater_service
 
     def stop_updater(self, source: str = "自动") -> Dict[str, Any]:
@@ -2019,6 +2012,19 @@ class AppContainer:
         return self.job_service.task_engine_runtime_snapshot()
 
     def updater_snapshot(self) -> Dict[str, Any]:
+        if normalize_role_mode(self._configured_deployment_snapshot().get("role_mode", "")) == "internal":
+            return {
+                "running": False,
+                "enabled": False,
+                "disabled_reason": "internal_role_disabled",
+                "last_check_at": "",
+                "last_result": "disabled",
+                "last_error": "",
+                "source_kind": "",
+                "source_label": "",
+                "update_available": False,
+                "restart_required": False,
+            }
         if not self.updater_service:
             return {
                 "running": False,
@@ -2148,7 +2154,7 @@ class AppContainer:
             status_text = "路径写法不同但目录一致"
             summary_text = "内外网路径文本不同，例如映射盘与 UNC，但归一后仍是同一共享目录。"
 
-        return {
+        snapshot = {
             "role_mode": role_mode,
             "role_label": role_label,
             "status": status,
@@ -2209,6 +2215,19 @@ class AppContainer:
                 "若内外网目录文本不同但状态为“路径写法不同但目录一致”，通常是映射盘和 UNC 的正常差异。",
             ],
         }
+        if role_mode == "internal":
+            snapshot["source_kind"] = ""
+            snapshot["paths"] = [
+                item for item in snapshot.get("paths", []) if item.get("key") != "updater_root"
+            ]
+            snapshot["items"] = [
+                item for item in snapshot.get("items", []) if item.get("label") != "更新镜像目录"
+            ]
+            snapshot["notes"] = [
+                "当前角色运行值来自后端运行时，不是前端推测值。",
+                "内网端 updater 已禁用，不再使用更新镜像目录参与诊断。",
+            ]
+        return snapshot
 
     def start_alert_log_uploader(self, source: str = "自动") -> Dict[str, Any]:
         if not self.alert_log_uploader:
@@ -2535,8 +2554,6 @@ class AppContainer:
             self.monthly_change_report_scheduler.run_callback = self.monthly_change_report_scheduler_callback
         if self.monthly_event_report_scheduler_callback:
             self.monthly_event_report_scheduler.run_callback = self.monthly_event_report_scheduler_callback
-        if self.updater_restart_callback:
-            self.updater_service.restart_callback = self.updater_restart_callback
         self.job_service.set_global_log_sink(
             lambda line: self.add_system_log(
                 line,

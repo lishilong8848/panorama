@@ -97,6 +97,11 @@ def _role_label(value: Any) -> str:
     return str(value or "").strip() or "-"
 
 
+def _is_unc_path_text(path_text: str) -> bool:
+    normalized = str(path_text or "").strip().replace("/", "\\")
+    return normalized.startswith("\\\\")
+
+
 def _default_node_id(role_mode: Any) -> str:
     role = normalize_role_mode(role_mode)
     machine_id = f"{uuid.getnode():012x}"
@@ -1531,6 +1536,11 @@ class SharedBridgeRuntimeService:
         file_path = str(item.get("file_path", "") or "").strip()
         if not file_path:
             return False
+        if _is_unc_path_text(file_path):
+            item["file_verified"] = True
+            item["file_verified_by"] = "external_http_index_unc_no_request_path_probe"
+            item["file_verification_skipped_reason"] = "unc_request_path_probe_disabled"
+            return True
         if not is_accessible_cached_file_path(file_path):
             return False
         item["file_verified"] = True

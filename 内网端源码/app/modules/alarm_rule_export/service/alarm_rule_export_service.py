@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from app.shared.runtime.building_browser_locks import (
+    acquire_building_browser_lock,
+    release_building_browser_lock,
+)
+from app.shared.utils.atomic_file import atomic_write_text
+
 
 DEFAULT_CONFIG_CANDIDATES = [
     Path(os.environ.get("INTERNAL_CONFIG_PATH", "")) if os.environ.get("INTERNAL_CONFIG_PATH") else None,
@@ -464,9 +470,7 @@ def _load_export_state(args: argparse.Namespace) -> dict[str, Any]:
 def _save_export_state(args: argparse.Namespace, state: dict[str, Any]) -> None:
     path = _state_file(args)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _upsert_export_state_record(args: argparse.Namespace, site: SiteConfig, record: dict[str, Any], status: str) -> None:
@@ -1465,7 +1469,16 @@ async def _run(args: argparse.Namespace) -> int:
                                 "message": message,
                             }
                         site_browser = None
+                        resource_acquired = False
                         try:
+                            resource_acquired = await asyncio.to_thread(
+                                acquire_building_browser_lock,
+                                site.building,
+                                owner="alarm_rule_export",
+                                timeout_sec=float(getattr(args, "browser_resource_wait_sec", 300) or 300),
+                            )
+                            if not resource_acquired:
+                                raise RuntimeError(f"{site.building} 浏览器资源正在被其他任务占用，等待超时")
                             site_browser = await p.chromium.launch(**dict(launch_options))
                             opened_browsers.append(site_browser)
                             return await export_alarm_rules(site_browser, site, args)
@@ -1476,6 +1489,9 @@ async def _run(args: argparse.Namespace) -> int:
                                 "status": "failed",
                                 "message": str(exc),
                             }
+                        finally:
+                            if resource_acquired:
+                                await asyncio.to_thread(release_building_browser_lock, site.building)
 
                 results = await asyncio.gather(*(one(site) for site in sites))
                 ok = [item for item in results if item["status"] == "exported"]
@@ -1514,6 +1530,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-root", default="", help="下载根目录；默认使用内网端共享目录，未配置共享目录时回退 D:\\QLDownload")
     parser.add_argument("--screenshots-dir", default=str(DEFAULT_SCREENSHOT_DIR), help="失败截图目录")
     parser.add_argument("--parallel", type=int, default=5, help="并发楼栋数，默认 5；每个楼栋启动一个独立浏览器")
+    parser.add_argument("--browser-resource-wait-sec", type=float, default=300, help="等待楼栋浏览器资源锁秒数")
     parser.add_argument("--browser-executable", help="指定本机 Chrome/Edge 可执行文件路径")
     parser.add_argument("--use-playwright-chromium", action="store_true", help="强制使用 Playwright 自带 Chromium")
     parser.add_argument("--headless", action="store_true", help="无界面模式运行")

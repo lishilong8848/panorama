@@ -5,10 +5,7 @@ import copy
 import json
 from contextlib import asynccontextmanager
 import os
-import subprocess
-import sys
 import threading
-import time
 from datetime import datetime, timedelta
 from ipaddress import ip_address
 from typing import Any, Dict
@@ -459,6 +456,13 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_updater(source="关闭自动")
             if container.alert_log_uploader:
                 container.stop_alert_log_uploader(source="关闭自动")
+            internal_bridge_runner = getattr(_app.state, "_internal_bridge_http_runner", None)
+            stop_internal_bridge_runner = getattr(internal_bridge_runner, "stop", None)
+            if callable(stop_internal_bridge_runner):
+                try:
+                    stop_internal_bridge_runner()
+                except Exception:  # noqa: BLE001
+                    pass
             if container.shared_bridge_service:
                 container.stop_shared_bridge(source="关闭自动")
             container.job_service.shutdown_task_engine()
@@ -1705,80 +1709,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
 
-    def updater_restart_callback(context: dict) -> tuple[bool, str]:
-        wrote_startup_handoff = False
-        try:
-            write_startup_role_handoff = getattr(container, "write_startup_role_handoff", None)
-            clear_startup_role_handoff = getattr(container, "clear_startup_role_handoff", None)
-            deployment_snapshot = container.deployment_snapshot() if hasattr(container, "deployment_snapshot") else {}
-            if not isinstance(deployment_snapshot, dict):
-                deployment_snapshot = {}
-            target_role_mode = normalize_role_mode(deployment_snapshot.get("role_mode"))
-            if callable(write_startup_role_handoff) and target_role_mode in {"internal", "external"}:
-                write_startup_role_handoff(
-                    target_role_mode=target_role_mode,
-                    source="updater_restart",
-                    reason=str((context or {}).get("reason", "") or "updater_apply").strip(),
-                    source_startup_time=str(getattr(app.state, "started_at", "") or "").strip(),
-                )
-                wrote_startup_handoff = True
-            restart_exit_code = str(os.environ.get("QJPT_RESTART_EXIT_CODE", "") or "").strip()
-            if restart_exit_code:
-                try:
-                    exit_code = int(restart_exit_code)
-                except Exception as exc:  # noqa: BLE001
-                    return False, f"无效的重启退出码: {exc}"
-
-                container.add_system_log("[更新] 已安排在当前窗口内重启")
-
-                def _exit_later() -> None:
-                    time.sleep(1)
-                    os._exit(exit_code)
-
-                threading.Thread(target=_exit_later, daemon=True, name="updater-restart").start()
-                return True, "same_console_restart_scheduled"
-
-            app_dir = get_app_dir()
-            app_root_dir = get_app_root_dir(app_dir)
-            launcher_bat = app_root_dir / "启动程序.bat"
-            portable_launcher = app_dir / "portable_launcher.py"
-            if sys.platform.startswith("win") and launcher_bat.exists() and app_root_dir != app_dir:
-                cmd = ["cmd.exe", "/c", str(launcher_bat)]
-                popen_kwargs = {"cwd": str(app_root_dir)}
-            elif (
-                not getattr(sys, "frozen", False)
-                and not str(os.environ.get("QJPT_PORTABLE_LAUNCHER", "") or "").strip()
-                and portable_launcher.exists()
-            ):
-                cmd = [sys.executable, str(portable_launcher)]
-                popen_kwargs = {"cwd": str(app_dir)}
-            elif sys.platform.startswith("win") and launcher_bat.exists():
-                cmd = ["cmd.exe", "/c", str(launcher_bat)]
-                popen_kwargs = {"cwd": str(app_root_dir)}
-            elif getattr(sys, "frozen", False):
-                cmd = [sys.executable]
-                popen_kwargs = {"cwd": str(app_dir)}
-            else:
-                cmd = [sys.executable, str(app_dir / "main.py")]
-                popen_kwargs = {"cwd": str(app_dir)}
-
-            child_env = dict(os.environ)
-            child_env["QJPT_DISABLE_BROWSER_AUTO_OPEN"] = "1"
-            popen_kwargs["env"] = child_env
-
-            subprocess.Popen(cmd, **popen_kwargs)
-            container.add_system_log(f"[更新] 已安排当前控制台重启: {' '.join(cmd)}")
-
-            def _exit_later() -> None:
-                time.sleep(1)
-                os._exit(0)
-
-            threading.Thread(target=_exit_later, daemon=True, name="updater-restart").start()
-            return True, "restart_scheduled"
-        except Exception as exc:  # noqa: BLE001
-            if wrote_startup_handoff and callable(clear_startup_role_handoff):
-                clear_startup_role_handoff()
-            return False, str(exc)
     setter = getattr(container, "set_scheduler_callback", None)
     if callable(setter):
         setter(scheduler_callback)
@@ -1800,9 +1730,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     setter = getattr(container, "set_monthly_event_report_scheduler_callback", None)
     if callable(setter):
         setter(monthly_event_report_scheduler_callback)
-    setter = getattr(container, "set_updater_restart_callback", None)
-    if callable(setter):
-        setter(updater_restart_callback)
     @app.get("/")
     def root_redirect() -> Response:
         return RedirectResponse(url="/internal/status", status_code=307)

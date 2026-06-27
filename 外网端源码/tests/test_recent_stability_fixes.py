@@ -215,6 +215,7 @@ def test_http_source_index_uses_short_cache_and_coalesces_requests():
                             "bucket_key": query["bucket_or_date"],
                             "relative_path": f"支路功率源文件/202606/20260609--整日/{query['building']}.xlsx",
                             "status": "ready",
+                            "file_verified": True,
                         }
                     ],
                 }
@@ -252,3 +253,49 @@ def test_http_source_index_uses_short_cache_and_coalesces_requests():
         bucket_key="2026-06-09",
     )
     assert client.calls == 1
+
+
+def test_http_source_index_accepts_unc_ready_entry_without_request_path_probe():
+    service = SharedBridgeRuntimeService(
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"enabled": True, "root_dir": r"\\172.16.1.2\share"},
+            "internal_bridge_http": {"enabled": True, "base_url": "http://internal", "read_timeout_sec": 1},
+        },
+        app_version="test",
+        emit_log=lambda _text: None,
+    )
+
+    class Client:
+        read_timeout_sec = 1
+
+        def source_index_batch(self, queries, *, default_limit=50):
+            return [
+                {
+                    "index": 0,
+                    "ok": True,
+                    "entries": [
+                        {
+                            "entry_id": "entry-unc",
+                            "source_family": "branch_power_family",
+                            "building": "A楼",
+                            "bucket_kind": "daily",
+                            "bucket_key": "2026-06-09",
+                            "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.xlsx",
+                            "status": "ready",
+                        }
+                    ],
+                }
+            ]
+
+    service._internal_bridge_http_client = Client()  # type: ignore[assignment]
+
+    rows = service._http_source_index_entries(
+        source_family="branch_power_family",
+        buildings=["A楼"],
+        bucket_key="2026-06-09",
+    )
+
+    assert rows and len(rows) == 1
+    assert rows[0]["file_verified"] is True
+    assert rows[0]["file_verified_by"] == "external_http_index_unc_no_request_path_probe"

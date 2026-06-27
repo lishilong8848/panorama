@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict
 
+from app.shared.utils.atomic_file import atomic_write_text
 from pipeline_utils import get_app_dir
 
 
@@ -116,7 +117,11 @@ class MonthlySchedulerService:
     def _save_state(self) -> None:
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(
+                self.state_path,
+                json.dumps(self.state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception as exc:
             self._log(f"保存状态失败: {exc}")
 
