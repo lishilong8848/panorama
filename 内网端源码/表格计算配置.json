@@ -17,6 +17,19 @@
       "node_id": "",
       "node_label": "内网端"
     },
+    "internal_bridge_http": {
+      "enabled": true,
+      "bind_host": "0.0.0.0",
+      "port": 18765,
+      "base_url": "http://172.16.1.2:18765",
+      "auth_token": "123456789",
+      "allowed_client_ips": [
+        "172.16.1.1"
+      ],
+      "connect_timeout_sec": 3,
+      "read_timeout_sec": 5,
+      "request_timeout_sec": 5
+    },
     "paths": {
       "business_root_dir": "D:\\QLDownload",
       "runtime_state_root": ".runtime"
