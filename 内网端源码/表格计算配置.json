@@ -22,7 +22,7 @@
       "bind_host": "0.0.0.0",
       "port": 18765,
       "base_url": "http://172.16.1.2:18765",
-      "auth_token": "123456789",
+      "auth_token": "",
       "allowed_client_ips": [
         "172.16.1.1"
       ],

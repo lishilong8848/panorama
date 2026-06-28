@@ -51,9 +51,7 @@ def _require_enabled_and_authorized(
     if normalized_ips and host not in normalized_ips:
         raise HTTPException(status_code=403, detail="当前客户端 IP 不允许调用内网桥接接口")
     expected_token = str(cfg.get("auth_token", "") or "").strip()
-    if not expected_token:
-        raise HTTPException(status_code=503, detail="内网桥接 auth_token 未配置")
-    if str(x_bridge_token or "").strip() != expected_token:
+    if expected_token and str(x_bridge_token or "").strip() != expected_token:
         raise HTTPException(status_code=401, detail="内网桥接 token 无效")
     return cfg
 
