@@ -1367,6 +1367,34 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 },
             },
         },
+        "alarm_rule_export_upload": {
+            "enabled": True,
+            "buildings": ["A楼", "B楼", "C楼", "D楼", "E楼"],
+            "month_value_format": "{period}",
+            "scheduler": {
+                "enabled": False,
+                "auto_start_in_gui": False,
+                "day_of_month": 1,
+                "run_time": "04:30:00",
+                "check_interval_sec": 30,
+                "catch_up_if_missed": True,
+                "retry_failed_in_same_period": True,
+                "state_file": "alarm_rule_export_upload_scheduler_state.json",
+            },
+            "target": {
+                "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+                "table_id": "tblNyGBGSCnWhWyL",
+                "page_size": 500,
+                "max_records": 5000,
+                "delete_batch_size": 200,
+                "create_batch_size": 200,
+                "fields": {
+                    "building": "楼栋",
+                    "month": "月份",
+                    "attachment": "附件",
+                },
+            },
+        },
         "alarm_export": {
             "scheduler": {
                 "enabled": False,

@@ -9,6 +9,7 @@ import {
   postSheetImportJob,
   retryJobApi,
   startJsonJobApi,
+  submitAlarmRuleExportUploadJob,
   submitBranchPowerFromDownloadJob,
   submitBranchPowerPowerAlertSyncJob,
   submitDayMetricFromDownloadJob,
@@ -35,6 +36,7 @@ const ACTION_KEYS = {
   top5PowerReport: "job:top5_power_report",
   top5OverPowerAttachment: "job:top5_over_power_attachment",
   monthlyPowerAlertReport: "job:monthly_power_alert_report",
+  alarmRuleExportUpload: "job:alarm_rule_export_upload",
   dayMetricFromFile: "job:day_metric_from_file",
   dayMetricRetryUnit: "job:day_metric_retry_unit",
   dayMetricRetryFailed: "job:day_metric_retry_failed",
@@ -78,6 +80,8 @@ export function createDashboardJobActions(ctx) {
     top5OverPowerMonth,
     monthlyPowerAlertReportYear,
     monthlyPowerAlertReportMonth,
+    alarmRuleExportUploadYear,
+    alarmRuleExportUploadMonth,
     streamController,
     fetchHealth,
     fetchJobs,
@@ -652,6 +656,12 @@ if (!canRun.value) return;
     return job;
   }
 
+  function getAlarmRuleExportUploadJob() {
+    const job = currentJob?.value && typeof currentJob.value === "object" ? currentJob.value : null;
+    if (!job || String(job.feature || "").trim() !== "alarm_rule_export_upload") return null;
+    return job;
+  }
+
   function getTop5PowerReportResult() {
     const job = getTop5PowerReportJob();
     const result = job?.result && typeof job.result === "object" ? job.result : {};
@@ -689,6 +699,12 @@ if (!canRun.value) return;
 
   function getMonthlyPowerAlertReportResult() {
     const job = getMonthlyPowerAlertReportJob();
+    const result = job?.result && typeof job.result === "object" ? job.result : {};
+    return result && typeof result === "object" ? result : {};
+  }
+
+  function getAlarmRuleExportUploadResult() {
+    const job = getAlarmRuleExportUploadJob();
     const result = job?.result && typeof job.result === "object" ? job.result : {};
     return result && typeof result === "object" ? result : {};
   }
@@ -731,6 +747,29 @@ if (!canRun.value) return;
 
   function getMonthlyPowerAlertReportStatusTone() {
     const job = getMonthlyPowerAlertReportJob();
+    const status = String(job?.status || "").trim().toLowerCase();
+    if (status === "success") return "success";
+    if (status === "failed") return "danger";
+    if (status === "running" || status === "queued" || status === "waiting_resource") return "info";
+    if (status === "cancelled") return "neutral";
+    return "neutral";
+  }
+
+  function getAlarmRuleExportUploadStatusText() {
+    const job = getAlarmRuleExportUploadJob();
+    if (!job) return "尚未执行";
+    const status = String(job.status || "").trim().toLowerCase();
+    if (status === "success") return "已上传";
+    if (status === "failed") return "上传失败";
+    if (status === "running") return "上传中";
+    if (status === "queued") return "排队中";
+    if (status === "waiting_resource") return "等待资源";
+    if (status === "cancelled") return "已取消";
+    return job.status || "处理中";
+  }
+
+  function getAlarmRuleExportUploadStatusTone() {
+    const job = getAlarmRuleExportUploadJob();
     const status = String(job?.status || "").trim().toLowerCase();
     if (status === "success") return "success";
     if (status === "failed") return "danger";
@@ -893,6 +932,34 @@ if (!canRun.value) return;
     link.click();
     link.remove();
     message.value = "月度超功率统计表下载已开始";
+  }
+
+  async function runAlarmRuleExportUpload() {
+    if (!canRun.value) return;
+    const yearText = String(alarmRuleExportUploadYear?.value || new Date().getFullYear()).trim();
+    const monthNumber = Number.parseInt(String(alarmRuleExportUploadMonth?.value || new Date().getMonth() + 1), 10);
+    if (!/^20\d{2}$/.test(yearText)) {
+      message.value = "告警规则附件上传年份格式错误，请填写四位年份";
+      return;
+    }
+    if (!Number.isFinite(monthNumber) || monthNumber < 1 || monthNumber > 12) {
+      message.value = "告警规则附件上传月份必须在 1-12 之间";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.alarmRuleExportUpload,
+      async () => {
+        try {
+          const period = `${yearText}-${String(monthNumber).padStart(2, "0")}`;
+          message.value = `告警规则导出附件上传任务已提交: ${period}`;
+          const response = await submitAlarmRuleExportUploadJob({ period });
+          await applyAcceptedExecutionResponse(response, "告警规则导出附件上传");
+        } catch (err) {
+          message.value = `告警规则导出附件上传提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
   }
 
   async function runDayMetricFromFile() {
@@ -1066,6 +1133,10 @@ if (!canRun.value) return;
     getMonthlyPowerAlertReportResult,
     getMonthlyPowerAlertReportStatusText,
     getMonthlyPowerAlertReportStatusTone,
+    runAlarmRuleExportUpload,
+    getAlarmRuleExportUploadResult,
+    getAlarmRuleExportUploadStatusText,
+    getAlarmRuleExportUploadStatusTone,
     runDayMetricFromFile,
     retryDayMetricUnit,
     retryFailedDayMetricUnits,

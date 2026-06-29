@@ -35,6 +35,9 @@ from app.config.settings_loader import (
     save_settings,
 )
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
+from app.modules.alarm_rule_export_upload.service.alarm_rule_export_upload_service import (
+    AlarmRuleExportUploadService,
+)
 from app.modules.report_pipeline.service.resume_checkpoint_store import (
     resolve_resume_index_path as resolve_monthly_resume_index_path,
 )
@@ -4997,6 +5000,50 @@ def download_monthly_power_alert_report(job_id: str, request: Request):
         filename=file_name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@router.post("/api/jobs/alarm-rule-export/upload")
+def job_alarm_rule_export_upload_run(
+    request: Request,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端上传告警规则导出附件")
+
+    raw_period = str(payload.get("period", "") or "").strip()
+    if not raw_period:
+        year = str(payload.get("year", "") or "").strip()
+        month_raw = payload.get("month", "")
+        if year or month_raw not in ("", None):
+            try:
+                month = int(month_raw)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail="月份必须为 1-12 的数字") from exc
+            raw_period = f"{year}-{month:02d}"
+    try:
+        period = AlarmRuleExportUploadService.normalize_period(raw_period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        job = _start_background_job(
+            container,
+            name=f"告警规则导出附件上传 {period}",
+            run_func=None,
+            worker_handler="alarm_rule_export_upload",
+            worker_payload={"period": period},
+            resource_keys=_job_resource_keys(f"alarm_rule_export_upload:{period}"),
+            priority="manual",
+            feature="alarm_rule_export_upload",
+            dedupe_key=_job_dedupe_key("alarm_rule_export_upload", period=period),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: 告警规则导出附件上传 {period} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/api/jobs/monthly-change-report/run")

@@ -11,6 +11,7 @@ import { DASHBOARD_WET_BULB_COLLECTION_SECTION } from "./dashboard_template_sect
 import { DASHBOARD_CHILLER_MODE_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_chiller_mode_upload_section.js";
 import { DASHBOARD_MONTHLY_EVENT_REPORT_SECTION } from "./dashboard_template_sections/dashboard_monthly_event_report_section.js";
 import { DASHBOARD_ALARM_EVENT_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_alarm_event_upload_section.js";
+import { DASHBOARD_ALARM_RULE_EXPORT_UPLOAD_SECTION } from "./dashboard_template_sections/dashboard_alarm_rule_export_upload_section.js";
 
 export const DASHBOARD_TEMPLATE = `<section v-if="showDashboardPageNav && isDashboardView" class="dashboard-layout">
       <aside class="content-card dashboard-menu" :class="{ 'is-open': dashboardModuleMenuOpen }">
@@ -301,6 +302,7 @@ ${DASHBOARD_WET_BULB_COLLECTION_SECTION}
 ${DASHBOARD_CHILLER_MODE_UPLOAD_SECTION}
 ${DASHBOARD_MONTHLY_EVENT_REPORT_SECTION}
 ${DASHBOARD_ALARM_EVENT_UPLOAD_SECTION}
+${DASHBOARD_ALARM_RULE_EXPORT_UPLOAD_SECTION}
       </div>
     </section>`;
 

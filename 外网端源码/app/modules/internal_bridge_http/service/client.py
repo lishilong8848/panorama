@@ -5,7 +5,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 
 class InternalBridgeHttpError(RuntimeError):
@@ -103,6 +103,64 @@ class InternalBridgeHttpClient:
             raise InternalBridgeHttpError(f"内网端 HTTP 返回 {exc.code}: {body or exc.reason}") from exc
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             raise InternalBridgeHttpError(f"内网端 HTTP 请求失败: {exc}") from exc
+
+    def _request_bytes(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: Dict[str, Any] | None = None,
+    ) -> Tuple[bytes, str, str]:
+        if not self.base_url:
+            raise InternalBridgeHttpError("内网端 HTTP 桥接 base_url 未配置")
+        path_text = str(path or "").strip()
+        if not path_text.startswith("/"):
+            path_text = "/" + path_text
+        url = self.base_url + path_text
+        if query:
+            clean_query = {
+                str(key): str(value)
+                for key, value in query.items()
+                if value is not None and str(value).strip() != ""
+            }
+            if clean_query:
+                url += "?" + urllib.parse.urlencode(clean_query)
+        req = urllib.request.Request(
+            url,
+            method=str(method or "GET").upper(),
+            headers={"Accept": "application/octet-stream"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.read_timeout_sec) as resp:
+                content = resp.read()
+                content_type = str(resp.headers.get("Content-Type", "") or "").strip()
+                disposition = str(resp.headers.get("Content-Disposition", "") or "").strip()
+                return content, self._filename_from_content_disposition(disposition), content_type
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            raise InternalBridgeHttpError(f"内网端 HTTP 返回 {exc.code}: {body or exc.reason}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise InternalBridgeHttpError(f"内网端 HTTP 请求失败: {exc}") from exc
+
+    @staticmethod
+    def _filename_from_content_disposition(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        match = re.search(r"filename\*=UTF-8''([^;]+)", text, flags=re.IGNORECASE)
+        if match:
+            return urllib.parse.unquote(match.group(1).strip().strip('"'))
+        match = re.search(r'filename="([^"]+)"', text, flags=re.IGNORECASE)
+        if match:
+            return urllib.parse.unquote(match.group(1).strip())
+        match = re.search(r"filename=([^;]+)", text, flags=re.IGNORECASE)
+        if match:
+            return urllib.parse.unquote(match.group(1).strip().strip('"'))
+        return ""
 
     def health(self) -> Dict[str, Any]:
         return self._request("GET", "/api/internal-bridge/health")
@@ -218,5 +276,32 @@ class InternalBridgeHttpClient:
             payload={
                 "source_family": str(source_family or "").strip(),
                 "buildings": [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()],
+            },
+        )
+
+    def list_alarm_rule_export_files(self, *, period: str = "", building: str = "") -> Dict[str, Any]:
+        return self._request(
+            "GET",
+            "/api/internal-bridge/alarm-rule-export/files",
+            query={
+                "period": str(period or "").strip(),
+                "building": str(building or "").strip(),
+            },
+        )
+
+    def download_alarm_rule_export_file(
+        self,
+        *,
+        period: str,
+        building: str,
+        file_name: str,
+    ) -> Tuple[bytes, str, str]:
+        return self._request_bytes(
+            "GET",
+            "/api/internal-bridge/alarm-rule-export/files/download",
+            query={
+                "period": str(period or "").strip(),
+                "building": str(building or "").strip(),
+                "file_name": str(file_name or "").strip(),
             },
         )

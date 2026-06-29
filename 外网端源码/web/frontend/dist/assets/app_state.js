@@ -799,6 +799,8 @@ export function createAppState(vueApi) {
   const top5OverPowerMonth = ref(new Date().getMonth() + 1);
   const monthlyPowerAlertReportYear = ref(String(new Date().getFullYear()));
   const monthlyPowerAlertReportMonth = ref(new Date().getMonth() + 1);
+  const alarmRuleExportUploadYear = ref(String(new Date().getFullYear()));
+  const alarmRuleExportUploadMonth = ref(new Date().getMonth() + 1);
   const handoverFile = ref(null);
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
@@ -2043,6 +2045,8 @@ export function createAppState(vueApi) {
     top5OverPowerMonth,
     monthlyPowerAlertReportYear,
     monthlyPowerAlertReportMonth,
+    alarmRuleExportUploadYear,
+    alarmRuleExportUploadMonth,
     handoverFile,
     handoverFilesByBuilding,
     handoverDutyDate,

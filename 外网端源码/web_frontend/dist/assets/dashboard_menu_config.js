@@ -85,6 +85,11 @@ const SPECIAL_GROUP = {
       title: '告警信息上传',
       desc: '读取每小时共享告警文件，筛选 60 天内记录并写入多维表。',
     },
+    {
+      id: 'alarm_rule_export_upload',
+      title: '告警规则附件上传',
+      desc: '按月份读取内网端导出的告警规则文件，上传到多维表附件字段。',
+    },
   ],
 };
 
