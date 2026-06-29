@@ -1277,7 +1277,8 @@ class SharedBridgeStore:
     def create_branch_power_upload_task(
         self,
         *,
-        buildings: List[str] | None,
+        buildings: List[str] | None = None,
+        download_buildings: List[str] | None = None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         target_bucket_keys: List[str] | None = None,
@@ -1295,9 +1296,10 @@ class SharedBridgeStore:
         task_id = uuid.uuid4().hex
         now_text = _now_text()
         payload: Dict[str, Any] | None = None
+        effective_buildings = download_buildings if download_buildings is not None else buildings
         normalized_buildings = [
             str(item or "").strip()
-            for item in (buildings or [])
+            for item in (effective_buildings or [])
             if str(item or "").strip()
         ]
         normalized_bucket_keys = [
@@ -1335,6 +1337,7 @@ class SharedBridgeStore:
             )
         request_payload = {
             "buildings": normalized_buildings,
+            "download_buildings": normalized_buildings,
             "resume_job_id": str(resume_job_id or "").strip(),
             "target_bucket_key": resolved_target_bucket_key,
             "target_bucket_keys": normalized_bucket_keys,

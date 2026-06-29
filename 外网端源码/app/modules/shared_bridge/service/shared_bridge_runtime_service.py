@@ -792,6 +792,7 @@ class SharedBridgeRuntimeService:
             return False
         bridge_kwargs = {
             "buildings": buildings,
+            "download_buildings": buildings,
             "resume_job_id": job_id,
             "target_bucket_key": business_date,
             "target_business_date": business_date,
@@ -4366,7 +4367,8 @@ class SharedBridgeRuntimeService:
     def create_branch_power_upload_task(
         self,
         *,
-        buildings: List[str] | None,
+        buildings: List[str] | None = None,
+        download_buildings: List[str] | None = None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         target_bucket_keys: List[str] | None = None,
@@ -4382,8 +4384,10 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
+        effective_buildings = download_buildings if download_buildings is not None else buildings
         return self._store.create_branch_power_upload_task(
-            buildings=buildings,
+            buildings=effective_buildings,
+            download_buildings=download_buildings,
             resume_job_id=resume_job_id,
             target_bucket_key=target_bucket_key,
             target_bucket_keys=target_bucket_keys,
@@ -4464,7 +4468,8 @@ class SharedBridgeRuntimeService:
     def get_or_create_branch_power_upload_task(
         self,
         *,
-        buildings: List[str] | None,
+        buildings: List[str] | None = None,
+        download_buildings: List[str] | None = None,
         resume_job_id: str | None = None,
         target_bucket_key: str | None = None,
         target_bucket_keys: List[str] | None = None,
@@ -4480,7 +4485,8 @@ class SharedBridgeRuntimeService:
         if not self._store:
             raise RuntimeError("共享桥接未配置")
         self._store.ensure_ready()
-        normalized_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        effective_buildings = download_buildings if download_buildings is not None else buildings
+        normalized_buildings = [str(item or "").strip() for item in (effective_buildings or []) if str(item or "").strip()]
         normalized_upload_buildings = [str(item or "").strip() for item in (upload_buildings or []) if str(item or "").strip()]
         normalized_bucket_keys = [str(item or "").strip() for item in (target_bucket_keys or []) if str(item or "").strip()]
         normalized_requested_units: List[Dict[str, Any]] = []
@@ -4519,6 +4525,7 @@ class SharedBridgeRuntimeService:
             return existing
         return self.create_branch_power_upload_task(
             buildings=normalized_buildings,
+            download_buildings=normalized_buildings,
             resume_job_id=resume_job_id,
             target_bucket_key=resolved_bucket_key,
             target_bucket_keys=normalized_bucket_keys,
