@@ -86,6 +86,12 @@ FAMILY_LABELS = {
     FAMILY_BUILDING_FULL_CABINET_POWER: "楼栋全机柜功率源文件",
     FAMILY_CHILLER_MODE_SWITCH: "制冷单元模式切换参数源文件",
 }
+DAILY_AUTO_SOURCE_FAMILIES = (
+    FAMILY_BRANCH_POWER,
+    FAMILY_BRANCH_CURRENT,
+    FAMILY_BRANCH_SWITCH,
+    FAMILY_BUILDING_FULL_CABINET_POWER,
+)
 
 ALARM_EVENT_BITABLE_TARGET_FIELDS = {
     "level": "等级",
@@ -288,9 +294,27 @@ class SharedSourceCacheService:
             "completed_buildings": [],
             "scope_text": "当前小时 / 最近定时",
         }
+        self._daily_source_refresh: Dict[str, Any] = {
+            "running": False,
+            "last_attempt_business_date": "",
+            "last_success_business_date": "",
+            "last_run_at": "",
+            "last_success_at": "",
+            "last_error": "",
+            "failed_units": [],
+            "blocked_units": [],
+            "running_units": [],
+            "completed_units": [],
+            "scope_text": "每日整日源文件",
+        }
+        self._last_daily_source_run_monotonic = 0.0
         self._last_scheduler_log_signature = ""
         self._last_chiller_mode_switch_run_monotonic = 0.0
         self._chiller_mode_switch_interval_sec = 600
+        self._daily_source_download_enabled = True
+        self._daily_source_download_time = dt_time(hour=0, minute=30)
+        self._daily_source_retry_interval_sec = 300
+        self._daily_source_families: tuple[str, ...] = DAILY_AUTO_SOURCE_FAMILIES
         self._alarm_external_upload_state: Dict[str, Any] = {
             "running": False,
             "started_at": "",
@@ -787,6 +811,7 @@ class SharedSourceCacheService:
             current_bucket = self._current_hour_bucket or self.current_hour_bucket()
             families = copy.deepcopy(self._family_status)
             current_hour_refresh = copy.deepcopy(self._current_hour_refresh)
+            daily_source_refresh = copy.deepcopy(self._daily_source_refresh)
             last_run_at = self._last_run_at
             last_success_at = self._last_success_at
             last_error = self._last_error
@@ -841,6 +866,15 @@ class SharedSourceCacheService:
             alarm_family = {"current_bucket": alarm_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
         try:
+            branch_power_family = self._build_family_health_snapshot(
+                source_family=FAMILY_BRANCH_POWER,
+                current_bucket=branch_bucket,
+                include_latest_selection=include_latest_selection,
+            )
+        except Exception as exc:  # noqa: BLE001
+            branch_power_family = {"current_bucket": branch_bucket, "buildings": []}
+            snapshot_error = snapshot_error or str(exc)
+        try:
             branch_current_family = self._build_family_health_snapshot(
                 source_family=FAMILY_BRANCH_CURRENT,
                 current_bucket=branch_bucket,
@@ -888,6 +922,10 @@ class SharedSourceCacheService:
             **alarm_family,
             "external_upload": alarm_external_upload,
         }
+        families[FAMILY_BRANCH_POWER] = {
+            **families.get(FAMILY_BRANCH_POWER, {}),
+            **branch_power_family,
+        }
         families[FAMILY_BRANCH_CURRENT] = {
             **families.get(FAMILY_BRANCH_CURRENT, {}),
             **branch_current_family,
@@ -913,6 +951,7 @@ class SharedSourceCacheService:
             "last_error": last_error or snapshot_error,
             "cache_root": str(self.shared_root) if self.shared_root else "",
             "current_hour_refresh": current_hour_refresh,
+            "daily_source_refresh": daily_source_refresh,
             FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
             FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
@@ -1346,6 +1385,11 @@ class SharedSourceCacheService:
         deployment = self.runtime_config.get("deployment", {}) if isinstance(self.runtime_config.get("deployment", {}), dict) else {}
         shared_bridge = self.runtime_config.get("shared_bridge", {}) if isinstance(self.runtime_config.get("shared_bridge", {}), dict) else {}
         source_cache = self.runtime_config.get("internal_source_cache", {}) if isinstance(self.runtime_config.get("internal_source_cache", {}), dict) else {}
+        daily_source_cfg = (
+            source_cache.get("daily_source_download", {})
+            if isinstance(source_cache.get("daily_source_download", {}), dict)
+            else {}
+        )
         resolved_bridge = resolve_shared_bridge_paths(shared_bridge, deployment.get("role_mode"))
         if isinstance(self.runtime_config, dict):
             self.runtime_config["shared_bridge"] = copy.deepcopy(resolved_bridge)
@@ -1356,6 +1400,23 @@ class SharedSourceCacheService:
         self.check_interval_sec = max(5, int(source_cache.get("check_interval_sec", 30) or 30))
         self.latest_required = bool(source_cache.get("latest_required", True))
         self.history_fill_timeout_sec = max(60, int(source_cache.get("history_fill_timeout_sec", 1800) or 1800))
+        self._daily_source_download_enabled = bool(daily_source_cfg.get("enabled", True))
+        self._daily_source_download_time = self._parse_time_text(
+            daily_source_cfg.get("run_time", "00:30:00"),
+            default=dt_time(hour=0, minute=30),
+        )
+        self._daily_source_retry_interval_sec = max(
+            60,
+            int(daily_source_cfg.get("retry_interval_sec", 300) or 300),
+        )
+        configured_families = daily_source_cfg.get("families", [])
+        normalized_daily_families: list[str] = []
+        if isinstance(configured_families, list):
+            for item in configured_families:
+                family = self._normalize_source_family(str(item or ""))
+                if family in DAILY_AUTO_SOURCE_FAMILIES and family not in normalized_daily_families:
+                    normalized_daily_families.append(family)
+        self._daily_source_families = tuple(normalized_daily_families or DAILY_AUTO_SOURCE_FAMILIES)
         chiller_mode_switch_cfg = (
             self.runtime_config.get("handover_log", {}).get("chiller_mode_switch", {})
             if isinstance(self.runtime_config.get("handover_log", {}), dict)
@@ -1379,6 +1440,16 @@ class SharedSourceCacheService:
         )
         self._chiller_mode_switch_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_CHILLER_MODE_SWITCH] if self.shared_root else None
         self._tmp_root = self.shared_root / "tmp" / "source_cache" if self.shared_root else None
+
+    @staticmethod
+    def _parse_time_text(value: Any, *, default: dt_time) -> dt_time:
+        text = str(value or "").strip()
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                return datetime.strptime(text, fmt).time()
+            except ValueError:
+                continue
+        return default
 
     def update_runtime_config(self, runtime_config: Dict[str, Any]) -> None:
         self.runtime_config = copy.deepcopy(runtime_config if isinstance(runtime_config, dict) else {})
@@ -1550,6 +1621,7 @@ class SharedSourceCacheService:
             active_downloads = dict(self._active_latest_downloads)
             alarm_external_upload = copy.deepcopy(self._alarm_external_upload_state)
             manual_alarm_refresh = copy.deepcopy(self._manual_alarm_refresh)
+            daily_source_refresh = copy.deepcopy(self._daily_source_refresh)
         if normalized_mode == "internal_light":
             alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
             branch_bucket = (
@@ -1670,6 +1742,7 @@ class SharedSourceCacheService:
                 "last_error": last_error,
                 "cache_root": str(self.shared_root) if self.shared_root else "",
                 "current_hour_refresh": current_hour_refresh,
+                "daily_source_refresh": daily_source_refresh,
                 FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
                 FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
                 FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
@@ -6438,6 +6511,135 @@ class SharedSourceCacheService:
                 self._last_chiller_mode_switch_run_monotonic = time.monotonic()
                 self._last_run_at = _now_text()
 
+    def _daily_source_steps(self, *, business_date: str) -> List[tuple[str, str, Callable[..., Any]]]:
+        fill_funcs: Dict[str, Callable[..., Any]] = {
+            FAMILY_BRANCH_POWER: self.fill_branch_power_day_latest,
+            FAMILY_BRANCH_CURRENT: self.fill_branch_current_day_latest,
+            FAMILY_BRANCH_SWITCH: self.fill_branch_switch_day_latest,
+            FAMILY_BUILDING_FULL_CABINET_POWER: self.fill_building_full_cabinet_power_day_latest,
+        }
+        steps: List[tuple[str, str, Callable[..., Any]]] = []
+        for source_family in self._daily_source_families:
+            normalized_family = self._normalize_source_family(source_family)
+            fill_func = fill_funcs.get(normalized_family)
+            if fill_func is not None:
+                steps.append((normalized_family, business_date, fill_func))
+        return steps
+
+    def _mark_daily_source_refresh(self, **fields: Any) -> None:
+        with self._lock:
+            self._daily_source_refresh.update(fields)
+            self._external_full_snapshot_dirty = True
+
+    def _run_daily_source_files_if_due(self, when: datetime | None = None, *, force: bool = False) -> None:
+        if not self._daily_source_download_enabled:
+            return
+        now_dt = when or datetime.now()
+        if not force and now_dt.time() < self._daily_source_download_time:
+            return
+        business_date = self.branch_power_business_date(now_dt)
+        now_mono = time.monotonic()
+        with self._lock:
+            if bool(self._daily_source_refresh.get("running", False)):
+                return
+            if str(self._daily_source_refresh.get("last_success_business_date", "") or "") == business_date:
+                return
+            if (
+                not force
+                and str(self._daily_source_refresh.get("last_attempt_business_date", "") or "") == business_date
+                and self._last_daily_source_run_monotonic > 0
+                and now_mono - self._last_daily_source_run_monotonic < self._daily_source_retry_interval_sec
+            ):
+                return
+            self._last_daily_source_run_monotonic = now_mono
+        steps = self._daily_source_steps(business_date=business_date)
+        if not steps:
+            return
+        self._ensure_dirs()
+        family_labels = ",".join(FAMILY_LABELS.get(source_family, source_family) for source_family, _bucket, _func in steps)
+        self._emit(
+            "[共享缓存] 每日整日源文件自动下载开始 "
+            f"business_date={business_date}, run_time={self._daily_source_download_time.strftime('%H:%M:%S')}, "
+            f"families={family_labels}"
+        )
+        self._mark_daily_source_refresh(
+            running=True,
+            last_attempt_business_date=business_date,
+            last_run_at=_now_text(),
+            last_success_at="",
+            last_error="",
+            failed_units=[],
+            blocked_units=[],
+            running_units=[],
+            completed_units=[],
+        )
+        failed_units: List[str] = []
+        blocked_units: List[str] = []
+        running_units: List[str] = []
+        completed_units: List[str] = []
+        try:
+            result = self._run_latest_source_steps_by_building(
+                steps=steps,
+                force_retry_failed=True,
+                force_refresh_existing=False,
+            )
+            failed_units = list(result.get("failed_units", []) or [])
+            blocked_units = list(result.get("blocked_units", []) or [])
+            running_units = list(result.get("running_units", []) or [])
+            completed_units = list(result.get("completed_units", []) or [])
+            has_problem = bool(failed_units or blocked_units or running_units)
+            last_error = ""
+            if has_problem:
+                parts: List[str] = []
+                if failed_units:
+                    parts.append("失败: " + ",".join(failed_units[:20]))
+                if blocked_units:
+                    parts.append("等待楼栋恢复: " + ",".join(blocked_units[:20]))
+                if running_units:
+                    parts.append("仍在运行: " + ",".join(running_units[:20]))
+                last_error = "；".join(parts) or self._last_error
+            success_at = _now_text() if not has_problem else ""
+            self._mark_daily_source_refresh(
+                running=False,
+                **({"last_success_business_date": business_date} if not has_problem else {}),
+                last_success_at=success_at,
+                last_error=last_error,
+                failed_units=failed_units,
+                blocked_units=blocked_units,
+                running_units=running_units,
+                completed_units=completed_units,
+            )
+            with self._lock:
+                self._last_run_at = _now_text()
+                if not has_problem:
+                    self._last_success_at = success_at
+                    self._last_error = ""
+            if has_problem:
+                self._emit(
+                    "[共享缓存] 每日整日源文件自动下载未完成 "
+                    f"business_date={business_date}, failed={len(failed_units)}, "
+                    f"blocked={len(blocked_units)}, running={len(running_units)}"
+                )
+            else:
+                self._emit(
+                    "[共享缓存] 每日整日源文件自动下载完成 "
+                    f"business_date={business_date}, completed={len(completed_units)}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            with self._lock:
+                self._last_error = error_text
+                self._last_run_at = _now_text()
+            self._mark_daily_source_refresh(
+                running=False,
+                last_error=error_text,
+                failed_units=failed_units or ["daily_source_download"],
+                blocked_units=blocked_units,
+                running_units=running_units,
+                completed_units=completed_units,
+            )
+            self._emit(f"[共享缓存] 每日整日源文件自动下载异常 business_date={business_date}, error={error_text}")
+
     def _mark_current_hour_refresh(self, **fields: Any) -> None:
         with self._lock:
             self._current_hour_refresh.update(fields)
@@ -7318,6 +7520,7 @@ class SharedSourceCacheService:
                     self._run_current_bucket_once()
                     self._run_alarm_bucket_if_due()
                     self._run_chiller_mode_switch_if_due(force=True)
+                    self._run_daily_source_files_if_due()
                     startup_done = True
                 else:
                     bucket = self.current_hour_bucket()
@@ -7325,11 +7528,13 @@ class SharedSourceCacheService:
                         self._run_current_bucket_once()
                     self._run_alarm_bucket_if_due()
                     self._run_chiller_mode_switch_if_due()
+                    self._run_daily_source_files_if_due()
                 if startup_done:
                     handover_status = self._family_status.get(FAMILY_HANDOVER_LOG, {})
                     monthly_status = self._family_status.get(FAMILY_MONTHLY_REPORT, {})
                     alarm_status = self._family_status.get(FAMILY_ALARM_EVENT, {})
                     chiller_mode_switch_status = self._family_status.get(FAMILY_CHILLER_MODE_SWITCH, {})
+                    daily_source_refresh = self._daily_source_refresh
                     signature = "|".join(
                         [
                             self._current_hour_bucket,
@@ -7337,6 +7542,8 @@ class SharedSourceCacheService:
                             ",".join(str(item) for item in monthly_status.get("blocked_buildings", []) or []),
                             ",".join(str(item) for item in alarm_status.get("blocked_buildings", []) or []),
                             ",".join(str(item) for item in chiller_mode_switch_status.get("blocked_buildings", []) or []),
+                            ",".join(str(item) for item in daily_source_refresh.get("blocked_units", []) or []),
+                            ",".join(str(item) for item in daily_source_refresh.get("failed_units", []) or []),
                             str(bool(self._last_error)),
                         ]
                     )
@@ -7347,15 +7554,19 @@ class SharedSourceCacheService:
                             or monthly_status.get("blocked_buildings")
                             or alarm_status.get("blocked_buildings")
                             or chiller_mode_switch_status.get("blocked_buildings")
+                            or daily_source_refresh.get("blocked_units")
+                            or daily_source_refresh.get("failed_units")
                         ):
                             blocked = (
                                 list(handover_status.get("blocked_buildings", []) or [])
                                 + list(monthly_status.get("blocked_buildings", []) or [])
                                 + list(alarm_status.get("blocked_buildings", []) or [])
                                 + list(chiller_mode_switch_status.get("blocked_buildings", []) or [])
+                                + list(daily_source_refresh.get("blocked_units", []) or [])
+                                + list(daily_source_refresh.get("failed_units", []) or [])
                             )
                             self._emit(
-                                f"[共享缓存] 调度等待楼栋恢复: 小时桶={self._current_hour_bucket}, "
+                                f"[共享缓存] 调度等待/重试源文件: 小时桶={self._current_hour_bucket}, "
                                 f"告警桶={str(alarm_status.get('current_bucket', '') or '').strip() or '-'}, 楼栋={' / '.join(blocked)}"
                             )
                         elif not self._last_error:

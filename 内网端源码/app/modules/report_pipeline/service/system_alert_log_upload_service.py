@@ -1,6 +1,9 @@
 ﻿from __future__ import annotations
 
 import json
+import os
+import socket
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -15,6 +18,8 @@ class SystemAlertLogUploadService:
     TARGET_APP_TOKEN = "HScCwZt9QiqPCUkSrHjcbBL1ngb"
     TARGET_TABLE_ID = "tblGy6Z1GTxbY1EQ"
     TARGET_FIELD_NAME = "日志信息"
+    COMPUTER_NAME_FIELD_NAME = "创建者电脑名"
+    COMPUTER_IP_FIELD_NAME = "创建者IP地址"
     IDLE_SECONDS = 30.0
     POLL_INTERVAL_SECONDS = 1.0
     BATCH_SIZE = 100
@@ -22,6 +27,7 @@ class SystemAlertLogUploadService:
     FORCE_FLUSH_AGE_SECONDS = 600.0
     COMPACT_UPLOADED_LINES_THRESHOLD = 5000
     COMPACT_FILE_SIZE_THRESHOLD_BYTES = 5 * 1024 * 1024
+    RECENT_FINGERPRINT_LIMIT = 2000
 
     def __init__(
         self,
@@ -40,6 +46,7 @@ class SystemAlertLogUploadService:
         self._queue_dir = self._runtime_root / "system_alert_logs"
         self._queue_path = self._queue_dir / "queue.jsonl"
         self._state_path = self._queue_dir / "upload_state.json"
+        self._identity_path = self._queue_dir / "creator_identity.json"
         self._queue_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -48,6 +55,95 @@ class SystemAlertLogUploadService:
         self._state = self._load_state()
         self._last_flush_at = ""
         self._last_error = ""
+        self._host_name = self._load_or_create_host_name()
+        self._host_ip = self._load_or_create_host_ip()
+        self._session_id = self._build_session_id()
+        self._target_field_names_cache: set[str] | None = None
+        self._target_field_names_cache_at = 0.0
+
+    @staticmethod
+    def _detect_host_name() -> str:
+        try:
+            return str(socket.gethostname() or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _detect_host_ip(host_name: str = "") -> str:
+        candidates: list[str] = []
+        try:
+            name = str(host_name or socket.gethostname() or "").strip()
+            if name:
+                _hostname, _aliases, addresses = socket.gethostbyname_ex(name)
+                candidates.extend(str(item or "").strip() for item in addresses)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                candidates.append(str(sock.getsockname()[0] or "").strip())
+        except Exception:  # noqa: BLE001
+            pass
+        for value in candidates:
+            if not value or value.startswith("127.") or value.startswith("169.254."):
+                continue
+            return value
+        return candidates[0] if candidates else ""
+
+    @staticmethod
+    def _build_session_id() -> str:
+        return f"{int(time.time() * 1000)}-{os.getpid()}"
+
+    @staticmethod
+    def _load_json(path: Path, default: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:  # noqa: BLE001
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        result = dict(default or {})
+        result.update(payload)
+        return result
+
+    @staticmethod
+    def _save_json(path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+
+    def _load_or_create_host_name(self) -> str:
+        payload = self._load_json(self._identity_path, {})
+        host_name = str(payload.get("host_name", "") if isinstance(payload, dict) else "").strip()
+        if host_name:
+            return host_name
+        host_name = self._detect_host_name()
+        if host_name:
+            self._save_json(
+                self._identity_path,
+                {
+                    "host_name": host_name,
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+        return host_name
+
+    def _load_or_create_host_ip(self) -> str:
+        payload = self._load_json(self._identity_path, {})
+        host_ip = str(payload.get("host_ip", "") if isinstance(payload, dict) else "").strip()
+        if host_ip:
+            return host_ip
+        host_ip = self._detect_host_ip(self._host_name)
+        if host_ip:
+            merged = payload if isinstance(payload, dict) else {}
+            merged = dict(merged)
+            merged.setdefault("host_name", self._host_name)
+            merged["host_ip"] = host_ip
+            merged.setdefault("created_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+            merged["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._save_json(self._identity_path, merged)
+        return host_ip
 
     @staticmethod
     def _resolve_runtime_root(runtime_state_root: str) -> Path:
@@ -60,18 +156,19 @@ class SystemAlertLogUploadService:
         return path
 
     def _load_state(self) -> Dict[str, Any]:
-        try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            payload = {}
+        payload = self._load_json(self._state_path, {"uploaded_line_count": 0})
         uploaded_line_count = int(payload.get("uploaded_line_count", 0) or 0)
-        return {"uploaded_line_count": max(0, uploaded_line_count)}
+        recent = payload.get("recent_fingerprints", [])
+        if not isinstance(recent, list):
+            recent = []
+        recent_values = [str(item or "").strip() for item in recent if str(item or "").strip()]
+        return {
+            "uploaded_line_count": max(0, uploaded_line_count),
+            "recent_fingerprints": recent_values[-self.RECENT_FINGERPRINT_LIMIT :],
+        }
 
     def _save_state(self) -> None:
-        self._state_path.write_text(
-            json.dumps(self._state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._save_json(self._state_path, self._state)
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -79,6 +176,7 @@ class SystemAlertLogUploadService:
     def start(self) -> Dict[str, Any]:
         if self.is_running():
             return {"started": False, "running": True, "reason": "already_running"}
+        self._discard_stale_queue_entries()
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop,
@@ -100,9 +198,50 @@ class SystemAlertLogUploadService:
         level = str(payload.get("level", "")).strip().lower()
         if level not in {"warning", "error"}:
             return
+        payload = dict(payload)
+        payload.setdefault("host_name", self._host_name)
+        payload.setdefault("host_ip", self._host_ip)
+        payload.setdefault("session_id", self._session_id)
         with self._lock:
             with self._queue_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _discard_stale_queue_entries(self) -> None:
+        with self._lock:
+            if not self._queue_path.exists():
+                self._state["uploaded_line_count"] = 0
+                self._save_state()
+                return
+            try:
+                raw_lines = self._queue_path.read_text(encoding="utf-8").splitlines()
+            except Exception:  # noqa: BLE001
+                return
+            kept_lines: List[str] = []
+            dropped = 0
+            for raw_line in raw_lines:
+                text = str(raw_line or "").strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except Exception:  # noqa: BLE001
+                    dropped += 1
+                    continue
+                if not isinstance(payload, dict):
+                    dropped += 1
+                    continue
+                if str(payload.get("session_id", "") or "").strip() != self._session_id:
+                    dropped += 1
+                    continue
+                kept_lines.append(json.dumps(payload, ensure_ascii=False))
+            content = "\n".join(kept_lines)
+            if content:
+                content += "\n"
+            self._queue_path.write_text(content, encoding="utf-8")
+            self._state["uploaded_line_count"] = 0
+            self._save_state()
+        if dropped > 0:
+            self._emit_log(f"[系统告警上报] 启动时已丢弃旧积压日志 count={dropped}")
 
     def _loop(self) -> None:
         while not self._stop.wait(self.POLL_INTERVAL_SECONDS):
@@ -257,20 +396,96 @@ class SystemAlertLogUploadService:
             dimension_mapping={},
         )
 
-    def _upload_entries(self, entries: List[Dict[str, Any]]) -> None:
-        client = self._build_client()
-        fields_list = [
-            {self.TARGET_FIELD_NAME: str(item.get("line", "") or "").strip()}
-            for item in entries
-            if str(item.get("line", "") or "").strip()
-        ]
-        if not fields_list:
+    @staticmethod
+    def _entry_fingerprint(*, line: str, host_name: str, host_ip: str) -> str:
+        raw = "\n".join(
+            [
+                str(line or "").strip(),
+                str(host_name or "").strip(),
+                str(host_ip or "").strip(),
+            ]
+        )
+        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _remember_uploaded_fingerprints(self, fingerprints: List[str]) -> None:
+        normalized = [str(item or "").strip() for item in fingerprints if str(item or "").strip()]
+        if not normalized:
             return
+        with self._lock:
+            existing = [
+                str(item or "").strip()
+                for item in self._state.get("recent_fingerprints", [])
+                if str(item or "").strip()
+            ]
+            merged = existing + normalized
+            seen: set[str] = set()
+            compacted: list[str] = []
+            for item in reversed(merged):
+                if item in seen:
+                    continue
+                seen.add(item)
+                compacted.append(item)
+                if len(compacted) >= self.RECENT_FINGERPRINT_LIMIT:
+                    break
+            self._state["recent_fingerprints"] = list(reversed(compacted))
+            self._save_state()
+
+    @staticmethod
+    def _field_name(field: Dict[str, Any]) -> str:
+        return str(field.get("field_name") or field.get("name") or "").strip()
+
+    def _target_field_names(self, client: FeishuBitableClient) -> set[str]:
+        now = time.monotonic()
+        if self._target_field_names_cache is not None and now - self._target_field_names_cache_at < 300:
+            return set(self._target_field_names_cache)
+        fields = client.list_fields(self.TARGET_TABLE_ID, page_size=200)
+        names = {self._field_name(item) for item in fields if isinstance(item, dict)}
+        names = {name for name in names if name}
+        self._target_field_names_cache = set(names)
+        self._target_field_names_cache_at = now
+        return names
+
+    def _upload_entries(self, entries: List[Dict[str, Any]]) -> int:
+        client = self._build_client()
+        try:
+            target_field_names = self._target_field_names(client)
+        except Exception as exc:  # noqa: BLE001
+            target_field_names = {self.TARGET_FIELD_NAME}
+            self._emit_log(f"[系统告警上报] 字段定义读取失败，仅上传日志信息: {exc}")
+        fields_list = []
+        uploaded_fingerprints: list[str] = []
+        recent_fingerprints = {
+            str(item or "").strip()
+            for item in self._state.get("recent_fingerprints", [])
+            if str(item or "").strip()
+        }
+        batch_fingerprints: set[str] = set()
+        for item in entries:
+            line = str(item.get("line", "") or "").strip()
+            if not line:
+                continue
+            host_name = str(item.get("host_name", "") or "").strip() or self._host_name
+            host_ip = str(item.get("host_ip", "") or "").strip() or self._host_ip
+            fingerprint = self._entry_fingerprint(line=line, host_name=host_name, host_ip=host_ip)
+            if fingerprint in recent_fingerprints or fingerprint in batch_fingerprints:
+                continue
+            batch_fingerprints.add(fingerprint)
+            row = {self.TARGET_FIELD_NAME: line}
+            if self.COMPUTER_NAME_FIELD_NAME in target_field_names and host_name:
+                row[self.COMPUTER_NAME_FIELD_NAME] = host_name
+            if self.COMPUTER_IP_FIELD_NAME in target_field_names and host_ip:
+                row[self.COMPUTER_IP_FIELD_NAME] = host_ip
+            fields_list.append(row)
+            uploaded_fingerprints.append(fingerprint)
+        if not fields_list:
+            return 0
         client.batch_create_records(
             table_id=self.TARGET_TABLE_ID,
             fields_list=fields_list,
             batch_size=self.BATCH_SIZE,
         )
+        self._remember_uploaded_fingerprints(uploaded_fingerprints)
+        return len(fields_list)
 
     def _flush_pending(self) -> None:
         while not self._stop.is_set():
@@ -281,7 +496,7 @@ class SystemAlertLogUploadService:
                 self._advance_uploaded_cursor(consumed, [])
                 continue
             try:
-                self._upload_entries(entries)
+                uploaded_count = self._upload_entries(entries)
             except Exception as exc:  # noqa: BLE001
                 self._last_error = str(exc)
                 self._emit_log(f"[系统告警上报] 上传失败: {exc}")
@@ -292,7 +507,8 @@ class SystemAlertLogUploadService:
             )
             self._last_error = ""
             self._last_flush_at = time.strftime("%Y-%m-%d %H:%M:%S")
-            self._emit_log(f"[系统告警上报] 上传完成 count={len(entries)}")
+            if uploaded_count > 0:
+                self._emit_log(f"[系统告警上报] 上传完成 count={uploaded_count}")
 
     def runtime_snapshot(self) -> Dict[str, Any]:
         stats = self._pending_queue_stats()

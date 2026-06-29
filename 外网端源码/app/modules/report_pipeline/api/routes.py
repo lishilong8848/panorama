@@ -1101,6 +1101,11 @@ def _cache_wait_detail(message: str) -> HTTPException:
     return HTTPException(status_code=409, detail=message)
 
 
+def _is_unc_path_text(path_text: str) -> bool:
+    text = str(path_text or "").strip()
+    return text.startswith("\\\\") or text.startswith("//")
+
+
 def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = False) -> list[Dict[str, Any]]:
     output: list[Dict[str, Any]] = []
     for item in entries if isinstance(entries, list) else []:
@@ -1110,7 +1115,7 @@ def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = Fals
         file_path = str(item.get("file_path", "") or "").strip()
         if not building or not file_path:
             continue
-        if verify_files and not is_accessible_cached_file_path(file_path):
+        if verify_files and not _is_unc_path_text(file_path) and not is_accessible_cached_file_path(file_path):
             continue
         output.append(item)
     return output

@@ -37,7 +37,7 @@ class InternalBridgeHttpClient:
         read_timeout_sec: int = 5,
     ) -> None:
         self.base_url = str(base_url or "").strip().rstrip("/")
-        self.auth_token = str(auth_token or "").strip()
+        self.auth_token = ""
         self.connect_timeout_sec = max(1, int(connect_timeout_sec or 3))
         self.read_timeout_sec = max(self.connect_timeout_sec, int(read_timeout_sec or 5))
 
@@ -54,7 +54,7 @@ class InternalBridgeHttpClient:
         configured_read_timeout = int(cfg.get("read_timeout_sec", cfg.get("request_timeout_sec", 5)) or 5)
         return cls(
             base_url=base_url,
-            auth_token=str(cfg.get("auth_token", "") or "").strip(),
+            auth_token="",
             connect_timeout_sec=int(cfg.get("connect_timeout_sec", 3) or 3),
             read_timeout_sec=configured_read_timeout,
         )
@@ -86,8 +86,6 @@ class InternalBridgeHttpClient:
         if payload is not None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        if self.auth_token:
-            headers["X-Bridge-Token"] = self.auth_token
         req = urllib.request.Request(url, data=data, method=str(method or "GET").upper(), headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.read_timeout_sec) as resp:

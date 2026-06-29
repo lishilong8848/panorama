@@ -61,10 +61,6 @@ export const CONFIG_COMMON_DEPLOYMENT_TAB_TEMPLATE = `
         <label class="label">内网端地址</label>
         <input type="text" v-model.trim="config.internal_bridge_http.base_url" placeholder="留空时从共享目录自动推断" />
       </div>
-      <div class="form-row">
-        <label class="label">桥接 Token</label>
-        <input type="password" v-model.trim="config.internal_bridge_http.auth_token" autocomplete="off" />
-      </div>
       <div class="config-form-grid two-col">
         <div class="form-row">
           <label class="label">连接超时（秒）</label>

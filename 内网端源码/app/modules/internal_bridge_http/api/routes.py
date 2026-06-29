@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
@@ -34,11 +34,7 @@ def _bridge_config(request: Request) -> Dict[str, Any]:
     return cfg
 
 
-def _require_enabled_and_authorized(
-    request: Request,
-    *,
-    x_bridge_token: str | None,
-) -> Dict[str, Any]:
+def _require_enabled_and_authorized(request: Request) -> Dict[str, Any]:
     cfg = _bridge_config(request)
     if not bool(cfg.get("enabled", False)):
         raise HTTPException(status_code=503, detail="内网端 HTTP 桥接未启用")
@@ -50,9 +46,6 @@ def _require_enabled_and_authorized(
     host = _client_host(request)
     if normalized_ips and host not in normalized_ips:
         raise HTTPException(status_code=403, detail="当前客户端 IP 不允许调用内网桥接接口")
-    expected_token = str(cfg.get("auth_token", "") or "").strip()
-    if expected_token and str(x_bridge_token or "").strip() != expected_token:
-        raise HTTPException(status_code=401, detail="内网桥接 token 无效")
     return cfg
 
 
@@ -88,11 +81,8 @@ def _alarm_rule_export_state_file(config: Dict[str, Any]) -> str | None:
 
 
 @router.get("/health")
-def internal_bridge_health(
-    request: Request,
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
-) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+def internal_bridge_health(request: Request) -> Dict[str, Any]:
+    _require_enabled_and_authorized(request)
     return _runner(request).health()
 
 
@@ -100,9 +90,8 @@ def internal_bridge_health(
 def create_internal_bridge_task(
     request: Request,
     payload: Dict[str, Any],
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     try:
         return _runner(request).create_task(payload)
     except ValueError as exc:
@@ -117,9 +106,8 @@ def create_internal_bridge_task(
 def create_alarm_event_window_query_task(
     request: Request,
     payload: Dict[str, Any],
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     body = payload if isinstance(payload, dict) else {}
     try:
         return _runner(request).create_task(
@@ -151,9 +139,8 @@ def list_internal_bridge_tasks(
     request: Request,
     status: str = "",
     limit: int = 100,
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     try:
         tasks = _runner(request).list_tasks(status=status, limit=limit)
         return {"ok": True, "tasks": tasks}
@@ -167,9 +154,8 @@ def list_internal_bridge_tasks(
 def get_internal_bridge_task(
     task_id: str,
     request: Request,
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     task = _runner(request).get_task(task_id)
     if not isinstance(task, dict):
         raise HTTPException(status_code=404, detail="内网桥接任务不存在")
@@ -180,9 +166,8 @@ def get_internal_bridge_task(
 def cancel_internal_bridge_task(
     task_id: str,
     request: Request,
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     cancelled = _runner(request).cancel_task(task_id)
     return {"ok": bool(cancelled), "task_id": str(task_id or "").strip(), "status": "cancelled" if cancelled else "not_found"}
 
@@ -197,9 +182,8 @@ def query_internal_source_index(
     duty_shift: str = "",
     status: str = "ready",
     limit: int = 50,
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     entries = _runner(request).list_source_index(
         source_family=source_family,
         bucket_or_date=bucket_or_date,
@@ -224,9 +208,8 @@ def list_internal_alarm_rule_export_files(
     request: Request,
     period: str = "",
     building: str = "",
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     config = _runtime_config(request)
     return {
         "ok": True,
@@ -245,9 +228,8 @@ def download_internal_alarm_rule_export_file(
     period: str,
     building: str,
     file_name: str,
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> FileResponse:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     config = _runtime_config(request)
     try:
         path, _metadata = resolve_alarm_rule_export_file(
@@ -266,9 +248,8 @@ def download_internal_alarm_rule_export_file(
 def query_internal_source_index_batch(
     request: Request,
     payload: Dict[str, Any],
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     queries = payload.get("queries", []) if isinstance(payload, dict) else []
     default_limit = int(payload.get("default_limit", 50) or 50) if isinstance(payload, dict) else 50
     results = _runner(request).list_source_index_batch(
@@ -282,9 +263,8 @@ def query_internal_source_index_batch(
 def refresh_internal_latest_source_cache(
     request: Request,
     payload: Dict[str, Any],
-    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request, x_bridge_token=x_bridge_token)
+    _require_enabled_and_authorized(request)
     source_family = str(payload.get("source_family", "") or "") if isinstance(payload, dict) else ""
     buildings = payload.get("buildings", []) if isinstance(payload, dict) else []
     try:

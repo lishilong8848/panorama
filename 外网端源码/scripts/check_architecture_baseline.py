@@ -439,6 +439,8 @@ def check_external_cache_filter_does_not_probe_files() -> None:
     entries = [{"building": "A楼", "file_path": unc_path}]
     filtered = _filter_accessible_cached_entries(entries)
     _assert(len(filtered) == 1, "default source-index filter probed file accessibility")
+    filtered_with_probe = _filter_accessible_cached_entries(entries, verify_files=True)
+    _assert(len(filtered_with_probe) == 1, "explicit source-index filter probed UNC file accessibility")
     local_missing = PROJECT_DIR / ".runtime" / "architecture_baseline_check" / "missing.xlsx"
     filtered_with_probe = _filter_accessible_cached_entries(
         [{"building": "A楼", "file_path": str(local_missing)}],

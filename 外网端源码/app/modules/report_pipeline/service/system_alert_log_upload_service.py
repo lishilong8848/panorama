@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -19,6 +20,7 @@ class SystemAlertLogUploadService:
     TARGET_TABLE_ID = "tblGy6Z1GTxbY1EQ"
     TARGET_FIELD_NAME = "日志信息"
     COMPUTER_NAME_FIELD_NAME = "创建者电脑名"
+    COMPUTER_IP_FIELD_NAME = "创建者IP地址"
     IDLE_SECONDS = 30.0
     POLL_INTERVAL_SECONDS = 1.0
     BATCH_SIZE = 100
@@ -26,6 +28,7 @@ class SystemAlertLogUploadService:
     FORCE_FLUSH_AGE_SECONDS = 600.0
     COMPACT_UPLOADED_LINES_THRESHOLD = 5000
     COMPACT_FILE_SIZE_THRESHOLD_BYTES = 5 * 1024 * 1024
+    RECENT_FINGERPRINT_LIMIT = 2000
 
     def __init__(
         self,
@@ -55,6 +58,7 @@ class SystemAlertLogUploadService:
         self._last_flush_at = ""
         self._last_error = ""
         self._host_name = self._load_or_create_host_name()
+        self._host_ip = self._load_or_create_host_ip()
         self._session_id = self._build_session_id()
         self._target_field_names_cache: set[str] | None = None
         self._target_field_names_cache_at = 0.0
@@ -65,6 +69,28 @@ class SystemAlertLogUploadService:
             return str(socket.gethostname() or "").strip()
         except Exception:  # noqa: BLE001
             return ""
+
+    @staticmethod
+    def _detect_host_ip(host_name: str = "") -> str:
+        candidates: list[str] = []
+        try:
+            name = str(host_name or socket.gethostname() or "").strip()
+            if name:
+                _hostname, _aliases, addresses = socket.gethostbyname_ex(name)
+                candidates.extend(str(item or "").strip() for item in addresses)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                candidates.append(str(sock.getsockname()[0] or "").strip())
+        except Exception:  # noqa: BLE001
+            pass
+        for value in candidates:
+            if not value or value.startswith("127.") or value.startswith("169.254."):
+                continue
+            return value
+        return candidates[0] if candidates else ""
 
     @staticmethod
     def _build_session_id() -> str:
@@ -86,6 +112,22 @@ class SystemAlertLogUploadService:
             )
         return host_name
 
+    def _load_or_create_host_ip(self) -> str:
+        payload = self._state_repository.load(self._identity_path, {})
+        host_ip = str(payload.get("host_ip", "") if isinstance(payload, dict) else "").strip()
+        if host_ip:
+            return host_ip
+        host_ip = self._detect_host_ip(self._host_name)
+        if host_ip:
+            merged = payload if isinstance(payload, dict) else {}
+            merged = dict(merged)
+            merged.setdefault("host_name", self._host_name)
+            merged["host_ip"] = host_ip
+            merged.setdefault("created_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+            merged["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._state_repository.save(self._identity_path, merged)
+        return host_ip
+
     @staticmethod
     def _resolve_runtime_root(runtime_state_root: str) -> Path:
         app_dir = get_app_dir()
@@ -99,7 +141,14 @@ class SystemAlertLogUploadService:
     def _load_state(self) -> Dict[str, Any]:
         payload = self._state_repository.load(self._state_path, {"uploaded_line_count": 0})
         uploaded_line_count = int(payload.get("uploaded_line_count", 0) or 0)
-        return {"uploaded_line_count": max(0, uploaded_line_count)}
+        recent = payload.get("recent_fingerprints", [])
+        if not isinstance(recent, list):
+            recent = []
+        recent_values = [str(item or "").strip() for item in recent if str(item or "").strip()]
+        return {
+            "uploaded_line_count": max(0, uploaded_line_count),
+            "recent_fingerprints": recent_values[-self.RECENT_FINGERPRINT_LIMIT :],
+        }
 
     def _save_state(self) -> None:
         self._state_repository.save(self._state_path, self._state)
@@ -134,6 +183,7 @@ class SystemAlertLogUploadService:
             return
         payload = dict(payload)
         payload.setdefault("host_name", self._host_name)
+        payload.setdefault("host_ip", self._host_ip)
         payload.setdefault("session_id", self._session_id)
         with self._lock:
             with self._queue_path.open("a", encoding="utf-8") as fh:
@@ -330,6 +380,40 @@ class SystemAlertLogUploadService:
         )
 
     @staticmethod
+    def _entry_fingerprint(*, line: str, host_name: str, host_ip: str) -> str:
+        raw = "\n".join(
+            [
+                str(line or "").strip(),
+                str(host_name or "").strip(),
+                str(host_ip or "").strip(),
+            ]
+        )
+        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _remember_uploaded_fingerprints(self, fingerprints: List[str]) -> None:
+        normalized = [str(item or "").strip() for item in fingerprints if str(item or "").strip()]
+        if not normalized:
+            return
+        with self._lock:
+            existing = [
+                str(item or "").strip()
+                for item in self._state.get("recent_fingerprints", [])
+                if str(item or "").strip()
+            ]
+            merged = existing + normalized
+            seen: set[str] = set()
+            compacted: list[str] = []
+            for item in reversed(merged):
+                if item in seen:
+                    continue
+                seen.add(item)
+                compacted.append(item)
+                if len(compacted) >= self.RECENT_FINGERPRINT_LIMIT:
+                    break
+            self._state["recent_fingerprints"] = list(reversed(compacted))
+            self._save_state()
+
+    @staticmethod
     def _field_name(field: Dict[str, Any]) -> str:
         return str(field.get("field_name") or field.get("name") or "").strip()
 
@@ -344,7 +428,7 @@ class SystemAlertLogUploadService:
         self._target_field_names_cache_at = now
         return names
 
-    def _upload_entries(self, entries: List[Dict[str, Any]]) -> None:
+    def _upload_entries(self, entries: List[Dict[str, Any]]) -> int:
         client = self._build_client()
         try:
             target_field_names = self._target_field_names(client)
@@ -352,22 +436,39 @@ class SystemAlertLogUploadService:
             target_field_names = {self.TARGET_FIELD_NAME}
             self._emit_log(f"[系统告警上报] 字段定义读取失败，仅上传日志信息: {exc}")
         fields_list = []
+        uploaded_fingerprints: list[str] = []
+        recent_fingerprints = {
+            str(item or "").strip()
+            for item in self._state.get("recent_fingerprints", [])
+            if str(item or "").strip()
+        }
+        batch_fingerprints: set[str] = set()
         for item in entries:
             line = str(item.get("line", "") or "").strip()
             if not line:
                 continue
-            row = {self.TARGET_FIELD_NAME: line}
             host_name = str(item.get("host_name", "") or "").strip() or self._host_name
+            host_ip = str(item.get("host_ip", "") or "").strip() or self._host_ip
+            fingerprint = self._entry_fingerprint(line=line, host_name=host_name, host_ip=host_ip)
+            if fingerprint in recent_fingerprints or fingerprint in batch_fingerprints:
+                continue
+            batch_fingerprints.add(fingerprint)
+            row = {self.TARGET_FIELD_NAME: line}
             if self.COMPUTER_NAME_FIELD_NAME in target_field_names and host_name:
                 row[self.COMPUTER_NAME_FIELD_NAME] = host_name
+            if self.COMPUTER_IP_FIELD_NAME in target_field_names and host_ip:
+                row[self.COMPUTER_IP_FIELD_NAME] = host_ip
             fields_list.append(row)
+            uploaded_fingerprints.append(fingerprint)
         if not fields_list:
-            return
+            return 0
         client.batch_create_records(
             table_id=self.TARGET_TABLE_ID,
             fields_list=fields_list,
             batch_size=self.BATCH_SIZE,
         )
+        self._remember_uploaded_fingerprints(uploaded_fingerprints)
+        return len(fields_list)
 
     def _flush_pending(self) -> None:
         while not self._stop.is_set():
@@ -378,7 +479,7 @@ class SystemAlertLogUploadService:
                 self._advance_uploaded_cursor(consumed, [])
                 continue
             try:
-                self._upload_entries(entries)
+                uploaded_count = self._upload_entries(entries)
             except Exception as exc:  # noqa: BLE001
                 self._last_error = str(exc)
                 self._emit_log(f"[系统告警上报] 上传失败: {exc}")
@@ -389,7 +490,8 @@ class SystemAlertLogUploadService:
             )
             self._last_error = ""
             self._last_flush_at = time.strftime("%Y-%m-%d %H:%M:%S")
-            self._emit_log(f"[系统告警上报] 上传完成 count={len(entries)}")
+            if uploaded_count > 0:
+                self._emit_log(f"[系统告警上报] 上传完成 count={uploaded_count}")
 
     def runtime_snapshot(self) -> Dict[str, Any]:
         stats = self._pending_queue_stats()

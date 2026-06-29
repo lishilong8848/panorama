@@ -48,6 +48,17 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "hour_bucket_mode": "natural_hour",
             "latest_required": True,
             "history_fill_timeout_sec": 1800,
+            "daily_source_download": {
+                "enabled": True,
+                "run_time": "00:30:00",
+                "retry_interval_sec": 300,
+                "families": [
+                    "branch_power_family",
+                    "branch_current_family",
+                    "branch_switch_family",
+                    "building_full_cabinet_power_family",
+                ],
+            },
         },
         "internal_source_sites": [
             {"building": "A楼", "enabled": False, "host": "", "username": "", "password": ""},
