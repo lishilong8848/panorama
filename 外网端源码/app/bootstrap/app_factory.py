@@ -983,6 +983,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         best_bucket_age_hours = selection.get("best_bucket_age_hours") if isinstance(selection, dict) else None
         max_selection_age_hours = selection.get("max_selection_age_hours") if isinstance(selection, dict) else 3.0
         is_best_bucket_too_old = bool(selection.get("is_best_bucket_too_old", False)) if isinstance(selection, dict) else False
+        selection_error = str(selection.get("error", "") or "").strip() if isinstance(selection, dict) else ""
         missing_buildings = [
             str(item or "").strip()
             for item in (selection.get("missing_buildings", []) if isinstance(selection, dict) else [])
@@ -1001,6 +1002,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             for item in (selection.get("blocked_buildings", []) if isinstance(selection, dict) else [])
             if isinstance(item, dict) and str(item.get("building", "") or "").strip()
         ]
+        if selection_error:
+            return f"等待内网端 HTTP source-index 恢复：{selection_error}"
         if is_best_bucket_too_old:
             age_text = _format_bucket_age_hours_text(best_bucket_age_hours)
             limit_text = _format_bucket_age_limit_text(max_selection_age_hours)

@@ -257,8 +257,9 @@ function applyDeploymentDefaults(cfg) {
   setStringDefault(cfg.internal_bridge_http, "auth_token", "");
   setNumberDefault(cfg.internal_bridge_http, "port", 18765);
   setNumberDefault(cfg.internal_bridge_http, "connect_timeout_sec", 3);
-  setNumberDefault(cfg.internal_bridge_http, "read_timeout_sec", 5);
-  setNumberDefault(cfg.internal_bridge_http, "request_timeout_sec", 5);
+  setNumberDefault(cfg.internal_bridge_http, "read_timeout_sec", 15);
+  setNumberDefault(cfg.internal_bridge_http, "request_timeout_sec", 15);
+  setNumberDefault(cfg.internal_bridge_http, "max_attempts", 2);
   if (cfg.deployment.role_mode === "internal") {
     cfg.shared_bridge.root_dir = cfg.shared_bridge.internal_root_dir;
   } else if (cfg.deployment.role_mode === "external") {

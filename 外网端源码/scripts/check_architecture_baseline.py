@@ -757,7 +757,9 @@ def check_internal_bridge_http_config_preserved() -> None:
     default_cfg = DEFAULT_CONFIG_V3.get("common", {}).get("internal_bridge_http", {})
     _assert(isinstance(default_cfg, dict), "internal_bridge_http defaults missing")
     _assert(int(default_cfg.get("connect_timeout_sec", 0) or 0) <= 3, "internal bridge connect timeout default is too high")
-    _assert(int(default_cfg.get("read_timeout_sec", 0) or 0) <= 5, "internal bridge read timeout default is too high")
+    default_read_timeout = int(default_cfg.get("read_timeout_sec", 0) or 0)
+    _assert(10 <= default_read_timeout <= 30, "internal bridge read timeout default should absorb short internal busy periods")
+    _assert(int(default_cfg.get("max_attempts", 0) or 0) >= 2, "internal bridge max_attempts default should retry transient failures")
     for path in (
         PROJECT_DIR / "config" / "表格计算配置.template.json",
         PROJECT_DIR / "表格计算配置.json",
@@ -766,7 +768,9 @@ def check_internal_bridge_http_config_preserved() -> None:
         common = payload.get("common", {}) if isinstance(payload, dict) else {}
         cfg = common.get("internal_bridge_http", {}) if isinstance(common, dict) else {}
         _assert(isinstance(cfg, dict) and cfg, f"internal_bridge_http missing from {path.name}")
-        _assert(int(cfg.get("read_timeout_sec", 0) or 0) <= 5, f"internal bridge read timeout too high in {path.name}")
+        read_timeout = int(cfg.get("read_timeout_sec", 0) or 0)
+        _assert(10 <= read_timeout <= 30, f"internal bridge read timeout should be 10-30 sec in {path.name}")
+        _assert(int(cfg.get("max_attempts", 0) or 0) >= 2, f"internal bridge max_attempts should be >=2 in {path.name}")
     for path in (
         PROJECT_DIR / "web" / "frontend" / "src" / "config_runtime_convert.js",
         PROJECT_DIR / "web" / "frontend" / "src" / "config_runtime_defaults.js",

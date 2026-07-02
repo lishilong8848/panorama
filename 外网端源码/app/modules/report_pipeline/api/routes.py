@@ -1187,10 +1187,13 @@ def _build_latest_cache_wait_detail(*, feature_name: str, selection: Dict[str, A
     best_bucket_key = str(selection.get("best_bucket_key", "") or "").strip() if isinstance(selection, dict) else ""
     best_bucket_age_hours = selection.get("best_bucket_age_hours") if isinstance(selection, dict) else None
     is_best_bucket_too_old = bool(selection.get("is_best_bucket_too_old", False)) if isinstance(selection, dict) else False
+    selection_error = str(selection.get("error", "") or "").strip() if isinstance(selection, dict) else ""
     missing_buildings = selection.get("missing_buildings", []) if isinstance(selection, dict) else []
     stale_buildings = selection.get("stale_buildings", []) if isinstance(selection, dict) else []
     fallback_buildings = selection.get("fallback_buildings", []) if isinstance(selection, dict) else []
     blocked_buildings = selection.get("blocked_buildings", []) if isinstance(selection, dict) else []
+    if selection_error:
+        return f"等待内网端 HTTP source-index 恢复：{selection_error}"
     if is_best_bucket_too_old:
         age_text = _format_bucket_age_hours_text(best_bucket_age_hours)
         bucket_text = best_bucket_key or "未知时间桶"
@@ -2217,9 +2220,12 @@ def _run_external_chiller_mode_upload_shared_flow(
         detail = _build_latest_cache_wait_detail(feature_name="制冷模式参数", selection=selection)
         emit_log(f"[制冷模式参数上传] 共享缓存尚未齐全，本次不扫描共享目录、不清空目标表: {detail}")
         return {
-            "status": "failed",
+            "ok": True,
+            "status": "waiting_shared_bridge",
+            "mode": "waiting_shared_bridge",
             "run_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "failed_files": [
+            "waiting_reason": detail,
+            "missing_files": [
                 {
                     "building": "-",
                     "file_path": "",

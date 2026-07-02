@@ -1689,12 +1689,16 @@ export function prepareConfigPayloadForSave({
   );
   payload.internal_bridge_http.read_timeout_sec = Math.max(
     payload.internal_bridge_http.connect_timeout_sec,
-    Number.parseInt(payload.internal_bridge_http.read_timeout_sec ?? 5, 10) || 5,
+    Number.parseInt(payload.internal_bridge_http.read_timeout_sec ?? 15, 10) || 15,
   );
   payload.internal_bridge_http.request_timeout_sec = Math.max(
     1,
     Number.parseInt(payload.internal_bridge_http.request_timeout_sec ?? payload.internal_bridge_http.read_timeout_sec, 10)
       || payload.internal_bridge_http.read_timeout_sec,
+  );
+  payload.internal_bridge_http.max_attempts = Math.max(
+    1,
+    Number.parseInt(payload.internal_bridge_http.max_attempts ?? 2, 10) || 2,
   );
 
   // 路径收敛：调度状态/续传/告警恢复统一使用内部固定 .runtime 子路径

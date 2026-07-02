@@ -1399,6 +1399,11 @@ class SharedBridgeRuntimeService:
                 "connection reset",
                 "remote end closed",
                 "temporarily unavailable",
+                "正在处理其他请求",
+                "正在排队",
+                "稍后重试",
+                "retry_after",
+                "busy",
             )
         )
 
@@ -5272,6 +5277,8 @@ class SharedBridgeRuntimeService:
 
     def get_source_cache_buildings(self) -> List[str]:
         if self._http_bridge_should_try():
+            return self._http_source_cache_buildings()
+        if self._http_bridge_forced():
             return self._http_source_cache_buildings()
         if self._source_cache_service is None:
             return []

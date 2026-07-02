@@ -21,6 +21,22 @@ from app.modules.internal_bridge_http.service.internal_bridge_http_runner import
 router = APIRouter(prefix="/api/internal-bridge", tags=["internal-bridge"])
 
 _RUNNER_ATTR = "_internal_bridge_http_runner"
+_SOURCE_INDEX_MAX_CONCURRENT_REQUESTS = 3
+_SOURCE_INDEX_REQUEST_SEMAPHORE = threading.BoundedSemaphore(_SOURCE_INDEX_MAX_CONCURRENT_REQUESTS)
+_SOURCE_INDEX_BUSY_RETRY_AFTER_SEC = 60
+
+
+def _source_index_busy_payload(*, scope: str) -> Dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "busy",
+        "queued": True,
+        "retry_after_sec": _SOURCE_INDEX_BUSY_RETRY_AFTER_SEC,
+        "message": f"内网端 {scope} 正在处理其他请求，请约 {_SOURCE_INDEX_BUSY_RETRY_AFTER_SEC} 秒后重试",
+        "entries": [],
+        "results": [],
+        "recovering": True,
+    }
 
 
 def _client_host(request: Request) -> str:
@@ -197,23 +213,29 @@ def query_internal_source_index(
     limit: int = 50,
 ) -> Dict[str, Any]:
     _require_enabled_and_authorized(request)
-    entries = _runner(request).list_source_index(
-        source_family=source_family,
-        bucket_or_date=bucket_or_date,
-        building=building,
-        bucket_kind=bucket_kind,
-        duty_shift=duty_shift,
-        status=status,
-        limit=limit,
-    )
-    recovering = _runner(request).source_index_recovery_active(
-        source_family=source_family,
-        bucket_or_date=bucket_or_date,
-        building=building,
-        bucket_kind=bucket_kind,
-        duty_shift=duty_shift,
-    )
-    return {"ok": True, "entries": entries, "recovering": recovering}
+    acquired = _SOURCE_INDEX_REQUEST_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
+        return _source_index_busy_payload(scope="source-index")
+    try:
+        entries = _runner(request).list_source_index(
+            source_family=source_family,
+            bucket_or_date=bucket_or_date,
+            building=building,
+            bucket_kind=bucket_kind,
+            duty_shift=duty_shift,
+            status=status,
+            limit=limit,
+        )
+        recovering = _runner(request).source_index_recovery_active(
+            source_family=source_family,
+            bucket_or_date=bucket_or_date,
+            building=building,
+            bucket_kind=bucket_kind,
+            duty_shift=duty_shift,
+        )
+        return {"ok": True, "entries": entries, "recovering": recovering}
+    finally:
+        _SOURCE_INDEX_REQUEST_SEMAPHORE.release()
 
 
 @router.get("/alarm-rule-export/files")
@@ -371,13 +393,19 @@ def query_internal_source_index_batch(
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     _require_enabled_and_authorized(request)
-    queries = payload.get("queries", []) if isinstance(payload, dict) else []
-    default_limit = int(payload.get("default_limit", 50) or 50) if isinstance(payload, dict) else 50
-    results = _runner(request).list_source_index_batch(
-        queries if isinstance(queries, list) else [],
-        default_limit=default_limit,
-    )
-    return {"ok": True, "results": results}
+    acquired = _SOURCE_INDEX_REQUEST_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
+        return _source_index_busy_payload(scope="source-index/batch")
+    try:
+        queries = payload.get("queries", []) if isinstance(payload, dict) else []
+        default_limit = int(payload.get("default_limit", 50) or 50) if isinstance(payload, dict) else 50
+        results = _runner(request).list_source_index_batch(
+            queries if isinstance(queries, list) else [],
+            default_limit=default_limit,
+        )
+        return {"ok": True, "results": results}
+    finally:
+        _SOURCE_INDEX_REQUEST_SEMAPHORE.release()
 
 
 @router.post("/source-cache/refresh-latest")

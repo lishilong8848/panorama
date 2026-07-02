@@ -38,8 +38,9 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "auth_token": "",
             "allowed_client_ips": [],
             "connect_timeout_sec": 3,
-            "read_timeout_sec": 5,
-            "request_timeout_sec": 5,
+            "read_timeout_sec": 15,
+            "request_timeout_sec": 15,
+            "max_attempts": 2,
         },
         "internal_source_cache": {
             "enabled": True,
