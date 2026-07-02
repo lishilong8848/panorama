@@ -1395,6 +1395,58 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 },
             },
         },
+        "system_screenshot_upload": {
+            "enabled": True,
+            "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+            "trigger_internal_capture": True,
+            "wait_capture_timeout_sec": 180,
+            "wait_capture_poll_sec": 5,
+            "date_value_format": "{date}",
+            "page_size": 500,
+            "max_records": 1000,
+            "delete_batch_size": 200,
+            "create_batch_size": 200,
+            "scheduler": {
+                "enabled": True,
+                "auto_start_in_gui": True,
+                "run_time": "05:00:00",
+                "check_interval_sec": 30,
+                "catch_up_if_missed": True,
+                "retry_failed_in_same_period": True,
+                "state_file": "system_screenshot_upload_scheduler_state.json",
+            },
+            "fields": {
+                "date": "日期",
+                "attachment": "附件",
+            },
+            "targets": [
+                {
+                    "key": "power_distribution",
+                    "label": "供配电系统图",
+                    "table_id": "tblGIz3IElh6T8vm",
+                },
+                {
+                    "key": "hvac",
+                    "label": "暖通系统图",
+                    "table_id": "tblnnbx0tw3sFJoH",
+                },
+                {
+                    "key": "fuel",
+                    "label": "燃油系统图",
+                    "table_id": "tblvKzr7a7SuzYMZ",
+                },
+                {
+                    "key": "generator",
+                    "label": "柴发系统图",
+                    "table_id": "tblPzH8miDHPnjAl",
+                },
+                {
+                    "key": "weak_current",
+                    "label": "弱电系统图",
+                    "table_id": "tbly9D29sw0eT6FQ",
+                },
+            ],
+        },
         "alarm_export": {
             "scheduler": {
                 "enabled": False,

@@ -636,6 +636,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
     )
     alarm_export = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
     alarm_rule_export_upload = _dict(features.get("alarm_rule_export_upload"))
+    system_screenshot_upload = _dict(features.get("system_screenshot_upload"))
     wet_bulb_collection = sanitize_wet_bulb_collection_config(_dict(features.get("wet_bulb_collection")))
     chiller_mode_upload = sanitize_chiller_mode_upload_config(_dict(features.get("chiller_mode_upload")))
     branch_power_upload = _dict(features.get("branch_power_upload"))
@@ -757,6 +758,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "day_metric_upload": copy.deepcopy(day_metric_upload),
         "branch_power_upload": copy.deepcopy(branch_power_upload),
         "alarm_rule_export_upload": copy.deepcopy(alarm_rule_export_upload),
+        "system_screenshot_upload": copy.deepcopy(system_screenshot_upload),
         "alarm_export": copy.deepcopy(alarm_export),
         "wet_bulb_collection": copy.deepcopy(wet_bulb_collection),
         "chiller_mode_upload": copy.deepcopy(chiller_mode_upload),
@@ -877,6 +879,10 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
     features["alarm_rule_export_upload"] = deep_merge_defaults(
         _dict(runtime.get("alarm_rule_export_upload")),
         _dict(features.get("alarm_rule_export_upload")),
+    )
+    features["system_screenshot_upload"] = deep_merge_defaults(
+        _dict(runtime.get("system_screenshot_upload")),
+        _dict(features.get("system_screenshot_upload")),
     )
     features["alarm_export"] = sanitize_alarm_export_config(deep_merge_defaults(
         _dict(runtime.get("alarm_export")),

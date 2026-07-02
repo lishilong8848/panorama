@@ -143,11 +143,13 @@ class SharedBridgeRuntimeService:
         job_service: JobService | None = None,
         emit_log: Callable[[str], None] | None = None,
         request_runtime_status_refresh: Callable[[str], None] | None = None,
+        app_state_repository: Any | None = None,
     ) -> None:
         self.runtime_config = copy.deepcopy(runtime_config if isinstance(runtime_config, dict) else {})
         self.app_version = str(app_version or "").strip()
         self.emit_log = emit_log
         self._job_service = job_service
+        self._app_state_repository = app_state_repository
         self._request_runtime_status_refresh_callback = request_runtime_status_refresh
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -1718,6 +1720,90 @@ class SharedBridgeRuntimeService:
         if event is not None:
             event.set()
 
+    def _persist_http_source_index_mirror(self, entries: List[Dict[str, Any]]) -> None:
+        repository = getattr(self, "_app_state_repository", None)
+        writer = getattr(repository, "upsert_bridge_source_index_entries", None)
+        if not callable(writer) or not entries:
+            return
+        try:
+            writer(copy.deepcopy(entries))
+        except Exception as exc:  # noqa: BLE001
+            self._emit_http_bridge_issue_log("写入源文件索引镜像", exc)
+
+    def _load_http_source_index_mirror(
+        self,
+        *,
+        source_family: str,
+        target_buildings: List[str],
+        query_specs: List[Dict[str, str]],
+        target_bucket: str,
+        status_text: str,
+        limit_per_building: int,
+    ) -> List[Dict[str, Any]]:
+        repository = getattr(self, "_app_state_repository", None)
+        reader = getattr(repository, "list_bridge_source_index_entries", None)
+        if not callable(reader):
+            return []
+        bucket_keys = [
+            str(spec.get("bucket_or_date", "") or "").strip()
+            for spec in query_specs if isinstance(spec, dict) and str(spec.get("bucket_or_date", "") or "").strip()
+        ]
+        status_filter_all = str(status_text or "").strip().lower() in {"all", "*"}
+        try:
+            rows = reader(
+                source_family=str(source_family or "").strip().lower(),
+                buildings=target_buildings,
+                bucket_keys=list(dict.fromkeys(bucket_keys)),
+                status="" if status_filter_all else status_text,
+                limit=max(100, len(target_buildings or []) * max(1, int(limit_per_building or 20)) * 3),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit_http_bridge_issue_log("读取源文件索引镜像", exc)
+            return []
+        output: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            item = self._normalize_http_source_index_entry(row)
+            item_status = str(item.get("status", "") or "").strip().lower()
+            if not status_filter_all and item_status != str(status_text or "").strip().lower():
+                continue
+            if item_status == "ready" and not self._ensure_http_source_index_entry_file_verified(item):
+                continue
+            if str(item.get("source_family", "") or "").strip().lower() != str(source_family or "").strip().lower():
+                continue
+            building = str(item.get("building", "") or "").strip()
+            if target_buildings and building not in target_buildings:
+                continue
+            if target_bucket:
+                bucket = str(item.get("bucket_key", "") or "").strip()
+                duty_date = str(item.get("duty_date", "") or "").strip()
+                relative_path = str(item.get("relative_path", "") or "").strip()
+                if target_bucket not in {bucket, duty_date} and not self._http_source_index_path_matches_bucket(
+                    source_family=source_family,
+                    target_bucket=target_bucket,
+                    relative_path=relative_path,
+                ):
+                    continue
+            identity = "|".join(
+                [
+                    str(item.get("entry_id", "") or "").strip(),
+                    str(item.get("source_family", "") or "").strip(),
+                    str(item.get("building", "") or "").strip(),
+                    str(item.get("bucket_kind", "") or "").strip(),
+                    str(item.get("bucket_key", "") or "").strip(),
+                    str(item.get("duty_date", "") or "").strip(),
+                    str(item.get("relative_path", "") or "").strip(),
+                ]
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            item["mirror_source"] = "external_app_state"
+            output.append(item)
+        return output
+
     def _http_source_index_entries(
         self,
         *,
@@ -1729,17 +1815,37 @@ class SharedBridgeRuntimeService:
         limit_per_building: int = 20,
         force_refresh: bool = False,
     ) -> List[Dict[str, Any]] | None:
+        target_buildings = self._http_source_cache_buildings(buildings)
+        target_bucket = str(bucket_key or "").strip()
+        query_specs = self._http_source_index_query_specs(source_family, target_bucket)
+        status_text = str(status or "ready").strip().lower()
         if not self._http_bridge_should_try():
+            mirror_entries = self._load_http_source_index_mirror(
+                source_family=source_family,
+                target_buildings=target_buildings,
+                query_specs=query_specs,
+                target_bucket=target_bucket,
+                status_text=status_text,
+                limit_per_building=limit_per_building,
+            )
+            if mirror_entries:
+                return mirror_entries
             if self._http_bridge_forced():
                 return []
             return None
         client = self._internal_bridge_http_client
         if client is None:
+            mirror_entries = self._load_http_source_index_mirror(
+                source_family=source_family,
+                target_buildings=target_buildings,
+                query_specs=query_specs,
+                target_bucket=target_bucket,
+                status_text=status_text,
+                limit_per_building=limit_per_building,
+            )
+            if mirror_entries:
+                return mirror_entries
             return None
-        target_buildings = self._http_source_cache_buildings(buildings)
-        target_bucket = str(bucket_key or "").strip()
-        query_specs = self._http_source_index_query_specs(source_family, target_bucket)
-        status_text = str(status or "ready").strip().lower()
         status_filter_all = status_text in {"all", "*"}
         output: List[Dict[str, Any]] = []
         seen: set[str] = set()
@@ -1776,6 +1882,17 @@ class SharedBridgeRuntimeService:
                         self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("source-index 同查询仍在等待内网端响应"))
                     else:
                         self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("source-index 同查询完成但未产生缓存"))
+                    mirror_entries = self._load_http_source_index_mirror(
+                        source_family=source_family,
+                        target_buildings=target_buildings,
+                        query_specs=query_specs,
+                        target_bucket=target_bucket,
+                        status_text=status_text,
+                        limit_per_building=limit_per_building,
+                    )
+                    if mirror_entries:
+                        self._set_http_source_index_cache(cache_key, mirror_entries)
+                        return mirror_entries
                     return [] if self._http_bridge_forced() else None
                 fetch_event = inflight_event
             batch_reader = getattr(client, "source_index_batch", None)
@@ -1851,12 +1968,26 @@ class SharedBridgeRuntimeService:
                         matched_buildings.add(building)
             if not force_refresh:
                 self._set_http_source_index_cache(cache_key, output)
+                self._persist_http_source_index_mirror(output)
                 self._finish_http_source_index_fetch(cache_key, fetch_event)
                 fetch_event = None
         except Exception as exc:  # noqa: BLE001
             if "cache_key" in locals() and "fetch_event" in locals() and fetch_event is not None:
                 self._finish_http_source_index_fetch(cache_key, fetch_event)
             self._emit_http_bridge_issue_log("读取源文件索引", exc)
+            mirror_entries = self._load_http_source_index_mirror(
+                source_family=source_family,
+                target_buildings=target_buildings,
+                query_specs=query_specs,
+                target_bucket=target_bucket,
+                status_text=status_text,
+                limit_per_building=limit_per_building,
+            )
+            if mirror_entries:
+                self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("内网端暂不可用，已使用外网端本地 source-index 镜像"))
+                if "cache_key" in locals():
+                    self._set_http_source_index_cache(cache_key, mirror_entries)
+                return mirror_entries
             if self._http_bridge_forced():
                 return []
             return None
@@ -8494,6 +8625,48 @@ class SharedBridgeRuntimeService:
             )
         )
 
+    def _reissue_unbound_waiting_job(self, snapshot: Dict[str, Any]) -> bool:
+        if self._job_service is None:
+            return False
+        job_id = str(snapshot.get("job_id", "") or "").strip()
+        if not job_id:
+            return False
+        loader = getattr(self._job_service, "load_job_stage_payload", None)
+        payload = loader(job_id, "main") if callable(loader) else {}
+        if not isinstance(payload, dict):
+            return False
+        dispatch = payload.get("_bridge_dispatch", {}) if isinstance(payload.get("_bridge_dispatch", {}), dict) else {}
+        get_or_create_name = str(dispatch.get("get_or_create_name", "") or "").strip()
+        create_name = str(dispatch.get("create_name", "") or "").strip()
+        bridge_kwargs = dispatch.get("bridge_kwargs", {}) if isinstance(dispatch.get("bridge_kwargs", {}), dict) else {}
+        if not get_or_create_name and not create_name:
+            return False
+        marker = f"unbound_waiting_reissue:{job_id}"
+        now_monotonic = time.monotonic()
+        previous = float(self._waiting_job_cache_probe_log_markers.get(marker, 0.0) or 0.0)
+        if previous and now_monotonic - previous < 60:
+            return True
+        self._waiting_job_cache_probe_log_markers[marker] = now_monotonic
+        task_kwargs = copy.deepcopy(bridge_kwargs)
+        task_kwargs["resume_job_id"] = job_id
+        task_kwargs.setdefault("requested_by", str(dispatch.get("requested_by", "") or snapshot.get("submitted_by", "") or "waiting_retry").strip() or "waiting_retry")
+        try:
+            new_task = self.create_http_bridge_task(
+                get_or_create_name=get_or_create_name,
+                create_name=create_name,
+                bridge_kwargs=task_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit_system_log(f"[共享桥接] 等待任务={job_id} 重派内网补采暂不可用，继续等待: {exc}")
+            return True
+        new_task_id = str((new_task or {}).get("task_id", "") or "").strip() if isinstance(new_task, dict) else ""
+        if not new_task_id:
+            self._emit_system_log(f"[共享桥接] 等待任务={job_id} 重派内网补采暂未返回任务，继续等待")
+            return True
+        self._job_service.bind_bridge_task(job_id, new_task_id)
+        self._emit_system_log(f"[共享桥接] 等待任务={job_id} 已重派内网补采 task_id={new_task_id}")
+        return True
+
     def _reconcile_waiting_jobs(self) -> None:
         if self._job_service is None:
             return
@@ -8508,7 +8681,10 @@ class SharedBridgeRuntimeService:
                 continue
             job_id = str(snapshot.get("job_id", "") or "").strip()
             bridge_task_id = str(snapshot.get("bridge_task_id", "") or "").strip()
-            if not job_id or not bridge_task_id:
+            if not job_id:
+                continue
+            if not bridge_task_id:
+                self._reissue_unbound_waiting_job(snapshot)
                 continue
             task = self.get_task(bridge_task_id)
             if not task:

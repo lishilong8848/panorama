@@ -2985,6 +2985,21 @@ class JobService:
         with self._lock:
             return job.to_dict()
 
+    def load_job_stage_payload(self, job_id: str, stage_id: str = "main") -> Dict[str, Any]:
+        if not self._task_engine_store:
+            return {}
+        payload_path = self._task_engine_store.resolve_stage_payload_path(
+            str(job_id or "").strip(),
+            str(stage_id or "").strip() or "main",
+        )
+        if not payload_path.exists():
+            return {}
+        try:
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
     def list_jobs(self, *, limit: int = 50, statuses: List[str] | tuple[str, ...] | None = None) -> List[Dict[str, Any]]:
         if self._task_engine_db:
             try:

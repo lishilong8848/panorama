@@ -38,6 +38,9 @@ from app.modules.notify.service.webhook_notify_service import WebhookNotifyServi
 from app.modules.alarm_rule_export_upload.service.alarm_rule_export_upload_service import (
     AlarmRuleExportUploadService,
 )
+from app.modules.system_screenshot_upload.service.system_screenshot_upload_service import (
+    SystemScreenshotUploadService,
+)
 from app.modules.report_pipeline.service.resume_checkpoint_store import (
     resolve_resume_index_path as resolve_monthly_resume_index_path,
 )
@@ -5042,6 +5045,45 @@ def job_alarm_rule_export_upload_run(
             submitted_by="manual",
         )
         container.add_system_log(f"[任务] 已提交: 告警规则导出附件上传 {period} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/jobs/system-screenshot/upload")
+def job_system_screenshot_upload_run(
+    request: Request,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端上传系统截图")
+
+    raw_date = str(payload.get("capture_date", "") or payload.get("date", "") or "").strip()
+    try:
+        capture_date = SystemScreenshotUploadService.normalize_capture_date(raw_date or None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    trigger_internal_capture = payload.get("trigger_internal_capture", None)
+
+    try:
+        job = _start_background_job(
+            container,
+            name=f"系统截图上传 {capture_date}",
+            run_func=None,
+            worker_handler="system_screenshot_upload",
+            worker_payload={
+                "capture_date": capture_date,
+                **({"trigger_internal_capture": bool(trigger_internal_capture)} if isinstance(trigger_internal_capture, bool) else {}),
+            },
+            resource_keys=_job_resource_keys(f"system_screenshot_upload:{capture_date}"),
+            priority="manual",
+            feature="system_screenshot_upload",
+            dedupe_key=_job_dedupe_key("system_screenshot_upload", capture_date=capture_date),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: 系统截图上传 {capture_date} ({job.job_id})")
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

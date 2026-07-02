@@ -2363,6 +2363,51 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(f"[告警信息上传调度] 提交失败：{error_text}")
             return False, error_text
 
+    def system_screenshot_upload_scheduler_callback(source: str) -> tuple[bool, str]:
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[系统截图上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+        if role_mode != "external":
+            detail = "当前未确认有效角色，无法执行系统截图上传调度"
+            container.add_system_log(f"[系统截图上传调度] {detail}")
+            return False, detail
+
+        capture_date = datetime.now().strftime("%Y-%m-%d")
+        started_at = datetime.now()
+        try:
+            job = container.job_service.start_worker_job(
+                name=f"系统截图上传 {capture_date}",
+                worker_handler="system_screenshot_upload",
+                worker_payload={"capture_date": capture_date},
+                resource_keys=[f"system_screenshot_upload:{capture_date}"],
+                priority="scheduler",
+                feature="system_screenshot_upload",
+                dedupe_key=f"system_screenshot_upload:{capture_date}",
+                submitted_by="scheduler",
+            )
+            duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+            container.record_system_screenshot_upload_external_run(
+                status="submitted",
+                source="scheduler_job",
+                detail=f"job_id={job.job_id}",
+                duration_ms=duration_ms,
+            )
+            detail = f"已提交系统截图上传任务 job_id={job.job_id}, date={capture_date}"
+            container.add_system_log(f"[系统截图上传调度] {detail}")
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+            container.record_system_screenshot_upload_external_run(
+                status="failed",
+                source="scheduler_job",
+                detail=str(exc),
+                duration_ms=duration_ms,
+            )
+            error_text = str(exc)
+            container.add_system_log(f"[系统截图上传调度] 提交失败：{error_text}")
+            return False, error_text
+
     def monthly_event_report_scheduler_callback(source: str) -> tuple[bool, str]:
         role_mode = _deployment_role_mode()
         if role_mode == "internal":
@@ -2558,6 +2603,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     setter = getattr(container, "set_alarm_event_upload_scheduler_callback", None)
     if callable(setter):
         setter(alarm_event_upload_scheduler_callback)
+    setter = getattr(container, "set_system_screenshot_upload_scheduler_callback", None)
+    if callable(setter):
+        setter(system_screenshot_upload_scheduler_callback)
     setter = getattr(container, "set_monthly_change_report_scheduler_callback", None)
     if callable(setter):
         setter(monthly_change_report_scheduler_callback)

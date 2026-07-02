@@ -20,10 +20,18 @@ def start_waiting_bridge_job(
     bridge_kwargs: Dict[str, Any],
     summary: str = "等待内网补采同步",
 ) -> Tuple[Any, Dict[str, Any]]:
+    dispatch_payload = {
+        "get_or_create_name": bridge_get_or_create_name,
+        "create_name": bridge_create_name,
+        "bridge_kwargs": dict(bridge_kwargs or {}),
+        "requested_by": submitted_by,
+    }
+    persisted_payload = dict(worker_payload or {})
+    persisted_payload["_bridge_dispatch"] = dispatch_payload
     job = job_service.create_waiting_worker_job(
         name=name,
         worker_handler=worker_handler,
-        worker_payload=worker_payload,
+        worker_payload=persisted_payload,
         resource_keys=resource_keys,
         priority=priority,
         feature=feature,
@@ -50,8 +58,10 @@ def start_waiting_bridge_job(
         raise RuntimeError("内网端 HTTP 桥接未配置或不可用，已移除旧共享库任务回退")
     except Exception as exc:
         error_text = str(exc or "").strip() or "内网端 HTTP 桥接派发失败"
-        try:
-            job_service.fail_waiting_job(job_id, error_text=error_text, summary="内网端 HTTP 桥接派发失败")
-        except Exception:
-            pass
-        raise
+        return job, {
+            "task_id": "",
+            "status": "dispatch_pending",
+            "error": error_text,
+            "transport": "http",
+            "detail": "内网端 HTTP 桥接暂不可用，等待任务将由后台自动重派",
+        }

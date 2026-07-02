@@ -305,3 +305,40 @@ class InternalBridgeHttpClient:
                 "file_name": str(file_name or "").strip(),
             },
         )
+
+    def run_system_screenshot_capture(self, *, capture_date: str = "", force: bool = False) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/internal-bridge/system-screenshots/run",
+            payload={
+                "capture_date": str(capture_date or "").strip(),
+                "force": bool(force),
+            },
+        )
+
+    def list_system_screenshot_files(self, *, capture_date: str = "", target_key: str = "") -> Dict[str, Any]:
+        return self._request(
+            "GET",
+            "/api/internal-bridge/system-screenshots/files",
+            query={
+                "capture_date": str(capture_date or "").strip(),
+                "target_key": str(target_key or "").strip(),
+            },
+        )
+
+    def download_system_screenshot_file(
+        self,
+        *,
+        capture_date: str,
+        target_key: str,
+        file_name: str = "",
+    ) -> Tuple[bytes, str, str]:
+        return self._request_bytes(
+            "GET",
+            "/api/internal-bridge/system-screenshots/files/download",
+            query={
+                "capture_date": str(capture_date or "").strip(),
+                "target_key": str(target_key or "").strip(),
+                "file_name": str(file_name or "").strip(),
+            },
+        )

@@ -171,6 +171,10 @@ export async function submitAlarmRuleExportUploadJob(payload = {}) {
   return startJsonJobApi("/api/jobs/alarm-rule-export/upload", payload || {});
 }
 
+export async function submitSystemScreenshotUploadJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/system-screenshot/upload", payload || {});
+}
+
 export async function getJobApi(jobId) {
   return apiJson(`/api/jobs/${jobId}`);
 }

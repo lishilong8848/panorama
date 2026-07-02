@@ -18,6 +18,7 @@ import {
   submitDayMetricRetryFailedJob,
   submitDayMetricRetryUnitJob,
   submitMonthlyPowerAlertReportJob,
+  submitSystemScreenshotUploadJob,
   submitTop5OverPowerAttachmentJob,
   submitTop5PowerReportJob,
 } from "./api_client.js";
@@ -37,6 +38,7 @@ const ACTION_KEYS = {
   top5OverPowerAttachment: "job:top5_over_power_attachment",
   monthlyPowerAlertReport: "job:monthly_power_alert_report",
   alarmRuleExportUpload: "job:alarm_rule_export_upload",
+  systemScreenshotUpload: "job:system_screenshot_upload",
   dayMetricFromFile: "job:day_metric_from_file",
   dayMetricRetryUnit: "job:day_metric_retry_unit",
   dayMetricRetryFailed: "job:day_metric_retry_failed",
@@ -82,6 +84,7 @@ export function createDashboardJobActions(ctx) {
     monthlyPowerAlertReportMonth,
     alarmRuleExportUploadYear,
     alarmRuleExportUploadMonth,
+    systemScreenshotUploadDate,
     streamController,
     fetchHealth,
     fetchJobs,
@@ -662,6 +665,12 @@ if (!canRun.value) return;
     return job;
   }
 
+  function getSystemScreenshotUploadJob() {
+    const job = currentJob?.value && typeof currentJob.value === "object" ? currentJob.value : null;
+    if (!job || String(job.feature || "").trim() !== "system_screenshot_upload") return null;
+    return job;
+  }
+
   function getTop5PowerReportResult() {
     const job = getTop5PowerReportJob();
     const result = job?.result && typeof job.result === "object" ? job.result : {};
@@ -705,6 +714,12 @@ if (!canRun.value) return;
 
   function getAlarmRuleExportUploadResult() {
     const job = getAlarmRuleExportUploadJob();
+    const result = job?.result && typeof job.result === "object" ? job.result : {};
+    return result && typeof result === "object" ? result : {};
+  }
+
+  function getSystemScreenshotUploadResult() {
+    const job = getSystemScreenshotUploadJob();
     const result = job?.result && typeof job.result === "object" ? job.result : {};
     return result && typeof result === "object" ? result : {};
   }
@@ -770,6 +785,29 @@ if (!canRun.value) return;
 
   function getAlarmRuleExportUploadStatusTone() {
     const job = getAlarmRuleExportUploadJob();
+    const status = String(job?.status || "").trim().toLowerCase();
+    if (status === "success") return "success";
+    if (status === "failed") return "danger";
+    if (status === "running" || status === "queued" || status === "waiting_resource") return "info";
+    if (status === "cancelled") return "neutral";
+    return "neutral";
+  }
+
+  function getSystemScreenshotUploadStatusText() {
+    const job = getSystemScreenshotUploadJob();
+    if (!job) return "尚未执行";
+    const status = String(job.status || "").trim().toLowerCase();
+    if (status === "success") return "已上传";
+    if (status === "failed") return "上传失败";
+    if (status === "running") return "上传中";
+    if (status === "queued") return "排队中";
+    if (status === "waiting_resource") return "等待资源";
+    if (status === "cancelled") return "已取消";
+    return job.status || "处理中";
+  }
+
+  function getSystemScreenshotUploadStatusTone() {
+    const job = getSystemScreenshotUploadJob();
     const status = String(job?.status || "").trim().toLowerCase();
     if (status === "success") return "success";
     if (status === "failed") return "danger";
@@ -962,6 +1000,28 @@ if (!canRun.value) return;
     );
   }
 
+  async function runSystemScreenshotUpload() {
+    if (!canRun.value) return;
+    const captureDate = String(systemScreenshotUploadDate?.value || formatDateObj(new Date())).trim();
+    if (!parseDateText(captureDate)) {
+      message.value = "系统截图上传日期格式错误，请使用 YYYY-MM-DD";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.systemScreenshotUpload,
+      async () => {
+        try {
+          message.value = `系统截图上传任务已提交: ${captureDate}`;
+          const response = await submitSystemScreenshotUploadJob({ capture_date: captureDate });
+          await applyAcceptedExecutionResponse(response, "系统截图上传");
+        } catch (err) {
+          message.value = `系统截图上传提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
   async function runDayMetricFromFile() {
     const building = String(dayMetricLocalBuilding.value || "").trim();
     const dutyDate = String(dayMetricLocalDate.value || "").trim();
@@ -1137,6 +1197,10 @@ if (!canRun.value) return;
     getAlarmRuleExportUploadResult,
     getAlarmRuleExportUploadStatusText,
     getAlarmRuleExportUploadStatusTone,
+    runSystemScreenshotUpload,
+    getSystemScreenshotUploadResult,
+    getSystemScreenshotUploadStatusText,
+    getSystemScreenshotUploadStatusTone,
     runDayMetricFromFile,
     retryDayMetricUnit,
     retryFailedDayMetricUnits,

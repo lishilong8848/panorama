@@ -55,6 +55,7 @@ _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...
     ("day_metric_upload", "12项独立上传", ("features", "day_metric_upload", "scheduler")),
     ("branch_power_upload", "自动上传支路功率", ("features", "branch_power_upload", "scheduler")),
     ("alarm_event_upload", "告警信息上传", ("features", "alarm_export", "scheduler")),
+    ("system_screenshot_upload", "系统截图上传", ("features", "system_screenshot_upload", "scheduler")),
     ("monthly_change_report", "月度变更统计表", ("features", "handover_log", "monthly_change_report", "scheduler")),
     ("monthly_event_report", "月度事件统计表", ("features", "handover_log", "monthly_event_report", "scheduler")),
 )
@@ -69,6 +70,7 @@ _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "day_metric_upload": "day_metric_upload_scheduler",
     "branch_power_upload": "branch_power_upload_scheduler",
     "alarm_event_upload": "alarm_event_upload_scheduler",
+    "system_screenshot_upload": "system_screenshot_upload_scheduler",
     "monthly_change_report": "monthly_change_report_scheduler",
     "monthly_event_report": "monthly_event_report_scheduler",
 }
@@ -113,6 +115,8 @@ class AppContainer:
     branch_power_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     alarm_event_upload_scheduler: ApschedulerSchedulerFacade | None = None
     alarm_event_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    system_screenshot_upload_scheduler: ApschedulerSchedulerFacade | None = None
+    system_screenshot_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_change_report_scheduler: ApschedulerSchedulerFacade | None = None
     monthly_change_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_event_report_scheduler: ApschedulerSchedulerFacade | None = None
@@ -248,6 +252,9 @@ class AppContainer:
         if not self.alarm_event_upload_scheduler:
             _report_progress("building_alarm_scheduler")
             self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
+        if not self.system_screenshot_upload_scheduler:
+            _report_progress("building_system_screenshot_upload_scheduler")
+            self.system_screenshot_upload_scheduler = self._build_system_screenshot_upload_scheduler()
         if not self.monthly_change_report_scheduler:
             _report_progress("building_monthly_change_scheduler")
             self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
@@ -300,6 +307,9 @@ class AppContainer:
         if self.alarm_event_upload_scheduler_callback and self.alarm_event_upload_scheduler:
             _report_progress("binding_alarm_scheduler_callback")
             self.alarm_event_upload_scheduler.run_callback = self.alarm_event_upload_scheduler_callback
+        if self.system_screenshot_upload_scheduler_callback and self.system_screenshot_upload_scheduler:
+            _report_progress("binding_system_screenshot_upload_scheduler_callback")
+            self.system_screenshot_upload_scheduler.run_callback = self.system_screenshot_upload_scheduler_callback
         if self.monthly_change_report_scheduler_callback and self.monthly_change_report_scheduler:
             _report_progress("binding_monthly_change_scheduler_callback")
             self.monthly_change_report_scheduler.run_callback = self.monthly_change_report_scheduler_callback
@@ -575,6 +585,27 @@ class AppContainer:
             source_name="告警信息上传",
         )
 
+    def _build_system_screenshot_upload_scheduler(self) -> ApschedulerSchedulerFacade:
+        screenshot_cfg = self.runtime_config.get("system_screenshot_upload", {})
+        if not isinstance(screenshot_cfg, dict):
+            screenshot_cfg = {}
+        scheduler_cfg = screenshot_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        return ApschedulerSchedulerFacade(
+            scheduler_key="system_screenshot_upload",
+            feature="system_screenshot_upload",
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=self._runtime_state_root_text(),
+            emit_log=self.add_system_log,
+            run_callback=self.system_screenshot_upload_scheduler_callback
+            or self._system_screenshot_upload_scheduler_run_callback,
+            is_busy=self._job_busy_for_feature_prefixes("system_screenshot_upload"),
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="daily",
+            source_name="系统截图上传",
+        )
+
     def _build_monthly_change_report_scheduler(self) -> ApschedulerSchedulerFacade:
         handover_cfg = self.runtime_config.get("handover_log", {})
         if not isinstance(handover_cfg, dict):
@@ -635,6 +666,7 @@ class AppContainer:
             app_version=self.version,
             job_service=self.job_service,
             emit_log=self.add_system_log,
+            app_state_repository=self.app_state_repository,
             request_runtime_status_refresh=lambda reason: (
                 getattr(self, "runtime_status_coordinator", None).request_refresh(reason=str(reason or "").strip() or "shared_bridge_runtime")
                 if getattr(self, "runtime_status_coordinator", None) is not None
@@ -663,6 +695,9 @@ class AppContainer:
 
     def _alarm_event_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"告警信息上传调度回调尚未绑定执行器(source={source})"
+
+    def _system_screenshot_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        return False, f"系统截图上传调度回调尚未绑定执行器(source={source})"
 
     def _monthly_change_report_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"月度变更统计表调度回调尚未绑定执行器(source={source})"
@@ -813,6 +848,27 @@ class AppContainer:
             name = getattr(getattr(callback, "__func__", None), "__name__", "")
         return str(name or "-")
 
+    def is_system_screenshot_upload_scheduler_executor_bound(self) -> bool:
+        callback = None
+        if self.system_screenshot_upload_scheduler:
+            callback = getattr(self.system_screenshot_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.system_screenshot_upload_scheduler_callback
+        return not self._is_placeholder_callback(callback, self._system_screenshot_upload_scheduler_run_callback)
+
+    def system_screenshot_upload_scheduler_executor_name(self) -> str:
+        callback = None
+        if self.system_screenshot_upload_scheduler:
+            callback = getattr(self.system_screenshot_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.system_screenshot_upload_scheduler_callback
+        if callback is None:
+            callback = self._system_screenshot_upload_scheduler_run_callback
+        name = getattr(callback, "__name__", "")
+        if not name:
+            name = getattr(getattr(callback, "__func__", None), "__name__", "")
+        return str(name or "-")
+
     def is_monthly_change_report_scheduler_executor_bound(self) -> bool:
         callback = self.monthly_change_report_scheduler_callback
         return callable(callback)
@@ -894,6 +950,11 @@ class AppContainer:
         self.alarm_event_upload_scheduler_callback = callback
         if self.alarm_event_upload_scheduler:
             self.alarm_event_upload_scheduler.run_callback = callback
+
+    def set_system_screenshot_upload_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
+        self.system_screenshot_upload_scheduler_callback = callback
+        if self.system_screenshot_upload_scheduler:
+            self.system_screenshot_upload_scheduler.run_callback = callback
 
     def set_monthly_change_report_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
         self.monthly_change_report_scheduler_callback = callback
@@ -1188,6 +1249,15 @@ class AppContainer:
             if all_disabled and any_config_enabled:
                 loaded_states = dict(config_snapshot)
                 memory_source = "legacy_repair"
+                changed = True
+        if payload:
+            raw_state_values = payload.get("states")
+            raw_state_values = raw_state_values if isinstance(raw_state_values, dict) else {}
+            missing_keys = [key for key in config_snapshot if key not in raw_state_values]
+            if missing_keys:
+                for key in missing_keys:
+                    loaded_states[key] = bool(config_snapshot.get(key, False))
+                memory_source = memory_source or "config_fallback"
                 changed = True
         if changed:
             try:
@@ -1644,6 +1714,28 @@ class AppContainer:
             self.add_system_log("[告警信息上传调度] 已禁用")
 
         self.add_system_log(
+            f"[系统截图上传调度] 启动阶段执行器状态: executor_bound={self.is_system_screenshot_upload_scheduler_executor_bound()}, "
+            f"callback={self.system_screenshot_upload_scheduler_executor_name()}"
+        )
+        system_screenshot_status = self.system_screenshot_upload_scheduler_status()
+        if role_mode == "internal":
+            self.add_system_log("[系统截图上传调度] 当前为内网端，启动时不自动开启")
+        elif bool(system_screenshot_status.get("enabled", False)):
+            screenshot_cfg = self.runtime_config.get("system_screenshot_upload", {})
+            if not isinstance(screenshot_cfg, dict):
+                screenshot_cfg = {}
+            screenshot_scheduler_cfg = screenshot_cfg.get("scheduler", {})
+            if not isinstance(screenshot_scheduler_cfg, dict):
+                screenshot_scheduler_cfg = {}
+            if bool(screenshot_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_system_screenshot_upload_scheduler")
+                self.start_system_screenshot_upload_scheduler(source=source)
+            else:
+                self.add_system_log("[系统截图上传调度] 启动时未自动开启")
+        else:
+            self.add_system_log("[系统截图上传调度] 已禁用")
+
+        self.add_system_log(
             f"[月度变更统计表调度] 启动阶段执行器状态: executor_bound={self.is_monthly_change_report_scheduler_executor_bound()}, "
             f"callback={self.monthly_change_report_scheduler_executor_name()}"
         )
@@ -1763,6 +1855,14 @@ class AppContainer:
                 self.alarm_event_upload_scheduler,
             ),
             (
+                "系统截图上传调度",
+                ("features", "system_screenshot_upload", "scheduler"),
+                bool(self.system_screenshot_upload_scheduler.is_running())
+                if self.system_screenshot_upload_scheduler
+                else False,
+                self.system_screenshot_upload_scheduler,
+            ),
+            (
                 "月度变更统计表调度",
                 ("features", "handover_log", "monthly_change_report", "scheduler"),
                 bool(self.monthly_change_report_scheduler.is_running()) if self.monthly_change_report_scheduler else False,
@@ -1871,6 +1971,7 @@ class AppContainer:
             ("day_metric_upload_scheduler", self.stop_day_metric_upload_scheduler),
             ("branch_power_upload_scheduler", self.stop_branch_power_upload_scheduler),
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
+            ("system_screenshot_upload_scheduler", self.stop_system_screenshot_upload_scheduler),
             ("monthly_change_report_scheduler", self.stop_monthly_change_report_scheduler),
             ("monthly_event_report_scheduler", self.stop_monthly_event_report_scheduler),
             ("scheduler_orchestrator", self.shutdown_scheduler_orchestrator),
@@ -2052,6 +2153,29 @@ class AppContainer:
             result = {"stopped": False, "running": False, "reason": "not_initialized"}
         self.add_system_log(
             f"[告警信息上传调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_system_screenshot_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.system_screenshot_upload_scheduler:
+            self.system_screenshot_upload_scheduler = self._build_system_screenshot_upload_scheduler()
+        result = self.system_screenshot_upload_scheduler.start()
+        self.add_system_log(
+            f"[系统截图上传调度] {source}启动请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}, "
+            f"executor_bound={self.is_system_screenshot_upload_scheduler_executor_bound()}, "
+            f"callback={self.system_screenshot_upload_scheduler_executor_name()}"
+        )
+        return result
+
+    def stop_system_screenshot_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.system_screenshot_upload_scheduler:
+            result = self.system_screenshot_upload_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[系统截图上传调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
             f"running={bool(result.get('running', False))}"
         )
         return result
@@ -2707,6 +2831,41 @@ class AppContainer:
         }
         return self._record_scheduler_runtime_snapshot("alarm_event_upload", "alarm_event_upload", payload)
 
+    def system_screenshot_upload_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("system_screenshot_upload")
+        if not self.system_screenshot_upload_scheduler:
+            payload = {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+                **memory_fields,
+            }
+            return self._record_scheduler_runtime_snapshot(
+                "system_screenshot_upload",
+                "system_screenshot_upload",
+                payload,
+            )
+        runtime = self.system_screenshot_upload_scheduler.get_runtime_snapshot()
+        payload = {
+            "enabled": bool(self.system_screenshot_upload_scheduler.enabled),
+            "status": self.system_screenshot_upload_scheduler.status_text(),
+            "next_run_time": self.system_screenshot_upload_scheduler.next_run_text(),
+            **runtime,
+            **memory_fields,
+        }
+        return self._record_scheduler_runtime_snapshot(
+            "system_screenshot_upload",
+            "system_screenshot_upload",
+            payload,
+        )
+
     def monthly_event_report_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("monthly_event_report")
         if not self.monthly_event_report_scheduler:
@@ -2859,6 +3018,23 @@ class AppContainer:
             duration_ms=duration_ms,
         )
 
+    def record_system_screenshot_upload_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.system_screenshot_upload_scheduler:
+            return
+        self.system_screenshot_upload_scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
     def record_monthly_event_report_external_run(
         self,
         *,
@@ -2965,6 +3141,8 @@ class AppContainer:
             self.branch_power_upload_scheduler.stop()
         if self.alarm_event_upload_scheduler:
             self.alarm_event_upload_scheduler.stop()
+        if self.system_screenshot_upload_scheduler:
+            self.system_screenshot_upload_scheduler.stop()
         if self.monthly_change_report_scheduler:
             self.monthly_change_report_scheduler.stop()
         if self.monthly_event_report_scheduler:
@@ -2982,6 +3160,7 @@ class AppContainer:
         self.day_metric_upload_scheduler = self._build_day_metric_upload_scheduler()
         self.branch_power_upload_scheduler = self._build_branch_power_upload_scheduler()
         self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
+        self.system_screenshot_upload_scheduler = self._build_system_screenshot_upload_scheduler()
         self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
         self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
         self.updater_service = self._build_updater_service()
@@ -3013,6 +3192,8 @@ class AppContainer:
             self.branch_power_upload_scheduler.run_callback = self.branch_power_upload_scheduler_callback
         if self.alarm_event_upload_scheduler_callback:
             self.alarm_event_upload_scheduler.run_callback = self.alarm_event_upload_scheduler_callback
+        if self.system_screenshot_upload_scheduler_callback:
+            self.system_screenshot_upload_scheduler.run_callback = self.system_screenshot_upload_scheduler_callback
         if self.monthly_change_report_scheduler_callback:
             self.monthly_change_report_scheduler.run_callback = self.monthly_change_report_scheduler_callback
         if self.monthly_event_report_scheduler_callback:

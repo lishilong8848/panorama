@@ -290,6 +290,103 @@ class AppStateRepository:
             return None
         return payload if isinstance(payload, dict) else None
 
+    def upsert_bridge_source_index_entries(self, entries: list[Dict[str, Any]]) -> None:
+        self.ensure_ready()
+        rows: list[tuple[str, str, str, str, str, str, str]] = []
+        now = _now_text()
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            source_family = str(entry.get("source_family", "") or "").strip()
+            building = str(entry.get("building", "") or "").strip()
+            bucket_key = str(entry.get("bucket_key", "") or entry.get("duty_date", "") or "").strip()
+            if not source_family or not building or not bucket_key:
+                continue
+            payload = dict(entry)
+            payload.setdefault("mirrored_at", now)
+            rows.append(
+                (
+                    source_family,
+                    bucket_key,
+                    building,
+                    str(entry.get("status", "") or "").strip(),
+                    str(entry.get("file_path", "") or "").strip(),
+                    _json_dumps(payload),
+                    str(entry.get("updated_at", "") or "").strip() or now,
+                )
+            )
+        if not rows:
+            return
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO bridge_source_index(
+                    source_family, bucket_key, building, status, file_path, metadata_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_family, bucket_key, building) DO UPDATE SET
+                    status=excluded.status,
+                    file_path=excluded.file_path,
+                    metadata_json=excluded.metadata_json,
+                    updated_at=excluded.updated_at
+                """,
+                rows,
+            )
+
+    def list_bridge_source_index_entries(
+        self,
+        *,
+        source_family: str,
+        buildings: list[str] | None = None,
+        bucket_keys: list[str] | None = None,
+        status: str = "",
+        limit: int = 500,
+    ) -> list[Dict[str, Any]]:
+        self.ensure_ready()
+        family = str(source_family or "").strip()
+        if not family:
+            return []
+        building_values = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        bucket_values = [str(item or "").strip() for item in (bucket_keys or []) if str(item or "").strip()]
+        status_text = str(status or "").strip().lower()
+        clauses = ["source_family=?"]
+        params: list[Any] = [family]
+        if building_values:
+            clauses.append("building IN (" + ",".join("?" for _ in building_values) + ")")
+            params.extend(building_values)
+        if bucket_values:
+            clauses.append("bucket_key IN (" + ",".join("?" for _ in bucket_values) + ")")
+            params.extend(bucket_values)
+        if status_text and status_text not in {"all", "*"}:
+            clauses.append("LOWER(status)=?")
+            params.append(status_text)
+        safe_limit = max(1, int(limit or 500))
+        params.append(safe_limit)
+        sql = f"""
+            SELECT source_family, bucket_key, building, status, file_path, metadata_json, updated_at
+            FROM bridge_source_index
+            WHERE {' AND '.join(clauses)}
+            ORDER BY updated_at DESC
+            LIMIT ?
+        """
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        output: list[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["metadata_json"] or "{}"))
+            except Exception:
+                payload = {}
+            item = payload if isinstance(payload, dict) else {}
+            item.setdefault("source_family", str(row["source_family"] or ""))
+            item.setdefault("bucket_key", str(row["bucket_key"] or ""))
+            item.setdefault("building", str(row["building"] or ""))
+            item.setdefault("status", str(row["status"] or ""))
+            item.setdefault("file_path", str(row["file_path"] or ""))
+            item.setdefault("updated_at", str(row["updated_at"] or ""))
+            item["mirror_source"] = "external_app_state"
+            output.append(item)
+        return output
+
     def enqueue_config_write(self, *, queue_id: str, patch: Dict[str, Any], source: str) -> None:
         self.ensure_ready()
         queue_id_text = str(queue_id or "").strip()

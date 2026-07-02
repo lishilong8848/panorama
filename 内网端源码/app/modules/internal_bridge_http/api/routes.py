@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
@@ -8,6 +9,11 @@ from fastapi.responses import FileResponse
 from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     list_alarm_rule_export_files,
     resolve_alarm_rule_export_file,
+)
+from app.modules.system_screenshot_capture.service.system_screenshot_capture_service import (
+    list_system_screenshot_files,
+    resolve_system_screenshot_file,
+    run_system_screenshot_capture,
 )
 from app.modules.internal_bridge_http.service.internal_bridge_http_runner import InternalBridgeHttpTaskRunner
 
@@ -75,6 +81,13 @@ def _runtime_config(request: Request) -> Dict[str, Any]:
 
 def _alarm_rule_export_state_file(config: Dict[str, Any]) -> str | None:
     feature_cfg = config.get("alarm_rule_export", {}) if isinstance(config, dict) else {}
+    if not isinstance(feature_cfg, dict):
+        return None
+    return str(feature_cfg.get("state_file", "") or "").strip() or None
+
+
+def _system_screenshot_state_file(config: Dict[str, Any]) -> str | None:
+    feature_cfg = config.get("system_screenshot_capture", {}) if isinstance(config, dict) else {}
     if not isinstance(feature_cfg, dict):
         return None
     return str(feature_cfg.get("state_file", "") or "").strip() or None
@@ -242,6 +255,114 @@ def download_internal_alarm_rule_export_file(
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return FileResponse(path=str(path), filename=path.name)
+
+
+@router.get("/system-screenshots/files")
+def list_internal_system_screenshot_files(
+    request: Request,
+    capture_date: str = "",
+    target_key: str = "",
+) -> Dict[str, Any]:
+    _require_enabled_and_authorized(request)
+    config = _runtime_config(request)
+    return {
+        "ok": True,
+        **list_system_screenshot_files(
+            config=config,
+            capture_date=capture_date or None,
+            target_key=target_key,
+            state_file=_system_screenshot_state_file(config),
+        ),
+    }
+
+
+@router.get("/system-screenshots/files/download")
+def download_internal_system_screenshot_file(
+    request: Request,
+    capture_date: str,
+    target_key: str,
+    file_name: str = "",
+) -> FileResponse:
+    _require_enabled_and_authorized(request)
+    config = _runtime_config(request)
+    try:
+        path, metadata = resolve_system_screenshot_file(
+            config=config,
+            capture_date=capture_date,
+            target_key=target_key,
+            file_name=file_name,
+            state_file=_system_screenshot_state_file(config),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        path=str(path),
+        filename=path.name,
+        media_type=str(metadata.get("content_type", "") or "image/png"),
+    )
+
+
+@router.post("/system-screenshots/run")
+def run_internal_system_screenshot_capture(
+    request: Request,
+    payload: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    _require_enabled_and_authorized(request)
+    body = payload if isinstance(payload, dict) else {}
+    config = _runtime_config(request)
+    container = getattr(request.app.state, "container", None)
+    raw_emit_log = getattr(container, "add_system_log", None)
+    capture_date = str(body.get("capture_date", "") or "").strip() or None
+    force = bool(body.get("force", False))
+    wait = bool(body.get("wait", False))
+
+    def emit_log(text: str) -> None:
+        if not callable(raw_emit_log):
+            return
+        try:
+            raw_emit_log(text, suppress_alert_upload=True)
+        except TypeError:
+            raw_emit_log(text)
+
+    def _run_once() -> Dict[str, Any]:
+        lock = getattr(container, "_system_screenshot_capture_run_lock", None)
+        acquired = False
+        if lock is not None and hasattr(lock, "acquire"):
+            acquired = bool(lock.acquire(blocking=False))
+            if not acquired:
+                return {"status": "running", "message": "系统截图采集已有运行实例"}
+        try:
+            return run_system_screenshot_capture(
+                config=config,
+                capture_date=capture_date,
+                force=force,
+                emit_log=emit_log,
+            )
+        finally:
+            if acquired:
+                lock.release()
+
+    if wait:
+        try:
+            result = _run_once()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"ok": True, **result}
+
+    def _worker() -> None:
+        try:
+            result = _run_once()
+            emit_log(
+                "[系统截图采集] HTTP 后台检查完成: "
+                f"date={capture_date or '-'}, status={result.get('status', '-')}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[系统截图采集] HTTP 后台检查失败: date={capture_date or '-'}, error={exc}")
+
+    threading.Thread(target=_worker, name="internal-http-system-screenshot-capture", daemon=True).start()
+    return {"ok": True, "status": "accepted", "capture_date": capture_date or "", "force": force}
 
 
 @router.post("/source-index/batch")
