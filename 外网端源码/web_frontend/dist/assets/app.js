@@ -213,6 +213,8 @@ createApp({
       branchPowerUploadSchedulerTriggerText,
       alarmEventUploadSchedulerDecisionText,
       alarmEventUploadSchedulerTriggerText,
+      systemScreenshotUploadSchedulerDecisionText,
+      systemScreenshotUploadSchedulerTriggerText,
       monthlyEventReportSchedulerDecisionText,
       monthlyEventReportSchedulerTriggerText,
       monthlyChangeReportSchedulerDecisionText,
