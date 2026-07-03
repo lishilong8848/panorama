@@ -1799,44 +1799,94 @@ def _derive_capacity_source_from_handover_source(handover_source: Any) -> str:
     return _first_existing_path(*candidates)
 
 
+def _derive_handover_source_from_capacity_source(capacity_source: Any) -> str:
+    text = str(capacity_source or "").strip()
+    if not text:
+        return ""
+    candidates: list[str] = []
+    if "交接班容量报表源文件" in text:
+        candidates.append(text.replace("交接班容量报表源文件", "交接班日志源文件"))
+    try:
+        path = Path(text)
+        name = path.name.replace("交接班容量报表源文件", "交接班日志源文件")
+        parent_parts = [
+            "交接班日志源文件" if part == "交接班容量报表源文件" else part
+            for part in path.parent.parts
+        ]
+        if parent_parts:
+            candidates.append(str(Path(*parent_parts) / name))
+    except Exception:  # noqa: BLE001
+        pass
+    return _first_existing_path(*candidates)
+
+
 def _resolve_regenerate_source_files(container, session: Dict[str, Any], *, building: str) -> tuple[str, str]:
     duty_date = str(session.get("duty_date", "") or "").strip()
     duty_shift = str(session.get("duty_shift", "") or "").strip().lower()
     source_cache = session.get("source_file_cache", {}) if isinstance(session.get("source_file_cache", {}), dict) else {}
-    handover_source = _first_existing_path(
+    fallback_handover_source = _first_existing_path(
         session.get("data_file"),
         source_cache.get("stored_path"),
     )
-    capacity_source = _first_existing_path(session.get("capacity_source_file"))
-    capacity_source = capacity_source or _derive_capacity_source_from_handover_source(handover_source)
+    fallback_capacity_source = _first_existing_path(session.get("capacity_source_file"))
+    fallback_capacity_source = fallback_capacity_source or _derive_capacity_source_from_handover_source(fallback_handover_source)
     bridge_service = getattr(container, "shared_bridge_service", None)
-    if bridge_service is not None and duty_date and duty_shift and (not handover_source or not capacity_source):
+    latest_handover_source = ""
+    latest_capacity_source = ""
+    if bridge_service is not None and duty_date and duty_shift:
         try:
-            if not handover_source:
-                handover_source = _first_cached_file(
-                    bridge_service.get_handover_by_date_cache_entries(
-                        duty_date=duty_date,
-                        duty_shift=duty_shift,
-                        buildings=[building],
-                        require_fresh=True,
-                    ),
-                    building,
-                )
+            latest_handover_source = _first_cached_file(
+                bridge_service.get_handover_by_date_cache_entries(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    buildings=[building],
+                    require_fresh=True,
+                ),
+                building,
+            )
         except Exception as exc:  # noqa: BLE001
             container.add_system_log(f"[交接班][审核重生成] 读取交接班共享缓存失败 building={building}, error={exc}")
         try:
-            if not capacity_source:
-                capacity_source = _first_cached_file(
-                    bridge_service.get_handover_capacity_by_date_cache_entries(
-                        duty_date=duty_date,
-                        duty_shift=duty_shift,
-                        buildings=[building],
-                        require_fresh=True,
-                    ),
-                    building,
-                )
+            latest_capacity_source = _first_cached_file(
+                bridge_service.get_handover_capacity_by_date_cache_entries(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    buildings=[building],
+                    require_fresh=True,
+                ),
+                building,
+            )
         except Exception as exc:  # noqa: BLE001
             container.add_system_log(f"[交接班][审核重生成] 读取容量共享缓存失败 building={building}, error={exc}")
+    if not latest_capacity_source and latest_handover_source:
+        latest_capacity_source = _derive_capacity_source_from_handover_source(latest_handover_source)
+    if not latest_handover_source and latest_capacity_source:
+        latest_handover_source = _derive_handover_source_from_capacity_source(latest_capacity_source)
+
+    latest_pair_ready = bool(latest_handover_source and latest_capacity_source)
+    handover_source = latest_handover_source if latest_pair_ready else fallback_handover_source
+    capacity_source = latest_capacity_source if latest_pair_ready else fallback_capacity_source
+    if not capacity_source:
+        capacity_source = _derive_capacity_source_from_handover_source(handover_source)
+    try:
+        if (latest_handover_source or latest_capacity_source) and not latest_pair_ready:
+            container.add_system_log(
+                "[交接班][审核重生成] 最新源文件不完整，回退当前会话源文件 "
+                f"building={building}, latest_handover={'yes' if latest_handover_source else 'no'}, "
+                f"latest_capacity={'yes' if latest_capacity_source else 'no'}"
+            )
+        if latest_pair_ready and latest_handover_source and latest_handover_source != fallback_handover_source:
+            container.add_system_log(
+                "[交接班][审核重生成] 使用最新交接班源文件 "
+                f"building={building}, file={Path(latest_handover_source).name}"
+            )
+        if latest_pair_ready and latest_capacity_source and latest_capacity_source != fallback_capacity_source:
+            container.add_system_log(
+                "[交接班][审核重生成] 使用最新容量源文件 "
+                f"building={building}, file={Path(latest_capacity_source).name}"
+            )
+    except Exception:  # noqa: BLE001
+        pass
     return handover_source, capacity_source
 
 
