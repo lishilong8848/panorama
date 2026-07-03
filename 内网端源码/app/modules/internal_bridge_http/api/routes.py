@@ -283,6 +283,7 @@ def download_internal_alarm_rule_export_file(
 def list_internal_system_screenshot_files(
     request: Request,
     capture_date: str = "",
+    building: str = "",
     target_key: str = "",
 ) -> Dict[str, Any]:
     _require_enabled_and_authorized(request)
@@ -292,6 +293,7 @@ def list_internal_system_screenshot_files(
         **list_system_screenshot_files(
             config=config,
             capture_date=capture_date or None,
+            building=building,
             target_key=target_key,
             state_file=_system_screenshot_state_file(config),
         ),
@@ -303,6 +305,7 @@ def download_internal_system_screenshot_file(
     request: Request,
     capture_date: str,
     target_key: str,
+    building: str = "",
     file_name: str = "",
 ) -> FileResponse:
     _require_enabled_and_authorized(request)
@@ -312,6 +315,7 @@ def download_internal_system_screenshot_file(
             config=config,
             capture_date=capture_date,
             target_key=target_key,
+            building=building,
             file_name=file_name,
             state_file=_system_screenshot_state_file(config),
         )
@@ -335,6 +339,7 @@ def run_internal_system_screenshot_capture(
     container = getattr(request.app.state, "container", None)
     raw_emit_log = getattr(container, "add_system_log", None)
     capture_date = str(body.get("capture_date", "") or "").strip() or None
+    site_building = str(body.get("site_building", "") or body.get("building", "") or "").strip() or None
     force = bool(body.get("force", False))
     wait = bool(body.get("wait", False))
 
@@ -357,6 +362,7 @@ def run_internal_system_screenshot_capture(
             return run_system_screenshot_capture(
                 config=config,
                 capture_date=capture_date,
+                site_building=site_building,
                 force=force,
                 emit_log=emit_log,
             )

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import copy
+import threading
 from typing import Any, Callable, Dict
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -23,6 +24,10 @@ from app.modules.shared_bridge.service.internal_runtime_status_presenter import 
     build_empty_internal_runtime_summary,
     build_internal_runtime_building_status as presenter_build_internal_runtime_building_status,
     build_internal_runtime_summary as presenter_build_internal_runtime_summary,
+)
+from app.modules.system_screenshot_capture.service.system_screenshot_capture_service import (
+    list_system_screenshot_files,
+    run_system_screenshot_capture,
 )
 
 
@@ -961,6 +966,101 @@ def bridge_shared_root_self_check(request: Request) -> Dict[str, Any]:
     except Exception:
         pass
     return {"ok": True, **payload}
+
+
+@router.get("/api/bridge/system-screenshots/files")
+def bridge_system_screenshot_files(
+    request: Request,
+    capture_date: str = "",
+    capture_hour: str = "",
+    building: str = "",
+    target_key: str = "",
+) -> Dict[str, Any]:
+    if _deployment_role_mode(request) != "internal":
+        raise HTTPException(status_code=409, detail="当前仅内网端允许读取系统截图状态")
+    container = request.app.state.container
+    try:
+        payload = list_system_screenshot_files(
+            config=getattr(container, "runtime_config", {}) or {},
+            capture_date=capture_date or None,
+            capture_hour=capture_hour or None,
+            building=building,
+            target_key=target_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **payload}
+
+
+@router.post("/api/bridge/system-screenshots/run")
+def bridge_system_screenshot_run(
+    request: Request,
+    payload: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    if _deployment_role_mode(request) != "internal":
+        raise HTTPException(status_code=409, detail="当前仅内网端允许触发系统截图采集")
+    container = request.app.state.container
+    body = payload if isinstance(payload, dict) else {}
+    capture_date = str(body.get("capture_date", "") or "").strip() or None
+    capture_hour = str(body.get("capture_hour", "") or "").strip() or None
+    site_building = str(body.get("site_building", "") or body.get("building", "") or "").strip() or None
+    force = bool(body.get("force", False))
+    wait = bool(body.get("wait", False))
+    lock = getattr(container, "_system_screenshot_capture_run_lock", None)
+
+    def emit_log(text: str) -> None:
+        logger = getattr(container, "add_system_log", None)
+        if not callable(logger):
+            return
+        try:
+            logger(text, suppress_alert_upload=True)
+        except TypeError:
+            logger(text)
+
+    def _run_once() -> Dict[str, Any]:
+        acquired = False
+        if lock is not None and hasattr(lock, "acquire"):
+            acquired = bool(lock.acquire(blocking=False))
+            if not acquired:
+                return {"status": "running", "message": "系统截图采集已有运行实例"}
+        try:
+            cfg = getattr(container, "_system_screenshot_capture_cfg", lambda: {})()
+            return run_system_screenshot_capture(
+                config=getattr(container, "runtime_config", {}) or {},
+                capture_date=capture_date,
+                capture_hour=capture_hour,
+                state_file=str(cfg.get("state_file", "") or "").strip() or None,
+                download_root=str(cfg.get("download_root", "") or "").strip() or None,
+                site_building=site_building,
+                headless=bool(cfg.get("headless", False)),
+                force=force,
+                emit_log=emit_log,
+            )
+        finally:
+            if acquired:
+                lock.release()
+
+    if wait:
+        try:
+            result = _run_once()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"ok": True, **result}
+
+    def _worker() -> None:
+        try:
+            result = _run_once()
+            emit_log(
+                "[系统截图采集] 本机后台检查完成: "
+                f"date={capture_date or '-'}, hour={capture_hour or '-'}, status={result.get('status', '-')}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[系统截图采集] 本机后台检查失败: date={capture_date or '-'}, hour={capture_hour or '-'}, error={exc}")
+
+    threading.Thread(target=_worker, name="local-system-screenshot-capture", daemon=True).start()
+    return {"ok": True, "accepted": True, "running": True, "message": "已开始检查当天系统截图"}
 
 
 @router.post("/api/bridge/source-cache/refresh-current-hour")

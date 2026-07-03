@@ -1407,6 +1407,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "max_records": 1000,
             "delete_batch_size": 200,
             "create_batch_size": 200,
+            "expected_buildings": ["A楼", "B楼", "C楼", "D楼", "E楼"],
             "scheduler": {
                 "enabled": True,
                 "auto_start_in_gui": True,
@@ -1418,7 +1419,9 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             },
             "fields": {
                 "date": "日期",
+                "building": "楼栋",
                 "attachment": "附件",
+                "partition": "分区",
             },
             "targets": [
                 {
@@ -1427,9 +1430,16 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "table_id": "tblGIz3IElh6T8vm",
                 },
                 {
-                    "key": "hvac",
-                    "label": "暖通系统图",
+                    "key": "hvac_a",
+                    "label": "暖通系统图-A区",
                     "table_id": "tblnnbx0tw3sFJoH",
+                    "partition": "A区",
+                },
+                {
+                    "key": "hvac_b",
+                    "label": "暖通系统图-B区",
+                    "table_id": "tblnnbx0tw3sFJoH",
+                    "partition": "B区",
                 },
                 {
                     "key": "fuel",

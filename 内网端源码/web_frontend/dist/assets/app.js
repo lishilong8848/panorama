@@ -11,12 +11,21 @@ const SOURCE_FAMILIES = [
   ["chiller_mode_switch_family", "制冷单元模式切换参数源文件"],
   ["alarm_event_family", "告警信息源文件"],
 ];
+const SYSTEM_SCREENSHOT_TARGETS = [
+  ["power_distribution", "供配电系统图"],
+  ["hvac_a", "暖通系统图-A区"],
+  ["hvac_b", "暖通系统图-B区"],
+  ["fuel", "燃油系统图"],
+  ["generator", "柴发系统图"],
+  ["weak_current", "弱电系统图"],
+];
 
 const state = {
   view: location.pathname.includes("/config") ? "config" : "status",
   health: {},
   config: null,
   summary: null,
+  systemScreenshots: null,
   tasks: [],
   logs: [],
   logOffset: 0,
@@ -51,6 +60,18 @@ function query(path, params = {}) {
     }
   });
   return url.pathname + url.search;
+}
+
+function todayText() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function currentHourText() {
+  return String(new Date().getHours()).padStart(2, "0");
 }
 
 async function api(path, options = {}) {
@@ -152,6 +173,22 @@ async function loadTasks() {
   }
 }
 
+async function loadSystemScreenshots() {
+  try {
+    state.systemScreenshots = await api(query("/api/bridge/system-screenshots/files", {
+      capture_date: todayText(),
+      _t: Date.now(),
+    }), { timeoutMs: 8000 });
+  } catch (error) {
+    state.systemScreenshots = {
+      ok: false,
+      error: error.message,
+      capture_date: todayText(),
+      files: [],
+    };
+  }
+}
+
 async function loadLogs() {
   try {
     const textPayload = await fetchText(`/api/logs/system?offset=${state.logOffset || 0}`, { timeoutMs: 4000 });
@@ -171,7 +208,7 @@ async function refreshAll({ silent = false } = {}) {
   refreshInFlight = true;
   if (!silent) setMessage("正在刷新内网端状态...");
   try {
-    await Promise.allSettled([loadHealth(), loadConfig(), loadRuntimeStatus(), loadTasks(), loadLogs()]);
+    await Promise.allSettled([loadHealth(), loadConfig(), loadRuntimeStatus(), loadTasks(), loadSystemScreenshots(), loadLogs()]);
     if (!silent) setMessage("状态已刷新");
     render();
   } finally {
@@ -376,6 +413,56 @@ function renderSourceMatrix() {
   `;
 }
 
+function renderSystemScreenshots() {
+  const payload = state.systemScreenshots || {};
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  const byPair = Object.fromEntries(files.map((item) => [`${String(item.site_building || "")}|${String(item.target_key || "")}`, item]));
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>系统截图状态</h2>
+          <p>启动时会检查当天 A-E 五楼截图；每楼采集供配电、暖通 A/B 区、燃油、柴发、弱电 6 张图。</p>
+          <p class="muted">日期：${escapeHtml(payload.capture_date || todayText())}</p>
+        </div>
+        <button class="btn btn-secondary" data-action="run-system-screenshots">检查当天截图</button>
+      </div>
+      ${payload.error ? `<div class="global-message global-message-danger">${escapeHtml(payload.error)}</div>` : ""}
+      <div class="screenshot-grid">
+        ${BUILDINGS.map((building) => {
+          const readyCount = SYSTEM_SCREENSHOT_TARGETS.reduce((count, [key]) => {
+            const item = byPair[`${building}|${key}`] || {};
+            return count + ((item.file_exists === true && String(item.status || "") === "captured") ? 1 : 0);
+          }, 0);
+          return `
+            <article class="mini-card screenshot-card screenshot-building-card">
+              <div class="row-between">
+                <strong>${escapeHtml(building)}</strong>
+                <span class="pill ${readyCount === SYSTEM_SCREENSHOT_TARGETS.length ? "is-success" : "is-warning"}">
+                  ${readyCount}/${SYSTEM_SCREENSHOT_TARGETS.length}
+                </span>
+              </div>
+              <div class="screenshot-target-list">
+                ${SYSTEM_SCREENSHOT_TARGETS.map(([key, label]) => {
+                  const item = byPair[`${building}|${key}`] || {};
+                  const ready = item.file_exists === true && String(item.status || "") === "captured";
+                  const detail = ready ? (item.file_name || item.relative_path || item.file_path || "") : "等待补查";
+                  return `
+                    <div class="screenshot-target-row" title="${escapeHtml(detail)}">
+                      <span>${escapeHtml(label)}</span>
+                      <span class="pill ${ready ? "is-success" : "is-warning"}">${ready ? "已截图" : "缺失"}</span>
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderTasks() {
   const tasks = state.tasks || [];
   return `
@@ -424,6 +511,7 @@ function renderStatus() {
       <button class="btn btn-secondary" data-action="self-check">共享目录自检</button>
     </section>
     ${renderPageSlots()}
+    ${renderSystemScreenshots()}
     ${renderSourceMatrix()}
     ${renderTasks()}
     ${renderLogs()}
@@ -606,6 +694,17 @@ async function handleAction(event) {
       setMessage("已提交当前小时常规源文件下载...");
       const payload = await api("/api/bridge/source-cache/refresh-current-hour", { method: "POST", body: "{}" });
       setMessage(payload.message || "已开始下载当前小时常规源文件");
+      await refreshAll({ silent: true });
+    } else if (action === "run-system-screenshots") {
+      setMessage("已提交当天系统截图检查...");
+      const payload = await api("/api/bridge/system-screenshots/run", {
+        method: "POST",
+        body: JSON.stringify({
+          capture_date: todayText(),
+          force: false,
+        }),
+      });
+      setMessage(payload.message || "已开始检查当天系统截图");
       await refreshAll({ silent: true });
     } else if (action === "refresh-building") {
       const family = target.dataset.family || "";

@@ -18,9 +18,16 @@ DEFAULT_TARGETS: List[Dict[str, str]] = [
         "table_id": "tblGIz3IElh6T8vm",
     },
     {
-        "key": "hvac",
-        "label": "暖通系统图",
+        "key": "hvac_a",
+        "label": "暖通系统图-A区",
         "table_id": "tblnnbx0tw3sFJoH",
+        "partition": "A区",
+    },
+    {
+        "key": "hvac_b",
+        "label": "暖通系统图-B区",
+        "table_id": "tblnnbx0tw3sFJoH",
+        "partition": "B区",
     },
     {
         "key": "fuel",
@@ -38,6 +45,7 @@ DEFAULT_TARGETS: List[Dict[str, str]] = [
         "table_id": "tbly9D29sw0eT6FQ",
     },
 ]
+DEFAULT_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"]
 DEFAULT_CONFIG = {
     "enabled": True,
     "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
@@ -49,9 +57,12 @@ DEFAULT_CONFIG = {
     "max_records": 1000,
     "delete_batch_size": 200,
     "create_batch_size": 200,
+    "expected_buildings": DEFAULT_BUILDINGS,
     "fields": {
         "date": "日期",
+        "building": "楼栋",
         "attachment": "附件",
+        "partition": "分区",
     },
     "targets": DEFAULT_TARGETS,
 }
@@ -63,6 +74,18 @@ def _dict(value: Any) -> Dict[str, Any]:
 
 def _list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
+
+
+def _expand_legacy_hvac_target(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    key = str(item.get("key", "") or "").strip()
+    partition = str(item.get("partition", "") or "").strip()
+    if key != "hvac" or partition:
+        return [item]
+    base = dict(item)
+    return [
+        {**base, "key": "hvac_a", "label": "暖通系统图-A区", "partition": "A区"},
+        {**base, "key": "hvac_b", "label": "暖通系统图-B区", "partition": "B区"},
+    ]
 
 
 def _deep_merge(raw: Any, defaults: Any) -> Any:
@@ -152,14 +175,26 @@ class SystemScreenshotUploadService:
         for item in _list(cfg.get("targets")):
             if not isinstance(item, dict):
                 continue
-            key = str(item.get("key", "") or "").strip()
-            label = str(item.get("label", "") or "").strip()
-            table_id = str(item.get("table_id", "") or "").strip()
-            if not key or not label or not table_id or key in seen:
-                continue
-            seen.add(key)
-            output.append({"key": key, "label": label, "table_id": table_id})
+            for expanded in _expand_legacy_hvac_target(item):
+                key = str(expanded.get("key", "") or "").strip()
+                label = str(expanded.get("label", "") or "").strip()
+                table_id = str(expanded.get("table_id", "") or "").strip()
+                partition = str(expanded.get("partition", "") or "").strip()
+                if not key or not label or not table_id or key in seen:
+                    continue
+                seen.add(key)
+                output.append({"key": key, "label": label, "table_id": table_id, "partition": partition})
         return output
+
+    def _expected_buildings(self, cfg: Dict[str, Any]) -> List[str]:
+        configured = cfg.get("expected_buildings")
+        values = configured if isinstance(configured, list) else DEFAULT_BUILDINGS
+        output: List[str] = []
+        for item in values:
+            text = str(item or "").strip()
+            if text and text not in output:
+                output.append(text)
+        return output or list(DEFAULT_BUILDINGS)
 
     def _date_value(self, cfg: Dict[str, Any], capture_date: str) -> str:
         fmt = str(cfg.get("date_value_format", "{date}") or "{date}")
@@ -226,6 +261,11 @@ class SystemScreenshotUploadService:
             return True
         return expected in text
 
+    def _record_matches_field_value(self, fields: Dict[str, Any], field_name: str, expected: str) -> bool:
+        if not field_name:
+            return True
+        return _field_text(fields.get(field_name)) == expected
+
     def _old_record_ids(
         self,
         client: FeishuBitableClient,
@@ -233,16 +273,23 @@ class SystemScreenshotUploadService:
         table_id: str,
         date_field: str,
         date_value: str,
+        extra_match_fields: Dict[str, str] | None = None,
         page_size: int,
         max_records: int,
     ) -> List[str]:
-        if not date_field:
+        extra_matches = {
+            str(key or "").strip(): str(value or "").strip()
+            for key, value in (extra_match_fields or {}).items()
+            if str(key or "").strip()
+        }
+        if not date_field and not extra_matches:
             return []
+        field_names = [field for field in [date_field, *extra_matches.keys()] if field]
         records = client.list_records(
             table_id,
             page_size=page_size,
             max_records=max_records,
-            field_names=[date_field],
+            field_names=field_names,
         )
         record_ids: List[str] = []
         for item in records:
@@ -250,7 +297,12 @@ class SystemScreenshotUploadService:
                 continue
             record_id = str(item.get("record_id", "") or "").strip()
             fields = _dict(item.get("fields"))
-            if record_id and self._record_matches_date(fields, date_field, date_value):
+            date_matched = True if not date_field else self._record_matches_date(fields, date_field, date_value)
+            extra_matched = all(
+                self._record_matches_field_value(fields, field_name, expected)
+                for field_name, expected in extra_matches.items()
+            )
+            if record_id and date_matched and extra_matched:
                 record_ids.append(record_id)
         return record_ids
 
@@ -276,6 +328,7 @@ class SystemScreenshotUploadService:
         targets = self._targets(cfg)
         if not targets:
             raise RuntimeError("系统截图上传目标为空")
+        expected_buildings = self._expected_buildings(cfg)
 
         internal = self._make_internal_client()
         should_trigger = bool(cfg.get("trigger_internal_capture", True)) if trigger_internal_capture is None else bool(trigger_internal_capture)
@@ -283,21 +336,27 @@ class SystemScreenshotUploadService:
             log(f"[系统截图上传] 触发内网端截图检查 date={date_text}")
             internal.run_system_screenshot_capture(capture_date=date_text, force=False)
 
-        by_key: Dict[str, Dict[str, Any]] = {}
+        by_pair: Dict[tuple[str, str], Dict[str, Any]] = {}
         missing: List[str] = []
         deadline = time.monotonic() + max(1.0, float(cfg.get("wait_capture_timeout_sec", 180) or 180))
         poll_sec = max(1.0, float(cfg.get("wait_capture_poll_sec", 5) or 5))
         while True:
             listing = internal.list_system_screenshot_files(capture_date=date_text)
             files = listing.get("files", []) if isinstance(listing, dict) else []
-            by_key = {}
+            by_pair = {}
             for item in files if isinstance(files, list) else []:
                 if not isinstance(item, dict):
                     continue
+                building = str(item.get("site_building", "") or "").strip()
                 key = str(item.get("target_key", "") or "").strip()
-                if key and item.get("file_exists") is True:
-                    by_key[key] = item
-            missing = [target["label"] for target in targets if target["key"] not in by_key]
+                if building and key and item.get("file_exists") is True:
+                    by_pair[(building, key)] = item
+            missing = [
+                f"{building}/{target['label']}"
+                for building in expected_buildings
+                for target in targets
+                if (building, target["key"]) not in by_pair
+            ]
             if not missing or not should_trigger or time.monotonic() >= deadline:
                 break
             log(f"[系统截图上传] 等待内网端截图完成: missing={','.join(missing)}")
@@ -309,61 +368,88 @@ class SystemScreenshotUploadService:
         app_token = str(cfg.get("app_token", "") or "").strip()
         fields_cfg = _dict(cfg.get("fields"))
         configured_date_field = str(fields_cfg.get("date", "日期") or "").strip()
+        configured_building_field = str(fields_cfg.get("building", "楼栋") or "").strip()
         configured_attachment_field = str(fields_cfg.get("attachment", "附件") or "").strip()
+        configured_partition_field = str(fields_cfg.get("partition", "分区") or "").strip()
         if not configured_attachment_field:
             raise ValueError("系统截图上传附件字段配置为空")
+        if not configured_building_field:
+            raise ValueError("系统截图上传楼栋字段配置为空")
 
         prepared: List[Dict[str, Any]] = []
-        for target in targets:
-            table_id = target["table_id"]
-            item = by_key[target["key"]]
-            file_name = str(item.get("file_name", "") or "").strip()
-            content, response_name, content_type = internal.download_system_screenshot_file(
-                capture_date=date_text,
-                target_key=target["key"],
-                file_name=file_name,
-            )
-            if not content:
-                raise RuntimeError(f"{target['label']} 截图文件为空: {file_name}")
-            final_name = str(response_name or file_name).strip() or f"{target['label']}.png"
-            client = self._make_bitable_client(cfg, table_id)
-            field_map = self._field_map(client, table_id)
-            attachment_field = configured_attachment_field if configured_attachment_field in field_map else ""
-            if not attachment_field:
-                raise RuntimeError(f"{target['label']} 目标表缺少附件字段: {configured_attachment_field}")
-            date_field = configured_date_field if configured_date_field in field_map else ""
-            old_ids = self._old_record_ids(
-                client,
-                table_id=table_id,
-                date_field=date_field,
-                date_value=date_value,
-                page_size=max(1, int(cfg.get("page_size", 500) or 500)),
-                max_records=max(0, int(cfg.get("max_records", 1000) or 1000)),
-            )
-            prepared.append(
-                {
-                    "target": target,
-                    "table_id": table_id,
-                    "client": client,
-                    "field_map": field_map,
-                    "attachment_field": attachment_field,
-                    "date_field": date_field,
-                    "old_ids": old_ids,
-                    "content": content,
-                    "file_name": final_name,
-                    "mime_type": content_type or self._mime_type(final_name),
-                }
-            )
+        for building in expected_buildings:
+            for target in targets:
+                table_id = target["table_id"]
+                item = by_pair[(building, target["key"])]
+                file_name = str(item.get("file_name", "") or "").strip()
+                content, response_name, content_type = internal.download_system_screenshot_file(
+                    capture_date=date_text,
+                    building=building,
+                    target_key=target["key"],
+                    file_name=file_name,
+                )
+                if not content:
+                    raise RuntimeError(f"{building}/{target['label']} 截图文件为空: {file_name}")
+                final_name = str(response_name or file_name).strip() or f"{building}_{target['label']}.png"
+                client = self._make_bitable_client(cfg, table_id)
+                field_map = self._field_map(client, table_id)
+                attachment_field = configured_attachment_field if configured_attachment_field in field_map else ""
+                if not attachment_field:
+                    raise RuntimeError(f"{target['label']} 目标表缺少附件字段: {configured_attachment_field}")
+                building_field = configured_building_field if configured_building_field in field_map else ""
+                if not building_field:
+                    raise RuntimeError(f"{target['label']} 目标表缺少楼栋字段: {configured_building_field}")
+                date_field = configured_date_field if configured_date_field in field_map else ""
+                partition_value = str(target.get("partition", "") or "").strip()
+                partition_field = ""
+                if partition_value:
+                    partition_field = configured_partition_field if configured_partition_field in field_map else ""
+                    if not partition_field:
+                        raise RuntimeError(f"{target['label']} 目标表缺少分区字段: {configured_partition_field}")
+                extra_match_fields = {building_field: building}
+                if partition_field and partition_value:
+                    extra_match_fields[partition_field] = partition_value
+                old_ids = self._old_record_ids(
+                    client,
+                    table_id=table_id,
+                    date_field=date_field,
+                    date_value=date_value,
+                    extra_match_fields=extra_match_fields,
+                    page_size=max(1, int(cfg.get("page_size", 500) or 500)),
+                    max_records=max(0, int(cfg.get("max_records", 1000) or 1000)),
+                )
+                prepared.append(
+                    {
+                        "building": building,
+                        "target": target,
+                        "table_id": table_id,
+                        "client": client,
+                        "field_map": field_map,
+                        "attachment_field": attachment_field,
+                        "building_field": building_field,
+                        "date_field": date_field,
+                        "partition_field": partition_field,
+                        "partition_value": partition_value,
+                        "old_ids": old_ids,
+                        "content": content,
+                        "file_name": final_name,
+                        "mime_type": content_type or self._mime_type(final_name),
+                    }
+                )
 
         uploaded: List[Dict[str, Any]] = []
         deleted_total = 0
         for prepared_item in prepared:
+            building = prepared_item["building"]
             target = prepared_item["target"]
             table_id = prepared_item["table_id"]
             client = prepared_item["client"]
             field_map = prepared_item["field_map"]
             attachment_field = prepared_item["attachment_field"]
+            building_field = prepared_item["building_field"]
             date_field = prepared_item["date_field"]
+            partition_field = prepared_item["partition_field"]
+            partition_value = prepared_item["partition_value"]
             old_ids = prepared_item["old_ids"]
             content = prepared_item["content"]
             final_name = prepared_item["file_name"]
@@ -374,9 +460,12 @@ class SystemScreenshotUploadService:
             )
             fields: Dict[str, Any] = {
                 attachment_field: [{"file_token": file_token}],
+                building_field: building,
             }
             if date_field:
                 fields[date_field] = self._date_field_value(field_map.get(date_field), date_value)
+            if partition_field and partition_value:
+                fields[partition_field] = partition_value
             client.batch_create_records(
                 table_id,
                 [fields],
@@ -392,6 +481,7 @@ class SystemScreenshotUploadService:
                 deleted_total += deleted_count
             uploaded.append(
                 {
+                    "building": building,
                     "key": target["key"],
                     "label": target["label"],
                     "table_id": table_id,
@@ -400,11 +490,14 @@ class SystemScreenshotUploadService:
                     "file_token": file_token,
                     "deleted_count": deleted_count,
                     "date_field": date_field,
+                    "building_field": building_field,
                     "attachment_field": attachment_field,
+                    "partition_field": partition_field,
+                    "partition": partition_value,
                 }
             )
             log(
-                f"[系统截图上传] 已上传: {target['label']} table={table_id}, "
+                f"[系统截图上传] 已上传: {building} {target['label']} table={table_id}, "
                 f"file={final_name}, deleted={deleted_count}"
             )
 

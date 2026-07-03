@@ -37,6 +37,7 @@ from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
 from app.modules.system_screenshot_capture.service.system_screenshot_capture_service import (
     run_system_screenshot_capture,
 )
+from app.shared.runtime.internal_download_browser_pool_runtime import get_internal_download_browser_pool
 from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
 from app.shared.utils.file_utils import (
     canonicalize_windows_path_for_compare,
@@ -543,10 +544,16 @@ class AppContainer:
             source_name="告警规则导出",
         )
 
+    def _system_screenshot_capture_cfg(self) -> Dict[str, Any]:
+        runtime_config = self.runtime_config if isinstance(self.runtime_config, dict) else {}
+        features = runtime_config.get("features", {})
+        if isinstance(features, dict) and isinstance(features.get("system_screenshot_capture"), dict):
+            return features.get("system_screenshot_capture") or {}
+        cfg = runtime_config.get("system_screenshot_capture", {})
+        return cfg if isinstance(cfg, dict) else {}
+
     def _build_system_screenshot_capture_scheduler(self) -> DailyAutoSchedulerService:
-        cfg = self.runtime_config.get("system_screenshot_capture", {})
-        if not isinstance(cfg, dict):
-            cfg = {}
+        cfg = self._system_screenshot_capture_cfg()
         scheduler_cfg = cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
@@ -563,8 +570,38 @@ class AppContainer:
             emit_log=self.add_system_log,
             run_callback=self.system_screenshot_capture_scheduler_callback
             or self._system_screenshot_capture_scheduler_run_callback,
-            is_busy=lambda: False,
+            is_busy=self._system_screenshot_capture_is_busy,
         )
+
+    def _system_screenshot_capture_is_busy(self) -> bool:
+        if getattr(self._system_screenshot_capture_run_lock, "locked", lambda: False)():
+            return True
+        service = getattr(self, "shared_bridge_service", None)
+        source_cache = getattr(service, "_source_cache_service", None)
+        if source_cache is not None and hasattr(source_cache, "get_health_snapshot"):
+            try:
+                snapshot = source_cache.get_health_snapshot(mode="internal_light")
+                current_hour = snapshot.get("current_hour_refresh", {}) if isinstance(snapshot, dict) else {}
+                daily_source = snapshot.get("daily_source_refresh", {}) if isinstance(snapshot, dict) else {}
+                if bool(current_hour.get("running")) or bool(daily_source.get("running")):
+                    return True
+            except Exception:
+                # busy 判断必须轻量且不能影响调度线程；读取失败时交给浏览器池状态继续判断。
+                pass
+        pool = getattr(service, "_internal_download_pool", None) or get_internal_download_browser_pool()
+        if pool is not None and hasattr(pool, "get_health_snapshot"):
+            try:
+                snapshot = pool.get_health_snapshot()
+                active_buildings = snapshot.get("active_buildings", []) if isinstance(snapshot, dict) else []
+                if active_buildings:
+                    return True
+                page_slots = snapshot.get("page_slots", []) if isinstance(snapshot, dict) else []
+                for slot in page_slots if isinstance(page_slots, list) else []:
+                    if isinstance(slot, dict) and bool(slot.get("in_use", False)):
+                        return True
+            except Exception:
+                return True
+        return False
 
     def _build_updater_service(self) -> Any:
         from app.modules.updater.service.updater_service import UpdaterService
@@ -653,9 +690,7 @@ class AppContainer:
         return False, f"告警规则导出退出码={exit_code}"
 
     def _system_screenshot_capture_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
-        cfg = self.runtime_config.get("system_screenshot_capture", {})
-        if not isinstance(cfg, dict):
-            cfg = {}
+        cfg = self._system_screenshot_capture_cfg()
         if cfg.get("enabled") is False:
             return True, "系统截图采集已禁用"
         if not self._system_screenshot_capture_run_lock.acquire(blocking=False):
@@ -665,7 +700,7 @@ class AppContainer:
                 config=self.runtime_config,
                 state_file=str(cfg.get("state_file", "") or "").strip() or None,
                 download_root=str(cfg.get("download_root", "") or "").strip() or None,
-                site_building=str(cfg.get("site_building", "") or "").strip() or None,
+                site_building=None,
                 headless=bool(cfg.get("headless", False)),
                 emit_log=self.add_system_log,
             )
@@ -729,6 +764,12 @@ class AppContainer:
             name="alarm-rule-export-startup-check",
             daemon=True,
         ).start()
+
+    def _start_system_screenshot_capture_startup_check(self, source: str) -> None:
+        cfg = self._system_screenshot_capture_cfg()
+        if cfg.get("enabled") is False:
+            return
+        self.add_system_log("[系统截图采集调度] 启动检查：截图采集交给每日空闲调度执行，不抢占源文件下载")
 
     def _is_placeholder_callback(self, callback: Any, placeholder: Any | None = None) -> bool:
         if callback is None:
@@ -1339,19 +1380,16 @@ class AppContainer:
                 self._start_alarm_rule_export_startup_check(source=source)
             else:
                 self.add_system_log("[告警规则导出调度] 启动时未自动开启")
-            system_screenshot_cfg = self.runtime_config.get("system_screenshot_capture", {})
-            if not isinstance(system_screenshot_cfg, dict):
-                system_screenshot_cfg = {}
-            system_screenshot_scheduler_cfg = system_screenshot_cfg.get("scheduler", {})
-            if not isinstance(system_screenshot_scheduler_cfg, dict):
-                system_screenshot_scheduler_cfg = {}
-            if bool(system_screenshot_cfg.get("enabled", True)) and bool(
-                system_screenshot_scheduler_cfg.get("auto_start_in_gui", True)
-            ):
+
+            system_screenshot_cfg = self._system_screenshot_capture_cfg()
+            screenshot_enabled = bool(system_screenshot_cfg.get("enabled", True))
+            if screenshot_enabled:
                 _report_progress("starting_system_screenshot_capture_scheduler")
                 self.start_system_screenshot_capture_scheduler(source=source)
             else:
-                self.add_system_log("[系统截图采集调度] 启动时未自动开启")
+                self.add_system_log("[系统截图采集调度] 截图功能已禁用，启动时不自动截图")
+            if screenshot_enabled:
+                self._start_system_screenshot_capture_startup_check(source=source)
             _report_progress("runtime_services_started")
             return {
                 "ok": True,

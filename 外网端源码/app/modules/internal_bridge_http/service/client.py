@@ -496,12 +496,19 @@ class InternalBridgeHttpClient:
             },
         )
 
-    def list_system_screenshot_files(self, *, capture_date: str = "", target_key: str = "") -> Dict[str, Any]:
+    def list_system_screenshot_files(
+        self,
+        *,
+        capture_date: str = "",
+        building: str = "",
+        target_key: str = "",
+    ) -> Dict[str, Any]:
         return self._request(
             "GET",
             "/api/internal-bridge/system-screenshots/files",
             query={
                 "capture_date": str(capture_date or "").strip(),
+                "building": str(building or "").strip(),
                 "target_key": str(target_key or "").strip(),
             },
         )
@@ -511,6 +518,7 @@ class InternalBridgeHttpClient:
         *,
         capture_date: str,
         target_key: str,
+        building: str = "",
         file_name: str = "",
     ) -> Tuple[bytes, str, str]:
         return self._request_bytes(
@@ -519,6 +527,7 @@ class InternalBridgeHttpClient:
             query={
                 "capture_date": str(capture_date or "").strip(),
                 "target_key": str(target_key or "").strip(),
+                "building": str(building or "").strip(),
                 "file_name": str(file_name or "").strip(),
             },
         )

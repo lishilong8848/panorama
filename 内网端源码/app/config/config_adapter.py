@@ -802,6 +802,10 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         _dict(runtime.get("system_screenshot_capture")),
         _dict(features.get("system_screenshot_capture")),
     )
+    screenshot_scheduler = _dict(features["system_screenshot_capture"].get("scheduler"))
+    if str(screenshot_scheduler.get("run_time", "") or "").strip() == "04:30:00":
+        screenshot_scheduler["run_time"] = "05:37:00"
+        features["system_screenshot_capture"]["scheduler"] = screenshot_scheduler
     features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
         _dict(features.get("wet_bulb_collection"))
     )
