@@ -1400,7 +1400,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "enabled": True,
             "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
             "trigger_internal_capture": True,
-            "wait_capture_timeout_sec": 180,
+            "wait_capture_timeout_sec": 600,
             "wait_capture_poll_sec": 5,
             "date_value_format": "{date}",
             "page_size": 500,
@@ -1411,7 +1411,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "scheduler": {
                 "enabled": True,
                 "auto_start_in_gui": True,
-                "run_time": "05:00:00",
+                "run_time": "06:37:00",
                 "check_interval_sec": 30,
                 "catch_up_if_missed": True,
                 "retry_failed_in_same_period": True,

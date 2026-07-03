@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
     "trigger_internal_capture": True,
-    "wait_capture_timeout_sec": 180,
+    "wait_capture_timeout_sec": 600,
     "wait_capture_poll_sec": 5,
     "date_value_format": "{date}",
     "page_size": 500,
@@ -252,57 +252,21 @@ class SystemScreenshotUploadService:
             return _date_to_timestamp_ms(source_date)
         return date_value
 
-    def _record_matches_date(self, fields: Dict[str, Any], date_field: str, expected: str) -> bool:
-        value = fields.get(date_field)
-        text = _field_text(value)
-        if text == expected:
-            return True
-        if _timestamp_ms_to_date_text(text) == expected:
-            return True
-        return expected in text
-
-    def _record_matches_field_value(self, fields: Dict[str, Any], field_name: str, expected: str) -> bool:
-        if not field_name:
-            return True
-        return _field_text(fields.get(field_name)) == expected
-
-    def _old_record_ids(
-        self,
-        client: FeishuBitableClient,
-        *,
-        table_id: str,
-        date_field: str,
-        date_value: str,
-        extra_match_fields: Dict[str, str] | None = None,
-        page_size: int,
-        max_records: int,
-    ) -> List[str]:
-        extra_matches = {
-            str(key or "").strip(): str(value or "").strip()
-            for key, value in (extra_match_fields or {}).items()
-            if str(key or "").strip()
-        }
-        if not date_field and not extra_matches:
-            return []
-        field_names = [field for field in [date_field, *extra_matches.keys()] if field]
-        records = client.list_records(
-            table_id,
-            page_size=page_size,
-            max_records=max_records,
-            field_names=field_names,
-        )
+    def _table_record_ids(self, client: FeishuBitableClient, table_id: str, *, page_size: int) -> List[str]:
+        reader = getattr(client, "list_record_ids", None)
+        if callable(reader):
+            return [
+                str(record_id or "").strip()
+                for record_id in reader(table_id, page_size=page_size)
+                if str(record_id or "").strip()
+            ]
+        records = client.list_records(table_id, page_size=page_size, max_records=0, field_names=[])
         record_ids: List[str] = []
         for item in records:
             if not isinstance(item, dict):
                 continue
             record_id = str(item.get("record_id", "") or "").strip()
-            fields = _dict(item.get("fields"))
-            date_matched = True if not date_field else self._record_matches_date(fields, date_field, date_value)
-            extra_matched = all(
-                self._record_matches_field_value(fields, field_name, expected)
-                for field_name, expected in extra_matches.items()
-            )
-            if record_id and date_matched and extra_matched:
+            if record_id:
                 record_ids.append(record_id)
         return record_ids
 
@@ -357,7 +321,7 @@ class SystemScreenshotUploadService:
                 for target in targets
                 if (building, target["key"]) not in by_pair
             ]
-            if not missing or not should_trigger or time.monotonic() >= deadline:
+            if not missing or time.monotonic() >= deadline:
                 break
             log(f"[系统截图上传] 等待内网端截图完成: missing={','.join(missing)}")
             time.sleep(poll_sec)
@@ -406,18 +370,6 @@ class SystemScreenshotUploadService:
                     partition_field = configured_partition_field if configured_partition_field in field_map else ""
                     if not partition_field:
                         raise RuntimeError(f"{target['label']} 目标表缺少分区字段: {configured_partition_field}")
-                extra_match_fields = {building_field: building}
-                if partition_field and partition_value:
-                    extra_match_fields[partition_field] = partition_value
-                old_ids = self._old_record_ids(
-                    client,
-                    table_id=table_id,
-                    date_field=date_field,
-                    date_value=date_value,
-                    extra_match_fields=extra_match_fields,
-                    page_size=max(1, int(cfg.get("page_size", 500) or 500)),
-                    max_records=max(0, int(cfg.get("max_records", 1000) or 1000)),
-                )
                 prepared.append(
                     {
                         "building": building,
@@ -430,7 +382,6 @@ class SystemScreenshotUploadService:
                         "date_field": date_field,
                         "partition_field": partition_field,
                         "partition_value": partition_value,
-                        "old_ids": old_ids,
                         "content": content,
                         "file_name": final_name,
                         "mime_type": content_type or self._mime_type(final_name),
@@ -439,6 +390,26 @@ class SystemScreenshotUploadService:
 
         uploaded: List[Dict[str, Any]] = []
         deleted_total = 0
+        table_clients: Dict[str, FeishuBitableClient] = {}
+        for prepared_item in prepared:
+            table_id = str(prepared_item["table_id"])
+            table_clients.setdefault(table_id, prepared_item["client"])
+        for table_id, client in table_clients.items():
+            record_ids = self._table_record_ids(
+                client,
+                table_id,
+                page_size=max(1, int(cfg.get("page_size", 500) or 500)),
+            )
+            deleted_count = 0
+            if record_ids:
+                deleted_count = client.batch_delete_records(
+                    table_id,
+                    record_ids,
+                    batch_size=max(1, int(cfg.get("delete_batch_size", 200) or 200)),
+                )
+            deleted_total += deleted_count
+            log(f"[系统截图上传] 已清空目标表: table={table_id}, deleted={deleted_count}")
+
         for prepared_item in prepared:
             building = prepared_item["building"]
             target = prepared_item["target"]
@@ -450,7 +421,6 @@ class SystemScreenshotUploadService:
             date_field = prepared_item["date_field"]
             partition_field = prepared_item["partition_field"]
             partition_value = prepared_item["partition_value"]
-            old_ids = prepared_item["old_ids"]
             content = prepared_item["content"]
             final_name = prepared_item["file_name"]
             file_token = client.upload_attachment_bytes(
@@ -471,14 +441,6 @@ class SystemScreenshotUploadService:
                 [fields],
                 batch_size=max(1, int(cfg.get("create_batch_size", 200) or 200)),
             )
-            deleted_count = 0
-            if old_ids:
-                deleted_count = client.batch_delete_records(
-                    table_id,
-                    old_ids,
-                    batch_size=max(1, int(cfg.get("delete_batch_size", 200) or 200)),
-                )
-                deleted_total += deleted_count
             uploaded.append(
                 {
                     "building": building,
@@ -488,7 +450,6 @@ class SystemScreenshotUploadService:
                     "file_name": final_name,
                     "size_bytes": len(content),
                     "file_token": file_token,
-                    "deleted_count": deleted_count,
                     "date_field": date_field,
                     "building_field": building_field,
                     "attachment_field": attachment_field,
@@ -498,7 +459,7 @@ class SystemScreenshotUploadService:
             )
             log(
                 f"[系统截图上传] 已上传: {building} {target['label']} table={table_id}, "
-                f"file={final_name}, deleted={deleted_count}"
+                f"file={final_name}"
             )
 
         return {

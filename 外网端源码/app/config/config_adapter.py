@@ -884,6 +884,12 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         _dict(runtime.get("system_screenshot_upload")),
         _dict(features.get("system_screenshot_upload")),
     )
+    screenshot_upload_scheduler = _dict(features["system_screenshot_upload"].get("scheduler"))
+    if str(screenshot_upload_scheduler.get("run_time", "") or "").strip() == "05:00:00":
+        screenshot_upload_scheduler["run_time"] = "06:37:00"
+        features["system_screenshot_upload"]["scheduler"] = screenshot_upload_scheduler
+    if str(features["system_screenshot_upload"].get("wait_capture_timeout_sec", "") or "").strip() == "180":
+        features["system_screenshot_upload"]["wait_capture_timeout_sec"] = 600
     features["alarm_export"] = sanitize_alarm_export_config(deep_merge_defaults(
         _dict(runtime.get("alarm_export")),
         _dict(features.get("alarm_export")),

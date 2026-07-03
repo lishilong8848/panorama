@@ -401,7 +401,13 @@ def list_system_screenshot_files(
     for item in files:
         key = f"{str(item.get('site_building', '') or '')}|{str(item.get('target_key', '') or '')}"
         previous = latest_by_target.get(key)
-        if previous is None or str(item.get("capture_hour", "") or "") >= str(previous.get("capture_hour", "") or ""):
+        item_exists = item.get("file_exists") is True
+        previous_exists = previous is not None and previous.get("file_exists") is True
+        if previous is None:
+            latest_by_target[key] = item
+        elif item_exists and not previous_exists:
+            latest_by_target[key] = item
+        elif item_exists == previous_exists and str(item.get("capture_hour", "") or "") >= str(previous.get("capture_hour", "") or ""):
             latest_by_target[key] = item
     files = list(latest_by_target.values())
     files.sort(
@@ -755,17 +761,29 @@ async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_l
         raise RuntimeError("系统截图目标为空")
     sites = _select_sites(config, str(args.site_building or ""))
     state_path = _state_path(config, args.state_file)
+
+    def _ready_keys_from_listing(payload: Dict[str, Any]) -> set[tuple[str, str]]:
+        return {
+            (str(item.get("site_building", "") or ""), str(item.get("target_key", "") or ""))
+            for item in payload.get("files", [])
+            if isinstance(item, dict) and item.get("file_exists") is True and str(item.get("status", "") or "") == "captured"
+        }
+
+    def _missing_labels(ready_keys: set[tuple[str, str]]) -> list[str]:
+        return [
+            f"{site.building}/{target.label}"
+            for site in sites
+            for target in targets
+            if (site.building, target.key) not in ready_keys
+        ]
+
     listing = list_system_screenshot_files(
         config=config,
         capture_date=date_text,
         capture_hour=hour_text or None,
         state_file=str(state_path),
     )
-    ready_keys = {
-        (str(item.get("site_building", "") or ""), str(item.get("target_key", "") or ""))
-        for item in listing.get("files", [])
-        if isinstance(item, dict) and item.get("file_exists") is True and str(item.get("status", "") or "") == "captured"
-    }
+    ready_keys = _ready_keys_from_listing(listing)
     capture_plan: list[tuple[SiteConfig, ScreenshotTarget]] = []
     for site in sites:
         for target in targets:
@@ -773,7 +791,7 @@ async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_l
                 capture_plan.append((site, target))
     total_expected = len(sites) * len(targets)
     if not capture_plan:
-        emit_log(f"[系统截图采集] {date_text} 当天已有 {total_expected} 张截图，跳过重复采集")
+        emit_log(f"[系统截图采集] {date_text} 当天截图已齐全 {total_expected}/{total_expected}，跳过重复采集")
         return {
             "status": "skipped",
             "capture_date": date_text,
@@ -841,6 +859,21 @@ async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_l
             emit_log=emit_log,
         )
 
+    final_listing = list_system_screenshot_files(
+        config=config,
+        capture_date=date_text,
+        capture_hour=hour_text or None,
+        state_file=str(state_path),
+    )
+    final_ready_keys = _ready_keys_from_listing(final_listing)
+    missing_after = _missing_labels(final_ready_keys)
+    if missing_after:
+        raise RuntimeError(
+            "系统截图采集后仍不完整: "
+            + ",".join(missing_after)
+            + f"，ready={len(final_ready_keys)}/{total_expected}"
+        )
+
     return {
         "status": "success",
         "capture_date": date_text,
@@ -848,7 +881,10 @@ async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_l
         "site_building": ",".join(site.building for site in sites),
         "state_file": str(state_path),
         "output_dir": str(output_dir),
-        "files": captured,
+        "captured_count": len(captured),
+        "ready_count": len(final_ready_keys),
+        "expected_count": total_expected,
+        "files": final_listing.get("files", []),
     }
 
 
