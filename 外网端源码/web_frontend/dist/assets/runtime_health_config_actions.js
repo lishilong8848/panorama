@@ -1694,6 +1694,48 @@ export function createRuntimeHealthConfigActions(ctx) {
         });
       }
     }
+    if (data.system_screenshot_upload && typeof data.system_screenshot_upload === "object") {
+      health.system_screenshot_upload.enabled = Boolean(data.system_screenshot_upload.enabled);
+      if (data.system_screenshot_upload.scheduler && typeof data.system_screenshot_upload.scheduler === "object") {
+        Object.assign(health.system_screenshot_upload.scheduler, {
+          enabled: Boolean(data.system_screenshot_upload.scheduler.enabled),
+          running: Boolean(data.system_screenshot_upload.scheduler.running),
+          status: String(data.system_screenshot_upload.scheduler.status || ""),
+          run_time: String(data.system_screenshot_upload.scheduler.run_time || ""),
+          next_run_time: String(data.system_screenshot_upload.scheduler.next_run_time || ""),
+          last_check_at: String(data.system_screenshot_upload.scheduler.last_check_at || ""),
+          last_decision: String(data.system_screenshot_upload.scheduler.last_decision || ""),
+          last_trigger_at: String(data.system_screenshot_upload.scheduler.last_trigger_at || ""),
+          last_trigger_result: String(data.system_screenshot_upload.scheduler.last_trigger_result || ""),
+          state_path: String(data.system_screenshot_upload.scheduler.state_path || ""),
+          state_exists: Boolean(data.system_screenshot_upload.scheduler.state_exists),
+          executor_bound: Boolean(data.system_screenshot_upload.scheduler.executor_bound),
+          callback_name: String(data.system_screenshot_upload.scheduler.callback_name || ""),
+          remembered_enabled: Boolean(data.system_screenshot_upload.scheduler.remembered_enabled),
+          effective_auto_start_in_gui: Boolean(data.system_screenshot_upload.scheduler.effective_auto_start_in_gui),
+          memory_source: String(data.system_screenshot_upload.scheduler.memory_source || ""),
+        });
+      } else {
+        Object.assign(health.system_screenshot_upload.scheduler, {
+          enabled: false,
+          running: false,
+          status: "未初始化",
+          run_time: "",
+          next_run_time: "",
+          last_check_at: "",
+          last_decision: "",
+          last_trigger_at: "",
+          last_trigger_result: "",
+          state_path: "",
+          state_exists: false,
+          executor_bound: false,
+          callback_name: "",
+          remembered_enabled: false,
+          effective_auto_start_in_gui: false,
+          memory_source: "",
+        });
+      }
+    }
     if (data.deployment && typeof data.deployment === "object") {
       Object.assign(health.deployment, data.deployment);
     }
@@ -1990,6 +2032,14 @@ export function createRuntimeHealthConfigActions(ctx) {
     const alarm = summary.alarm_event_upload_scheduler;
     if (alarm && typeof alarm === "object" && health?.alarm_event_upload?.scheduler) {
       Object.assign(health.alarm_event_upload.scheduler, alarm);
+    }
+    const systemScreenshotUpload = summary.system_screenshot_upload_scheduler;
+    if (
+      systemScreenshotUpload
+      && typeof systemScreenshotUpload === "object"
+      && health?.system_screenshot_upload?.scheduler
+    ) {
+      Object.assign(health.system_screenshot_upload.scheduler, systemScreenshotUpload);
     }
     const monthlyEvent = summary.monthly_event_report_scheduler;
     if (monthlyEvent && typeof monthlyEvent === "object" && health?.monthly_event_report?.scheduler) {

@@ -6,6 +6,7 @@ const SCHEDULER_REMEMBERED_PATHS = [
   ["day_metric_upload", () => "day_metric_upload"],
   ["branch_power_upload", () => "branch_power_upload"],
   ["alarm_event_upload", () => "alarm_event_upload"],
+  ["system_screenshot_upload", () => "system_screenshot_upload"],
   ["monthly_event_report", () => "monthly_event_report"],
   ["monthly_change_report", () => "monthly_change_report"],
 ];

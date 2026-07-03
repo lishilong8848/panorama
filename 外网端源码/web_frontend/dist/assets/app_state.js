@@ -604,6 +604,27 @@ export function createAppState(vueApi) {
         resolved_at: "",
       },
     },
+    system_screenshot_upload: {
+      enabled: false,
+      scheduler: {
+        enabled: false,
+        running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
+        status: "未初始化",
+        run_time: "06:37:00",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "",
+      },
+    },
     deployment: {
       role_mode: "",
       node_id: "",
@@ -747,6 +768,7 @@ export function createAppState(vueApi) {
   const dayMetricUploadSchedulerQuickSaving = ref(false);
   const branchPowerUploadSchedulerQuickSaving = ref(false);
   const alarmEventUploadSchedulerQuickSaving = ref(false);
+  const systemScreenshotUploadSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
   const schedulerToggleState = reactive({
@@ -757,6 +779,7 @@ export function createAppState(vueApi) {
     day_metric_upload: { mode: "idle", rememberedOverride: null },
     branch_power_upload: { mode: "idle", rememberedOverride: null },
     alarm_event_upload: { mode: "idle", rememberedOverride: null },
+    system_screenshot_upload: { mode: "idle", rememberedOverride: null },
     monthly_event_report: { mode: "idle", rememberedOverride: null },
     monthly_change_report: { mode: "idle", rememberedOverride: null },
   });
@@ -1636,6 +1659,12 @@ export function createAppState(vueApi) {
   const alarmEventUploadSchedulerTriggerText = computed(() =>
     readSchedulerDisplayText(health.alarm_event_upload?.scheduler, "trigger_text", "暂无记录"),
   );
+  const systemScreenshotUploadSchedulerDecisionText = computed(() =>
+    readSchedulerDisplayText(health.system_screenshot_upload?.scheduler, "decision_text", "暂无记录"),
+  );
+  const systemScreenshotUploadSchedulerTriggerText = computed(() =>
+    readSchedulerDisplayText(health.system_screenshot_upload?.scheduler, "trigger_text", "暂无记录"),
+  );
   const handoverMorningDecisionText = computed(() =>
     readSchedulerDisplayText(health.handover_scheduler?.morning, "decision_text", "暂无记录"),
   );
@@ -2016,6 +2045,7 @@ export function createAppState(vueApi) {
     dayMetricUploadSchedulerQuickSaving,
     branchPowerUploadSchedulerQuickSaving,
     alarmEventUploadSchedulerQuickSaving,
+    systemScreenshotUploadSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
     schedulerToggleState,
@@ -2113,6 +2143,8 @@ export function createAppState(vueApi) {
     branchPowerUploadScheduleText,
     alarmEventUploadSchedulerDecisionText,
     alarmEventUploadSchedulerTriggerText,
+    systemScreenshotUploadSchedulerDecisionText,
+    systemScreenshotUploadSchedulerTriggerText,
     monthlyEventReportSchedulerDecisionText,
     monthlyEventReportSchedulerTriggerText,
     monthlyChangeReportSchedulerDecisionText,

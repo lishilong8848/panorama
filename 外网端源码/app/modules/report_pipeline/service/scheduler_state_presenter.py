@@ -243,6 +243,13 @@ def present_scheduler_overview_items(
     alarm_cfg = _dict(
         _cfg_get(config_payload, ("alarm_export", "scheduler"), ("features", "alarm_export", "scheduler"))
     )
+    system_screenshot_upload_cfg = _dict(
+        _cfg_get(
+            config_payload,
+            ("system_screenshot_upload", "scheduler"),
+            ("features", "system_screenshot_upload", "scheduler"),
+        )
+    )
     monthly_event_cfg = _dict(
         _cfg_get(
             config_payload,
@@ -265,6 +272,7 @@ def present_scheduler_overview_items(
     day_metric_snapshot = _dict(summary_payload.get("day_metric_upload_scheduler"))
     branch_power_snapshot = _dict(summary_payload.get("branch_power_upload_scheduler"))
     alarm_snapshot = _dict(summary_payload.get("alarm_event_upload_scheduler"))
+    system_screenshot_upload_snapshot = _dict(summary_payload.get("system_screenshot_upload_scheduler"))
     monthly_event_snapshot = _dict(summary_payload.get("monthly_event_report_scheduler"))
     monthly_change_snapshot = _dict(summary_payload.get("monthly_change_report_scheduler"))
 
@@ -275,6 +283,7 @@ def present_scheduler_overview_items(
     day_metric_display = present_scheduler_state(day_metric_snapshot, role_mode=role_mode)
     branch_power_display = present_scheduler_state(branch_power_snapshot, role_mode=role_mode)
     alarm_display = present_scheduler_state(alarm_snapshot, role_mode=role_mode)
+    system_screenshot_upload_display = present_scheduler_state(system_screenshot_upload_snapshot, role_mode=role_mode)
     monthly_event_display = present_scheduler_state(monthly_event_snapshot, role_mode=role_mode)
     monthly_change_display = present_scheduler_state(monthly_change_snapshot, role_mode=role_mode)
 
@@ -533,6 +542,29 @@ def present_scheduler_overview_items(
                     next_run_time=alarm_snapshot.get("next_run_time"),
                     last_trigger_at=alarm_snapshot.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(alarm_snapshot.get("last_trigger_result")),
+                )
+            ],
+        },
+        {
+            "key": "system_screenshot_upload",
+            "title": "系统截图上传",
+            "module_id": "system_screenshot_upload",
+            "focus_key": "",
+            "tone": system_screenshot_upload_display.get("tone", "neutral"),
+            "status_text": system_screenshot_upload_display.get("status_text", "未启动"),
+            "summary_text": _summary_choice(
+                _map_scheduler_decision_text(system_screenshot_upload_snapshot.get("last_decision")),
+                _map_scheduler_trigger_text(system_screenshot_upload_snapshot.get("last_trigger_result")),
+                system_screenshot_upload_display.get("summary_text", ""),
+                fallback="每天读取当天系统截图并上传到对应多维表",
+            ),
+            "parts": [
+                _overview_part(
+                    label="每日调度",
+                    run_time_text=_text(system_screenshot_upload_cfg.get("run_time")) or "未设置",
+                    next_run_time=system_screenshot_upload_snapshot.get("next_run_time"),
+                    last_trigger_at=system_screenshot_upload_snapshot.get("last_trigger_at"),
+                    result_text=_map_scheduler_trigger_text(system_screenshot_upload_snapshot.get("last_trigger_result")),
                 )
             ],
         },

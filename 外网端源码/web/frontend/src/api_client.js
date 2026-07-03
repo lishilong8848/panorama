@@ -463,6 +463,25 @@ export async function saveAlarmEventUploadSchedulerConfigApi(payload) {
   });
 }
 
+export async function startSystemScreenshotUploadSchedulerApi() {
+  return apiJson("/api/scheduler/system-screenshot-upload/start", { method: "POST", body: "{}" });
+}
+
+export async function stopSystemScreenshotUploadSchedulerApi() {
+  return apiJson("/api/scheduler/system-screenshot-upload/stop", { method: "POST", body: "{}" });
+}
+
+export async function getSystemScreenshotUploadSchedulerStatusApi() {
+  return apiJson("/api/scheduler/system-screenshot-upload/status");
+}
+
+export async function saveSystemScreenshotUploadSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/system-screenshot-upload/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function startMonthlyEventReportJobApi(payload = {}) {
   return apiJson("/api/jobs/monthly-event-report/run", {
     method: "POST",

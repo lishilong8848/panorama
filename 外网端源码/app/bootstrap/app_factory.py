@@ -45,6 +45,7 @@ from app.modules.scheduler.api.alarm_event_upload_routes import router as alarm_
 from app.modules.scheduler.api.monthly_change_report_routes import router as monthly_change_report_scheduler_router
 from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
 from app.modules.scheduler.api.routes import router as scheduler_router
+from app.modules.scheduler.api.system_screenshot_upload_routes import router as system_screenshot_upload_scheduler_router
 from app.modules.scheduler.api.wet_bulb_collection_routes import router as wet_bulb_collection_scheduler_router
 from app.modules.sheet_import.api.routes import router as sheet_import_router
 from app.modules.tasks.api.routes import router as tasks_router
@@ -202,6 +203,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(branch_power_upload_scheduler_router)
     app.include_router(chiller_mode_upload_scheduler_router)
     app.include_router(alarm_event_upload_scheduler_router)
+    app.include_router(system_screenshot_upload_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
     app.include_router(monthly_change_report_scheduler_router)
     app.include_router(monthly_event_report_scheduler_router)

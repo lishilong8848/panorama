@@ -116,6 +116,7 @@ createApp({
       dayMetricUploadSchedulerQuickSaving,
       branchPowerUploadSchedulerQuickSaving,
       alarmEventUploadSchedulerQuickSaving,
+      systemScreenshotUploadSchedulerQuickSaving,
       monthlyEventReportSchedulerQuickSaving,
       monthlyChangeReportSchedulerQuickSaving,
       schedulerToggleState,
@@ -383,6 +384,9 @@ createApp({
       actionKeyAlarmEventUploadSchedulerStart,
       actionKeyAlarmEventUploadSchedulerStop,
       actionKeyAlarmEventUploadSchedulerSave,
+      actionKeySystemScreenshotUploadSchedulerStart,
+      actionKeySystemScreenshotUploadSchedulerStop,
+      actionKeySystemScreenshotUploadSchedulerSave,
       actionKeyMonthlyEventReportRunAll,
       actionKeyMonthlyEventReportRunBuildingPrefix,
       actionKeyMonthlyChangeReportRunAll,
@@ -1315,6 +1319,7 @@ createApp({
           "wet_bulb_collection",
           "day_metric_upload",
           "alarm_event_upload",
+          "system_screenshot_upload",
           "monthly_event_report",
           "scheduler_overview",
         ]);
@@ -1371,6 +1376,7 @@ createApp({
       dayMetricUploadSchedulerQuickSaving,
       branchPowerUploadSchedulerQuickSaving,
       alarmEventUploadSchedulerQuickSaving,
+      systemScreenshotUploadSchedulerQuickSaving,
       monthlyEventReportSchedulerQuickSaving,
       monthlyChangeReportSchedulerQuickSaving,
       monthlyReportTestReceiveIds,
@@ -1493,6 +1499,9 @@ createApp({
       getSystemScreenshotUploadResult,
       getSystemScreenshotUploadStatusText,
       getSystemScreenshotUploadStatusTone,
+      startSystemScreenshotUploadScheduler,
+      stopSystemScreenshotUploadScheduler,
+      saveSystemScreenshotUploadSchedulerQuickConfig: saveSystemScreenshotUploadSchedulerQuickConfigImmediate,
       runDayMetricFromFile,
       retryDayMetricUnit,
       retryFailedDayMetricUnits,
@@ -1513,6 +1522,8 @@ createApp({
       runSchedulerConfigQuickSave(saveBranchPowerUploadSchedulerQuickConfigImmediate);
     const saveAlarmEventUploadSchedulerQuickConfig = (overrides = {}) =>
       runSchedulerConfigQuickSave(() => saveAlarmEventUploadSchedulerQuickConfigImmediate(overrides));
+    const saveSystemScreenshotUploadSchedulerQuickConfig = (overrides = {}) =>
+      runSchedulerConfigQuickSave(() => saveSystemScreenshotUploadSchedulerQuickConfigImmediate(overrides));
     const saveMonthlyEventReportSchedulerQuickConfig = (overrides = {}) =>
       runSchedulerConfigQuickSave(() => saveMonthlyEventReportSchedulerQuickConfigImmediate(overrides));
     const saveMonthlyChangeReportSchedulerQuickConfig = (overrides = {}) =>
@@ -2179,12 +2190,21 @@ createApp({
       dayMetricUploadSchedulerQuickSaving,
       branchPowerUploadSchedulerQuickSaving,
       alarmEventUploadSchedulerQuickSaving,
+      systemScreenshotUploadSchedulerQuickSaving,
       dayMetricUploadSchedulerDecisionText,
       dayMetricUploadSchedulerTriggerText,
       branchPowerUploadSchedulerDecisionText,
       branchPowerUploadSchedulerTriggerText,
       alarmEventUploadSchedulerDecisionText,
       alarmEventUploadSchedulerTriggerText,
+      systemScreenshotUploadSchedulerDecisionText,
+      systemScreenshotUploadSchedulerTriggerText,
+      startSystemScreenshotUploadScheduler,
+      stopSystemScreenshotUploadScheduler,
+      saveSystemScreenshotUploadSchedulerQuickConfig,
+      actionKeySystemScreenshotUploadSchedulerStart,
+      actionKeySystemScreenshotUploadSchedulerStop,
+      actionKeySystemScreenshotUploadSchedulerSave,
       actionKeyMonthlyEventReportSchedulerStart,
       actionKeyMonthlyEventReportSchedulerStop,
       actionKeyMonthlyEventReportSchedulerSave,

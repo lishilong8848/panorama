@@ -140,6 +140,7 @@ function ensureRoot(cfg) {
   cfg.branch_power_upload = cfg.branch_power_upload || {};
   cfg.wet_bulb_collection = cfg.wet_bulb_collection || {};
   cfg.chiller_mode_upload = cfg.chiller_mode_upload || {};
+  cfg.system_screenshot_upload = cfg.system_screenshot_upload || {};
   cfg.handover_log.template = cfg.handover_log.template || {};
   cfg.handover_log.review_ui = cfg.handover_log.review_ui || {};
   cfg.web = cfg.web || {};
@@ -220,6 +221,7 @@ function ensureRoot(cfg) {
   cfg.chiller_mode_upload.target = cfg.chiller_mode_upload.target || {};
   cfg.chiller_mode_upload.fields = cfg.chiller_mode_upload.fields || {};
   cfg.chiller_mode_upload.mode_value_map = cfg.chiller_mode_upload.mode_value_map || {};
+  cfg.system_screenshot_upload.scheduler = cfg.system_screenshot_upload.scheduler || {};
   cfg.alarm_export.scheduler = cfg.alarm_export.scheduler || {};
   cfg.alarm_export.feishu = cfg.alarm_export.feishu || {};
   cfg.alarm_export.shared_source_upload =
@@ -1060,6 +1062,28 @@ function applyAlarmExportDefaults(cfg) {
   setBooleanDefault(sharedSourceUpload, "replace_existing_on_full", true);
 }
 
+function applySystemScreenshotUploadDefaults(cfg) {
+  const upload = cfg.system_screenshot_upload;
+  const scheduler = upload.scheduler || {};
+  upload.scheduler = scheduler;
+  setBooleanDefault(upload, "enabled", true);
+  setBooleanDefault(upload, "trigger_internal_capture", true);
+  setNumberDefault(upload, "wait_capture_timeout_sec", 600);
+  setNumberDefault(upload, "wait_capture_poll_sec", 5);
+  setStringDefault(upload, "date_value_format", "{date}");
+  setNumberDefault(upload, "page_size", 500);
+  setNumberDefault(upload, "max_records", 1000);
+  setNumberDefault(upload, "delete_batch_size", 200);
+  setNumberDefault(upload, "create_batch_size", 200);
+  setBooleanDefault(scheduler, "enabled", true);
+  setBooleanDefault(scheduler, "auto_start_in_gui", true);
+  setStringDefault(scheduler, "run_time", "06:37:00");
+  setNumberDefault(scheduler, "check_interval_sec", 30);
+  setBooleanDefault(scheduler, "catch_up_if_missed", true);
+  setBooleanDefault(scheduler, "retry_failed_in_same_period", true);
+  setStringDefault(scheduler, "state_file", "system_screenshot_upload_scheduler_state.json");
+}
+
 function applyNetworkDefaults(cfg) {
   setNumberDefault(cfg.network, "connect_poll_interval_sec", 1);
   delete cfg.network.enable_auto_switch_wifi;
@@ -1301,6 +1325,7 @@ export function ensureConfigShape(raw) {
   applyInternalSourceSiteDefaults(cfg);
   applyHandoverDefaults(cfg);
   applyAlarmExportDefaults(cfg);
+  applySystemScreenshotUploadDefaults(cfg);
   applyNetworkDefaults(cfg);
   applyWetBulbCollectionDefaults(cfg);
   applyChillerModeUploadDefaults(cfg);

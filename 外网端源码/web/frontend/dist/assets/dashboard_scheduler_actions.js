@@ -1,16 +1,19 @@
 import {
   saveBranchPowerUploadSchedulerConfigApi,
   saveAlarmEventUploadSchedulerConfigApi,
+  saveSystemScreenshotUploadSchedulerConfigApi,
   saveDayMetricUploadSchedulerConfigApi,
   saveHandoverSchedulerConfigApi,
   saveSchedulerConfigApi,
   startBranchPowerUploadSchedulerApi,
   startAlarmEventUploadSchedulerApi,
+  startSystemScreenshotUploadSchedulerApi,
   startDayMetricUploadSchedulerApi,
   startHandoverSchedulerApi,
   startSchedulerApi,
   stopBranchPowerUploadSchedulerApi,
   stopAlarmEventUploadSchedulerApi,
+  stopSystemScreenshotUploadSchedulerApi,
   stopDayMetricUploadSchedulerApi,
   stopHandoverSchedulerApi,
   stopSchedulerApi,
@@ -43,6 +46,9 @@ const ACTION_KEYS = {
   alarmEventUploadSchedulerStart: "alarm_event_upload_scheduler:start",
   alarmEventUploadSchedulerStop: "alarm_event_upload_scheduler:stop",
   alarmEventUploadSchedulerSave: "alarm_event_upload_scheduler:save",
+  systemScreenshotUploadSchedulerStart: "system_screenshot_upload_scheduler:start",
+  systemScreenshotUploadSchedulerStop: "system_screenshot_upload_scheduler:stop",
+  systemScreenshotUploadSchedulerSave: "system_screenshot_upload_scheduler:save",
 };
 
 function formatSchedulerActionReason(reason) {
@@ -75,6 +81,7 @@ export function createDashboardSchedulerActions(ctx) {
     dayMetricUploadSchedulerQuickSaving,
     branchPowerUploadSchedulerQuickSaving,
     alarmEventUploadSchedulerQuickSaving,
+    systemScreenshotUploadSchedulerQuickSaving,
     fetchExternalDashboardSummary,
     scheduleExternalDashboardRefresh,
     runSingleFlight,
@@ -667,6 +674,106 @@ export function createDashboardSchedulerActions(ctx) {
     );
   }
 
+  async function startSystemScreenshotUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.systemScreenshotUploadSchedulerStart,
+      async () => {
+        markSchedulerToggle("system_screenshot_upload", "starting", true);
+        try {
+          const data = await startSystemScreenshotUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.system_screenshot_upload?.scheduler, true, { enableOnStart: true });
+          applySchedulerSnapshot(health?.system_screenshot_upload?.scheduler, { ...data, enabled: true, running: true });
+          markSchedulerToggle("system_screenshot_upload", "idle", true);
+          triggerDashboardRefresh("system_screenshot_upload_scheduler_start");
+          message.value = `系统截图上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          markSchedulerToggle("system_screenshot_upload", "idle", null);
+          message.value = `启动系统截图上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function stopSystemScreenshotUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.systemScreenshotUploadSchedulerStop,
+      async () => {
+        markSchedulerToggle("system_screenshot_upload", "stopping", false);
+        try {
+          const data = await stopSystemScreenshotUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(config.value?.system_screenshot_upload?.scheduler, false);
+          applySchedulerSnapshot(health?.system_screenshot_upload?.scheduler, { ...data, running: false });
+          markSchedulerToggle("system_screenshot_upload", "idle", false);
+          triggerDashboardRefresh("system_screenshot_upload_scheduler_stop");
+          message.value = `系统截图上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          markSchedulerToggle("system_screenshot_upload", "idle", null);
+          message.value = `停止系统截图上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function saveSystemScreenshotUploadSchedulerQuickConfig(overrides = {}) {
+    if (!config.value) return;
+    if (!config.value.system_screenshot_upload || typeof config.value.system_screenshot_upload !== "object") {
+      config.value.system_screenshot_upload = {};
+    }
+    if (!config.value.system_screenshot_upload.scheduler || typeof config.value.system_screenshot_upload.scheduler !== "object") {
+      config.value.system_screenshot_upload.scheduler = {};
+    }
+    const scheduler = config.value.system_screenshot_upload.scheduler;
+    const previousScheduler = { ...scheduler };
+    const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
+    const runTime = normalizeRunTimeText(
+      Object.prototype.hasOwnProperty.call(overrideValues, "run_time")
+        ? overrideValues.run_time
+        : scheduler.run_time,
+    );
+    const payload = {
+      enabled: true,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
+      run_time: runTime,
+      check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
+      catch_up_if_missed: Boolean(scheduler.catch_up_if_missed ?? true),
+      retry_failed_in_same_period: Boolean(scheduler.retry_failed_in_same_period ?? true),
+      state_file: String(scheduler.state_file || "system_screenshot_upload_scheduler_state.json").trim(),
+    };
+    if (!payload.run_time) {
+      message.value = "系统截图上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
+      return;
+    }
+    if (!payload.state_file) {
+      message.value = "系统截图上传调度状态文件不能为空";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.systemScreenshotUploadSchedulerSave,
+      async () => {
+        try {
+          systemScreenshotUploadSchedulerQuickSaving.value = true;
+          const data = await saveSystemScreenshotUploadSchedulerConfigApi(payload);
+          if (data?.scheduler_config && config.value?.system_screenshot_upload?.scheduler) {
+            Object.assign(config.value.system_screenshot_upload.scheduler, data.scheduler_config);
+          }
+          applySchedulerSnapshot(health?.system_screenshot_upload?.scheduler, data?.scheduler_status || data);
+          triggerDashboardRefresh("system_screenshot_upload_scheduler_save");
+          message.value = data?.message || "系统截图上传调度配置已更新";
+        } catch (err) {
+          if (config.value?.system_screenshot_upload?.scheduler) {
+            Object.assign(config.value.system_screenshot_upload.scheduler, previousScheduler);
+          }
+          message.value = `系统截图上传调度自动更新失败: ${err}`;
+        } finally {
+          systemScreenshotUploadSchedulerQuickSaving.value = false;
+        }
+      },
+      { cooldownMs: 0, queueLatest: true },
+    );
+  }
+
   return {
     startScheduler,
     saveSchedulerQuickConfig,
@@ -683,5 +790,8 @@ export function createDashboardSchedulerActions(ctx) {
     startAlarmEventUploadScheduler,
     stopAlarmEventUploadScheduler,
     saveAlarmEventUploadSchedulerQuickConfig,
+    startSystemScreenshotUploadScheduler,
+    stopSystemScreenshotUploadScheduler,
+    saveSystemScreenshotUploadSchedulerQuickConfig,
   };
 }

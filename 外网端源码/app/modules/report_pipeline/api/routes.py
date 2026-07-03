@@ -3468,6 +3468,7 @@ def health(
     day_metric_upload_scheduler_snapshot = _safe_scheduler_snapshot("day_metric_upload_scheduler_status")
     branch_power_upload_scheduler_snapshot = _safe_scheduler_snapshot("branch_power_upload_scheduler_status")
     alarm_event_upload_scheduler_snapshot = _safe_scheduler_snapshot("alarm_event_upload_scheduler_status")
+    system_screenshot_upload_scheduler_snapshot = _safe_scheduler_snapshot("system_screenshot_upload_scheduler_status")
     monthly_report_delivery_service = MonthlyReportDeliveryService(runtime_cfg)
     include_monthly_delivery = role_mode != "internal" and not is_lite_mode
 
@@ -4052,6 +4053,40 @@ def health(
                 },
                 "target_preview": alarm_event_target_preview,
                 "target_display": feature_target_displays.get("alarm_event_upload", {}),
+            },
+            "system_screenshot_upload": {
+                "enabled": bool(runtime_cfg.get("system_screenshot_upload", {}).get("enabled", True))
+                if isinstance(runtime_cfg.get("system_screenshot_upload", {}), dict)
+                else True,
+                "scheduler": {
+                    "enabled": bool(system_screenshot_upload_scheduler_snapshot.get("enabled", False)),
+                    "running": bool(system_screenshot_upload_scheduler_snapshot.get("running", False)),
+                    "status": str(system_screenshot_upload_scheduler_snapshot.get("status", "未初始化")),
+                    "run_time": str(
+                        (
+                            runtime_cfg.get("system_screenshot_upload", {}).get("scheduler", {})
+                            if isinstance(runtime_cfg.get("system_screenshot_upload", {}), dict)
+                            and isinstance(runtime_cfg.get("system_screenshot_upload", {}).get("scheduler", {}), dict)
+                            else {}
+                        ).get("run_time", "")
+                    ),
+                    "next_run_time": str(system_screenshot_upload_scheduler_snapshot.get("next_run_time", "")),
+                    "last_check_at": str(system_screenshot_upload_scheduler_snapshot.get("last_check_at", "")),
+                    "last_decision": str(system_screenshot_upload_scheduler_snapshot.get("last_decision", "")),
+                    "last_trigger_at": str(system_screenshot_upload_scheduler_snapshot.get("last_trigger_at", "")),
+                    "last_trigger_result": str(system_screenshot_upload_scheduler_snapshot.get("last_trigger_result", "")),
+                    "state_path": str(system_screenshot_upload_scheduler_snapshot.get("state_path", "")),
+                    "state_exists": bool(system_screenshot_upload_scheduler_snapshot.get("state_exists", False)),
+                    "remembered_enabled": bool(
+                        system_screenshot_upload_scheduler_snapshot.get("remembered_enabled", False)
+                    ),
+                    "effective_auto_start_in_gui": bool(
+                        system_screenshot_upload_scheduler_snapshot.get("effective_auto_start_in_gui", False)
+                    ),
+                    "memory_source": str(system_screenshot_upload_scheduler_snapshot.get("memory_source", "") or ""),
+                    "executor_bound": _safe_bool_method("is_system_screenshot_upload_scheduler_executor_bound"),
+                    "callback_name": _safe_text_method("system_screenshot_upload_scheduler_executor_name"),
+                },
             },
         "updater": {
             "enabled": bool(runtime_cfg.get("updater", {}).get("enabled", True))
@@ -7012,6 +7047,7 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
         "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
+        "system_screenshot_upload_scheduler": _safe_scheduler("system_screenshot_upload_scheduler_status"),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
     }
@@ -7715,6 +7751,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "day_metric_upload_scheduler": _safe_scheduler("day_metric_upload_scheduler_status"),
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
+        "system_screenshot_upload_scheduler": _safe_scheduler("system_screenshot_upload_scheduler_status"),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
     }

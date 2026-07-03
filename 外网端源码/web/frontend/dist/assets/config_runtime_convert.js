@@ -89,6 +89,7 @@ export function convertV3ConfigToLegacy(v3) {
     wet_bulb_collection: cleanupWetBulbCollectionCompat(features.wet_bulb_collection || {}, { cloneInput: true }),
     chiller_mode_upload: cleanupChillerModeUploadCompat(features.chiller_mode_upload || {}, { cloneInput: true }),
     alarm_export: cleanupAlarmExportCompat(features.alarm_export || {}, { cloneInput: true }),
+    system_screenshot_upload: clone(features.system_screenshot_upload || {}),
     manual_upload_gui: clone(features.manual_upload_gui || {}),
     web: clone(common.console || {}),
   };
@@ -167,6 +168,7 @@ export function convertLegacyConfigToV3(legacy) {
       wet_bulb_collection: cleanupWetBulbCollectionCompat(src.wet_bulb_collection || {}, { cloneInput: true }),
       chiller_mode_upload: cleanupChillerModeUploadCompat(src.chiller_mode_upload || {}, { cloneInput: true }),
       alarm_export: cleanupAlarmExportCompat(src.alarm_export || {}, { cloneInput: true }),
+      system_screenshot_upload: clone(src.system_screenshot_upload || {}),
       manual_upload_gui: clone(src.manual_upload_gui || {}),
     },
   };
