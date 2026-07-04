@@ -81,7 +81,16 @@ def system_screenshot_upload_scheduler_start(request: Request) -> Dict[str, Any]
         path=("features", "system_screenshot_upload", "scheduler"),
         auto_start_in_gui=True,
     )
-    action = container.start_system_screenshot_upload_scheduler()
+    action: Dict[str, Any] | None = None
+    reloader = getattr(container, "rebuild_system_screenshot_upload_scheduler", None)
+    if callable(reloader):
+        reload_result = reloader(source="调度启动")
+        if isinstance(reload_result, dict):
+            reload_action = reload_result.get("action")
+            if isinstance(reload_action, dict):
+                action = reload_action
+    if action is None:
+        action = container.start_system_screenshot_upload_scheduler()
     return _build_payload(container, action_result=action)
 
 
@@ -169,6 +178,10 @@ def system_screenshot_upload_scheduler_config(payload: Dict[str, Any], request: 
     reset_result: Dict[str, Any] = {}
     if run_time_changed and container.system_screenshot_upload_scheduler:
         reset_result = container.system_screenshot_upload_scheduler.reset_today_state_for_run_time_change()
+    reload_result: Dict[str, Any] = {}
+    reloader = getattr(container, "rebuild_system_screenshot_upload_scheduler", None)
+    if callable(reloader):
+        reload_result = reloader(source="调度配置保存")
 
     status_payload = _build_payload(container)
     data = dict(status_payload)
@@ -177,6 +190,7 @@ def system_screenshot_upload_scheduler_config(payload: Dict[str, Any], request: 
             "message": "系统截图上传调度配置已更新并热重载",
             "run_time_changed": run_time_changed,
             "state_reset": reset_result,
+            "scheduler_reload": reload_result,
             "scheduler_status": status_payload,
             "scheduler_config": {key: new_cfg.get(key) for key in sorted(ALLOWED_KEYS)},
         }

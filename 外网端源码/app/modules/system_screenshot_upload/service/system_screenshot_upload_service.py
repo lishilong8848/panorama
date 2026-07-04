@@ -61,7 +61,7 @@ DEFAULT_CONFIG = {
     "fields": {
         "date": "日期",
         "building": "楼栋",
-        "attachment": "附件",
+        "attachment": "截图",
         "partition": "分区",
     },
     "targets": DEFAULT_TARGETS,
@@ -246,6 +246,22 @@ class SystemScreenshotUploadService:
             return False
         return str(field.get("type", "") or "").strip() in {"5", "1005"}
 
+    @staticmethod
+    def _resolve_field_name(
+        field_map: Dict[str, Dict[str, Any]],
+        configured_name: str,
+        fallback_names: List[str],
+    ) -> str:
+        candidates: List[str] = []
+        for item in [configured_name, *fallback_names]:
+            text = str(item or "").strip()
+            if text and text not in candidates:
+                candidates.append(text)
+        for candidate in candidates:
+            if candidate in field_map:
+                return candidate
+        return ""
+
     def _date_field_value(self, field: Dict[str, Any] | None, date_value: str) -> Any:
         if self._is_date_field(field):
             source_date = date_value if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", date_value) else _capture_date(date_value)
@@ -333,7 +349,7 @@ class SystemScreenshotUploadService:
         fields_cfg = _dict(cfg.get("fields"))
         configured_date_field = str(fields_cfg.get("date", "日期") or "").strip()
         configured_building_field = str(fields_cfg.get("building", "楼栋") or "").strip()
-        configured_attachment_field = str(fields_cfg.get("attachment", "附件") or "").strip()
+        configured_attachment_field = str(fields_cfg.get("attachment", "截图") or "").strip()
         configured_partition_field = str(fields_cfg.get("partition", "分区") or "").strip()
         if not configured_attachment_field:
             raise ValueError("系统截图上传附件字段配置为空")
@@ -357,9 +373,16 @@ class SystemScreenshotUploadService:
                 final_name = str(response_name or file_name).strip() or f"{building}_{target['label']}.png"
                 client = self._make_bitable_client(cfg, table_id)
                 field_map = self._field_map(client, table_id)
-                attachment_field = configured_attachment_field if configured_attachment_field in field_map else ""
+                attachment_field = self._resolve_field_name(
+                    field_map,
+                    configured_attachment_field,
+                    ["截图", "附件"],
+                )
                 if not attachment_field:
-                    raise RuntimeError(f"{target['label']} 目标表缺少附件字段: {configured_attachment_field}")
+                    raise RuntimeError(
+                        f"{target['label']} 目标表缺少截图附件字段: "
+                        f"{configured_attachment_field or '-'} / 截图 / 附件"
+                    )
                 building_field = configured_building_field if configured_building_field in field_map else ""
                 if not building_field:
                     raise RuntimeError(f"{target['label']} 目标表缺少楼栋字段: {configured_building_field}")

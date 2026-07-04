@@ -2169,6 +2169,35 @@ class AppContainer:
         )
         return result
 
+    def rebuild_system_screenshot_upload_scheduler(self, source: str = "配置热重载") -> Dict[str, Any]:
+        was_running = self.system_screenshot_upload_scheduler.is_running() if self.system_screenshot_upload_scheduler else False
+        if self.system_screenshot_upload_scheduler:
+            self.system_screenshot_upload_scheduler.stop()
+        self.system_screenshot_upload_scheduler = self._build_system_screenshot_upload_scheduler()
+        if self.system_screenshot_upload_scheduler_callback:
+            self.system_screenshot_upload_scheduler.run_callback = self.system_screenshot_upload_scheduler_callback
+        screenshot_cfg = self.runtime_config.get("system_screenshot_upload", {})
+        if not isinstance(screenshot_cfg, dict):
+            screenshot_cfg = {}
+        scheduler_cfg = screenshot_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        should_start = was_running or bool(scheduler_cfg.get("auto_start_in_gui", False))
+        action: Dict[str, Any] = {"started": False, "running": False, "reason": "not_auto_started"}
+        if should_start:
+            action = self.start_system_screenshot_upload_scheduler(source=source)
+        self.add_system_log(
+            "[系统截图上传调度] 已按最新配置重建: "
+            f"was_running={was_running}, auto_start={bool(scheduler_cfg.get('auto_start_in_gui', False))}, "
+            f"action={action}"
+        )
+        return {
+            "reloaded": True,
+            "was_running": was_running,
+            "auto_start_in_gui": bool(scheduler_cfg.get("auto_start_in_gui", False)),
+            "action": action,
+        }
+
     def stop_system_screenshot_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
         if self.system_screenshot_upload_scheduler:
             result = self.system_screenshot_upload_scheduler.stop()
@@ -3114,6 +3143,9 @@ class AppContainer:
         was_alarm_event_upload_running = (
             self.alarm_event_upload_scheduler.is_running() if self.alarm_event_upload_scheduler else False
         )
+        was_system_screenshot_upload_running = (
+            self.system_screenshot_upload_scheduler.is_running() if self.system_screenshot_upload_scheduler else False
+        )
         was_monthly_change_report_running = (
             self.monthly_change_report_scheduler.is_running() if self.monthly_change_report_scheduler else False
         )
@@ -3286,6 +3318,15 @@ class AppContainer:
             self.branch_power_upload_scheduler.start()
         if was_alarm_event_upload_running or (self.runtime_services_armed and alarm_event_auto_start):
             self.alarm_event_upload_scheduler.start()
+        system_screenshot_cfg = self.runtime_config.get("system_screenshot_upload", {})
+        if not isinstance(system_screenshot_cfg, dict):
+            system_screenshot_cfg = {}
+        system_screenshot_scheduler_cfg = system_screenshot_cfg.get("scheduler", {})
+        if not isinstance(system_screenshot_scheduler_cfg, dict):
+            system_screenshot_scheduler_cfg = {}
+        system_screenshot_auto_start = bool(system_screenshot_scheduler_cfg.get("auto_start_in_gui", False))
+        if was_system_screenshot_upload_running or (self.runtime_services_armed and system_screenshot_auto_start):
+            self.system_screenshot_upload_scheduler.start()
         if was_monthly_change_report_running or (self.runtime_services_armed and monthly_change_auto_start):
             self.monthly_change_report_scheduler.start()
         if was_monthly_event_report_running or (self.runtime_services_armed and monthly_event_auto_start):

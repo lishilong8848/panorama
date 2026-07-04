@@ -83,7 +83,10 @@ _WATER_SUMMARY_INFLIGHT: Dict[Any, threading.Event] = {}
 _WEATHER_CACHE_LOCK = threading.RLock()
 _WEATHER_CACHE: Dict[Any, tuple[float, Dict[str, Any]]] = {}
 _WEATHER_INFLIGHT: Dict[Any, threading.Event] = {}
+_WEATHER_FAILURE_LOG_MARKERS: Dict[Any, float] = {}
 _CAPACITY_BATCH_CACHE_TTL_SEC = 30
+_WEATHER_CACHE_TTL_SEC = 1800
+_WEATHER_FAILURE_LOG_INTERVAL_SEC = 1800
 _CAPACITY_TRACKED_CELLS = (
     "C3",
     "G3",
@@ -404,6 +407,24 @@ def _finish_singleflight(
         event.set()
 
 
+def _should_emit_weather_failure_log(key: Any) -> bool:
+    now = time.monotonic()
+    with _WEATHER_CACHE_LOCK:
+        previous = float(_WEATHER_FAILURE_LOG_MARKERS.get(key, 0.0) or 0.0)
+        if previous and now - previous < _WEATHER_FAILURE_LOG_INTERVAL_SEC:
+            return False
+        _WEATHER_FAILURE_LOG_MARKERS[key] = now
+        if len(_WEATHER_FAILURE_LOG_MARKERS) > 200:
+            stale_keys = [
+                marker
+                for marker, marked_at in _WEATHER_FAILURE_LOG_MARKERS.items()
+                if now - float(marked_at or 0.0) > _WEATHER_FAILURE_LOG_INTERVAL_SEC * 2
+            ]
+            for marker in stale_keys:
+                _WEATHER_FAILURE_LOG_MARKERS.pop(marker, None)
+        return True
+
+
 def _build_fixed_header_cells(building: Any, duty_date: Any = "") -> Dict[str, str]:
     building_text = _text(building)
     building_code = _extract_building_code(building_text)
@@ -490,13 +511,26 @@ class HandoverCapacityReportService:
 
     def _hvac_weather_cfg(self) -> Dict[str, Any]:
         raw = self.config.get("chiller_mode_upload", {})
+        weather: Dict[str, Any]
         if isinstance(raw, dict):
             hvac_sync = raw.get("hvac_bitable_sync", {})
             if isinstance(hvac_sync, dict):
                 weather = hvac_sync.get("weather", {})
                 if isinstance(weather, dict) and weather:
-                    return copy.deepcopy(weather)
-        return copy.deepcopy(hvac.DEFAULT_CONFIG.get("weather", {}))
+                    weather = copy.deepcopy(weather)
+                else:
+                    weather = copy.deepcopy(hvac.DEFAULT_CONFIG.get("weather", {}))
+            else:
+                weather = copy.deepcopy(hvac.DEFAULT_CONFIG.get("weather", {}))
+        else:
+            weather = copy.deepcopy(hvac.DEFAULT_CONFIG.get("weather", {}))
+        try:
+            timeout_seconds = float(weather.get("timeout_seconds", 15) or 15)
+        except Exception:  # noqa: BLE001
+            timeout_seconds = 15
+        if timeout_seconds > 5:
+            weather["timeout_seconds"] = 5
+        return weather
 
     def _today_local_date(self):
         return datetime.now().date()
@@ -1176,7 +1210,7 @@ class HandoverCapacityReportService:
                 _WEATHER_CACHE,
                 _WEATHER_CACHE_LOCK,
                 cache_key,
-                ttl_sec=_CAPACITY_BATCH_CACHE_TTL_SEC,
+                ttl_sec=_WEATHER_CACHE_TTL_SEC,
             )
             if cached is not None:
                 return {"text": _text(cached.get("text")), "humidity": ""}
@@ -1195,11 +1229,13 @@ class HandoverCapacityReportService:
                 )
             else:
                 error_text = _text(provider.error)
-                emit_log(
-                    "[交接班][容量报表][天气] 查询失败 "
-                    f"duty_date={duty_date_text}, provider=hvac_open_meteo, "
-                    f"reason={error_text or '未解析到天气关键词'}, summary={summary_text or '-'}"
-                )
+                log_key = (*cache_key, error_text or "empty_weather_keyword")
+                if _should_emit_weather_failure_log(log_key):
+                    emit_log(
+                        "[交接班][容量报表][天气] 查询失败 "
+                        f"duty_date={duty_date_text}, provider=hvac_open_meteo, "
+                        f"reason={error_text or '未解析到天气关键词'}, summary={summary_text or '-'}"
+                    )
             payload = {"text": weather_text, "humidity": ""}
             _store_short_cache(_WEATHER_CACHE, _WEATHER_CACHE_LOCK, cache_key, payload)
             return payload

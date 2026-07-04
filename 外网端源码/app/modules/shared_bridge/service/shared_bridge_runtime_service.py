@@ -1402,6 +1402,7 @@ class SharedBridgeRuntimeService:
                 "正在处理其他请求",
                 "正在排队",
                 "稍后重试",
+                "暂不可用",
                 "retry_after",
                 "busy",
             )
@@ -1989,7 +1990,6 @@ class SharedBridgeRuntimeService:
                 limit_per_building=limit_per_building,
             )
             if mirror_entries:
-                self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("内网端暂不可用，已使用外网端本地 source-index 镜像"))
                 if "cache_key" in locals():
                     self._set_http_source_index_cache(cache_key, mirror_entries)
                 return mirror_entries

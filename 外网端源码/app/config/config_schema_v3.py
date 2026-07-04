@@ -1420,7 +1420,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "fields": {
                 "date": "日期",
                 "building": "楼栋",
-                "attachment": "附件",
+                "attachment": "截图",
                 "partition": "分区",
             },
             "targets": [

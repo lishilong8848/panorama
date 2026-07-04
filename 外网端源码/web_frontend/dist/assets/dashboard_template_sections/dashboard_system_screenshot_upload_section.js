@@ -2,7 +2,7 @@ export const DASHBOARD_SYSTEM_SCREENSHOT_UPLOAD_SECTION = `        <section clas
           <div class="dashboard-module-shell">
             <div class="dashboard-module-intro">
               <h3 class="card-title">系统截图上传</h3>
-              <div class="hint">读取内网端当天已生成的 5 楼 × 6 张系统图截图，并上传到对应的多维表附件字段。</div>
+              <div class="hint">读取内网端当天已生成的 5 楼 × 6 张系统图截图，并上传到对应多维表的“截图”附件字段。</div>
             </div>
 
             <div class="day-metric-top-grid dashboard-module-primary-grid">
@@ -88,7 +88,7 @@ export const DASHBOARD_SYSTEM_SCREENSHOT_UPLOAD_SECTION = `        <section clas
                     {{ getSchedulerStopButtonText('system_screenshot_upload') }}
                   </button>
                 </div>
-                <div class="hint">{{ systemScreenshotUploadSchedulerQuickSaving ? '系统截图上传调度配置同步中...' : '调度只上传当天已有截图，不触发内网端截图采集。' }}</div>
+                <div class="hint">{{ systemScreenshotUploadSchedulerQuickSaving ? '系统截图上传调度配置同步中...' : '调度会先触发内网端检查并补齐当天截图，再上传到多维表。' }}</div>
                 <div class="hint">最近判断：{{ systemScreenshotUploadSchedulerDecisionText }}；最近结果：{{ systemScreenshotUploadSchedulerTriggerText }}</div>
               </article>
 

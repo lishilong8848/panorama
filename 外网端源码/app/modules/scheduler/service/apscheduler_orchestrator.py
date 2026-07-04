@@ -661,7 +661,7 @@ class ApschedulerSchedulerFacade:
             self.state["last_run_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
             self.state["last_status"] = status
             self.state["last_error"] = "" if status in {"submitted", "skipped", "accepted", "success"} else detail
-            if status in {"accepted", "success", "ok"}:
+            if status in {"submitted", "accepted", "success", "ok"}:
                 self.state["last_success_period"] = period
             elif was_retry:
                 self.state["retry_done_period"] = period
@@ -764,7 +764,7 @@ class ApschedulerSchedulerFacade:
         attempt = attempt_at or datetime.now()
         normalized_status = str(status or "").strip().lower() or "unknown"
         attempt_text = attempt.strftime("%Y-%m-%d %H:%M:%S")
-        success_statuses = {"ok", "success", "accepted"}
+        success_statuses = {"ok", "success", "accepted", "submitted"}
         if self.schedule_kind == "interval":
             self.state["last_attempt_at"] = attempt_text
             self.state["last_status"] = normalized_status
