@@ -1112,6 +1112,19 @@ def _is_unc_path_text(path_text: str) -> bool:
     return text.startswith("\\\\") or text.startswith("//")
 
 
+def _source_index_entry_reports_file_verified(item: Dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("file_verified") is True and not str(item.get("file_verification_skipped_reason", "") or "").strip():
+        return True
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+    if metadata.get("file_verified") is True:
+        return True
+    if metadata.get("file_exists") is True:
+        return True
+    return False
+
+
 def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = False) -> list[Dict[str, Any]]:
     output: list[Dict[str, Any]] = []
     for item in entries if isinstance(entries, list) else []:
@@ -1121,8 +1134,12 @@ def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = Fals
         file_path = str(item.get("file_path", "") or "").strip()
         if not building or not file_path:
             continue
-        if verify_files and not _is_unc_path_text(file_path) and not is_accessible_cached_file_path(file_path):
-            continue
+        if verify_files:
+            if _is_unc_path_text(file_path):
+                if not _source_index_entry_reports_file_verified(item):
+                    continue
+            elif not is_accessible_cached_file_path(file_path):
+                continue
         output.append(item)
     return output
 
@@ -2292,7 +2309,7 @@ def _run_external_multi_date_shared_flow(
         selected_dates=selected_dates,
         buildings=target_buildings,
         require_fresh=True,
-    ), verify_files=False)
+    ), verify_files=True)
     cached_entry_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
     for item in cached_entries:
         if not isinstance(item, dict):

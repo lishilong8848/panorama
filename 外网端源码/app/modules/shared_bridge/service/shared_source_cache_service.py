@@ -3856,11 +3856,20 @@ class SharedSourceCacheService:
         if self._tmp_root is None:
             raise RuntimeError("共享缓存临时目录未配置")
         target_buildings = [str(item or "").strip() for item in (buildings or self.get_enabled_buildings()) if str(item or "").strip()]
-        save_dir = self._tmp_root / "monthly_by_date" / ("_".join(selected_dates) or "manual")
+        normalized_dates = [str(item or "").strip() for item in (selected_dates or []) if str(item or "").strip()]
+        date_key = "_".join(normalized_dates)
+        if not date_key:
+            run_key = "manual"
+        elif len(date_key) <= 80:
+            run_key = date_key
+        else:
+            digest = hashlib.sha1(date_key.encode("utf-8")).hexdigest()[:12]
+            run_key = f"{normalized_dates[0]}_{normalized_dates[-1]}_{len(normalized_dates)}d_{digest}"
+        save_dir = self._tmp_root / "monthly_by_date" / run_key
         save_dir.mkdir(parents=True, exist_ok=True)
         cfg = self._prepare_monthly_runtime_config(buildings=target_buildings, save_dir=save_dir)
         module = self._get_monthly_download_module()
-        result = module.run_download_only_with_selected_dates(cfg, selected_dates=selected_dates, source_name="共享缓存-月报历史日期")
+        result = module.run_download_only_with_selected_dates(cfg, selected_dates=normalized_dates, source_name="共享缓存-月报历史日期")
         file_items = result.get("file_items", []) if isinstance(result.get("file_items", []), list) else []
         output: List[Dict[str, Any]] = []
         for item in file_items:

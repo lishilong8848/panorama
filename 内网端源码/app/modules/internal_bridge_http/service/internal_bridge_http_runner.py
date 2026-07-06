@@ -438,10 +438,22 @@ class InternalBridgeHttpTaskRunner:
             file_path_text = str(item.get("file_path", "") or "").strip()
             item_status = str(item.get("status", "") or "").strip().lower()
             if item_status == "ready":
-                item["file_verified"] = bool(file_path_text)
-                item["file_verified_by"] = "internal_index_snapshot"
-                item["file_verification_skipped_reason"] = "http_source_index_request_path_is_snapshot_only"
-                item["file_verified_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                verified = self._source_index_file_accessible(file_path_text)
+                verified_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                item["file_verified"] = verified
+                item["file_verified_by"] = "internal_path_exists"
+                item["file_verified_at"] = verified_at
+                if not verified:
+                    item["status"] = "missing"
+                    item["file_missing_reason"] = "path_not_found"
+                    item["file_missing_detail"] = file_path_text or "-"
+                    self._mark_source_index_entry_missing(
+                        item,
+                        reason="path_not_found",
+                        detail=f"source-index ready 文件不存在: {file_path_text or '-'}",
+                    )
+                    if status_filter == "ready":
+                        continue
             output.append(item)
         return output
 
