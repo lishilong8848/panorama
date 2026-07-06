@@ -37,6 +37,7 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
 )
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
 from app.modules.shared_bridge.service.runtime_status_coordinator import RuntimeStatusCoordinator
+from app.modules.shared_bridge.service.shared_source_cache_service import is_accessible_cached_file_path
 from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
 from app.modules.scheduler.api.day_metric_upload_routes import router as day_metric_upload_scheduler_router
 from app.modules.scheduler.api.branch_power_upload_routes import router as branch_power_upload_scheduler_router
@@ -88,6 +89,31 @@ _ROLE_SELECTION_ALLOWED_PREFIXES = (
     "/assets/",
     "/assets-src/",
 )
+
+
+def _is_unc_path_text(path_text: str) -> bool:
+    text = str(path_text or "").strip()
+    return text.startswith("\\\\") or text.startswith("//")
+
+
+def _source_index_entry_reports_file_verified(item: Dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("file_verified") is True and not str(item.get("file_verification_skipped_reason", "") or "").strip():
+        return True
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+    return metadata.get("file_verified") is True or metadata.get("file_exists") is True
+
+
+def _source_cache_entry_file_ready(item: Dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    file_path = str(item.get("file_path", "") or "").strip()
+    if not file_path:
+        return False
+    if _is_unc_path_text(file_path):
+        return _source_index_entry_reports_file_verified(item)
+    return is_accessible_cached_file_path(file_path)
 
 
 class _SourceNoCacheStaticFiles(StaticFiles):
@@ -2060,7 +2086,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     item
                     for item in (entries if isinstance(entries, list) else [])
                     if isinstance(item, dict)
-                    and str(item.get("file_path", "") or "").strip()
+                    and _source_cache_entry_file_ready(item)
                 ]
                 return output
 
@@ -2146,7 +2172,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                             continue
                         building = str(item.get("building", "") or "").strip()
                         file_path = str(item.get("file_path", "") or "").strip()
-                        if building and file_path and building not in output:
+                        if building and file_path and building not in output and _source_cache_entry_file_ready(item):
                             output[building] = item
                     return output
 

@@ -255,7 +255,7 @@ def test_http_source_index_uses_short_cache_and_coalesces_requests():
     assert client.calls == 1
 
 
-def test_http_source_index_accepts_unc_ready_entry_without_request_path_probe():
+def test_http_source_index_rejects_unc_ready_entry_without_file_verified():
     service = SharedBridgeRuntimeService(
         runtime_config={
             "deployment": {"role_mode": "external"},
@@ -296,9 +296,73 @@ def test_http_source_index_accepts_unc_ready_entry_without_request_path_probe():
         bucket_key="2026-06-09",
     )
 
+    assert rows == []
+
+
+def test_http_source_index_accepts_unc_ready_entry_with_internal_file_verified():
+    service = SharedBridgeRuntimeService(
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"enabled": True, "root_dir": r"\\172.16.1.2\share"},
+            "internal_bridge_http": {"enabled": True, "base_url": "http://internal", "read_timeout_sec": 1},
+        },
+        app_version="test",
+        emit_log=lambda _text: None,
+    )
+
+    class Client:
+        read_timeout_sec = 1
+
+        def source_index_batch(self, queries, *, default_limit=50):
+            return [
+                {
+                    "index": 0,
+                    "ok": True,
+                    "entries": [
+                        {
+                            "entry_id": "entry-unc",
+                            "source_family": "branch_power_family",
+                            "building": "A楼",
+                            "bucket_kind": "daily",
+                            "bucket_key": "2026-06-09",
+                            "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.xlsx",
+                            "status": "ready",
+                            "file_verified": True,
+                        }
+                    ],
+                }
+            ]
+
+    service._internal_bridge_http_client = Client()  # type: ignore[assignment]
+
+    rows = service._http_source_index_entries(
+        source_family="branch_power_family",
+        buildings=["A楼"],
+        bucket_key="2026-06-09",
+    )
+
     assert rows and len(rows) == 1
     assert rows[0]["file_verified"] is True
-    assert rows[0]["file_verified_by"] == "external_http_index_unc_no_request_path_probe"
+
+
+def test_branch_scheduler_file_ready_requires_verified_unc_and_existing_local_file(tmp_path):
+    from app.bootstrap.app_factory import _source_cache_entry_file_ready
+
+    local_file = tmp_path / "ready.xlsx"
+    local_file.write_text("ok", encoding="utf-8")
+
+    assert _source_cache_entry_file_ready({"file_path": r"\\172.16.1.2\share\missing.xlsx"}) is False
+    assert _source_cache_entry_file_ready({
+        "file_path": r"\\172.16.1.2\share\ready.xlsx",
+        "file_verified": True,
+    }) is True
+    assert _source_cache_entry_file_ready({
+        "file_path": r"\\172.16.1.2\share\old.xlsx",
+        "file_verified": True,
+        "file_verification_skipped_reason": "unc_request_path_probe_disabled",
+    }) is False
+    assert _source_cache_entry_file_ready({"file_path": str(local_file)}) is True
+    assert _source_cache_entry_file_ready({"file_path": str(tmp_path / "missing.xlsx")}) is False
 
 
 def test_http_source_index_queue_busy_uses_mirror_without_global_cooldown():
@@ -330,6 +394,7 @@ def test_http_source_index_queue_busy_uses_mirror_without_global_cooldown():
                     "bucket_key": "2026-06-09",
                     "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.xlsx",
                     "status": "ready",
+                    "file_verified": True,
                 }
             ]
 

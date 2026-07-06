@@ -1565,14 +1565,14 @@ class SharedBridgeRuntimeService:
         return item
 
     def _ensure_http_source_index_entry_file_verified(self, item: Dict[str, Any]) -> bool:
-        """Accept old internal source-index rows after checking their exact file path.
+        """Accept source-index rows only when the referenced file is verified.
 
         Newer internal builds return ``file_verified`` after checking the file on
         the internal machine. Older internal builds do not include that flag,
-        which would make the external side ignore otherwise valid ready rows.
-        This fallback does not scan directories; it only checks the explicit
-        path returned by source-index and then lets the normal upload flow read
-        the same file.
+        but UNC paths cannot be safely probed from request paths because stale
+        source-index rows may outlive deleted shared files. For UNC paths the
+        internal side must report verification; local paths can still be checked
+        directly without scanning directories.
         """
         if bool(item.get("file_verified", False)) is True:
             return True
@@ -1580,10 +1580,9 @@ class SharedBridgeRuntimeService:
         if not file_path:
             return False
         if _is_unc_path_text(file_path):
-            item["file_verified"] = True
-            item["file_verified_by"] = "external_http_index_unc_no_request_path_probe"
+            item["file_verified"] = False
             item["file_verification_skipped_reason"] = "unc_request_path_probe_disabled"
-            return True
+            return False
         if not is_accessible_cached_file_path(file_path):
             return False
         item["file_verified"] = True

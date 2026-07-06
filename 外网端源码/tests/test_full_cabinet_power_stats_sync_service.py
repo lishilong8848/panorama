@@ -482,6 +482,60 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
         self.assertTrue(client.create_called)
         self.assertEqual(client.deleted, [])
 
+    def test_replace_target_rows_deletes_old_records_after_create_succeeds(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def list_records(self, **_kwargs):
+                return [{"record_id": "old_1", "fields": {"数据时间": "2026/05/31"}}]
+
+            def batch_create_records(self, **_kwargs):
+                self.calls.append("create")
+
+            def batch_delete_records(self, **_kwargs):
+                self.calls.append("delete")
+                return len(_kwargs.get("record_ids", []))
+
+        class SafeReplaceService(FullCabinetPowerStatsSyncService):
+            def _field_meta_map(self, client, table):  # noqa: ANN001
+                return {name: {"name": name, "type": 1, "property": {}} for name in self.TARGET_FIELDS[table.key]}
+
+        service = SafeReplaceService({})
+        table = _PowerAlertTable(
+            key="cabinet",
+            name="机柜超18KW统计",
+            table_id="tbl_test",
+            view_id="",
+            threshold=18,
+        )
+        client = FakeClient()
+
+        result = service._replace_target_rows(
+            client=client,
+            table=table,
+            rows=[
+                {
+                    "序号": "1",
+                    "数据时间": "2026/05/31",
+                    "机房": "EA118",
+                    "楼栋": "E楼",
+                    "房间": "E-202",
+                    "机柜号": "A01",
+                    "机柜功率": "20kw",
+                }
+            ],
+            report_date="2026/05/31",
+            dry_run=False,
+            page_size=500,
+            batch_size=200,
+            emit_log=lambda _message: None,
+        )
+
+        self.assertEqual(client.calls, ["create", "delete"])
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["deleted"], 1)
+
     def _temp_full_cabinet_source(self) -> Path:
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
