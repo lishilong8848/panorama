@@ -59,6 +59,7 @@ from app.shared.utils.frontend_cache import (
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.service.monthly_change_report_service import MonthlyChangeReportService
 from handover_log_module.service.monthly_event_report_service import MonthlyEventReportService
+from handover_log_module.service.top5_power_report_service import Top5PowerReportService
 from pipeline_utils import get_app_dir, get_app_root_dir
 
 
@@ -478,6 +479,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_branch_power_upload_scheduler(source="关闭自动")
             if container.alarm_event_upload_scheduler:
                 container.stop_alarm_event_upload_scheduler(source="关闭自动")
+            if getattr(container, "top5_power_report_scheduler", None):
+                container.stop_top5_power_report_scheduler(source="关闭自动")
             if container.monthly_change_report_scheduler:
                 container.stop_monthly_change_report_scheduler(source="关闭自动")
             if container.monthly_event_report_scheduler:
@@ -2413,6 +2416,35 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(f"[系统截图上传调度] 提交失败：{error_text}")
             return False, error_text
 
+    def top5_power_report_scheduler_callback(source: str) -> tuple[bool, str]:
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[TOP5功率文件生成调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+        now_dt = datetime.now()
+        year = str(now_dt.year)
+        month = int(now_dt.month)
+        try:
+            service = Top5PowerReportService(container.runtime_config)
+            buildings = service.all_buildings()
+            job = container.job_service.start_worker_job(
+                name=f"TOP5功率文件生成 {year}-{month:02d}",
+                worker_handler="top5_power_report",
+                worker_payload={"buildings": buildings, "year": year, "month": month},
+                resource_keys=["top5_power_report:global"],
+                priority="scheduler",
+                feature="top5_power_report",
+                dedupe_key=f"top5_power_report:scheduler:{year}:{month:02d}",
+                submitted_by="scheduler",
+            )
+            detail = f"已提交TOP5功率文件生成任务 job_id={job.job_id}, target={year}-{month:02d}"
+            container.add_system_log(f"[TOP5功率文件生成调度] {detail}")
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            container.add_system_log(f"[TOP5功率文件生成调度] 提交失败：{error_text}")
+            return False, error_text
+
     def monthly_event_report_scheduler_callback(source: str) -> tuple[bool, str]:
         role_mode = _deployment_role_mode()
         if role_mode == "internal":
@@ -2611,6 +2643,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     setter = getattr(container, "set_system_screenshot_upload_scheduler_callback", None)
     if callable(setter):
         setter(system_screenshot_upload_scheduler_callback)
+    setter = getattr(container, "set_top5_power_report_scheduler_callback", None)
+    if callable(setter):
+        setter(top5_power_report_scheduler_callback)
     setter = getattr(container, "set_monthly_change_report_scheduler_callback", None)
     if callable(setter):
         setter(monthly_change_report_scheduler_callback)

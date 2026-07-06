@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -9,6 +9,39 @@ import openpyxl
 
 
 Worksheet = openpyxl.worksheet.worksheet.Worksheet
+
+
+def _parse_header_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("/", "-")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def _business_day_data_columns(ws: Worksheet, *, header_row: int, data_start_col: int, data_end_col: int) -> List[int]:
+    columns = list(range(data_start_col, data_end_col + 1))
+    parsed_by_col: Dict[int, datetime] = {}
+    for col in columns:
+        parsed = _parse_header_datetime(ws.cell(header_row, col).value)
+        if parsed is not None:
+            parsed_by_col[col] = parsed
+    if len(parsed_by_col) < 2:
+        return columns
+    first_col = min(parsed_by_col)
+    start_dt = parsed_by_col[first_col]
+    boundary_dt = datetime.combine(start_dt.date() + timedelta(days=1), time.min)
+    filtered = [col for col in columns if parsed_by_col.get(col) is None or parsed_by_col[col] <= boundary_dt]
+    return filtered or columns
 
 
 def apply_building_source_overrides(
@@ -112,6 +145,14 @@ def extract_row_sources(
     current_category = ""
     source_map: Dict[str, Any] = {}
 
+    data_columns = _business_day_data_columns(
+        ws,
+        header_row=2,
+        data_start_col=data_start_col,
+        data_end_col=data_end_col,
+    )
+    has_excluded_boundary_columns = len(data_columns) < (data_end_col - data_start_col + 1)
+
     for row in range(data_start_row, ws.max_row + 1):
         type_cell = ws.cell(row, type_col).value
         category_cell = ws.cell(row, category_col).value
@@ -127,7 +168,7 @@ def extract_row_sources(
         item_name = str(item_cell).strip()
 
         data_values: List[float] = []
-        for col in range(data_start_col, data_end_col + 1):
+        for col in data_columns:
             number = to_float(ws.cell(row, col).value)
             if number is not None:
                 data_values.append(number)
@@ -136,11 +177,11 @@ def extract_row_sources(
         min_value = to_float(ws.cell(row, stat_cols["min"]).value)
         avg_value = to_float(ws.cell(row, stat_cols["avg"]).value)
 
-        if max_value is None and data_values:
+        if (max_value is None or has_excluded_boundary_columns) and data_values:
             max_value = max(data_values)
-        if min_value is None and data_values:
+        if (min_value is None or has_excluded_boundary_columns) and data_values:
             min_value = min(data_values)
-        if avg_value is None and data_values:
+        if (avg_value is None or has_excluded_boundary_columns) and data_values:
             avg_value = sum(data_values) / len(data_values)
 
         row_source = row_source_factory(

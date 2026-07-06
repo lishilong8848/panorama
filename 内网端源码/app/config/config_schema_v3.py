@@ -49,6 +49,17 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "hour_bucket_mode": "natural_hour",
             "latest_required": True,
             "history_fill_timeout_sec": 1800,
+            "monthly_report_download": {
+                "enabled": True,
+                "run_time": "01:00:00",
+                "retry_interval_sec": 300,
+            },
+            "top5_monthly_report_download": {
+                "enabled": True,
+                "day_of_month": 2,
+                "run_time": "02:00:00",
+                "retry_interval_sec": 300,
+            },
             "daily_source_download": {
                 "enabled": True,
                 "run_time": "00:30:00",

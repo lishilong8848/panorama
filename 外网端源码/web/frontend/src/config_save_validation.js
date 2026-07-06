@@ -1439,6 +1439,7 @@ function validateAndNormalizeTop5PowerReport(payload) {
       : {};
   const top5 = handover.top5_power_report;
   top5.template = top5.template && typeof top5.template === "object" ? top5.template : {};
+  top5.scheduler = top5.scheduler && typeof top5.scheduler === "object" ? top5.scheduler : {};
   top5.over_power_attachment =
     top5.over_power_attachment && typeof top5.over_power_attachment === "object"
       ? top5.over_power_attachment
@@ -1447,6 +1448,22 @@ function validateAndNormalizeTop5PowerReport(payload) {
   top5.template.source_path = String(top5.template.source_path || "").trim();
   top5.template.output_dir = String(top5.template.output_dir || "").trim();
   top5.template.file_name_pattern = String(top5.template.file_name_pattern || "").trim();
+  top5.scheduler.enabled = top5.scheduler.enabled !== false;
+  top5.scheduler.auto_start_in_gui = Boolean(top5.scheduler.auto_start_in_gui);
+  top5.scheduler.day_of_month = Number.parseInt(top5.scheduler.day_of_month ?? 3, 10);
+  if (!Number.isFinite(top5.scheduler.day_of_month) || top5.scheduler.day_of_month < 1) {
+    top5.scheduler.day_of_month = 3;
+  }
+  if (top5.scheduler.day_of_month > 28) {
+    top5.scheduler.day_of_month = 28;
+  }
+  top5.scheduler.run_time = String(top5.scheduler.run_time || "03:00:00").trim();
+  top5.scheduler.check_interval_sec = Number.parseInt(top5.scheduler.check_interval_sec ?? 30, 10);
+  if (!Number.isFinite(top5.scheduler.check_interval_sec) || top5.scheduler.check_interval_sec < 10) {
+    top5.scheduler.check_interval_sec = 30;
+  }
+  top5.scheduler.retry_failed_on_next_tick = Boolean(top5.scheduler.retry_failed_on_next_tick);
+  top5.scheduler.state_file = String(top5.scheduler.state_file || "top5_power_report_scheduler_state.json").trim();
   top5.over_power_attachment.enabled = top5.over_power_attachment.enabled !== false;
   top5.over_power_attachment.app_token = String(top5.over_power_attachment.app_token || "").trim();
   top5.over_power_attachment.table_id = String(top5.over_power_attachment.table_id || "").trim();

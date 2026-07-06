@@ -21,9 +21,9 @@ from app.modules.internal_bridge_http.service.internal_bridge_http_runner import
 router = APIRouter(prefix="/api/internal-bridge", tags=["internal-bridge"])
 
 _RUNNER_ATTR = "_internal_bridge_http_runner"
-_SOURCE_INDEX_MAX_CONCURRENT_REQUESTS = 3
+_SOURCE_INDEX_MAX_CONCURRENT_REQUESTS = 8
 _SOURCE_INDEX_REQUEST_SEMAPHORE = threading.BoundedSemaphore(_SOURCE_INDEX_MAX_CONCURRENT_REQUESTS)
-_SOURCE_INDEX_BUSY_RETRY_AFTER_SEC = 60
+_SOURCE_INDEX_BUSY_RETRY_AFTER_SEC = 15
 
 
 def _source_index_busy_payload(*, scope: str) -> Dict[str, Any]:
@@ -422,10 +422,12 @@ def refresh_internal_latest_source_cache(
     _require_enabled_and_authorized(request)
     source_family = str(payload.get("source_family", "") or "") if isinstance(payload, dict) else ""
     buildings = payload.get("buildings", []) if isinstance(payload, dict) else []
+    target_bucket_key = str(payload.get("target_bucket_key", "") or "") if isinstance(payload, dict) else ""
     try:
         return _runner(request).refresh_latest_source_cache(
             source_family=source_family,
             buildings=buildings if isinstance(buildings, list) else [],
+            target_bucket_key=target_bucket_key,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

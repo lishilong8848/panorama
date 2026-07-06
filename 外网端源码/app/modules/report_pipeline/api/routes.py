@@ -1704,6 +1704,11 @@ def _bridge_http_error_is_transient(text: str) -> bool:
             "积极拒绝",
             "远程主机强迫关闭",
             "temporarily unavailable",
+            "正在处理其他请求",
+            "正在排队",
+            "稍后重试",
+            "retry_after",
+            "busy",
         )
     )
 
@@ -3469,6 +3474,7 @@ def health(
     branch_power_upload_scheduler_snapshot = _safe_scheduler_snapshot("branch_power_upload_scheduler_status")
     alarm_event_upload_scheduler_snapshot = _safe_scheduler_snapshot("alarm_event_upload_scheduler_status")
     system_screenshot_upload_scheduler_snapshot = _safe_scheduler_snapshot("system_screenshot_upload_scheduler_status")
+    top5_power_report_scheduler_snapshot = _safe_scheduler_snapshot("top5_power_report_scheduler_status")
     monthly_report_delivery_service = MonthlyReportDeliveryService(runtime_cfg)
     include_monthly_delivery = role_mode != "internal" and not is_lite_mode
 
@@ -7048,6 +7054,7 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
         "system_screenshot_upload_scheduler": _safe_scheduler("system_screenshot_upload_scheduler_status"),
+        "top5_power_report_scheduler": _safe_scheduler("top5_power_report_scheduler_status"),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
     }
@@ -7752,6 +7759,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
         "system_screenshot_upload_scheduler": _safe_scheduler("system_screenshot_upload_scheduler_status"),
+        "top5_power_report_scheduler": _safe_scheduler("top5_power_report_scheduler_status"),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
     }

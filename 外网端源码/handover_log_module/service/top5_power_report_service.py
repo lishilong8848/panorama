@@ -908,7 +908,7 @@ class Top5PowerReportBitableUploadService:
             raise FileNotFoundError(str(output_path))
 
         selected_year, selected_month = self._validate_year_month(year, month)
-        target_year, target_month = self._previous_year_month(year, month)
+        target_year, target_month = selected_year, selected_month
         fields = cfg["fields"]
         client = self._client(cfg, emit_log)
         table_id = str(cfg["table_id"])
@@ -916,7 +916,7 @@ class Top5PowerReportBitableUploadService:
 
         emit_log(
             "[TOP5功率文件生成] 开始上传多维附件: "
-            f"selected={selected_year}-{selected_month}, upload={target_year}-{target_month}, file={output_path.name}"
+            f"target={target_year}-{target_month}, file={output_path.name}"
         )
         existing_records = client.list_records(
             table_id=table_id,
@@ -974,7 +974,7 @@ class Top5PowerReportBitableUploadService:
             emit_log(f"[TOP5功率文件生成] 已删除旧多维记录: year={target_year}, month={target_month}, count={deleted}")
         emit_log(
             "[TOP5功率文件生成] 多维附件上传完成: "
-            f"selected={selected_year}-{selected_month}, upload={target_year}-{target_month}, record_id={record_id or '-'}, link={'yes' if link else 'no'}"
+            f"target={target_year}-{target_month}, record_id={record_id or '-'}, link={'yes' if link else 'no'}"
         )
         return {
             "status": "ok",

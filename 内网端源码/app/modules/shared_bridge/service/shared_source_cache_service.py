@@ -307,10 +307,45 @@ class SharedSourceCacheService:
             "completed_units": [],
             "scope_text": "每日整日源文件",
         }
+        self._monthly_source_refresh: Dict[str, Any] = {
+            "running": False,
+            "last_attempt_business_date": "",
+            "last_success_business_date": "",
+            "last_run_at": "",
+            "last_success_at": "",
+            "last_error": "",
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "running_buildings": [],
+            "completed_buildings": [],
+            "scope_text": "每日全景平台月报源文件",
+        }
+        self._top5_monthly_source_refresh: Dict[str, Any] = {
+            "running": False,
+            "last_attempt_period": "",
+            "last_success_period": "",
+            "last_run_at": "",
+            "last_success_at": "",
+            "last_error": "",
+            "failed_buildings": [],
+            "blocked_buildings": [],
+            "running_buildings": [],
+            "completed_buildings": [],
+            "scope_text": "每月TOP5月报源文件",
+        }
+        self._last_monthly_source_run_monotonic = 0.0
+        self._last_top5_monthly_source_run_monotonic = 0.0
         self._last_daily_source_run_monotonic = 0.0
         self._last_scheduler_log_signature = ""
         self._last_chiller_mode_switch_run_monotonic = 0.0
         self._chiller_mode_switch_interval_sec = 600
+        self._monthly_source_download_enabled = True
+        self._monthly_source_download_time = dt_time(hour=1, minute=0)
+        self._monthly_source_retry_interval_sec = 300
+        self._top5_monthly_source_download_enabled = True
+        self._top5_monthly_source_download_day = 2
+        self._top5_monthly_source_download_time = dt_time(hour=2, minute=0)
+        self._top5_monthly_source_retry_interval_sec = 300
         self._daily_source_download_enabled = True
         self._daily_source_download_time = dt_time(hour=0, minute=30)
         self._daily_source_retry_interval_sec = 300
@@ -812,6 +847,8 @@ class SharedSourceCacheService:
             families = copy.deepcopy(self._family_status)
             current_hour_refresh = copy.deepcopy(self._current_hour_refresh)
             daily_source_refresh = copy.deepcopy(self._daily_source_refresh)
+            monthly_source_refresh = copy.deepcopy(self._monthly_source_refresh)
+            top5_monthly_source_refresh = copy.deepcopy(self._top5_monthly_source_refresh)
             last_run_at = self._last_run_at
             last_success_at = self._last_success_at
             last_error = self._last_error
@@ -952,6 +989,8 @@ class SharedSourceCacheService:
             "cache_root": str(self.shared_root) if self.shared_root else "",
             "current_hour_refresh": current_hour_refresh,
             "daily_source_refresh": daily_source_refresh,
+            "monthly_source_refresh": monthly_source_refresh,
+            "top5_monthly_source_refresh": top5_monthly_source_refresh,
             FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
             FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
@@ -1390,6 +1429,16 @@ class SharedSourceCacheService:
             if isinstance(source_cache.get("daily_source_download", {}), dict)
             else {}
         )
+        monthly_source_cfg = (
+            source_cache.get("monthly_report_download", {})
+            if isinstance(source_cache.get("monthly_report_download", {}), dict)
+            else {}
+        )
+        top5_monthly_source_cfg = (
+            source_cache.get("top5_monthly_report_download", {})
+            if isinstance(source_cache.get("top5_monthly_report_download", {}), dict)
+            else {}
+        )
         resolved_bridge = resolve_shared_bridge_paths(shared_bridge, deployment.get("role_mode"))
         if isinstance(self.runtime_config, dict):
             self.runtime_config["shared_bridge"] = copy.deepcopy(resolved_bridge)
@@ -1400,6 +1449,28 @@ class SharedSourceCacheService:
         self.check_interval_sec = max(5, int(source_cache.get("check_interval_sec", 30) or 30))
         self.latest_required = bool(source_cache.get("latest_required", True))
         self.history_fill_timeout_sec = max(60, int(source_cache.get("history_fill_timeout_sec", 1800) or 1800))
+        self._monthly_source_download_enabled = bool(monthly_source_cfg.get("enabled", True))
+        self._monthly_source_download_time = self._parse_time_text(
+            monthly_source_cfg.get("run_time", "01:00:00"),
+            default=dt_time(hour=1, minute=0),
+        )
+        self._monthly_source_retry_interval_sec = max(
+            60,
+            int(monthly_source_cfg.get("retry_interval_sec", 300) or 300),
+        )
+        self._top5_monthly_source_download_enabled = bool(top5_monthly_source_cfg.get("enabled", True))
+        self._top5_monthly_source_download_day = min(
+            28,
+            max(1, int(top5_monthly_source_cfg.get("day_of_month", 2) or 2)),
+        )
+        self._top5_monthly_source_download_time = self._parse_time_text(
+            top5_monthly_source_cfg.get("run_time", "02:00:00"),
+            default=dt_time(hour=2, minute=0),
+        )
+        self._top5_monthly_source_retry_interval_sec = max(
+            60,
+            int(top5_monthly_source_cfg.get("retry_interval_sec", 300) or 300),
+        )
         self._daily_source_download_enabled = bool(daily_source_cfg.get("enabled", True))
         self._daily_source_download_time = self._parse_time_text(
             daily_source_cfg.get("run_time", "00:30:00"),
@@ -1622,6 +1693,8 @@ class SharedSourceCacheService:
             alarm_external_upload = copy.deepcopy(self._alarm_external_upload_state)
             manual_alarm_refresh = copy.deepcopy(self._manual_alarm_refresh)
             daily_source_refresh = copy.deepcopy(self._daily_source_refresh)
+            monthly_source_refresh = copy.deepcopy(self._monthly_source_refresh)
+            top5_monthly_source_refresh = copy.deepcopy(self._top5_monthly_source_refresh)
         if normalized_mode == "internal_light":
             alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
             branch_bucket = (
@@ -1743,6 +1816,8 @@ class SharedSourceCacheService:
                 "cache_root": str(self.shared_root) if self.shared_root else "",
                 "current_hour_refresh": current_hour_refresh,
                 "daily_source_refresh": daily_source_refresh,
+                "monthly_source_refresh": monthly_source_refresh,
+                "top5_monthly_source_refresh": top5_monthly_source_refresh,
                 FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
                 FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
                 FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
@@ -4423,7 +4498,8 @@ class SharedSourceCacheService:
         )
         success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
         output: List[Dict[str, Any]] = []
-        duty_date = datetime.now().strftime("%Y-%m-%d")
+        bucket_date = self._date_text_from_bucket_key(bucket_key)
+        duty_date = bucket_date or datetime.now().strftime("%Y-%m-%d")
         for item in success_files:
             building_name = str(item.get("building", "") or "").strip()
             source_path = Path(str(item.get("file_path", "") or "").strip())
@@ -4443,6 +4519,7 @@ class SharedSourceCacheService:
                         "family": source_family,
                         "building": building_name,
                         "upload_date": duty_date,
+                        "report_month": duty_date[:7],
                         "report_name": HandoverDownloadService._top5_monthly_report_template_name(building_name),
                     },
                 )
@@ -6321,8 +6398,6 @@ class SharedSourceCacheService:
         steps: List[tuple[str, str, Callable[..., Any]]] = [
             (FAMILY_HANDOVER_LOG, bucket_key, self.fill_handover_latest),
             (FAMILY_HANDOVER_CAPACITY_REPORT, bucket_key, self.fill_handover_capacity_latest),
-            (FAMILY_MONTHLY_REPORT, bucket_key, self.fill_monthly_latest),
-            (FAMILY_TOP5_MONTHLY_REPORT, bucket_key, self.fill_top5_monthly_report_latest),
         ]
         if alarm_bucket_key:
             steps.append((FAMILY_ALARM_EVENT, alarm_bucket_key, self.fill_alarm_event_latest))
@@ -6460,13 +6535,236 @@ class SharedSourceCacheService:
             handover_capacity_failed = list(
                 self._family_status.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}).get("failed_buildings", []) or []
             )
-            monthly_failed = list(self._family_status.get(FAMILY_MONTHLY_REPORT, {}).get("failed_buildings", []) or [])
             if (
                 not handover_failed
                 and not handover_capacity_failed
-                and not monthly_failed
             ):
                 self._last_error = ""
+
+    @staticmethod
+    def _monthly_report_business_date(when: datetime | None = None) -> str:
+        now_dt = when or datetime.now()
+        return (now_dt.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _top5_monthly_report_period_date(when: datetime | None = None) -> str:
+        now_dt = when or datetime.now()
+        return now_dt.strftime("%Y-%m-01")
+
+    def _mark_monthly_source_refresh(self, **fields: Any) -> None:
+        with self._lock:
+            self._monthly_source_refresh.update(fields)
+            self._external_full_snapshot_dirty = True
+
+    def _mark_top5_monthly_source_refresh(self, **fields: Any) -> None:
+        with self._lock:
+            self._top5_monthly_source_refresh.update(fields)
+            self._external_full_snapshot_dirty = True
+
+    def _run_monthly_report_file_if_due(self, when: datetime | None = None, *, force: bool = False) -> None:
+        if not self._monthly_source_download_enabled:
+            return
+        now_dt = when or datetime.now()
+        if not force and now_dt.time() < self._monthly_source_download_time:
+            return
+        business_date = self._monthly_report_business_date(now_dt)
+        now_mono = time.monotonic()
+        with self._lock:
+            if bool(self._monthly_source_refresh.get("running", False)):
+                return
+            if str(self._monthly_source_refresh.get("last_success_business_date", "") or "") == business_date:
+                return
+            if (
+                not force
+                and str(self._monthly_source_refresh.get("last_attempt_business_date", "") or "") == business_date
+                and self._last_monthly_source_run_monotonic > 0
+                and now_mono - self._last_monthly_source_run_monotonic < self._monthly_source_retry_interval_sec
+            ):
+                return
+            self._last_monthly_source_run_monotonic = now_mono
+        self._ensure_dirs()
+        self._emit(
+            "[共享缓存] 每日全景平台月报源文件自动下载开始 "
+            f"business_date={business_date}, run_time={self._monthly_source_download_time.strftime('%H:%M:%S')}"
+        )
+        self._mark_monthly_source_refresh(
+            running=True,
+            last_attempt_business_date=business_date,
+            last_run_at=_now_text(),
+            last_success_at="",
+            last_error="",
+            failed_buildings=[],
+            blocked_buildings=[],
+            running_buildings=[],
+            completed_buildings=[],
+        )
+        failed_units: List[str] = []
+        blocked_units: List[str] = []
+        running_units: List[str] = []
+        completed_units: List[str] = []
+        try:
+            result = self._run_latest_source_steps_by_building(
+                steps=[(FAMILY_MONTHLY_REPORT, business_date, self.fill_monthly_latest)],
+                force_retry_failed=True,
+                force_refresh_existing=False,
+            )
+            failed_units = list(result.get("failed_units", []) or [])
+            blocked_units = list(result.get("blocked_units", []) or [])
+            running_units = list(result.get("running_units", []) or [])
+            completed_units = list(result.get("completed_units", []) or [])
+            has_problem = bool(failed_units or blocked_units or running_units)
+            success_at = _now_text() if not has_problem else ""
+            self._mark_monthly_source_refresh(
+                running=False,
+                **({"last_success_business_date": business_date} if not has_problem else {}),
+                last_success_at=success_at,
+                last_error="; ".join(failed_units + blocked_units + running_units) if has_problem else "",
+                failed_buildings=failed_units,
+                blocked_buildings=blocked_units,
+                running_buildings=running_units,
+                completed_buildings=completed_units,
+            )
+            with self._lock:
+                self._last_run_at = _now_text()
+                if not has_problem:
+                    self._last_success_at = success_at
+                    self._last_error = ""
+            if has_problem:
+                parts: List[str] = []
+                if failed_units:
+                    parts.append("失败: " + ",".join(failed_units[:20]))
+                if blocked_units:
+                    parts.append("等待楼栋恢复: " + ",".join(blocked_units[:20]))
+                if running_units:
+                    parts.append("仍在运行: " + ",".join(running_units[:20]))
+                self._emit(
+                    "[共享缓存] 每日全景平台月报源文件自动下载未完成 "
+                    f"business_date={business_date}, " + "；".join(parts)
+                )
+            else:
+                self._emit(
+                    "[共享缓存] 每日全景平台月报源文件自动下载完成 "
+                    f"business_date={business_date}, completed={len(completed_units)}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._mark_monthly_source_refresh(
+                running=False,
+                last_error=error_text,
+                failed_buildings=failed_units or ["monthly_report_family"],
+                blocked_buildings=blocked_units,
+                running_buildings=running_units,
+                completed_buildings=completed_units,
+            )
+            with self._lock:
+                self._last_error = error_text
+                self._last_run_at = _now_text()
+            self._emit(f"[共享缓存] 每日全景平台月报源文件自动下载异常 business_date={business_date}, error={error_text}")
+
+    def _run_top5_monthly_report_file_if_due(self, when: datetime | None = None, *, force: bool = False) -> None:
+        if not self._top5_monthly_source_download_enabled:
+            return
+        now_dt = when or datetime.now()
+        if not force:
+            if now_dt.day < self._top5_monthly_source_download_day:
+                return
+            if now_dt.day == self._top5_monthly_source_download_day and now_dt.time() < self._top5_monthly_source_download_time:
+                return
+        period_date = self._top5_monthly_report_period_date(now_dt)
+        period = period_date[:7]
+        now_mono = time.monotonic()
+        with self._lock:
+            if bool(self._top5_monthly_source_refresh.get("running", False)):
+                return
+            if str(self._top5_monthly_source_refresh.get("last_success_period", "") or "") == period:
+                return
+            if (
+                not force
+                and str(self._top5_monthly_source_refresh.get("last_attempt_period", "") or "") == period
+                and self._last_top5_monthly_source_run_monotonic > 0
+                and now_mono - self._last_top5_monthly_source_run_monotonic < self._top5_monthly_source_retry_interval_sec
+            ):
+                return
+            self._last_top5_monthly_source_run_monotonic = now_mono
+        self._ensure_dirs()
+        self._emit(
+            "[共享缓存] 每月TOP5月报源文件自动下载开始 "
+            f"period={period}, day={self._top5_monthly_source_download_day}, "
+            f"run_time={self._top5_monthly_source_download_time.strftime('%H:%M:%S')}"
+        )
+        self._mark_top5_monthly_source_refresh(
+            running=True,
+            last_attempt_period=period,
+            last_run_at=_now_text(),
+            last_success_at="",
+            last_error="",
+            failed_buildings=[],
+            blocked_buildings=[],
+            running_buildings=[],
+            completed_buildings=[],
+        )
+        failed_units: List[str] = []
+        blocked_units: List[str] = []
+        running_units: List[str] = []
+        completed_units: List[str] = []
+        try:
+            result = self._run_latest_source_steps_by_building(
+                steps=[(FAMILY_TOP5_MONTHLY_REPORT, period_date, self.fill_top5_monthly_report_latest)],
+                force_retry_failed=True,
+                force_refresh_existing=False,
+            )
+            failed_units = list(result.get("failed_units", []) or [])
+            blocked_units = list(result.get("blocked_units", []) or [])
+            running_units = list(result.get("running_units", []) or [])
+            completed_units = list(result.get("completed_units", []) or [])
+            has_problem = bool(failed_units or blocked_units or running_units)
+            success_at = _now_text() if not has_problem else ""
+            self._mark_top5_monthly_source_refresh(
+                running=False,
+                **({"last_success_period": period} if not has_problem else {}),
+                last_success_at=success_at,
+                last_error="; ".join(failed_units + blocked_units + running_units) if has_problem else "",
+                failed_buildings=failed_units,
+                blocked_buildings=blocked_units,
+                running_buildings=running_units,
+                completed_buildings=completed_units,
+            )
+            with self._lock:
+                self._last_run_at = _now_text()
+                if not has_problem:
+                    self._last_success_at = success_at
+                    self._last_error = ""
+            if has_problem:
+                parts: List[str] = []
+                if failed_units:
+                    parts.append("失败: " + ",".join(failed_units[:20]))
+                if blocked_units:
+                    parts.append("等待楼栋恢复: " + ",".join(blocked_units[:20]))
+                if running_units:
+                    parts.append("仍在运行: " + ",".join(running_units[:20]))
+                self._emit(
+                    "[共享缓存] 每月TOP5月报源文件自动下载未完成 "
+                    f"period={period}, " + "；".join(parts)
+                )
+            else:
+                self._emit(
+                    "[共享缓存] 每月TOP5月报源文件自动下载完成 "
+                    f"period={period}, completed={len(completed_units)}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self._mark_top5_monthly_source_refresh(
+                running=False,
+                last_error=error_text,
+                failed_buildings=failed_units or ["top5_monthly_report_family"],
+                blocked_buildings=blocked_units,
+                running_buildings=running_units,
+                completed_buildings=completed_units,
+            )
+            with self._lock:
+                self._last_error = error_text
+                self._last_run_at = _now_text()
+            self._emit(f"[共享缓存] 每月TOP5月报源文件自动下载异常 period={period}, error={error_text}")
 
     def _run_alarm_bucket_if_due(self, when: datetime | None = None) -> None:
         bucket_key = self._auto_alarm_bucket(when)
@@ -6736,30 +7034,44 @@ class SharedSourceCacheService:
     def start_today_full_refresh(self) -> Dict[str, Any]:
         return self.start_current_hour_refresh()
 
-    def _resolve_latest_refresh_target(self, *, source_family: str) -> Dict[str, Any]:
+    def _normalize_latest_target_bucket_key(self, *, source_family: str, bucket_key: str) -> str:
         normalized_family = self._normalize_source_family(source_family)
+        text = str(bucket_key or "").strip()
+        if not text:
+            return ""
+        if normalized_family in {FAMILY_MONTHLY_REPORT, FAMILY_TOP5_MONTHLY_REPORT}:
+            date_text = self._date_text_from_bucket_key(text)
+            return date_text or text
+        return text
+
+    def _resolve_latest_refresh_target(self, *, source_family: str, target_bucket_key: str = "") -> Dict[str, Any]:
+        normalized_family = self._normalize_source_family(source_family)
+        requested_bucket = self._normalize_latest_target_bucket_key(
+            source_family=normalized_family,
+            bucket_key=target_bucket_key,
+        )
         if normalized_family == FAMILY_HANDOVER_LOG:
             return {
                 "source_family": normalized_family,
-                "bucket_key": self.current_hour_bucket(),
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
                 "fill_func": self.fill_handover_latest,
             }
         if normalized_family == FAMILY_HANDOVER_CAPACITY_REPORT:
             return {
                 "source_family": normalized_family,
-                "bucket_key": self.current_hour_bucket(),
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
                 "fill_func": self.fill_handover_capacity_latest,
             }
         if normalized_family == FAMILY_MONTHLY_REPORT:
             return {
                 "source_family": normalized_family,
-                "bucket_key": self.current_hour_bucket(),
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
                 "fill_func": self.fill_monthly_latest,
             }
         if normalized_family == FAMILY_TOP5_MONTHLY_REPORT:
             return {
                 "source_family": normalized_family,
-                "bucket_key": self.current_hour_bucket(),
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
                 "fill_func": self.fill_top5_monthly_report_latest,
             }
         if normalized_family == FAMILY_BRANCH_POWER:
@@ -7370,13 +7682,22 @@ class SharedSourceCacheService:
             with self._lock:
                 self._building_latest_refresh_threads.pop(thread_key, None)
 
-    def start_building_latest_refresh(self, *, source_family: str, building: str) -> Dict[str, Any]:
+    def start_building_latest_refresh(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        target_bucket_key: str = "",
+    ) -> Dict[str, Any]:
         if not self.enabled or self.role_mode != "internal" or self.store is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
         building_name = str(building or "").strip()
         if not building_name or building_name not in self.get_enabled_buildings():
             return {"accepted": False, "running": False, "reason": "invalid_building"}
-        target = self._resolve_latest_refresh_target(source_family=source_family)
+        target = self._resolve_latest_refresh_target(
+            source_family=source_family,
+            target_bucket_key=target_bucket_key,
+        )
         normalized_family = str(target.get("source_family", "") or "").strip()
         bucket_key = str(target.get("bucket_key", "") or "").strip()
         fill_func = target.get("fill_func")
@@ -7518,6 +7839,8 @@ class SharedSourceCacheService:
                     continue
                 if self.run_on_startup and not startup_done:
                     self._run_current_bucket_once()
+                    self._run_monthly_report_file_if_due()
+                    self._run_top5_monthly_report_file_if_due()
                     self._run_alarm_bucket_if_due()
                     self._run_chiller_mode_switch_if_due(force=True)
                     self._run_daily_source_files_if_due()
@@ -7526,6 +7849,8 @@ class SharedSourceCacheService:
                     bucket = self.current_hour_bucket()
                     if bucket != self._current_hour_bucket:
                         self._run_current_bucket_once()
+                    self._run_monthly_report_file_if_due()
+                    self._run_top5_monthly_report_file_if_due()
                     self._run_alarm_bucket_if_due()
                     self._run_chiller_mode_switch_if_due()
                     self._run_daily_source_files_if_due()
@@ -7535,6 +7860,7 @@ class SharedSourceCacheService:
                     alarm_status = self._family_status.get(FAMILY_ALARM_EVENT, {})
                     chiller_mode_switch_status = self._family_status.get(FAMILY_CHILLER_MODE_SWITCH, {})
                     daily_source_refresh = self._daily_source_refresh
+                    top5_monthly_source_refresh = self._top5_monthly_source_refresh
                     signature = "|".join(
                         [
                             self._current_hour_bucket,
@@ -7544,6 +7870,8 @@ class SharedSourceCacheService:
                             ",".join(str(item) for item in chiller_mode_switch_status.get("blocked_buildings", []) or []),
                             ",".join(str(item) for item in daily_source_refresh.get("blocked_units", []) or []),
                             ",".join(str(item) for item in daily_source_refresh.get("failed_units", []) or []),
+                            ",".join(str(item) for item in top5_monthly_source_refresh.get("blocked_buildings", []) or []),
+                            ",".join(str(item) for item in top5_monthly_source_refresh.get("failed_buildings", []) or []),
                             str(bool(self._last_error)),
                         ]
                     )
@@ -7556,6 +7884,8 @@ class SharedSourceCacheService:
                             or chiller_mode_switch_status.get("blocked_buildings")
                             or daily_source_refresh.get("blocked_units")
                             or daily_source_refresh.get("failed_units")
+                            or top5_monthly_source_refresh.get("blocked_buildings")
+                            or top5_monthly_source_refresh.get("failed_buildings")
                         ):
                             blocked = (
                                 list(handover_status.get("blocked_buildings", []) or [])
@@ -7564,6 +7894,8 @@ class SharedSourceCacheService:
                                 + list(chiller_mode_switch_status.get("blocked_buildings", []) or [])
                                 + list(daily_source_refresh.get("blocked_units", []) or [])
                                 + list(daily_source_refresh.get("failed_units", []) or [])
+                                + list(top5_monthly_source_refresh.get("blocked_buildings", []) or [])
+                                + list(top5_monthly_source_refresh.get("failed_buildings", []) or [])
                             )
                             self._emit(
                                 f"[共享缓存] 调度等待/重试源文件: 小时桶={self._current_hour_bucket}, "

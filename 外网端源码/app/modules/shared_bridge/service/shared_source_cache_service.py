@@ -5817,30 +5817,44 @@ class SharedSourceCacheService:
     def start_today_full_refresh(self) -> Dict[str, Any]:
         return self.start_current_hour_refresh()
 
-    def _resolve_latest_refresh_target(self, *, source_family: str) -> Dict[str, Any]:
+    def _normalize_latest_target_bucket_key(self, *, source_family: str, bucket_key: str) -> str:
         normalized_family = self._normalize_source_family(source_family)
+        text = str(bucket_key or "").strip()
+        if not text:
+            return ""
+        if normalized_family in {FAMILY_MONTHLY_REPORT, FAMILY_TOP5_MONTHLY_REPORT}:
+            date_text = self._date_text_from_bucket_key(text)
+            return date_text or text
+        return text
+
+    def _resolve_latest_refresh_target(self, *, source_family: str, target_bucket_key: str = "") -> Dict[str, Any]:
+        normalized_family = self._normalize_source_family(source_family)
+        requested_bucket = self._normalize_latest_target_bucket_key(
+            source_family=normalized_family,
+            bucket_key=target_bucket_key,
+        )
         if normalized_family == FAMILY_HANDOVER_LOG:
             return {
                 "source_family": normalized_family,
-                "bucket_key": self.current_hour_bucket(),
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
                 "fill_func": self.fill_handover_latest,
             }
         if normalized_family == FAMILY_HANDOVER_CAPACITY_REPORT:
             return {
                 "source_family": normalized_family,
-                "bucket_key": self.current_hour_bucket(),
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
                 "fill_func": self.fill_handover_capacity_latest,
             }
         if normalized_family == FAMILY_MONTHLY_REPORT:
             return {
                 "source_family": normalized_family,
-                "bucket_key": self.current_hour_bucket(),
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
                 "fill_func": self.fill_monthly_latest,
             }
         if normalized_family == FAMILY_TOP5_MONTHLY_REPORT:
             return {
                 "source_family": normalized_family,
-                "bucket_key": self.current_hour_bucket(),
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
                 "fill_func": self.fill_top5_monthly_report_latest,
             }
         if normalized_family == FAMILY_BRANCH_POWER:
@@ -5935,13 +5949,22 @@ class SharedSourceCacheService:
             with self._lock:
                 self._building_latest_refresh_threads.pop(thread_key, None)
 
-    def start_building_latest_refresh(self, *, source_family: str, building: str) -> Dict[str, Any]:
+    def start_building_latest_refresh(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        target_bucket_key: str = "",
+    ) -> Dict[str, Any]:
         if not self.enabled or self.role_mode != "internal" or self.store is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
         building_name = str(building or "").strip()
         if not building_name or building_name not in self.get_enabled_buildings():
             return {"accepted": False, "running": False, "reason": "invalid_building"}
-        target = self._resolve_latest_refresh_target(source_family=source_family)
+        target = self._resolve_latest_refresh_target(
+            source_family=source_family,
+            target_bucket_key=target_bucket_key,
+        )
         normalized_family = str(target.get("source_family", "") or "").strip()
         bucket_key = str(target.get("bucket_key", "") or "").strip()
         fill_func = target.get("fill_func")

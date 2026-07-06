@@ -1408,26 +1408,60 @@ class SharedBridgeRuntimeService:
             )
         )
 
+    @staticmethod
+    def _http_bridge_error_is_queue_busy(exc: Exception) -> bool:
+        text = str(exc or "").strip().lower()
+        return any(
+            token in text
+            for token in (
+                "正在处理其他请求",
+                "正在排队",
+                "retry_after",
+                "busy",
+                "请约",
+            )
+        )
+
+    @staticmethod
+    def _http_bridge_retry_after_sec(exc: Exception, *, default: int = 3, max_sec: int = 8) -> int:
+        text = str(exc or "")
+        match = re.search(r"retry_after_sec\s*=\s*(\d+)", text, flags=re.IGNORECASE)
+        if not match:
+            match = re.search(r"约\s*(\d+)\s*秒", text)
+        try:
+            value = int(match.group(1)) if match else int(default)
+        except (TypeError, ValueError):
+            value = int(default)
+        return max(1, min(int(max_sec), value))
+
     def _mark_http_bridge_success(self) -> None:
         self._http_bridge_unavailable_until_monotonic = 0.0
         self._http_bridge_last_error = ""
 
     def _emit_http_bridge_issue_log(self, scope: str, exc: Exception) -> None:
         error_text = str(exc or "").strip()
-        if self._http_bridge_error_is_transient(exc):
+        is_transient = self._http_bridge_error_is_transient(exc)
+        is_queue_busy = self._http_bridge_error_is_queue_busy(exc)
+        if is_transient and not is_queue_busy:
             self._http_bridge_unavailable_until_monotonic = max(
                 float(self._http_bridge_unavailable_until_monotonic or 0.0),
                 time.monotonic() + self.HTTP_BRIDGE_COOLDOWN_SEC,
             )
             self._http_bridge_last_error = error_text
-        marker = f"{scope}|{type(exc).__name__}|{'transient' if self._http_bridge_error_is_transient(exc) else error_text.lower()}"
+        elif is_transient:
+            self._http_bridge_last_error = error_text
+        marker_kind = "queue_busy" if is_queue_busy else ("transient" if is_transient else error_text.lower())
+        marker = f"{scope}|{type(exc).__name__}|{marker_kind}"
         now_monotonic = time.monotonic()
         previous = float(self._http_bridge_failure_log_markers.get(marker, 0.0) or 0.0)
         if previous and now_monotonic - previous < self.HTTP_BRIDGE_FAILURE_LOG_INTERVAL_SEC:
             return
         self._http_bridge_failure_log_markers[marker] = now_monotonic
         cooldown_text = self._http_bridge_cooldown_error_text()
-        suffix = f"，已进入短冷却: {cooldown_text}" if cooldown_text else ""
+        if is_queue_busy:
+            suffix = f"，内网端轻量接口排队，外网端将重试或使用本地镜像: {cooldown_text or error_text}"
+        else:
+            suffix = f"，已进入短冷却: {cooldown_text}" if cooldown_text else ""
         self._emit_system_log(f"[共享桥接][HTTP] {scope}失败: {error_text or exc}{suffix}")
 
     @staticmethod
@@ -1884,10 +1918,6 @@ class SharedBridgeRuntimeService:
                     cached_entries = self._get_http_source_index_cache(cache_key)
                     if cached_entries is not None:
                         return cached_entries
-                    if not inflight_event.is_set():
-                        self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("source-index 同查询仍在等待内网端响应"))
-                    else:
-                        self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("source-index 同查询完成但未产生缓存"))
                     mirror_entries = self._load_http_source_index_mirror(
                         source_family=source_family,
                         target_buildings=target_buildings,
@@ -1899,16 +1929,37 @@ class SharedBridgeRuntimeService:
                     if mirror_entries:
                         self._set_http_source_index_cache(cache_key, mirror_entries)
                         return mirror_entries
+                    if not inflight_event.is_set():
+                        self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("source-index 同查询仍在等待内网端响应"))
+                    else:
+                        self._emit_http_bridge_issue_log("读取源文件索引", RuntimeError("source-index 同查询完成但未产生缓存"))
                     return [] if self._http_bridge_forced() else None
                 fetch_event = inflight_event
             batch_reader = getattr(client, "source_index_batch", None)
-            if callable(batch_reader):
-                raw_results = batch_reader(query_contexts, default_limit=max(1, int(limit_per_building or 20)))
-            else:
-                raw_results = [
-                    {"index": index, "ok": True, "entries": client.source_index(**query)}
-                    for index, query in enumerate(query_contexts)
-                ]
+            raw_results: List[Dict[str, Any]] = []
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    if callable(batch_reader):
+                        raw_payload = batch_reader(query_contexts, default_limit=max(1, int(limit_per_building or 20)))
+                    else:
+                        raw_payload = [
+                            {"index": index, "ok": True, "entries": client.source_index(**query)}
+                            for index, query in enumerate(query_contexts)
+                        ]
+                    raw_results = raw_payload if isinstance(raw_payload, list) else []
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    is_queue_busy = self._http_bridge_error_is_queue_busy(exc)
+                    attempt_limit = max_attempts if is_queue_busy else 2
+                    if attempt >= attempt_limit or not self._http_bridge_error_is_transient(exc):
+                        raise
+                    delay_sec = self._http_bridge_retry_after_sec(
+                        exc,
+                        default=2 + attempt,
+                        max_sec=8 if is_queue_busy else 3,
+                    )
+                    time.sleep(delay_sec)
             rows_by_query_index: Dict[int, List[Dict[str, Any]]] = {}
             for result in raw_results if isinstance(raw_results, list) else []:
                 if not isinstance(result, dict) or not bool(result.get("ok", False)):
@@ -1980,7 +2031,6 @@ class SharedBridgeRuntimeService:
         except Exception as exc:  # noqa: BLE001
             if "cache_key" in locals() and "fetch_event" in locals() and fetch_event is not None:
                 self._finish_http_source_index_fetch(cache_key, fetch_event)
-            self._emit_http_bridge_issue_log("读取源文件索引", exc)
             mirror_entries = self._load_http_source_index_mirror(
                 source_family=source_family,
                 target_buildings=target_buildings,
@@ -1992,7 +2042,16 @@ class SharedBridgeRuntimeService:
             if mirror_entries:
                 if "cache_key" in locals():
                     self._set_http_source_index_cache(cache_key, mirror_entries)
+                if self._http_bridge_error_is_transient(exc):
+                    error_text = str(exc or "").strip()
+                    if not self._http_bridge_error_is_queue_busy(exc):
+                        self._http_bridge_unavailable_until_monotonic = max(
+                            float(self._http_bridge_unavailable_until_monotonic or 0.0),
+                            time.monotonic() + self.HTTP_BRIDGE_COOLDOWN_SEC,
+                        )
+                    self._http_bridge_last_error = error_text
                 return mirror_entries
+            self._emit_http_bridge_issue_log("读取源文件索引", exc)
             if self._http_bridge_forced():
                 return []
             return None
@@ -2163,6 +2222,8 @@ class SharedBridgeRuntimeService:
         self,
         *,
         buildings: List[str],
+        year: str | int | None = None,
+        month: str | int | None = None,
         timeout_sec: int = 1200,
         poll_interval_sec: float = 5.0,
         emit_log: Callable[[str], None] | None = None,
@@ -2174,15 +2235,25 @@ class SharedBridgeRuntimeService:
         if not self._http_bridge_should_try() or self._internal_bridge_http_client is None:
             raise RuntimeError("内网端 HTTP 桥接不可用，无法触发 TOP5 月报源文件下载")
 
+        year_text = str(year or "").strip()
+        month_text = ""
+        if month not in (None, ""):
+            try:
+                month_text = f"{int(month):02d}"
+            except (TypeError, ValueError):
+                month_text = str(month or "").strip().zfill(2)
+        target_bucket_key = f"{year_text}-{month_text}-01" if year_text and month_text else ""
         request_started_at = datetime.now().replace(microsecond=0)
         if emit_log:
             emit_log(
                 "[TOP5功率文件生成] 请求内网端下载本次 TOP5 月报源文件: "
                 f"buildings={','.join(target_buildings)}"
+                + (f", target_month={year_text}-{month_text}" if target_bucket_key else "")
             )
         refresh_result = self.request_latest_source_cache_refresh(
             source_family=FAMILY_TOP5_MONTHLY_REPORT,
             buildings=target_buildings,
+            target_bucket_key=target_bucket_key,
         )
         if not bool(refresh_result.get("ok", False)) and int(refresh_result.get("accepted_count", 0) or 0) <= 0:
             reason = str(refresh_result.get("error") or refresh_result.get("reason") or "内网端未受理下载任务").strip()
@@ -2202,6 +2273,7 @@ class SharedBridgeRuntimeService:
                 bucket_key="",
                 status="all",
                 limit_per_building=50,
+                force_refresh=True,
             )
             if entries is None:
                 raise RuntimeError("内网端 HTTP source-index 暂不可用，无法读取 TOP5 月报源文件下载结果")
@@ -2215,11 +2287,24 @@ class SharedBridgeRuntimeService:
                 for item in entries
                 if isinstance(item, dict) and str(item.get("status", "") or "").strip().lower() == "failed"
             ]
-            selected = self._latest_http_entries_by_building(
-                entries=ready_entries,
-                buildings=target_buildings,
-                not_before=request_started_at,
-            )
+            if target_bucket_key:
+                selected_list = self._pick_latest_source_index_entries_for_month(
+                    ready_entries,
+                    year=year_text,
+                    month=month_text,
+                    buildings=target_buildings,
+                )
+                selected = {
+                    str(item.get("building", "") or "").strip(): item
+                    for item in selected_list
+                    if isinstance(item, dict) and str(item.get("building", "") or "").strip()
+                }
+            else:
+                selected = self._latest_http_entries_by_building(
+                    entries=ready_entries,
+                    buildings=target_buildings,
+                    not_before=request_started_at,
+                )
             latest_failed = self._latest_http_entries_by_building(
                 entries=failed_entries,
                 buildings=target_buildings,
@@ -2265,6 +2350,7 @@ class SharedBridgeRuntimeService:
                 retry_result = self.request_latest_source_cache_refresh(
                     source_family=FAMILY_TOP5_MONTHLY_REPORT,
                     buildings=missing,
+                    target_bucket_key=target_bucket_key,
                 )
                 if emit_log:
                     accepted = int(retry_result.get("accepted_count", 0) or 0) if isinstance(retry_result, dict) else 0
@@ -2462,6 +2548,26 @@ class SharedBridgeRuntimeService:
         return bucket_dt, downloaded_dt, updated_dt, str(entry.get("entry_id", "") or "")
 
     @classmethod
+    def _source_index_effective_date(cls, entry: Dict[str, Any]) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+        effective_date = (
+            str(entry.get("duty_date", "") or "").strip()
+            or str(metadata.get("duty_date", "") or "").strip()
+            or str(metadata.get("business_date", "") or "").strip()
+            or str(metadata.get("upload_date", "") or "").strip()
+        )
+        if effective_date:
+            parsed = cls._parse_source_index_time(effective_date)
+            return parsed.strftime("%Y-%m-%d") if parsed != datetime.min else effective_date
+        for value in (entry.get("bucket_key"), entry.get("file_path"), entry.get("relative_path")):
+            parsed = cls._parse_source_index_time(value)
+            if parsed != datetime.min:
+                return parsed.strftime("%Y-%m-%d")
+        return ""
+
+    @classmethod
     def _pick_latest_source_index_entries_for_date(
         cls,
         entries: List[Dict[str, Any]],
@@ -2484,23 +2590,52 @@ class SharedBridgeRuntimeService:
             file_path = str(raw.get("file_path", "") or "").strip()
             if not file_path:
                 continue
-            metadata = raw.get("metadata", {}) if isinstance(raw.get("metadata", {}), dict) else {}
-            effective_date = (
-                str(raw.get("duty_date", "") or "").strip()
-                or str(metadata.get("duty_date", "") or "").strip()
-                or str(metadata.get("business_date", "") or "").strip()
-            )
-            if not effective_date:
-                parsed = cls._parse_source_index_time(raw.get("bucket_key"))
-                if parsed == datetime.min:
-                    parsed = cls._parse_source_index_time(file_path)
-                if parsed != datetime.min:
-                    effective_date = parsed.strftime("%Y-%m-%d")
+            effective_date = cls._source_index_effective_date(raw)
             if date_text and effective_date and effective_date != date_text:
                 continue
             current = grouped.get(building)
             if current is None or cls._source_index_sort_key(raw) > cls._source_index_sort_key(current):
                 grouped[building] = raw
+        return [
+            grouped[building]
+            for building in sorted(
+                grouped,
+                key=lambda item: requested_order.get(item, len(requested_order) + 1000),
+            )
+        ]
+
+    @classmethod
+    def _pick_latest_source_index_entries_for_month(
+        cls,
+        entries: List[Dict[str, Any]],
+        *,
+        year: str,
+        month: str,
+        buildings: List[str] | None,
+    ) -> List[Dict[str, Any]]:
+        month_prefix = f"{str(year or '').strip()}-{str(month or '').strip().zfill(2)}"
+        requested_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        requested_order = {building: index for index, building in enumerate(requested_buildings)}
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for raw in entries if isinstance(entries, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("status", "") or "").strip().lower() not in {"", "ready"}:
+                continue
+            building = str(raw.get("building", "") or "").strip()
+            if not building:
+                continue
+            if requested_buildings and building not in requested_order:
+                continue
+            file_path = str(raw.get("file_path", "") or "").strip()
+            if not file_path:
+                continue
+            effective_date = cls._source_index_effective_date(raw)
+            if not effective_date.startswith(month_prefix):
+                continue
+            current = grouped.get(building)
+            if current is None or cls._source_index_sort_key(raw) > cls._source_index_sort_key(current):
+                grouped[building] = {**raw, "building": building, "file_path": file_path}
         return [
             grouped[building]
             for building in sorted(
@@ -5275,6 +5410,42 @@ class SharedBridgeRuntimeService:
             buildings=buildings,
         )
 
+    def get_top5_monthly_by_month_cache_entries(
+        self,
+        *,
+        year: str,
+        month: str | int,
+        buildings: List[str] | None = None,
+        require_fresh: bool = False,
+    ) -> List[Dict[str, Any]]:
+        year_text = str(year or "").strip()
+        month_text = f"{int(month):02d}" if str(month or "").strip().isdigit() else str(month or "").strip().zfill(2)
+        if self._http_bridge_should_try():
+            http_entries = self._http_source_index_entries(
+                source_family=FAMILY_TOP5_MONTHLY_REPORT,
+                buildings=buildings,
+                bucket_key="",
+                status="all",
+                limit_per_building=200,
+                force_refresh=require_fresh,
+            )
+            if http_entries is not None:
+                return self._pick_latest_source_index_entries_for_month(
+                    http_entries,
+                    year=year_text,
+                    month=month_text,
+                    buildings=buildings,
+                )
+        if self._http_bridge_forced():
+            return []
+        if self._source_cache_service is None:
+            return []
+        selected_dates = [f"{year_text}-{month_text}-01"]
+        return self._source_cache_service.get_top5_monthly_by_date_entries(
+            selected_dates=selected_dates,
+            buildings=buildings,
+        )
+
     def get_source_cache_buildings(self) -> List[str]:
         if self._http_bridge_should_try():
             return self._http_source_cache_buildings()
@@ -5284,7 +5455,13 @@ class SharedBridgeRuntimeService:
             return []
         return self._source_cache_service.get_enabled_buildings()
 
-    def request_latest_source_cache_refresh(self, *, source_family: str, buildings: List[str]) -> Dict[str, Any]:
+    def request_latest_source_cache_refresh(
+        self,
+        *,
+        source_family: str,
+        buildings: List[str],
+        target_bucket_key: str = "",
+    ) -> Dict[str, Any]:
         family = str(source_family or "").strip()
         target_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
         if not family or not target_buildings:
@@ -5294,6 +5471,7 @@ class SharedBridgeRuntimeService:
                 result = self._internal_bridge_http_client.refresh_latest_source_cache(
                     source_family=family,
                     buildings=target_buildings,
+                    target_bucket_key=target_bucket_key,
                 )
                 self._mark_http_bridge_success()
                 return result if isinstance(result, dict) else {"ok": False, "accepted_count": 0, "results": []}
@@ -5312,6 +5490,7 @@ class SharedBridgeRuntimeService:
                 item = self._source_cache_service.start_building_latest_refresh(
                     source_family=family,
                     building=building,
+                    target_bucket_key=target_bucket_key,
                 )
                 row = dict(item if isinstance(item, dict) else {})
                 row["building"] = building
@@ -5360,7 +5539,13 @@ class SharedBridgeRuntimeService:
             return {"accepted": False, "running": False, "reason": "disabled"}
         return self._source_cache_service.start_manual_alarm_refresh()
 
-    def start_building_latest_source_cache_refresh(self, *, source_family: str, building: str) -> Dict[str, Any]:
+    def start_building_latest_source_cache_refresh(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        target_bucket_key: str = "",
+    ) -> Dict[str, Any]:
         if self._http_bridge_forced():
             return {"accepted": False, "running": False, "reason": "external_http_only"}
         if self._source_cache_service is None:
@@ -5368,6 +5553,7 @@ class SharedBridgeRuntimeService:
         return self._source_cache_service.start_building_latest_refresh(
             source_family=source_family,
             building=building,
+            target_bucket_key=target_bucket_key,
         )
 
     def delete_manual_alarm_source_cache_files(self) -> Dict[str, Any]:

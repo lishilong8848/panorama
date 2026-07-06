@@ -1112,9 +1112,11 @@ class InternalBridgeHttpTaskRunner:
         *,
         source_family: str,
         buildings: List[str],
+        target_bucket_key: str = "",
     ) -> Dict[str, Any]:
         family = str(source_family or "").strip()
         target_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
+        bucket_key = str(target_bucket_key or "").strip()
         if not family:
             raise ValueError("source_family 不能为空")
         if not target_buildings:
@@ -1127,6 +1129,7 @@ class InternalBridgeHttpTaskRunner:
                 "accepted": True,
                 "running": True,
                 "reason": "queued",
+                "bucket_key": bucket_key,
             }
             for building in target_buildings
         ]
@@ -1136,16 +1139,17 @@ class InternalBridgeHttpTaskRunner:
                 result = self._main_service.start_building_latest_source_cache_refresh(
                     source_family=family,
                     building=building,
+                    target_bucket_key=bucket_key,
                 )
                 reason = str(result.get("reason", "") or "").strip() if isinstance(result, dict) else ""
                 self._emit(
                     "[内网HTTP桥接] 源文件补采启动结果: "
-                    f"family={family}, building={building}, reason={reason or '-'}"
+                    f"family={family}, building={building}, bucket={bucket_key or '-'}, reason={reason or '-'}"
                 )
             except Exception as exc:  # noqa: BLE001
                 self._emit(
                     "[内网HTTP桥接] 源文件补采后台启动失败: "
-                    f"family={family}, building={building}, error={exc}"
+                    f"family={family}, building={building}, bucket={bucket_key or '-'}, error={exc}"
                 )
 
         for building in target_buildings:
@@ -1159,6 +1163,7 @@ class InternalBridgeHttpTaskRunner:
         return {
             "ok": accepted > 0,
             "source_family": family,
+            "target_bucket_key": bucket_key,
             "requested_buildings": target_buildings,
             "accepted_count": accepted,
             "already_ready_count": 0,

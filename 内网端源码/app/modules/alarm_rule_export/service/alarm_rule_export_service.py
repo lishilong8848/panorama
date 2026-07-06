@@ -679,6 +679,33 @@ EXPORT_LIST_ROWS_SCRIPT = """() => {
 }"""
 
 
+EXPORT_PAGER_STATE_SCRIPT = """() => {
+    const visible = element => !!element && !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+    const pagers = Array.from(document.querySelectorAll("ul.pagination")).filter(visible);
+    const pager = pagers[pagers.length - 1];
+    if (!pager) return { hasPager: false, activeText: "", hasPrev: false, hasNext: false };
+    const disabled = li => {
+        if (!li) return true;
+        const className = li.className || "";
+        const anchor = li.querySelector("a");
+        const style = anchor ? window.getComputedStyle(anchor) : null;
+        return className.includes("disabled")
+            || className.includes("disable")
+            || (anchor && anchor.getAttribute("disabled") !== null)
+            || (style && style.pointerEvents === "none");
+    };
+    const active = pager.querySelector("li.page-number.active a, li.active a");
+    const prev = pager.querySelector("li.page-pre");
+    const next = pager.querySelector("li.page-next");
+    return {
+        hasPager: true,
+        activeText: active ? active.textContent.trim() : "",
+        hasPrev: !disabled(prev),
+        hasNext: !disabled(next),
+    };
+}"""
+
+
 def _filename_has_period_date(file_name: str, period: str) -> bool:
     text = str(file_name or "")
     if not text:
@@ -718,6 +745,112 @@ def _exact_file_row(frame: Any, file_name: str) -> Any:
         "xpath=.//div[contains(concat(' ', normalize-space(@class), ' '), ' c-table__tbody ')]"
         f"//tbody//tr[td[2][normalize-space(.)={literal}]]"
     ).first
+
+
+async def _export_list_page_state(frame: Any) -> dict[str, Any]:
+    try:
+        state = await frame.evaluate(EXPORT_PAGER_STATE_SCRIPT)
+    except Exception:
+        state = {}
+    return state if isinstance(state, dict) else {}
+
+
+async def _click_export_list_page_turn(frame: Any, class_name: str, args: argparse.Namespace) -> bool:
+    locator = frame.locator(f"ul.pagination li.{class_name} a").last
+    try:
+        await _dom_click(locator, args.action_timeout_ms)
+        await asyncio.sleep(float(getattr(args, "list_page_turn_wait_sec", 0.8) or 0.8))
+        return True
+    except Exception:
+        return False
+
+
+async def _goto_first_export_list_page(frame: Any, args: argparse.Namespace) -> None:
+    max_pages = max(1, int(getattr(args, "list_page_max_pages", 20) or 20))
+    for _ in range(max_pages):
+        state = await _export_list_page_state(frame)
+        if not bool(state.get("hasPrev")):
+            return
+        if not await _click_export_list_page_turn(frame, "page-pre", args):
+            return
+
+
+async def _collect_export_list_rows_across_pages(frame: Any, args: argparse.Namespace) -> list[dict[str, Any]]:
+    await _goto_first_export_list_page(frame, args)
+    max_pages = max(1, int(getattr(args, "list_page_max_pages", 20) or 20))
+    output: list[dict[str, Any]] = []
+    seen_pages: set[str] = set()
+    for page_index in range(1, max_pages + 1):
+        rows = await frame.evaluate(EXPORT_LIST_ROWS_SCRIPT)
+        page_rows = [item for item in (rows if isinstance(rows, list) else []) if isinstance(item, dict)]
+        state = await _export_list_page_state(frame)
+        signature = json.dumps(
+            {
+                "active": str(state.get("activeText") or ""),
+                "first": str(page_rows[0].get("fileName") if page_rows else ""),
+                "last": str(page_rows[-1].get("fileName") if page_rows else ""),
+                "count": len(page_rows),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if signature in seen_pages:
+            break
+        seen_pages.add(signature)
+        for row in page_rows:
+            row["_page_index"] = page_index
+            output.append(row)
+        if not bool(state.get("hasNext")):
+            break
+        if not await _click_export_list_page_turn(frame, "page-next", args):
+            break
+    return output
+
+
+async def _find_export_status_by_file_name(frame: Any, file_name: str, args: argparse.Namespace) -> dict[str, Any] | None:
+    target = str(file_name or "").strip()
+    if not target:
+        return None
+    await _goto_first_export_list_page(frame, args)
+    max_pages = max(1, int(getattr(args, "list_page_max_pages", 20) or 20))
+    seen_pages: set[str] = set()
+    for page_index in range(1, max_pages + 1):
+        status = await frame.evaluate(ROW_STATUS_SCRIPT, target)
+        if isinstance(status, dict) and str(status.get("fileName") or "").strip() == target:
+            status["_page_index"] = page_index
+            return status
+        rows = await frame.evaluate(EXPORT_LIST_ROWS_SCRIPT)
+        page_rows = [item for item in (rows if isinstance(rows, list) else []) if isinstance(item, dict)]
+        state = await _export_list_page_state(frame)
+        signature = json.dumps(
+            {
+                "active": str(state.get("activeText") or ""),
+                "first": str(page_rows[0].get("fileName") if page_rows else ""),
+                "last": str(page_rows[-1].get("fileName") if page_rows else ""),
+                "count": len(page_rows),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if signature in seen_pages or not bool(state.get("hasNext")):
+            break
+        seen_pages.add(signature)
+        if not await _click_export_list_page_turn(frame, "page-next", args):
+            break
+    return None
+
+
+async def _find_export_file_name_by_prefix(frame: Any, file_prefix: str, args: argparse.Namespace) -> str | None:
+    prefix = str(file_prefix or "").strip()
+    if not prefix:
+        return None
+    rows = await _collect_export_list_rows_across_pages(frame, args)
+    for row in rows:
+        file_name = str(row.get("fileName") or "").strip()
+        if file_name.startswith(prefix):
+            await _find_export_status_by_file_name(frame, file_name, args)
+            return file_name
+    return None
 
 
 TREE_READ_TASKS_SCRIPT = """() => {
@@ -964,11 +1097,15 @@ async def _wait_export_row(frame: Any, file_prefix: str, args: argparse.Namespac
     timeout_ms = args.export_generate_timeout_ms
     if bool(getattr(args, "single_check_only", True)):
         timeout_ms = max(int(getattr(args, "export_timeout_ms", 30000) or 30000), 30000)
-    await frame.wait_for_function(ROW_FILE_NAME_SCRIPT, arg=file_prefix, timeout=timeout_ms)
-    file_name = await frame.evaluate(ROW_FILE_NAME_SCRIPT, file_prefix)
-    if not file_name:
-        raise RuntimeError(f"导出后未在列表中找到文件: {file_prefix}")
-    return str(file_name)
+    deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+    while True:
+        file_name = await _find_export_file_name_by_prefix(frame, file_prefix, args)
+        if file_name:
+            return str(file_name)
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise RuntimeError(f"导出后未在列表中找到文件: {file_prefix}")
+        await asyncio.sleep(min(2.0, max(0.2, remaining)))
 
 
 async def _download_export_file(page: Any, frame: Any, site: SiteConfig, file_name: str, args: argparse.Namespace) -> Path | None:
@@ -1100,7 +1237,7 @@ async def _download_and_delete_when_ready(
                     {"superseded_by": downloaded_paths[0].name},
                 )
                 continue
-            status = await frame.evaluate(ROW_STATUS_SCRIPT, file_name)
+            status = await _find_export_status_by_file_name(frame, file_name, args)
             if not status:
                 print(f"[{site.building}] 未找到导出记录，暂缓: {file_name}", flush=True)
                 _update_export_state_record(args, site, file_name, "missing", "列表中未找到该文件名")
@@ -1163,7 +1300,7 @@ async def _existing_export_records(frame: Any, site: SiteConfig, args: argparse.
         file_name = str(item.get("file_name") or "").strip()
         if not file_name:
             continue
-        row = await frame.evaluate(ROW_STATUS_SCRIPT, file_name)
+        row = await _find_export_status_by_file_name(frame, file_name, args)
         operation_text = ""
         if row:
             operation_text = str(row.get("operationText") or "")
@@ -1192,7 +1329,7 @@ async def _existing_export_records(frame: Any, site: SiteConfig, args: argparse.
 
 async def _current_month_export_records(frame: Any, site: SiteConfig, args: argparse.Namespace) -> list[dict[str, Any]]:
     period = _period_from_args(args)
-    rows = await frame.evaluate(EXPORT_LIST_ROWS_SCRIPT)
+    rows = await _collect_export_list_rows_across_pages(frame, args)
     candidates: list[dict[str, Any]] = []
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
@@ -1550,6 +1687,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-timeout-ms", type=int, default=60000, help="点击下载后等待文件下载的毫秒数")
     parser.add_argument("--delete-timeout-ms", type=int, default=10000, help="下载后点击删除并等待列表变化的毫秒数")
     parser.add_argument("--export-wait-sec", type=float, default=2.0, help="点击导出后等待秒数，默认 2")
+    parser.add_argument("--list-page-max-pages", type=int, default=20, help="导出列表最多翻页查找页数，默认 20")
+    parser.add_argument("--list-page-turn-wait-sec", type=float, default=0.8, help="导出列表翻页后等待秒数，默认 0.8")
     parser.add_argument("--action-timeout-ms", type=int, default=10000)
     return parser
 

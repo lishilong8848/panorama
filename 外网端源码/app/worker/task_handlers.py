@@ -497,13 +497,57 @@ def handle_top5_power_report(
     try:
         if runtime is not None:
             runtime.raise_if_cancelled()
-        monthly_entries = _top5_index_entries_by_building(
-            bridge_runtime.refresh_top5_monthly_latest_cache_entries(
+        get_top5_monthly_by_month = getattr(bridge_runtime, "get_top5_monthly_by_month_cache_entries", None)
+        if callable(get_top5_monthly_by_month):
+            raw_monthly_entries = get_top5_monthly_by_month(
+                year=upload_year,
+                month=upload_month,
                 buildings=buildings,
-                emit_log=emit_log,
-                cancel_check=runtime.raise_if_cancelled if runtime is not None else None,
             )
+        else:
+            raw_monthly_entries = bridge_runtime.get_top5_monthly_by_date_cache_entries(
+                selected_dates=[f"{upload_year}-{upload_month:02d}-01"],
+                buildings=buildings,
+            )
+        monthly_entries = _top5_index_entries_by_building(
+            raw_monthly_entries
         )
+        missing_buildings = [building for building in buildings if building not in {item.get("building") for item in monthly_entries}]
+        if missing_buildings:
+            emit_log(
+                "[TOP5功率文件生成] 所选月份 TOP5 月报源文件缺失，已请求内网端补采: "
+                f"year={upload_year}, month={upload_month:02d}, buildings={','.join(missing_buildings)}"
+            )
+            monthly_entries = _top5_index_entries_by_building(
+                bridge_runtime.refresh_top5_monthly_latest_cache_entries(
+                    buildings=missing_buildings,
+                    year=upload_year,
+                    month=upload_month,
+                    emit_log=emit_log,
+                    cancel_check=runtime.raise_if_cancelled if runtime is not None else None,
+                )
+                + monthly_entries
+            )
+            if callable(get_top5_monthly_by_month):
+                refreshed_month_entries = get_top5_monthly_by_month(
+                    year=upload_year,
+                    month=upload_month,
+                    buildings=buildings,
+                    require_fresh=True,
+                )
+            else:
+                refreshed_month_entries = bridge_runtime.get_top5_monthly_by_date_cache_entries(
+                    selected_dates=[f"{upload_year}-{upload_month:02d}-01"],
+                    buildings=buildings,
+                    require_fresh=True,
+                )
+            monthly_entries = _top5_index_entries_by_building(refreshed_month_entries or monthly_entries)
+            missing_buildings = [building for building in buildings if building not in {item.get("building") for item in monthly_entries}]
+        if missing_buildings:
+            raise RuntimeError(
+                "缺少所选年月 TOP5 月报源文件，未生成不完整报表: "
+                f"year={upload_year}, month={upload_month:02d}, buildings={','.join(missing_buildings)}"
+            )
         if runtime is not None:
             runtime.raise_if_cancelled()
         emit_log(

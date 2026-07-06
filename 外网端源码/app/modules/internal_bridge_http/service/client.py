@@ -149,7 +149,11 @@ class InternalBridgeHttpClient:
                     body = exc.read().decode("utf-8", errors="replace")
                 except Exception:
                     body = ""
-                raise InternalBridgeHttpError(f"内网端 HTTP 返回 {exc.code}: {body or exc.reason}") from exc
+                error = InternalBridgeHttpError(f"内网端 HTTP 返回 {exc.code}: {body or exc.reason}")
+                if attempt < self.max_attempts and self._is_retryable_error(error):
+                    time.sleep(min(1.5, 0.5 * attempt))
+                    continue
+                raise error from exc
             except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
                 last_exc = exc
                 if attempt >= self.max_attempts or not self._is_retryable_error(exc):
@@ -197,7 +201,11 @@ class InternalBridgeHttpClient:
                     body = exc.read().decode("utf-8", errors="replace")
                 except Exception:
                     body = ""
-                raise InternalBridgeHttpError(f"内网端 HTTP 返回 {exc.code}: {body or exc.reason}") from exc
+                error = InternalBridgeHttpError(f"内网端 HTTP 返回 {exc.code}: {body or exc.reason}")
+                if attempt < self.max_attempts and self._is_retryable_error(error):
+                    time.sleep(min(1.5, 0.5 * attempt))
+                    continue
+                raise error from exc
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_exc = exc
                 if attempt >= self.max_attempts or not self._is_retryable_error(exc):
@@ -449,13 +457,20 @@ class InternalBridgeHttpClient:
             ]
             request_item["event"].set()
 
-    def refresh_latest_source_cache(self, *, source_family: str, buildings: List[str]) -> Dict[str, Any]:
+    def refresh_latest_source_cache(
+        self,
+        *,
+        source_family: str,
+        buildings: List[str],
+        target_bucket_key: str = "",
+    ) -> Dict[str, Any]:
         return self._request(
             "POST",
             "/api/internal-bridge/source-cache/refresh-latest",
             payload={
                 "source_family": str(source_family or "").strip(),
                 "buildings": [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()],
+                "target_bucket_key": str(target_bucket_key or "").strip(),
             },
         )
 

@@ -22,7 +22,25 @@
       "runtime_state_root": ".runtime"
     },
     "internal_source_sites": [],
-    "internal_source_cache": {},
+    "internal_source_cache": {
+      "enabled": true,
+      "run_on_startup": true,
+      "check_interval_sec": 30,
+      "hour_bucket_mode": "natural_hour",
+      "latest_required": true,
+      "history_fill_timeout_sec": 1800,
+      "monthly_report_download": {
+        "enabled": true,
+        "run_time": "01:00:00",
+        "retry_interval_sec": 300
+      },
+      "top5_monthly_report_download": {
+        "enabled": true,
+        "day_of_month": 2,
+        "run_time": "02:00:00",
+        "retry_interval_sec": 300
+      }
+    },
     "shared_bridge": {},
     "feishu_auth": {}
   },

@@ -24,7 +24,7 @@
       <div class="form-row">
         <label class="label">时间窗模式</label>
         <select v-model="config.download.time_range_mode">
-          <option value="yesterday_to_today_start">按天（昨天 00:00:00 到今天 00:00:00）</option>
+          <option value="yesterday_to_today_start">按天（昨天 00:00:00 到今天 01:00:00）</option>
           <option value="last_month_to_this_month_start">按月（上月 1 号 00:00:00 到本月 1 号 00:00:00）</option>
           <option value="custom">自定义时间</option>
         </select>

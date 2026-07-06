@@ -171,11 +171,11 @@ class _FakeBitableClient:
         return [
             {
                 "record_id": "old_top5",
-                "fields": {"子分类": "高功率TOP5", "年度": "2026", "月份": "03"},
+                "fields": {"子分类": "高功率TOP5", "年度": "2026", "月份": "04"},
             },
             {
                 "record_id": "other_category",
-                "fields": {"子分类": "机柜超功耗", "年度": "2026", "月份": "03"},
+                "fields": {"子分类": "机柜超功耗", "年度": "2026", "月份": "04"},
             },
         ]
 
@@ -220,11 +220,11 @@ class Top5PowerReportBitableUploadServiceTest(unittest.TestCase):
 
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["year"], "2026")
-            self.assertEqual(result["month"], "03")
+            self.assertEqual(result["month"], "04")
             self.assertEqual(client.deleted_ids, ["old_top5"])
             self.assertEqual(client.created_fields[0]["子分类"], "高功率TOP5")
             self.assertEqual(client.created_fields[0]["年度"], "2026")
-            self.assertEqual(client.created_fields[0]["月份"], "03")
+            self.assertEqual(client.created_fields[0]["月份"], "04")
             self.assertEqual(client.created_fields[0]["上传文件"], [{"file_token": "file_token_1"}])
             self.assertEqual(client.updated, [("new_top5", {"链接": "https://example.test/top5.xlsx"})])
 
@@ -244,10 +244,15 @@ class Top5PowerReportWorkerHandlerTest(unittest.TestCase):
                 raise AssertionError("TOP5 worker must use top5_monthly_report_family")
 
             def get_top5_monthly_by_date_cache_entries(self, *args, **kwargs):  # noqa: ANN002, ANN003
-                raise AssertionError("TOP5 worker must not query month-range source-index")
+                raise AssertionError("TOP5 worker must use month-filtered TOP5 source-index")
 
-            def refresh_top5_monthly_latest_cache_entries(self, *, buildings, emit_log, cancel_check=None):  # noqa: ANN001
-                self.monthly_args = {"buildings": buildings}
+            def get_top5_monthly_by_month_cache_entries(self, *, year, month, buildings, require_fresh=False):  # noqa: ANN001
+                self.monthly_args = {
+                    "year": year,
+                    "month": month,
+                    "buildings": buildings,
+                    "require_fresh": require_fresh,
+                }
                 return [
                     {
                         "building": "A楼",
@@ -255,6 +260,9 @@ class Top5PowerReportWorkerHandlerTest(unittest.TestCase):
                         "metadata": {"upload_date": "2026-05-20"},
                     }
                 ]
+
+            def refresh_top5_monthly_latest_cache_entries(self, *, buildings, emit_log, cancel_check=None):  # noqa: ANN001
+                raise AssertionError("selected month source should not trigger latest refresh when entries are ready")
 
             def stop(self) -> None:
                 return None
@@ -298,6 +306,97 @@ class Top5PowerReportWorkerHandlerTest(unittest.TestCase):
         self.assertEqual(FakeBridgeRuntime.instances[0].monthly_args["buildings"], ["A楼"])
         self.assertEqual(FakeTop5Service.monthly_entries[0]["building"], "A楼")
 
+    def test_worker_downloads_missing_selected_month_sources(self) -> None:
+        from app.worker import task_handlers
+
+        class FakeBridgeRuntime:
+            instances: list["FakeBridgeRuntime"] = []
+
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.refresh_args: dict[str, Any] | None = None
+                self.query_count = 0
+                FakeBridgeRuntime.instances.append(self)
+
+            def get_top5_monthly_by_month_cache_entries(self, *, year, month, buildings, require_fresh=False):  # noqa: ANN001
+                self.query_count += 1
+                if not require_fresh:
+                    return [
+                        {
+                            "building": "A楼",
+                            "file_path": r"D:\share\top5_A_202606.xlsx",
+                            "metadata": {"report_month": "2026-06"},
+                        }
+                    ]
+                return [
+                    {
+                        "building": "A楼",
+                        "file_path": r"D:\share\top5_A_202606.xlsx",
+                        "metadata": {"report_month": "2026-06"},
+                    },
+                    {
+                        "building": "B楼",
+                        "file_path": r"D:\share\top5_B_202606.xlsx",
+                        "metadata": {"report_month": "2026-06"},
+                    },
+                ]
+
+            def refresh_top5_monthly_latest_cache_entries(self, *, buildings, year, month, emit_log, cancel_check=None):  # noqa: ANN001
+                self.refresh_args = {
+                    "buildings": list(buildings),
+                    "year": str(year),
+                    "month": int(month),
+                }
+                return [
+                    {
+                        "building": "B楼",
+                        "file_path": r"D:\share\top5_B_202606.xlsx",
+                        "metadata": {"report_month": "2026-06"},
+                    }
+                ]
+
+            def stop(self) -> None:
+                return None
+
+        class FakeTop5Service:
+            monthly_entries: list[dict[str, Any]] = []
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def all_buildings(self) -> list[str]:
+                return ["A楼", "B楼"]
+
+            def run(self, *, monthly_entries, emit_log):  # noqa: ANN001
+                FakeTop5Service.monthly_entries = list(monthly_entries)
+                return {"output_file": r"D:\tmp\top5.xlsx", "file_name": "top5.xlsx"}
+
+        class FakeUploadService:
+            @staticmethod
+            def _validate_year_month(year, month):  # noqa: ANN001
+                return str(year), f"{int(month):02d}"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def upload_report(self, *, file_path, year, month, emit_log):  # noqa: ANN001
+                return {"status": "ok", "file_path": file_path, "year": str(year), "month": f"{int(month):02d}"}
+
+        with (
+            patch.object(task_handlers.shared_bridge_runtime_module, "SharedBridgeRuntimeService", FakeBridgeRuntime),
+            patch.object(task_handlers, "Top5PowerReportService", FakeTop5Service),
+            patch.object(task_handlers, "Top5PowerReportBitableUploadService", FakeUploadService),
+        ):
+            result = task_handlers.handle_top5_power_report(
+                {},
+                {"year": "2026", "month": 6},
+                emit_log=lambda _message: None,
+            )
+
+        runtime = FakeBridgeRuntime.instances[0]
+        self.assertEqual(result["bitable_upload"]["month"], "06")
+        self.assertEqual(runtime.refresh_args, {"buildings": ["B楼"], "year": "2026", "month": 6})
+        self.assertEqual({item["building"] for item in FakeTop5Service.monthly_entries}, {"A楼", "B楼"})
+
 
 class Top5PowerReportBridgeRuntimeTest(unittest.TestCase):
     def test_latest_selection_prefers_newer_failed_over_old_ready(self) -> None:
@@ -306,7 +405,7 @@ class Top5PowerReportBridgeRuntimeTest(unittest.TestCase):
         runtime = bridge_module.SharedBridgeRuntimeService.__new__(bridge_module.SharedBridgeRuntimeService)
         runtime._http_source_cache_buildings = lambda buildings=None: ["A楼"]
 
-        def fake_entries(*, source_family, buildings, bucket_key, status="ready", limit_per_building):  # noqa: ANN001
+        def fake_entries(*, source_family, buildings, bucket_key, status="ready", limit_per_building, force_refresh=False):  # noqa: ANN001
             self.assertEqual(status, "all")
             return [
                 {
@@ -347,14 +446,14 @@ class Top5PowerReportBridgeRuntimeTest(unittest.TestCase):
         runtime = bridge_module.SharedBridgeRuntimeService.__new__(bridge_module.SharedBridgeRuntimeService)
         runtime._internal_bridge_http_client = object()
         runtime._http_bridge_should_try = lambda: True
-        runtime.request_latest_source_cache_refresh = lambda *, source_family, buildings: {
+        runtime.request_latest_source_cache_refresh = lambda *, source_family, buildings, target_bucket_key="": {
             "ok": True,
             "accepted_count": len(buildings),
             "results": [],
         }
         calls = {"count": 0}
 
-        def fake_entries(*, source_family, buildings, bucket_key, status="ready", limit_per_building):  # noqa: ANN001
+        def fake_entries(*, source_family, buildings, bucket_key, status="ready", limit_per_building, force_refresh=False):  # noqa: ANN001
             calls["count"] += 1
             if calls["count"] == 1:
                 return [
@@ -386,6 +485,48 @@ class Top5PowerReportBridgeRuntimeTest(unittest.TestCase):
 
         self.assertEqual(calls["count"], 2)
         self.assertEqual(entries[0]["file_path"], r"D:\share\new.xlsx")
+
+    def test_refresh_selected_month_passes_target_bucket_key(self) -> None:
+        from app.modules.shared_bridge.service import shared_bridge_runtime_service as bridge_module
+
+        runtime = bridge_module.SharedBridgeRuntimeService.__new__(bridge_module.SharedBridgeRuntimeService)
+        runtime._internal_bridge_http_client = object()
+        runtime._http_bridge_should_try = lambda: True
+        captured: dict[str, Any] = {}
+
+        def fake_refresh(*, source_family, buildings, target_bucket_key=""):  # noqa: ANN001
+            captured["source_family"] = source_family
+            captured["buildings"] = list(buildings)
+            captured["target_bucket_key"] = target_bucket_key
+            return {"ok": True, "accepted_count": len(buildings), "results": []}
+
+        def fake_entries(*, source_family, buildings, bucket_key, status="ready", limit_per_building, force_refresh=False):  # noqa: ANN001
+            return [
+                {
+                    "building": "A楼",
+                    "status": "ready",
+                    "file_path": r"D:\share\top5_A_202606.xlsx",
+                    "bucket_key": "2026-06-01",
+                    "duty_date": "2026-06-01",
+                    "metadata": {"report_month": "2026-06"},
+                    "downloaded_at": "2026-06-02 02:10:00",
+                    "updated_at": "2026-06-02 02:10:00",
+                }
+            ]
+
+        runtime.request_latest_source_cache_refresh = fake_refresh
+        runtime._http_source_index_entries = fake_entries
+
+        entries = runtime.refresh_top5_monthly_latest_cache_entries(
+            buildings=["A楼"],
+            year="2026",
+            month=6,
+            timeout_sec=30,
+            poll_interval_sec=1,
+        )
+
+        self.assertEqual(captured["target_bucket_key"], "2026-06-01")
+        self.assertEqual(entries[0]["file_path"], r"D:\share\top5_A_202606.xlsx")
 
 
 if __name__ == "__main__":

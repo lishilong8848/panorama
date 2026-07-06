@@ -36,8 +36,9 @@ def build_time_range(
     if mode == "yesterday_to_today_start":
         today_start = datetime(now_dt.year, now_dt.month, now_dt.day, 0, 0, 0)
         yesterday_start = today_start - timedelta(days=1)
+        today_one = today_start + timedelta(hours=1)
         start_text = yesterday_start.strftime(time_format)
-        end_text = today_start.strftime(time_format)
+        end_text = today_one.strftime(time_format)
         _log(f"[时间窗] mode={mode}, start={start_text}, end={end_text}")
         return start_text, end_text
 
@@ -145,8 +146,9 @@ def normalize_selected_dates(selected_dates: List[str], max_dates_per_run: int, 
 def daily_window_text() -> tuple[str, str, str]:
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday = today - timedelta(days=1)
+    today_one = today + timedelta(hours=1)
     return (
         yesterday.strftime("%Y-%m-%d"),
         yesterday.strftime("%Y-%m-%d %H:%M:%S"),
-        today.strftime("%Y-%m-%d %H:%M:%S"),
+        today_one.strftime("%Y-%m-%d %H:%M:%S"),
     )

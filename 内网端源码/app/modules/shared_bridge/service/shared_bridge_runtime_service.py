@@ -3181,12 +3181,19 @@ class SharedBridgeRuntimeService:
             return {"accepted": False, "running": False, "reason": "disabled"}
         return self._source_cache_service.start_manual_alarm_refresh()
 
-    def start_building_latest_source_cache_refresh(self, *, source_family: str, building: str) -> Dict[str, Any]:
+    def start_building_latest_source_cache_refresh(
+        self,
+        *,
+        source_family: str,
+        building: str,
+        target_bucket_key: str = "",
+    ) -> Dict[str, Any]:
         if self._source_cache_service is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
         return self._source_cache_service.start_building_latest_refresh(
             source_family=source_family,
             building=building,
+            target_bucket_key=target_bucket_key,
         )
 
     def delete_manual_alarm_source_cache_files(self) -> Dict[str, Any]:

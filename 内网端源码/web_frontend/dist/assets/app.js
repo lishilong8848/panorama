@@ -19,6 +19,20 @@ const SYSTEM_SCREENSHOT_TARGETS = [
   ["generator", "柴发系统图"],
   ["weak_current", "弱电系统图"],
 ];
+const SOURCE_FILTERS = [
+  { key: "all", label: "全部", families: SOURCE_FAMILIES.map(([key]) => key) },
+  { key: "problem", label: "只看异常", families: SOURCE_FAMILIES.map(([key]) => key) },
+  { key: "hourly", label: "当前小时", families: ["handover_log_family", "handover_capacity_report_family"] },
+  { key: "daily", label: "每日整日", families: ["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family"] },
+  { key: "monthly", label: "月报/TOP5", families: ["monthly_report_family", "top5_monthly_report_family"] },
+  { key: "special", label: "告警/制冷", families: ["alarm_event_family", "chiller_mode_switch_family"] },
+];
+const DAILY_SOURCE_FAMILIES = new Set(["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family"]);
+const MONTHLY_SOURCE_FAMILIES = new Set(["monthly_report_family", "top5_monthly_report_family"]);
+const HOURLY_SOURCE_FAMILIES = new Set(["handover_log_family", "handover_capacity_report_family"]);
+const SPECIAL_SOURCE_FAMILIES = new Set(["alarm_event_family", "chiller_mode_switch_family"]);
+const RUNTIME_STATUS_REFRESH_MS = 5000;
+const SLOW_STATUS_REFRESH_MS = 60000;
 
 const state = {
   view: location.pathname.includes("/config") ? "config" : "status",
@@ -26,11 +40,25 @@ const state = {
   config: null,
   summary: null,
   systemScreenshots: null,
+  selectedSourceFilter: "all",
+  selectedBuilding: "",
+  buildingDetail: null,
+  buildingDetailLoading: false,
   tasks: [],
   logs: [],
   logOffset: 0,
   message: "",
   error: "",
+  moduleErrors: {},
+  lastLoadedAt: {
+    health: 0,
+    config: 0,
+    runtime: 0,
+    tasks: 0,
+    screenshots: 0,
+    logs: 0,
+    buildingDetail: 0,
+  },
   saving: false,
   busy: new Set(),
 };
@@ -72,6 +100,24 @@ function todayText() {
 
 function currentHourText() {
   return String(new Date().getHours()).padStart(2, "0");
+}
+
+function nowMs() {
+  return Date.now();
+}
+
+function setModuleError(key, message) {
+  state.moduleErrors = {
+    ...(state.moduleErrors || {}),
+    [key]: text(message, ""),
+  };
+}
+
+function clearModuleError(key) {
+  if (!state.moduleErrors || !state.moduleErrors[key]) return;
+  const next = { ...state.moduleErrors };
+  delete next[key];
+  state.moduleErrors = next;
 }
 
 async function api(path, options = {}) {
@@ -132,20 +178,26 @@ async function loadHealth() {
   try {
     const payload = await api(`/api/health/bootstrap?_t=${Date.now()}`, { timeoutMs: 15000 });
     state.health = payload || {};
+    state.lastLoadedAt.health = nowMs();
+    clearModuleError("health");
     if (state.error.startsWith(HEALTH_BOOTSTRAP_ERROR_PREFIX)) {
       state.error = "";
     }
   } catch (error) {
     state.health = {};
-    state.error = `${HEALTH_BOOTSTRAP_ERROR_PREFIX}：${error.message}`;
+    setModuleError("health", `${HEALTH_BOOTSTRAP_ERROR_PREFIX}：${error.message}`);
+    if (!state.summary) state.error = `${HEALTH_BOOTSTRAP_ERROR_PREFIX}：${error.message}`;
   }
 }
 
 async function loadConfig() {
   try {
     state.config = await api(`/api/config?_t=${Date.now()}`);
+    state.lastLoadedAt.config = nowMs();
+    clearModuleError("config");
   } catch (error) {
-    state.error = `读取配置失败：${error.message}`;
+    setModuleError("config", `读取配置失败：${error.message}`);
+    if (state.view === "config") state.error = `读取配置失败：${error.message}`;
   }
 }
 
@@ -153,10 +205,13 @@ async function loadRuntimeStatus() {
   try {
     const payload = await api(`/api/bridge/internal-runtime-status?_t=${Date.now()}`, { timeoutMs: 20000 });
     state.summary = payload.summary || null;
+    state.lastLoadedAt.runtime = nowMs();
+    clearModuleError("runtime");
     if (state.error.startsWith(RUNTIME_STATUS_ERROR_PREFIX)) {
       state.error = "";
     }
   } catch (error) {
+    setModuleError("runtime", `${RUNTIME_STATUS_ERROR_PREFIX}：${error.message}`);
     if (!state.summary) {
       state.summary = null;
       state.error = `${RUNTIME_STATUS_ERROR_PREFIX}：${error.message}`;
@@ -168,8 +223,11 @@ async function loadTasks() {
   try {
     const payload = await api(`/api/bridge/tasks?limit=50&_t=${Date.now()}`);
     state.tasks = payload.tasks || payload.rows || payload.items || [];
+    state.lastLoadedAt.tasks = nowMs();
+    clearModuleError("tasks");
   } catch (_) {
     state.tasks = [];
+    setModuleError("tasks", "读取共享任务失败");
   }
 }
 
@@ -179,6 +237,8 @@ async function loadSystemScreenshots() {
       capture_date: todayText(),
       _t: Date.now(),
     }), { timeoutMs: 8000 });
+    state.lastLoadedAt.screenshots = nowMs();
+    clearModuleError("screenshots");
   } catch (error) {
     state.systemScreenshots = {
       ok: false,
@@ -186,6 +246,7 @@ async function loadSystemScreenshots() {
       capture_date: todayText(),
       files: [],
     };
+    setModuleError("screenshots", `读取系统截图状态失败：${error.message}`);
   }
 }
 
@@ -197,18 +258,58 @@ async function loadLogs() {
     if (lines.length) {
       state.logs = [...state.logs, ...lines].slice(-160);
       state.logOffset += lines.length;
+      state.lastLoadedAt.logs = nowMs();
+      clearModuleError("logs");
     }
   } catch (_) {
     // 日志不是关键路径，失败时保持页面可用。
+    setModuleError("logs", "读取系统日志失败");
   }
 }
 
-async function refreshAll({ silent = false } = {}) {
+async function loadBuildingDetail(building, { silent = true } = {}) {
+  const buildingText = text(building, "");
+  if (!buildingText) {
+    state.buildingDetail = null;
+    state.selectedBuilding = "";
+    return;
+  }
+  try {
+    state.buildingDetailLoading = true;
+    if (!silent) render();
+    const code = String(buildingText).replace("楼", "").toLowerCase();
+    const payload = await api(`/api/bridge/internal-runtime-status/buildings/${encodeURIComponent(code)}?_t=${Date.now()}`, { timeoutMs: 12000 });
+    state.selectedBuilding = buildingText;
+    state.buildingDetail = payload.status || null;
+    state.lastLoadedAt.buildingDetail = nowMs();
+    clearModuleError("buildingDetail");
+  } catch (error) {
+    setModuleError("buildingDetail", `读取${buildingText}详情失败：${error.message}`);
+  } finally {
+    state.buildingDetailLoading = false;
+  }
+}
+
+async function refreshAll({ silent = false, forceConfig = false, forceScreenshots = false, forceBuildingDetail = false } = {}) {
   if (refreshInFlight) return;
   refreshInFlight = true;
   if (!silent) setMessage("正在刷新内网端状态...");
   try {
-    await Promise.allSettled([loadHealth(), loadConfig(), loadRuntimeStatus(), loadTasks(), loadSystemScreenshots(), loadLogs()]);
+    const now = nowMs();
+    const jobs = [loadHealth(), loadRuntimeStatus(), loadTasks(), loadLogs()];
+    if (state.view === "config" || forceConfig || !state.config) {
+      jobs.push(loadConfig());
+    }
+    if (forceScreenshots || !state.systemScreenshots || now - Number(state.lastLoadedAt.screenshots || 0) >= SLOW_STATUS_REFRESH_MS) {
+      jobs.push(loadSystemScreenshots());
+    }
+    if (
+      state.selectedBuilding
+      && (forceBuildingDetail || !state.buildingDetail || now - Number(state.lastLoadedAt.buildingDetail || 0) >= SLOW_STATUS_REFRESH_MS)
+    ) {
+      jobs.push(loadBuildingDetail(state.selectedBuilding));
+    }
+    await Promise.allSettled(jobs);
     if (!silent) setMessage("状态已刷新");
     render();
   } finally {
