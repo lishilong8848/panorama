@@ -11,6 +11,10 @@ if str(ROOT) not in sys.path:
 
 from app.modules.shared_bridge.service.shared_source_cache_service import (  # noqa: E402
     DAILY_AUTO_SOURCE_FAMILIES,
+    FAMILY_BRANCH_CURRENT,
+    FAMILY_BRANCH_POWER,
+    FAMILY_BRANCH_SWITCH,
+    FAMILY_BUILDING_FULL_CABINET_POWER,
     SharedSourceCacheService,
 )
 
@@ -97,3 +101,40 @@ def test_daily_source_download_retries_failed_business_date_after_cooldown(tmp_p
     service._last_daily_source_run_monotonic -= 301
     service._run_daily_source_files_if_due(datetime(2026, 6, 29, 0, 36, 1))
     assert len(calls) == 2
+
+
+def test_branch_daily_source_query_windows_cover_business_day_hours(tmp_path):
+    service = _build_service(tmp_path)
+
+    branch_start, branch_end, branch_buckets = service._branch_day_query_window("2026-06-28")
+    full_start, full_end, full_buckets = service._building_full_cabinet_power_day_query_window("2026-06-28")
+
+    assert branch_start == "2026-06-27 23:50:00"
+    assert branch_end == "2026-06-28 23:50:00"
+    assert full_start == "2026-06-27 23:50:00"
+    assert full_end == "2026-06-29 00:10:00"
+    assert branch_buckets == [f"2026-06-28 {hour:02d}" for hour in range(24)]
+    assert full_buckets == branch_buckets
+
+
+def test_internal_light_daily_source_snapshot_uses_current_business_day_bucket(tmp_path, monkeypatch):
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "branch_power_day_bucket", lambda when=None: "2026-06-28")
+    monkeypatch.setattr(service, "building_full_cabinet_power_day_bucket", lambda when=None: "2026-06-28")
+
+    daily_families = [
+        FAMILY_BRANCH_POWER,
+        FAMILY_BRANCH_CURRENT,
+        FAMILY_BRANCH_SWITCH,
+        FAMILY_BUILDING_FULL_CABINET_POWER,
+    ]
+    for source_family in daily_families:
+        service._family_status.setdefault(source_family, {})["current_bucket"] = "2026-06-01"
+
+    snapshot = service.get_health_snapshot(mode="internal_light")
+
+    for source_family in daily_families:
+        family_snapshot = snapshot[source_family]
+        assert family_snapshot["current_bucket"] == "2026-06-28"
+        assert "整日" in family_snapshot["status_text"]
+        assert {row["bucket_key"] for row in family_snapshot["buildings"]} == {"2026-06-28"}

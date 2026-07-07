@@ -663,7 +663,7 @@ class ApschedulerSchedulerFacade:
             self.state["last_error"] = "" if status in {"submitted", "skipped", "accepted", "success"} else detail
             if status in {"submitted", "accepted", "success", "ok"}:
                 self.state["last_success_period"] = period
-            elif was_retry:
+            if was_retry:
                 self.state["retry_done_period"] = period
         self._save_state()
 

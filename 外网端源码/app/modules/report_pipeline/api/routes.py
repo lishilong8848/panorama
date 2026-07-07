@@ -1125,6 +1125,18 @@ def _source_index_entry_reports_file_verified(item: Dict[str, Any]) -> bool:
     return False
 
 
+def _source_index_entry_reports_file_missing(item: Dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return True
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+    if item.get("file_exists") is False or metadata.get("file_exists") is False:
+        return True
+    skipped_reason = str(item.get("file_verification_skipped_reason", "") or "").strip()
+    if item.get("file_verified") is False and not skipped_reason:
+        return True
+    return False
+
+
 def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = False) -> list[Dict[str, Any]]:
     output: list[Dict[str, Any]] = []
     for item in entries if isinstance(entries, list) else []:
@@ -1136,7 +1148,7 @@ def _filter_accessible_cached_entries(entries: Any, *, verify_files: bool = Fals
             continue
         if verify_files:
             if _is_unc_path_text(file_path):
-                if not _source_index_entry_reports_file_verified(item):
+                if _source_index_entry_reports_file_missing(item):
                     continue
             elif not is_accessible_cached_file_path(file_path):
                 continue

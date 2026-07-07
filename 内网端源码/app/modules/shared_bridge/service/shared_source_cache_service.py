@@ -568,7 +568,7 @@ class SharedSourceCacheService:
         branch_bucket = self.branch_power_day_bucket()
         branch_current_bucket = self.branch_power_day_bucket()
         branch_switch_bucket = self.branch_power_day_bucket()
-        building_full_cabinet_power_bucket = self.branch_power_day_bucket()
+        building_full_cabinet_power_bucket = self.building_full_cabinet_power_day_bucket()
         chiller_mode_switch_bucket = (
             str(self._family_status.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
             or self.current_chiller_mode_switch_bucket()
@@ -827,12 +827,18 @@ class SharedSourceCacheService:
             "buildings": building_rows,
             "latest_selection": {},
         }
-        bucket_scope_text = (
-            "本次定时"
-            if self._normalize_source_family(source_family) in {FAMILY_ALARM_EVENT, FAMILY_CHILLER_MODE_SWITCH}
-            else "本小时"
-        )
         family_key = self._normalize_source_family(source_family)
+        if family_key in {
+            FAMILY_BRANCH_POWER,
+            FAMILY_BRANCH_CURRENT,
+            FAMILY_BRANCH_SWITCH,
+            FAMILY_BUILDING_FULL_CABINET_POWER,
+        }:
+            bucket_scope_text = "整日"
+        elif family_key in {FAMILY_ALARM_EVENT, FAMILY_CHILLER_MODE_SWITCH}:
+            bucket_scope_text = "本次定时"
+        else:
+            bucket_scope_text = "本小时"
         return present_source_cache_family(
             raw_family,
             key=family_key,
@@ -1697,18 +1703,11 @@ class SharedSourceCacheService:
             top5_monthly_source_refresh = copy.deepcopy(self._top5_monthly_source_refresh)
         if normalized_mode == "internal_light":
             alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
-            branch_bucket = (
-                str(families.get(FAMILY_BRANCH_POWER, {}).get("current_bucket", "") or "").strip()
-                or self.branch_power_day_bucket()
-            )
-            branch_current_bucket = (
-                str(families.get(FAMILY_BRANCH_CURRENT, {}).get("current_bucket", "") or "").strip()
-                or self.branch_power_day_bucket()
-            )
-            branch_switch_bucket = (
-                str(families.get(FAMILY_BRANCH_SWITCH, {}).get("current_bucket", "") or "").strip()
-                or self.branch_power_day_bucket()
-            )
+            # 整日类源文件按最新业务日展示，不能沿用 _family_status 里的旧桶。
+            branch_bucket = self.branch_power_day_bucket()
+            branch_current_bucket = branch_bucket
+            branch_switch_bucket = branch_bucket
+            building_full_cabinet_power_bucket = self.building_full_cabinet_power_day_bucket()
             chiller_mode_switch_bucket = (
                 str(families.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
                 or self.current_chiller_mode_switch_bucket()
@@ -1757,7 +1756,7 @@ class SharedSourceCacheService:
             )
             building_full_cabinet_power_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_BUILDING_FULL_CABINET_POWER,
-                current_bucket=branch_bucket,
+                current_bucket=building_full_cabinet_power_bucket,
                 cached_rows=light_building_status.get(FAMILY_BUILDING_FULL_CABINET_POWER, {}),
                 active_downloads=active_downloads,
             )

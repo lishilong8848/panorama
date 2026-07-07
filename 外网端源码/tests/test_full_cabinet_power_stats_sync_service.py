@@ -7,7 +7,7 @@ from pathlib import Path
 
 import openpyxl
 
-from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
+from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService, _MetricRow
 from handover_log_module.service.full_cabinet_power_stats_sync_service import (
     FullCabinetPowerStatsSyncService,
 )
@@ -35,6 +35,55 @@ def _write_full_cabinet_source(path: Path) -> None:
 
 
 class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
+    def test_branch_power_combine_keeps_power_current_and_switch_fields_separate(self) -> None:
+        service = BranchPowerUploadService({})
+
+        rows = service._combine_rows(
+            building="A楼",
+            power_rows=[
+                _MetricRow(source_row=4, room="A-301包间", machine_row="A-301-C列-DC010", point="3 支路功率", value=7.7)
+            ],
+            current_rows=[
+                _MetricRow(source_row=4, room="A-301包间", machine_row="A-301-C列-DC010", point="3 支路电流", value=3.3)
+            ],
+            switch_rows=[
+                _MetricRow(source_row=4, room="A-301包间", machine_row="A-301-C列-DC010", point="C列-DC010 #3", value="合闸")
+            ],
+            hour=5,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["功率-5:00"], 7.7)
+        self.assertEqual(rows[0]["电流-5:00"], 3.3)
+        self.assertEqual(rows[0]["开关状态-5:00"], "合闸")
+
+    def test_single_branch_alert_uses_power_field_not_current_field(self) -> None:
+        service = FullCabinetPowerStatsSyncService({})
+        source_record = {
+            "机楼": "A楼",
+            "包间": "A-301包间",
+            "机列": "A-301-C列-DC010",
+            "支路编号": "C02-A2",
+            "PDU编号": "20",
+            "功率-0:00": 8.88,
+            "电流-0:00": 3.21,
+        }
+        source_row = service._normalize_source_row(source_record)
+        self.assertIsNotNone(source_row)
+
+        rows = service._generate_branch_rows(
+            [source_row],
+            threshold=6.25,
+            report_date="2026/05/31",
+            data_center_name="EA118",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["PDU编号"], "C02-A2")
+        self.assertEqual(rows[0]["支路号"], "20")
+        self.assertEqual(rows[0]["支路功率"], "8.88")
+        self.assertNotEqual(rows[0]["支路功率"], "3.21")
+
     def test_parse_metric_file_detects_header_below_first_row(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = Path(temp_dir) / "full_cabinet.xlsx"

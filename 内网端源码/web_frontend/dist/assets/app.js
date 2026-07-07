@@ -10,6 +10,7 @@ const SOURCE_FAMILIES = [
   ["building_full_cabinet_power_family", "楼栋全机柜功率源文件"],
   ["chiller_mode_switch_family", "制冷单元模式切换参数源文件"],
   ["alarm_event_family", "告警信息源文件"],
+  ["alarm_rule_export_family", "告警规则导出文件"],
 ];
 const SYSTEM_SCREENSHOT_TARGETS = [
   ["power_distribution", "供配电系统图"],
@@ -24,11 +25,11 @@ const SOURCE_FILTERS = [
   { key: "problem", label: "只看异常", families: SOURCE_FAMILIES.map(([key]) => key) },
   { key: "hourly", label: "当前小时", families: ["handover_log_family", "handover_capacity_report_family"] },
   { key: "daily", label: "每日整日", families: ["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family"] },
-  { key: "monthly", label: "月报/TOP5", families: ["monthly_report_family", "top5_monthly_report_family"] },
+  { key: "monthly", label: "月报/TOP5", families: ["monthly_report_family", "top5_monthly_report_family", "alarm_rule_export_family"] },
   { key: "special", label: "告警/制冷", families: ["alarm_event_family", "chiller_mode_switch_family"] },
 ];
 const DAILY_SOURCE_FAMILIES = new Set(["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family"]);
-const MONTHLY_SOURCE_FAMILIES = new Set(["monthly_report_family", "top5_monthly_report_family"]);
+const MONTHLY_SOURCE_FAMILIES = new Set(["monthly_report_family", "top5_monthly_report_family", "alarm_rule_export_family"]);
 const HOURLY_SOURCE_FAMILIES = new Set(["handover_log_family", "handover_capacity_report_family"]);
 const SPECIAL_SOURCE_FAMILIES = new Set(["alarm_event_family", "chiller_mode_switch_family"]);
 const RUNTIME_STATUS_REFRESH_MS = 5000;
@@ -40,6 +41,7 @@ const state = {
   config: null,
   summary: null,
   systemScreenshots: null,
+  alarmRuleExport: null,
   selectedSourceFilter: "all",
   selectedBuilding: "",
   buildingDetail: null,
@@ -250,6 +252,25 @@ async function loadSystemScreenshots() {
   }
 }
 
+async function loadAlarmRuleExportStatus() {
+  try {
+    state.alarmRuleExport = await api(query("/api/alarm-rule-export/status", {
+      _t: Date.now(),
+    }), { timeoutMs: 8000 });
+    state.lastLoadedAt.alarmRuleExport = nowMs();
+    clearModuleError("alarmRuleExport");
+  } catch (error) {
+    state.alarmRuleExport = {
+      ok: false,
+      error: error.message,
+      period: "",
+      records: [],
+      by_building: {},
+    };
+    setModuleError("alarmRuleExport", `读取告警规则导出状态失败：${error.message}`);
+  }
+}
+
 async function loadLogs() {
   try {
     const textPayload = await fetchText(`/api/logs/system?offset=${state.logOffset || 0}`, { timeoutMs: 4000 });
@@ -302,6 +323,9 @@ async function refreshAll({ silent = false, forceConfig = false, forceScreenshot
     }
     if (forceScreenshots || !state.systemScreenshots || now - Number(state.lastLoadedAt.screenshots || 0) >= SLOW_STATUS_REFRESH_MS) {
       jobs.push(loadSystemScreenshots());
+    }
+    if (!state.alarmRuleExport || now - Number(state.lastLoadedAt.alarmRuleExport || 0) >= SLOW_STATUS_REFRESH_MS) {
+      jobs.push(loadAlarmRuleExportStatus());
     }
     if (
       state.selectedBuilding
@@ -448,8 +472,137 @@ function renderSourceFamily(key, fallbackTitle) {
   `;
 }
 
+function latestAlarmRuleRecord(records) {
+  const rows = Array.isArray(records) ? records.filter((item) => item && typeof item === "object") : [];
+  const rank = { downloaded: 5, ready: 4, generating: 3, created: 2, missing: 1, failed: 0 };
+  return rows.sort((a, b) => {
+    const ar = rank[String(a.status || "").trim()] ?? -1;
+    const br = rank[String(b.status || "").trim()] ?? -1;
+    if (ar !== br) return br - ar;
+    return String(b.downloaded_at || b.updated_at || b.created_at || "").localeCompare(String(a.downloaded_at || a.updated_at || a.created_at || ""));
+  })[0] || null;
+}
+
+function alarmRuleRowStatus(record) {
+  if (!record) {
+    return { statusText: "未记录", tone: "warning", detail: "本月尚未发现导出文件", meta: [] };
+  }
+  const status = String(record.status || "").trim();
+  const fileName = String(record.file_name || "").trim();
+  const pathText = String(record.downloaded_path || "").trim();
+  if (status === "downloaded") {
+    return {
+      statusText: "已下载",
+      tone: "success",
+      detail: fileName || "本月告警规则文件已下载",
+      meta: [
+        record.downloaded_at ? `下载时间：${record.downloaded_at}` : "",
+        pathText ? `文件：${pathText}` : "",
+      ].filter(Boolean),
+    };
+  }
+  if (["created", "generating", "ready", "missing"].includes(status)) {
+    const statusText = status === "ready" ? "可下载" : status === "missing" ? "等待页面记录" : "生成中";
+    return {
+      statusText,
+      tone: "info",
+      detail: fileName || "已有导出任务，等待生成或下载",
+      meta: [record.operation_text || record.updated_at || record.created_at || ""].filter(Boolean),
+    };
+  }
+  if (status === "failed") {
+    return {
+      statusText: "失败",
+      tone: "danger",
+      detail: record.error || record.message || fileName || "导出失败",
+      meta: [record.updated_at || record.created_at || ""].filter(Boolean),
+    };
+  }
+  return {
+    statusText: status || "等待中",
+    tone: "warning",
+    detail: fileName || record.message || "等待告警规则导出状态",
+    meta: [record.updated_at || record.created_at || ""].filter(Boolean),
+  };
+}
+
+function buildAlarmRuleExportFamily() {
+  const payload = state.alarmRuleExport || {};
+  const byBuilding = payload.by_building && typeof payload.by_building === "object" ? payload.by_building : {};
+  const downloadedCount = Number(payload.downloaded_count || 0);
+  const pendingCount = Number(payload.pending_count || 0);
+  const running = payload.running === true;
+  const rows = BUILDINGS.map((building) => {
+    const record = latestAlarmRuleRecord(byBuilding[building] || []);
+    const status = alarmRuleRowStatus(record);
+    const busyKey = `alarm_rule_export_family:${building}`;
+    return {
+      building,
+      source_family: "alarm_rule_export_family",
+      status_text: status.statusText,
+      tone: status.tone,
+      ready: status.statusText === "已下载",
+      detail_text: status.detail,
+      meta_lines: status.meta,
+      actions: {
+        refresh: {
+          label: state.busy.has(busyKey) ? "提交中" : "检查/续跑",
+          allowed: !running,
+          pending: running,
+          disabled_reason: running ? "告警规则导出正在运行" : "",
+          action: "run-alarm-rule-export",
+        },
+      },
+    };
+  });
+  const failedCount = rows.filter((row) => row.tone === "danger").length;
+  const missingCount = rows.filter((row) => row.status_text === "未记录").length;
+  const familyTone = payload.error ? "danger" : downloadedCount >= BUILDINGS.length ? "success" : running ? "info" : failedCount ? "danger" : "warning";
+  const statusText = payload.error
+    ? "读取失败"
+    : downloadedCount >= BUILDINGS.length
+      ? "本月已齐全"
+      : running
+        ? "导出运行中"
+        : `已下载 ${downloadedCount}/${BUILDINGS.length}`;
+  return {
+    title: "告警规则导出文件",
+    status_text: statusText,
+    tone: familyTone,
+    current_bucket: payload.period || "",
+    buildings: rows,
+    meta_lines: [
+      payload.period ? `月份：${payload.period}` : "",
+      pendingCount ? `待完成：${pendingCount}` : "",
+      missingCount ? `未记录楼栋：${missingCount}` : "",
+      payload.error ? `错误：${payload.error}` : "",
+    ].filter(Boolean),
+  };
+}
+
+function sourceCacheForDisplay() {
+  const cache = { ...(((state.summary || {}).source_cache || {})) };
+  cache.alarm_rule_export_family = buildAlarmRuleExportFamily();
+  return cache;
+}
+
+function displaySourceFamilies(cache) {
+  const seen = new Set();
+  const rows = SOURCE_FAMILIES.map(([key, label]) => {
+    seen.add(key);
+    return [key, label];
+  });
+  Object.entries(cache || {}).forEach(([key, family]) => {
+    if (!key || seen.has(key)) return;
+    rows.push([key, (family && family.title) || key]);
+    seen.add(key);
+  });
+  return rows;
+}
+
 function renderSourceMatrix() {
-  const cache = ((state.summary || {}).source_cache || {});
+  const cache = sourceCacheForDisplay();
+  const families = displaySourceFamilies(cache);
   return `
     <section class="panel source-overview-panel">
       <div class="panel-head">
@@ -462,7 +615,7 @@ function renderSourceMatrix() {
         <div class="source-matrix" style="--building-count:${BUILDINGS.length}">
           <div class="source-matrix-head source-matrix-family-head">源文件</div>
           ${BUILDINGS.map((building) => `<div class="source-matrix-head">${escapeHtml(building)}</div>`).join("")}
-          ${SOURCE_FAMILIES.map(([key, fallbackTitle]) => {
+          ${families.map(([key, fallbackTitle]) => {
             const family = cache[key] || {};
             const rows = family.buildings || [];
             const rowByBuilding = Object.fromEntries(rows.map((row) => [row.building, row]));
@@ -480,6 +633,7 @@ function renderSourceMatrix() {
                 const action = ((row.actions || {}).refresh || {});
                 const busyKey = `${key}:${building}`;
                 const disabled = state.busy.has(busyKey) || action.pending || action.allowed === false;
+                const buttonAction = action.action || "refresh-building";
                 const title = [
                   row.status_text || "等待中",
                   row.detail_text || "",
@@ -497,7 +651,7 @@ function renderSourceMatrix() {
                     ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
                     <button
                       class="btn btn-secondary btn-compact"
-                      data-action="refresh-building"
+                      data-action="${escapeHtml(buttonAction)}"
                       data-family="${escapeHtml(key)}"
                       data-building="${escapeHtml(building)}"
                       ${disabled ? "disabled" : ""}
@@ -806,6 +960,22 @@ async function handleAction(event) {
         }),
       });
       setMessage(payload.message || "已开始检查当天系统截图");
+      await refreshAll({ silent: true });
+    } else if (action === "run-alarm-rule-export") {
+      const building = target.dataset.building || "";
+      const busyKey = `alarm_rule_export_family:${building}`;
+      state.busy.add(busyKey);
+      render();
+      const payload = await api("/api/alarm-rule-export/run", {
+        method: "POST",
+        body: JSON.stringify({
+          buildings: building || null,
+        }),
+        timeoutMs: 12000,
+      });
+      state.busy.delete(busyKey);
+      setMessage(payload.message || `已提交${building || "本月"}告警规则导出检查`);
+      await loadAlarmRuleExportStatus();
       await refreshAll({ silent: true });
     } else if (action === "refresh-building") {
       const family = target.dataset.family || "";
