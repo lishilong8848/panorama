@@ -1210,7 +1210,7 @@ class InternalDownloadBrowserPool:
             }
         return {"started": True, "running": True, "reason": "started"}
 
-    def wait_until_ready(self, *, timeout_sec: float = 120.0) -> Dict[str, Any]:
+    def wait_until_ready(self, *, timeout_sec: float = 120.0, require_prelogin: bool = True) -> Dict[str, Any]:
         wait_seconds = max(0.0, float(timeout_sec or 0.0))
         started = time.monotonic()
         self._ready_event.wait(timeout=wait_seconds)
@@ -1228,6 +1228,8 @@ class InternalDownloadBrowserPool:
                 "reason": "timeout",
                 "error": "内网下载浏览器池启动仍在进行",
             }
+        if not bool(require_prelogin):
+            return {"ready": True, "running": self.is_running(), "reason": "startup_ready"}
         remaining = max(0.0, wait_seconds - (time.monotonic() - started))
         self._initial_prelogin_done_event.wait(timeout=remaining)
         if not self._initial_prelogin_done_event.is_set():
@@ -1264,9 +1266,9 @@ class InternalDownloadBrowserPool:
     def _ensure_ready_for_submit(self) -> str:
         if self._thread is None and self._loop is None:
             return "内网下载浏览器池未启动"
-        if self._ready_event.is_set() and self._initial_prelogin_done_event.is_set():
+        if self._ready_event.is_set():
             return ""
-        ready_result = self.wait_until_ready(timeout_sec=self.SUBMIT_READY_TIMEOUT_SEC)
+        ready_result = self.wait_until_ready(timeout_sec=self.SUBMIT_READY_TIMEOUT_SEC, require_prelogin=False)
         if bool(ready_result.get("ready", False)):
             return ""
         return str(

@@ -1305,14 +1305,17 @@ class SharedBridgeRuntimeService:
             try:
                 wait_ready = getattr(pool, "wait_until_ready", None)
                 if callable(wait_ready):
-                    ready_result = wait_ready(timeout_sec=120)
+                    try:
+                        ready_result = wait_ready(timeout_sec=120, require_prelogin=False)
+                    except TypeError:
+                        ready_result = wait_ready(timeout_sec=120)
                 else:
                     try:
                         health = pool.get_health_snapshot() if hasattr(pool, "get_health_snapshot") else {}
                     except Exception:  # noqa: BLE001
                         health = {}
                     ready_result = {
-                        "ready": bool(health.get("browser_ready", False)) if isinstance(health, dict) else False,
+                        "ready": bool(health.get("startup_ready") or health.get("browser_ready", False)) if isinstance(health, dict) else False,
                         "reason": "ready",
                     }
                 if self._stop_event.is_set():
@@ -1353,7 +1356,7 @@ class SharedBridgeRuntimeService:
             health = pool.get_health_snapshot() if hasattr(pool, "get_health_snapshot") else {}
         except Exception:  # noqa: BLE001
             health = {}
-        if isinstance(health, dict) and bool(health.get("browser_ready", False)):
+        if isinstance(health, dict) and bool(health.get("startup_ready") or health.get("browser_ready", False)):
             if self._source_cache_service is not None:
                 self._source_cache_service.update_download_browser_pool(pool)
             return
@@ -1361,10 +1364,13 @@ class SharedBridgeRuntimeService:
             emit_log("[共享桥接][内网] 等待内网下载浏览器池就绪后再开始源文件下载")
         wait_ready = getattr(pool, "wait_until_ready", None)
         if callable(wait_ready):
-            ready_result = wait_ready(timeout_sec=max(1.0, float(timeout_sec or 1.0)))
+            try:
+                ready_result = wait_ready(timeout_sec=max(1.0, float(timeout_sec or 1.0)), require_prelogin=False)
+            except TypeError:
+                ready_result = wait_ready(timeout_sec=max(1.0, float(timeout_sec or 1.0)))
         else:
             ready_result = {
-                "ready": bool(health.get("browser_ready", False)) if isinstance(health, dict) else False,
+                "ready": bool(health.get("startup_ready") or health.get("browser_ready", False)) if isinstance(health, dict) else False,
                 "reason": "health_snapshot",
             }
         if not bool(ready_result.get("ready", False)):
@@ -1387,7 +1393,7 @@ class SharedBridgeRuntimeService:
             health = pool.get_health_snapshot() if hasattr(pool, "get_health_snapshot") else {}
         except Exception:  # noqa: BLE001
             return False
-        return bool(health.get("browser_ready", False)) if isinstance(health, dict) else False
+        return bool(health.get("startup_ready") or health.get("browser_ready", False)) if isinstance(health, dict) else False
 
     def start(self) -> Dict[str, Any]:
         with self._lock:
