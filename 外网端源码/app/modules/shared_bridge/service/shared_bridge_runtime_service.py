@@ -7591,31 +7591,44 @@ class SharedBridgeRuntimeService:
         claim_token = self._stage_claim_token(task, stage_id)
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         emit_log = self._bridge_emit(task_id=task_id, stage_id=stage_id, side="internal", claim_token=claim_token)
-        service = WetBulbCollectionService(
-            self.runtime_config,
-            download_browser_pool=self._internal_download_pool,
-        )
         try:
+            if self._source_cache_service is None:
+                raise RuntimeError("共享缓存服务未初始化，无法补采湿球温度源文件")
             emit_log("[共享桥接][湿球温度][内网] 开始下载阶段")
-            internal_result = service.download_source_units(
-                buildings=request.get("buildings") if isinstance(request.get("buildings"), list) else None,
-                emit_log=emit_log,
-            )
-            stage_result = dict(internal_result)
-            internal_source_units = internal_result.get("source_units", []) if isinstance(internal_result.get("source_units", []), list) else []
-            source_units = [
-                {
-                    "building": str(item.get("building", "") or "").strip(),
-                    "file_path": str(item.get("file_path", "") or item.get("source_file", "") or "").strip(),
-                }
-                for item in internal_source_units
-                if isinstance(item, dict)
-                and str(item.get("building", "") or "").strip()
-                and str(item.get("file_path", "") or item.get("source_file", "") or "").strip()
+            requested_buildings = [
+                str(item or "").strip()
+                for item in (request.get("buildings") if isinstance(request.get("buildings"), list) else [])
+                if str(item or "").strip()
             ]
+            if not requested_buildings:
+                requested_buildings = self._source_cache_service.get_enabled_buildings()
+            bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self.current_source_cache_bucket()
+            source_units: List[Dict[str, Any]] = []
+            failed_buildings: List[Dict[str, str]] = []
+            for building in requested_buildings:
+                try:
+                    filled = self._source_cache_service.fill_handover_latest(
+                        building=building,
+                        bucket_key=bucket_key,
+                        emit_log=emit_log,
+                    )
+                    file_path = str((filled or {}).get("file_path", "") or "").strip()
+                    if not file_path:
+                        raise RuntimeError("补采完成但未返回源文件路径")
+                    source_units.append({"building": building, "file_path": file_path})
+                except Exception as exc:  # noqa: BLE001
+                    failed_buildings.append({"building": building, "error": str(exc) or "download_failed"})
+            stage_result = {
+                "source_units": list(source_units),
+                "failed_buildings": failed_buildings,
+                "download_result": {
+                    "success_count": len(source_units),
+                    "failed_count": len(failed_buildings),
+                },
+                "target_bucket_key": bucket_key,
+            }
             stage_result["artifacts"] = []
             stage_result["artifact_count"] = 0
-            stage_result["source_units"] = list(source_units)
             if source_units:
                 self._store.complete_stage(
                     task_id=task_id,
@@ -7637,7 +7650,6 @@ class SharedBridgeRuntimeService:
                 )
                 self._request_runtime_status_refresh(reason=f"wet_bulb_internal_download_completed:{task_id}")
             else:
-                failed_buildings = internal_result.get("failed_buildings", []) if isinstance(internal_result.get("failed_buildings", []), list) else []
                 error_text = "内网下载未产生任何共享源文件"
                 for item in failed_buildings:
                     if not isinstance(item, dict):
