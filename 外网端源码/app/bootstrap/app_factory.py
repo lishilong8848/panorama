@@ -1843,10 +1843,16 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         for item in cached_entries
                         if isinstance(item, dict)
                     }
+                    is_best_bucket_too_old = bool(selection.get("is_best_bucket_too_old", False)) if isinstance(selection, dict) else False
+                    if is_best_bucket_too_old:
+                        refresh_candidates = target_buildings
+                    else:
+                        refresh_candidates = [*missing_buildings, *stale_buildings, *target_buildings]
                     refresh_buildings = [
                         item
-                        for item in [*missing_buildings, *stale_buildings, *target_buildings]
-                        if str(item or "").strip() and str(item or "").strip() not in ready_buildings
+                        for item in refresh_candidates
+                        if str(item or "").strip()
+                        and (is_best_bucket_too_old or str(item or "").strip() not in ready_buildings)
                     ]
                     refresh_buildings = list(dict.fromkeys(str(item or "").strip() for item in refresh_buildings if str(item or "").strip()))
                     if refresh_buildings and hasattr(bridge_service, "request_latest_source_cache_refresh"):
