@@ -565,6 +565,8 @@ class SharedSourceCacheService:
     def _reset_light_building_state_unlocked(self) -> None:
         buildings = self.get_enabled_buildings()
         current_bucket = self._current_hour_bucket or self.current_hour_bucket()
+        monthly_bucket = self._monthly_report_business_date()
+        top5_monthly_bucket = self._top5_monthly_report_period_date()
         branch_bucket = self.branch_power_day_bucket()
         branch_current_bucket = self.branch_power_day_bucket()
         branch_switch_bucket = self.branch_power_day_bucket()
@@ -579,8 +581,8 @@ class SharedSourceCacheService:
         )
         self._family_status.setdefault(FAMILY_HANDOVER_LOG, {})["current_bucket"] = current_bucket
         self._family_status.setdefault(FAMILY_HANDOVER_CAPACITY_REPORT, {})["current_bucket"] = current_bucket
-        self._family_status.setdefault(FAMILY_MONTHLY_REPORT, {})["current_bucket"] = current_bucket
-        self._family_status.setdefault(FAMILY_TOP5_MONTHLY_REPORT, {})["current_bucket"] = current_bucket
+        self._family_status.setdefault(FAMILY_MONTHLY_REPORT, {})["current_bucket"] = monthly_bucket
+        self._family_status.setdefault(FAMILY_TOP5_MONTHLY_REPORT, {})["current_bucket"] = top5_monthly_bucket
         self._family_status.setdefault(FAMILY_ALARM_EVENT, {})["current_bucket"] = alarm_bucket
         self._family_status.setdefault(FAMILY_BRANCH_POWER, {})["current_bucket"] = branch_bucket
         self._family_status.setdefault(FAMILY_BRANCH_CURRENT, {})["current_bucket"] = branch_current_bucket
@@ -590,8 +592,8 @@ class SharedSourceCacheService:
         for family_name, bucket_key in (
             (FAMILY_HANDOVER_LOG, current_bucket),
             (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
-            (FAMILY_MONTHLY_REPORT, current_bucket),
-            (FAMILY_TOP5_MONTHLY_REPORT, current_bucket),
+            (FAMILY_MONTHLY_REPORT, monthly_bucket),
+            (FAMILY_TOP5_MONTHLY_REPORT, top5_monthly_bucket),
             (FAMILY_ALARM_EVENT, alarm_bucket),
             (FAMILY_BRANCH_POWER, branch_bucket),
             (FAMILY_BRANCH_CURRENT, branch_current_bucket),
@@ -835,6 +837,10 @@ class SharedSourceCacheService:
             FAMILY_BUILDING_FULL_CABINET_POWER,
         }:
             bucket_scope_text = "整日"
+        elif family_key == FAMILY_MONTHLY_REPORT:
+            bucket_scope_text = "业务日"
+        elif family_key == FAMILY_TOP5_MONTHLY_REPORT:
+            bucket_scope_text = "月份"
         elif family_key in {FAMILY_ALARM_EVENT, FAMILY_CHILLER_MODE_SWITCH}:
             bucket_scope_text = "本次定时"
         else:
@@ -1703,6 +1709,8 @@ class SharedSourceCacheService:
             top5_monthly_source_refresh = copy.deepcopy(self._top5_monthly_source_refresh)
         if normalized_mode == "internal_light":
             alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
+            monthly_bucket = self._monthly_report_business_date()
+            top5_monthly_bucket = self._top5_monthly_report_period_date()
             # 整日类源文件按最新业务日展示，不能沿用 _family_status 里的旧桶。
             branch_bucket = self.branch_power_day_bucket()
             branch_current_bucket = branch_bucket
@@ -1726,13 +1734,13 @@ class SharedSourceCacheService:
             )
             monthly_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_MONTHLY_REPORT,
-                current_bucket=current_bucket,
+                current_bucket=monthly_bucket,
                 cached_rows=light_building_status.get(FAMILY_MONTHLY_REPORT, {}),
                 active_downloads=active_downloads,
             )
             top5_monthly_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_TOP5_MONTHLY_REPORT,
-                current_bucket=current_bucket,
+                current_bucket=top5_monthly_bucket,
                 cached_rows=light_building_status.get(FAMILY_TOP5_MONTHLY_REPORT, {}),
                 active_downloads=active_downloads,
             )

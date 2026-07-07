@@ -15,6 +15,8 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (  # n
     FAMILY_BRANCH_POWER,
     FAMILY_BRANCH_SWITCH,
     FAMILY_BUILDING_FULL_CABINET_POWER,
+    FAMILY_MONTHLY_REPORT,
+    FAMILY_TOP5_MONTHLY_REPORT,
     SharedSourceCacheService,
 )
 
@@ -138,3 +140,23 @@ def test_internal_light_daily_source_snapshot_uses_current_business_day_bucket(t
         assert family_snapshot["current_bucket"] == "2026-06-28"
         assert "整日" in family_snapshot["status_text"]
         assert {row["bucket_key"] for row in family_snapshot["buildings"]} == {"2026-06-28"}
+
+
+def test_internal_light_monthly_source_snapshot_uses_latest_target_bucket(tmp_path, monkeypatch):
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "_monthly_report_business_date", lambda when=None: "2026-06-28")
+    monkeypatch.setattr(service, "_top5_monthly_report_period_date", lambda when=None: "2026-06-01")
+
+    service._family_status.setdefault(FAMILY_MONTHLY_REPORT, {})["current_bucket"] = "2026-06-28 10"
+    service._family_status.setdefault(FAMILY_TOP5_MONTHLY_REPORT, {})["current_bucket"] = "2026-06-28 10"
+
+    snapshot = service.get_health_snapshot(mode="internal_light")
+
+    monthly_snapshot = snapshot[FAMILY_MONTHLY_REPORT]
+    top5_snapshot = snapshot[FAMILY_TOP5_MONTHLY_REPORT]
+    assert monthly_snapshot["current_bucket"] == "2026-06-28"
+    assert top5_snapshot["current_bucket"] == "2026-06-01"
+    assert "业务日" in monthly_snapshot["status_text"]
+    assert "月份" in top5_snapshot["status_text"]
+    assert {row["bucket_key"] for row in monthly_snapshot["buildings"]} == {"2026-06-28"}
+    assert {row["bucket_key"] for row in top5_snapshot["buildings"]} == {"2026-06-01"}
