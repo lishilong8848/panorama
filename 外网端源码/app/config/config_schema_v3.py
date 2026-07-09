@@ -1402,6 +1402,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "trigger_internal_capture": True,
             "wait_capture_timeout_sec": 600,
             "wait_capture_poll_sec": 5,
+            "fresh_capture_grace_sec": 180,
             "date_value_format": "{date}",
             "page_size": 500,
             "max_records": 1000,

@@ -393,7 +393,9 @@ def list_system_screenshot_files(
         entry["file_exists"] = _record_file_exists(entry)
         if entry["file_exists"]:
             try:
-                entry["size_bytes"] = Path(str(entry.get("file_path", "") or "")).stat().st_size
+                stat = Path(str(entry.get("file_path", "") or "")).stat()
+                entry["size_bytes"] = stat.st_size
+                entry["modified_at"] = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
             except OSError:
                 entry["size_bytes"] = 0
         files.append(entry)

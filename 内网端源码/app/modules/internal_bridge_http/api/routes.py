@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
@@ -342,6 +343,7 @@ def run_internal_system_screenshot_capture(
     site_building = str(body.get("site_building", "") or body.get("building", "") or "").strip() or None
     force = bool(body.get("force", False))
     wait = bool(body.get("wait", False))
+    accepted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def emit_log(text: str) -> None:
         if not callable(raw_emit_log):
@@ -377,7 +379,7 @@ def run_internal_system_screenshot_capture(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return {"ok": True, **result}
+        return {"ok": True, "accepted_at": accepted_at, **result}
 
     def _worker() -> None:
         try:
@@ -390,7 +392,13 @@ def run_internal_system_screenshot_capture(
             emit_log(f"[系统截图采集] HTTP 后台检查失败: date={capture_date or '-'}, error={exc}")
 
     threading.Thread(target=_worker, name="internal-http-system-screenshot-capture", daemon=True).start()
-    return {"ok": True, "status": "accepted", "capture_date": capture_date or "", "force": force}
+    return {
+        "ok": True,
+        "status": "accepted",
+        "capture_date": capture_date or "",
+        "force": force,
+        "accepted_at": accepted_at,
+    }
 
 
 @router.post("/source-index/batch")

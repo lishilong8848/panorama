@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
     "trigger_internal_capture": True,
     "wait_capture_timeout_sec": 600,
     "wait_capture_poll_sec": 5,
+    "fresh_capture_grace_sec": 180,
     "date_value_format": "{date}",
     "page_size": 500,
     "max_records": 1000,
@@ -331,8 +332,13 @@ class SystemScreenshotUploadService:
             mode_text = "强制重截" if force_capture else "补齐缺失"
             log(f"[系统截图上传] 触发内网端截图检查 date={date_text}, mode={mode_text}")
             if force_capture:
-                fresh_since = datetime.now().replace(microsecond=0)
-            internal.run_system_screenshot_capture(capture_date=date_text, force=force_capture)
+                grace_sec = max(0, int(float(cfg.get("fresh_capture_grace_sec", 180) or 180)))
+                fresh_since = (datetime.now() - timedelta(seconds=grace_sec)).replace(microsecond=0)
+            trigger_result = internal.run_system_screenshot_capture(capture_date=date_text, force=force_capture)
+            if force_capture and isinstance(trigger_result, dict):
+                accepted_at = _parse_datetime_text(trigger_result.get("accepted_at"))
+                if accepted_at is not None:
+                    fresh_since = accepted_at - timedelta(seconds=2)
 
         by_pair: Dict[tuple[str, str], Dict[str, Any]] = {}
         missing: List[str] = []
@@ -350,7 +356,12 @@ class SystemScreenshotUploadService:
                 if building and key and item.get("file_exists") is True:
                     if fresh_since is not None:
                         captured_at = _parse_datetime_text(item.get("captured_at"))
-                        if captured_at is None or captured_at < fresh_since:
+                        modified_at = _parse_datetime_text(item.get("modified_at"))
+                        item_fresh_at = max(
+                            [value for value in (captured_at, modified_at) if value is not None],
+                            default=None,
+                        )
+                        if item_fresh_at is None or item_fresh_at < fresh_since:
                             continue
                     by_pair[(building, key)] = item
             missing = [
