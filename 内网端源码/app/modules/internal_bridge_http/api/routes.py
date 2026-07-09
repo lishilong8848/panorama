@@ -353,13 +353,14 @@ def run_internal_system_screenshot_capture(
         except TypeError:
             raw_emit_log(text)
 
-    def _run_once() -> Dict[str, Any]:
+    def _run_once(*, acquired_lock: bool = False) -> Dict[str, Any]:
         lock = getattr(container, "_system_screenshot_capture_run_lock", None)
-        acquired = False
+        acquired = bool(acquired_lock)
         if lock is not None and hasattr(lock, "acquire"):
-            acquired = bool(lock.acquire(blocking=False))
             if not acquired:
-                return {"status": "running", "message": "系统截图采集已有运行实例"}
+                acquired = bool(lock.acquire(blocking=False))
+                if not acquired:
+                    return {"status": "running", "message": "系统截图采集已有运行实例"}
         try:
             return run_system_screenshot_capture(
                 config=config,
@@ -381,9 +382,23 @@ def run_internal_system_screenshot_capture(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"ok": True, "accepted_at": accepted_at, **result}
 
+    lock = getattr(container, "_system_screenshot_capture_run_lock", None)
+    pre_acquired = False
+    if lock is not None and hasattr(lock, "acquire"):
+        pre_acquired = bool(lock.acquire(blocking=False))
+        if not pre_acquired:
+            return {
+                "ok": True,
+                "status": "running",
+                "message": "系统截图采集已有运行实例",
+                "capture_date": capture_date or "",
+                "force": force,
+                "accepted_at": accepted_at,
+            }
+
     def _worker() -> None:
         try:
-            result = _run_once()
+            result = _run_once(acquired_lock=pre_acquired)
             emit_log(
                 "[系统截图采集] HTTP 后台检查完成: "
                 f"date={capture_date or '-'}, status={result.get('status', '-')}"

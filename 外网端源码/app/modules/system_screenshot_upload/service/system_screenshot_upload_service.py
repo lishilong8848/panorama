@@ -323,6 +323,9 @@ class SystemScreenshotUploadService:
         if not targets:
             raise RuntimeError("系统截图上传目标为空")
         expected_buildings = self._expected_buildings(cfg)
+        wait_timeout = max(1.0, float(cfg.get("wait_capture_timeout_sec", 180) or 180))
+        poll_sec = max(1.0, float(cfg.get("wait_capture_poll_sec", 5) or 5))
+        deadline = time.monotonic() + wait_timeout
 
         internal = self._make_internal_client()
         should_trigger = bool(cfg.get("trigger_internal_capture", True)) if trigger_internal_capture is None else bool(trigger_internal_capture)
@@ -334,7 +337,16 @@ class SystemScreenshotUploadService:
             if force_capture:
                 grace_sec = max(0, int(float(cfg.get("fresh_capture_grace_sec", 180) or 180)))
                 fresh_since = (datetime.now() - timedelta(seconds=grace_sec)).replace(microsecond=0)
-            trigger_result = internal.run_system_screenshot_capture(capture_date=date_text, force=force_capture)
+            trigger_result: Dict[str, Any] = {}
+            while True:
+                trigger_result = internal.run_system_screenshot_capture(capture_date=date_text, force=force_capture)
+                status_text = str(trigger_result.get("status", "") or "").strip().lower() if isinstance(trigger_result, dict) else ""
+                if not force_capture or status_text != "running":
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("内网端系统截图采集一直运行中，无法开始本次强制重截")
+                log("[系统截图上传] 内网端已有截图采集运行中，等待后重新触发强制重截")
+                time.sleep(poll_sec)
             if force_capture and isinstance(trigger_result, dict):
                 accepted_at = _parse_datetime_text(trigger_result.get("accepted_at"))
                 if accepted_at is not None:
@@ -342,12 +354,12 @@ class SystemScreenshotUploadService:
 
         by_pair: Dict[tuple[str, str], Dict[str, Any]] = {}
         missing: List[str] = []
-        deadline = time.monotonic() + max(1.0, float(cfg.get("wait_capture_timeout_sec", 180) or 180))
-        poll_sec = max(1.0, float(cfg.get("wait_capture_poll_sec", 5) or 5))
+        stale_candidates: Dict[tuple[str, str], str] = {}
         while True:
             listing = internal.list_system_screenshot_files(capture_date=date_text)
             files = listing.get("files", []) if isinstance(listing, dict) else []
             by_pair = {}
+            stale_candidates = {}
             for item in files if isinstance(files, list) else []:
                 if not isinstance(item, dict):
                     continue
@@ -362,6 +374,7 @@ class SystemScreenshotUploadService:
                             default=None,
                         )
                         if item_fresh_at is None or item_fresh_at < fresh_since:
+                            stale_candidates[(building, key)] = str(item.get("captured_at") or item.get("modified_at") or "")
                             continue
                     by_pair[(building, key)] = item
             missing = [
@@ -374,6 +387,15 @@ class SystemScreenshotUploadService:
                 break
             wait_reason = "等待最新截图完成" if fresh_since is not None else "等待内网端截图完成"
             log(f"[系统截图上传] {wait_reason}: missing={','.join(missing)}")
+            if fresh_since is not None:
+                stale = [
+                    f"{building}/{target['label']}={stale_candidates.get((building, target['key']), '-')}"
+                    for building in expected_buildings
+                    for target in targets
+                    if f"{building}/{target['label']}" in missing and (building, target["key"]) in stale_candidates
+                ]
+                if stale:
+                    log(f"[系统截图上传] 已发现但未达到最新门槛 fresh_since={fresh_since:%Y-%m-%d %H:%M:%S}: {','.join(stale[:8])}")
             time.sleep(poll_sec)
 
         if missing:
