@@ -26,6 +26,9 @@ from app.modules.shared_bridge.service.bridge_status_presenter import (
 from app.modules.report_pipeline.service.system_alert_log_upload_service import (
     SystemAlertLogUploadService,
 )
+from app.modules.system_screenshot_upload.service.system_screenshot_demand_poller import (
+    SystemScreenshotDemandPoller,
+)
 from app.modules.scheduler.service.apscheduler_orchestrator import (
     ApschedulerHandoverSchedulerManager,
     ApschedulerOrchestrator,
@@ -119,6 +122,7 @@ class AppContainer:
     alarm_event_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     system_screenshot_upload_scheduler: ApschedulerSchedulerFacade | None = None
     system_screenshot_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    system_screenshot_demand_poller: SystemScreenshotDemandPoller | None = None
     top5_power_report_scheduler: ApschedulerSchedulerFacade | None = None
     top5_power_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_change_report_scheduler: ApschedulerSchedulerFacade | None = None
@@ -259,6 +263,9 @@ class AppContainer:
         if not self.system_screenshot_upload_scheduler:
             _report_progress("building_system_screenshot_upload_scheduler")
             self.system_screenshot_upload_scheduler = self._build_system_screenshot_upload_scheduler()
+        if not self.system_screenshot_demand_poller:
+            _report_progress("building_system_screenshot_demand_poller")
+            self.system_screenshot_demand_poller = self._build_system_screenshot_demand_poller()
         if not self.top5_power_report_scheduler:
             _report_progress("building_top5_power_report_scheduler")
             self.top5_power_report_scheduler = self._build_top5_power_report_scheduler()
@@ -614,6 +621,14 @@ class AppContainer:
             orchestrator=self.ensure_scheduler_orchestrator(),
             schedule_kind="daily",
             source_name="系统截图上传",
+        )
+
+    def _build_system_screenshot_demand_poller(self) -> SystemScreenshotDemandPoller:
+        return SystemScreenshotDemandPoller(
+            runtime_config_getter=lambda: self.runtime_config,
+            job_service=self.job_service,
+            emit_log=self.add_system_log,
+            role_mode_getter=lambda: str(self._configured_deployment_snapshot().get("role_mode", "") or ""),
         )
 
     def _build_top5_power_report_scheduler(self) -> ApschedulerSchedulerFacade:
@@ -1796,6 +1811,19 @@ class AppContainer:
                 self.add_system_log("[系统截图上传调度] 启动时未自动开启")
         else:
             self.add_system_log("[系统截图上传调度] 已禁用")
+        screenshot_cfg = self.runtime_config.get("system_screenshot_upload", {})
+        if not isinstance(screenshot_cfg, dict):
+            screenshot_cfg = {}
+        demand_poll_cfg = screenshot_cfg.get("demand_poll", {})
+        if not isinstance(demand_poll_cfg, dict):
+            demand_poll_cfg = {}
+        if role_mode == "external" and bool(demand_poll_cfg.get("enabled", True)):
+            _report_progress("starting_system_screenshot_demand_poller")
+            self.start_system_screenshot_demand_poller(source=source)
+        elif role_mode == "internal":
+            self.add_system_log("[系统截图上传][同步需求] 当前为内网端，启动时不自动开启轮询")
+        else:
+            self.add_system_log("[系统截图上传][同步需求] 轮询已禁用")
 
         self.add_system_log(
             f"[TOP5功率文件生成调度] 启动阶段执行器状态: executor_bound={self.is_top5_power_report_scheduler_executor_bound()}, "
@@ -2059,6 +2087,7 @@ class AppContainer:
             ("branch_power_upload_scheduler", self.stop_branch_power_upload_scheduler),
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
             ("system_screenshot_upload_scheduler", self.stop_system_screenshot_upload_scheduler),
+            ("system_screenshot_demand_poller", self.stop_system_screenshot_demand_poller),
             ("top5_power_report_scheduler", self.stop_top5_power_report_scheduler),
             ("monthly_change_report_scheduler", self.stop_monthly_change_report_scheduler),
             ("monthly_event_report_scheduler", self.stop_monthly_event_report_scheduler),
@@ -2294,6 +2323,27 @@ class AppContainer:
         self.add_system_log(
             f"[系统截图上传调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
             f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_system_screenshot_demand_poller(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.system_screenshot_demand_poller:
+            self.system_screenshot_demand_poller = self._build_system_screenshot_demand_poller()
+        result = self.system_screenshot_demand_poller.start()
+        self.add_system_log(
+            "[系统截图上传][同步需求] "
+            f"{source}启动请求: reason={result.get('reason', '-')}, running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def stop_system_screenshot_demand_poller(self, source: str = "手动") -> Dict[str, Any]:
+        if self.system_screenshot_demand_poller:
+            result = self.system_screenshot_demand_poller.stop()
+        else:
+            result = {"ok": True, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            "[系统截图上传][同步需求] "
+            f"{source}停止请求: reason={result.get('reason', '-')}, running={bool(result.get('running', False))}"
         )
         return result
 
@@ -2973,6 +3023,19 @@ class AppContainer:
 
     def system_screenshot_upload_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("system_screenshot_upload")
+        demand_poll_status = (
+            self.system_screenshot_demand_poller.status_snapshot()
+            if self.system_screenshot_demand_poller
+            else {
+                "enabled": False,
+                "running": False,
+                "last_poll_at": "",
+                "last_hit_count": 0,
+                "last_submitted_job_id": "",
+                "last_error": "",
+                "last_decision": "未初始化",
+            }
+        )
         if not self.system_screenshot_upload_scheduler:
             payload = {
                 "enabled": False,
@@ -2985,6 +3048,7 @@ class AppContainer:
                 "last_trigger_result": "",
                 "state_path": "",
                 "state_exists": False,
+                "demand_poll": demand_poll_status,
                 **memory_fields,
             }
             return self._record_scheduler_runtime_snapshot(
@@ -2997,6 +3061,7 @@ class AppContainer:
             "enabled": bool(self.system_screenshot_upload_scheduler.enabled),
             "status": self.system_screenshot_upload_scheduler.status_text(),
             "next_run_time": self.system_screenshot_upload_scheduler.next_run_text(),
+            "demand_poll": demand_poll_status,
             **runtime,
             **memory_fields,
         }

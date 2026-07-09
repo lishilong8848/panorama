@@ -146,6 +146,18 @@ def _timestamp_ms_to_date_text(value: Any) -> str:
     return current.strftime("%Y-%m-%d")
 
 
+def _parse_datetime_text(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _field_name(item: Dict[str, Any]) -> str:
     return str(item.get("field_name") or item.get("name") or "").strip()
 
@@ -296,6 +308,7 @@ class SystemScreenshotUploadService:
         *,
         capture_date: Any | None = None,
         trigger_internal_capture: bool | None = None,
+        internal_capture_force: bool | None = None,
         emit_log: Callable[[str], None] | None = None,
     ) -> Dict[str, Any]:
         log = emit_log if callable(emit_log) else (lambda _msg: None)
@@ -312,9 +325,14 @@ class SystemScreenshotUploadService:
 
         internal = self._make_internal_client()
         should_trigger = bool(cfg.get("trigger_internal_capture", True)) if trigger_internal_capture is None else bool(trigger_internal_capture)
+        force_capture = bool(internal_capture_force) if internal_capture_force is not None else False
+        fresh_since: datetime | None = None
         if should_trigger:
-            log(f"[系统截图上传] 触发内网端截图检查 date={date_text}")
-            internal.run_system_screenshot_capture(capture_date=date_text, force=False)
+            mode_text = "强制重截" if force_capture else "补齐缺失"
+            log(f"[系统截图上传] 触发内网端截图检查 date={date_text}, mode={mode_text}")
+            if force_capture:
+                fresh_since = datetime.now().replace(microsecond=0)
+            internal.run_system_screenshot_capture(capture_date=date_text, force=force_capture)
 
         by_pair: Dict[tuple[str, str], Dict[str, Any]] = {}
         missing: List[str] = []
@@ -330,6 +348,10 @@ class SystemScreenshotUploadService:
                 building = str(item.get("site_building", "") or "").strip()
                 key = str(item.get("target_key", "") or "").strip()
                 if building and key and item.get("file_exists") is True:
+                    if fresh_since is not None:
+                        captured_at = _parse_datetime_text(item.get("captured_at"))
+                        if captured_at is None or captured_at < fresh_since:
+                            continue
                     by_pair[(building, key)] = item
             missing = [
                 f"{building}/{target['label']}"
@@ -339,11 +361,13 @@ class SystemScreenshotUploadService:
             ]
             if not missing or time.monotonic() >= deadline:
                 break
-            log(f"[系统截图上传] 等待内网端截图完成: missing={','.join(missing)}")
+            wait_reason = "等待最新截图完成" if fresh_since is not None else "等待内网端截图完成"
+            log(f"[系统截图上传] {wait_reason}: missing={','.join(missing)}")
             time.sleep(poll_sec)
 
         if missing:
-            raise RuntimeError("系统截图文件缺失或为空: " + ",".join(missing))
+            prefix = "系统截图文件未更新到本次强制截图时间: " if fresh_since is not None else "系统截图文件缺失或为空: "
+            raise RuntimeError(prefix + ",".join(missing))
 
         app_token = str(cfg.get("app_token", "") or "").strip()
         fields_cfg = _dict(cfg.get("fields"))

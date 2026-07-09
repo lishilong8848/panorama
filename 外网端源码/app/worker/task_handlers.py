@@ -13,6 +13,9 @@ from app.modules.alarm_rule_export_upload.service.alarm_rule_export_upload_servi
 from app.modules.system_screenshot_upload.service.system_screenshot_upload_service import (
     SystemScreenshotUploadService,
 )
+from app.modules.system_screenshot_upload.service.system_screenshot_demand_poller import (
+    mark_demand_record_completed,
+)
 from app.modules.report_pipeline.service.calculation_service import CalculationService
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
@@ -654,6 +657,7 @@ def handle_system_screenshot_upload(
     notify = WebhookNotifyService(config)
     capture_date = str(payload.get("capture_date", "") or "").strip()
     trigger_internal_capture = payload.get("trigger_internal_capture", None)
+    internal_capture_force = payload.get("internal_capture_force", None)
     try:
         if runtime is not None:
             runtime.raise_if_cancelled()
@@ -661,6 +665,7 @@ def handle_system_screenshot_upload(
         result = service.run(
             capture_date=capture_date or None,
             trigger_internal_capture=trigger_internal_capture if isinstance(trigger_internal_capture, bool) else None,
+            internal_capture_force=internal_capture_force if isinstance(internal_capture_force, bool) else None,
             emit_log=emit_log,
         )
         if runtime is not None:
@@ -668,6 +673,41 @@ def handle_system_screenshot_upload(
         return result
     except Exception as exc:  # noqa: BLE001
         notify.send_failure(stage="系统截图上传", detail=str(exc), emit_log=emit_log)
+        raise
+
+
+def handle_system_screenshot_demand_upload(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+    runtime: Any = None,  # noqa: ANN401
+) -> Dict[str, Any]:
+    notify = WebhookNotifyService(config)
+    capture_date = str(payload.get("capture_date", "") or "").strip()
+    trigger_internal_capture = payload.get("trigger_internal_capture", None)
+    internal_capture_force = payload.get("internal_capture_force", None)
+    try:
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        service = SystemScreenshotUploadService(config)
+        result = service.run(
+            capture_date=capture_date or None,
+            trigger_internal_capture=trigger_internal_capture if isinstance(trigger_internal_capture, bool) else None,
+            internal_capture_force=internal_capture_force if isinstance(internal_capture_force, bool) else None,
+            emit_log=emit_log,
+        )
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        if not isinstance(result, dict) or str(result.get("status", "") or "").strip().lower() != "success":
+            raise RuntimeError(f"系统截图上传未成功: {result}")
+        mark_demand_record_completed(config, payload)
+        emit_log(
+            "[系统截图上传][同步需求] 已回写需求表: "
+            f"record_id={str(payload.get('demand_record_id', '') or '').strip()}"
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        notify.send_failure(stage="系统截图上传同步需求", detail=str(exc), emit_log=emit_log)
         raise
 
 
@@ -1228,6 +1268,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "monthly_power_alert_report": handle_monthly_power_alert_report,
     "alarm_rule_export_upload": handle_alarm_rule_export_upload,
     "system_screenshot_upload": handle_system_screenshot_upload,
+    "system_screenshot_demand_upload": handle_system_screenshot_demand_upload,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,
     "handover_from_file": handle_handover_from_file,

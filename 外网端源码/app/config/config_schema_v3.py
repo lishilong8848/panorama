@@ -1417,6 +1417,16 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "retry_failed_in_same_period": True,
                 "state_file": "system_screenshot_upload_scheduler_state.json",
             },
+            "demand_poll": {
+                "enabled": True,
+                "interval_sec": 30,
+                "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
+                "table_id": "tblQlmBM3vgoN7fq",
+                "request_field": "同步需求",
+                "completed_field": "上传完成",
+                "page_size": 100,
+                "max_records": 100,
+            },
             "fields": {
                 "date": "日期",
                 "building": "楼栋",
