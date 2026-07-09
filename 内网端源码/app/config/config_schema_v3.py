@@ -1368,7 +1368,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "auto_start_in_gui": True,
                 "run_time": "05:37:00",
                 "check_interval_sec": 60,
-                "catch_up_if_missed": True,
+                "catch_up_if_missed": False,
                 "retry_failed_in_same_period": True,
                 "state_file": "system_screenshot_capture_scheduler_state.json",
             },

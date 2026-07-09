@@ -557,6 +557,10 @@ class AppContainer:
         scheduler_cfg = cfg.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
+        scheduler_cfg = dict(scheduler_cfg)
+        # 系统截图会复用楼栋浏览器，启动后立即补跑容易和外网端手动补采撞车。
+        # 截图缺失由外网端补采或每日到点调度处理，内网端启动阶段不做 catch-up。
+        scheduler_cfg["catch_up_if_missed"] = False
         paths_cfg = self.runtime_config.get("paths", {}) if isinstance(self.runtime_config, dict) else {}
         return DailyAutoSchedulerService(
             config={

@@ -406,7 +406,16 @@ def run_internal_system_screenshot_capture(
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[系统截图采集] HTTP 后台检查失败: date={capture_date or '-'}, error={exc}")
 
-    threading.Thread(target=_worker, name="internal-http-system-screenshot-capture", daemon=True).start()
+    worker_thread = threading.Thread(target=_worker, name="internal-http-system-screenshot-capture", daemon=True)
+    try:
+        worker_thread.start()
+    except Exception as exc:  # noqa: BLE001
+        if pre_acquired and lock is not None and hasattr(lock, "release"):
+            try:
+                lock.release()
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {
         "ok": True,
         "status": "accepted",

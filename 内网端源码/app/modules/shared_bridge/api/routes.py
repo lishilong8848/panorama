@@ -2,6 +2,7 @@
 
 import copy
 import threading
+from datetime import datetime
 from typing import Any, Callable, Dict
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -1007,6 +1008,7 @@ def bridge_system_screenshot_run(
     force = bool(body.get("force", False))
     wait = bool(body.get("wait", False))
     lock = getattr(container, "_system_screenshot_capture_run_lock", None)
+    accepted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def emit_log(text: str) -> None:
         logger = getattr(container, "add_system_log", None)
@@ -1017,12 +1019,13 @@ def bridge_system_screenshot_run(
         except TypeError:
             logger(text)
 
-    def _run_once() -> Dict[str, Any]:
-        acquired = False
+    def _run_once(*, acquired_lock: bool = False) -> Dict[str, Any]:
+        acquired = bool(acquired_lock)
         if lock is not None and hasattr(lock, "acquire"):
-            acquired = bool(lock.acquire(blocking=False))
             if not acquired:
-                return {"status": "running", "message": "系统截图采集已有运行实例"}
+                acquired = bool(lock.acquire(blocking=False))
+                if not acquired:
+                    return {"status": "running", "message": "系统截图采集已有运行实例"}
         try:
             cfg = getattr(container, "_system_screenshot_capture_cfg", lambda: {})()
             return run_system_screenshot_capture(
@@ -1047,11 +1050,27 @@ def bridge_system_screenshot_run(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return {"ok": True, **result}
+        return {"ok": True, "accepted_at": accepted_at, **result}
+
+    pre_acquired = False
+    if lock is not None and hasattr(lock, "acquire"):
+        pre_acquired = bool(lock.acquire(blocking=False))
+        if not pre_acquired:
+            return {
+                "ok": True,
+                "accepted": False,
+                "running": True,
+                "status": "running",
+                "message": "系统截图采集已有运行实例",
+                "capture_date": capture_date or "",
+                "capture_hour": capture_hour or "",
+                "force": force,
+                "accepted_at": accepted_at,
+            }
 
     def _worker() -> None:
         try:
-            result = _run_once()
+            result = _run_once(acquired_lock=pre_acquired)
             emit_log(
                 "[系统截图采集] 本机后台检查完成: "
                 f"date={capture_date or '-'}, hour={capture_hour or '-'}, status={result.get('status', '-')}"
@@ -1059,8 +1078,27 @@ def bridge_system_screenshot_run(
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[系统截图采集] 本机后台检查失败: date={capture_date or '-'}, hour={capture_hour or '-'}, error={exc}")
 
-    threading.Thread(target=_worker, name="local-system-screenshot-capture", daemon=True).start()
-    return {"ok": True, "accepted": True, "running": True, "message": "已开始检查当天系统截图"}
+    worker_thread = threading.Thread(target=_worker, name="local-system-screenshot-capture", daemon=True)
+    try:
+        worker_thread.start()
+    except Exception as exc:  # noqa: BLE001
+        if pre_acquired and lock is not None and hasattr(lock, "release"):
+            try:
+                lock.release()
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "accepted": True,
+        "running": True,
+        "status": "accepted",
+        "message": "已开始检查当天系统截图",
+        "capture_date": capture_date or "",
+        "capture_hour": capture_hour or "",
+        "force": force,
+        "accepted_at": accepted_at,
+    }
 
 
 @router.post("/api/bridge/source-cache/refresh-current-hour")
