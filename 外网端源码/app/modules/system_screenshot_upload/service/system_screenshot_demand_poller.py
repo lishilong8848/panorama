@@ -70,6 +70,12 @@ def _truthy_checkbox(value: Any) -> bool:
     return False
 
 
+def _date_to_timestamp_ms(date_text: str) -> int:
+    current = datetime.strptime(str(date_text), "%Y-%m-%d")
+    epoch = datetime(1970, 1, 1)
+    return int((current - epoch).total_seconds() * 1000) - 8 * 3600 * 1000
+
+
 def normalize_demand_poll_config(
     runtime_config: Dict[str, Any],
     overrides: Dict[str, Any] | None = None,
@@ -87,11 +93,36 @@ def normalize_demand_poll_config(
     return poll_cfg
 
 
+def make_demand_bitable_client(
+    runtime_config: Dict[str, Any],
+    *,
+    app_token: str,
+    table_id: str,
+    client_factory: Callable[[str, str], FeishuBitableClient] | None = None,
+) -> FeishuBitableClient:
+    if callable(client_factory):
+        return client_factory(app_token, table_id)
+    feishu = _dict(_dict(runtime_config).get("feishu"))
+    return FeishuBitableClient(
+        app_id=str(feishu.get("app_id", "") or "").strip(),
+        app_secret=str(feishu.get("app_secret", "") or "").strip(),
+        app_token=str(app_token or "").strip(),
+        calc_table_id=str(table_id or "").strip(),
+        attachment_table_id=str(table_id or "").strip(),
+        timeout=int(feishu.get("timeout", 30) or 30),
+        request_retry_count=int(feishu.get("request_retry_count", 3) or 3),
+        request_retry_interval_sec=float(feishu.get("request_retry_interval_sec", 2) or 2),
+        date_text_to_timestamp_ms_fn=lambda date_text, **_: _date_to_timestamp_ms(str(date_text)),
+        canonical_metric_name_fn=lambda value: str(value or "").strip(),
+        dimension_mapping={},
+    )
+
+
 def mark_demand_record_completed(
     runtime_config: Dict[str, Any],
     payload: Dict[str, Any],
     *,
-    client_factory: Callable[[str], FeishuBitableClient] | None = None,
+    client_factory: Callable[[str, str], FeishuBitableClient] | None = None,
 ) -> Dict[str, Any]:
     cfg = normalize_demand_poll_config(
         runtime_config,
@@ -107,7 +138,12 @@ def mark_demand_record_completed(
         raise ValueError("缺少同步需求记录 record_id")
     if not cfg["app_token"] or not cfg["table_id"]:
         raise ValueError("系统截图同步需求表配置缺失")
-    client = client_factory(cfg["app_token"]) if callable(client_factory) else FeishuBitableClient(cfg["app_token"])
+    client = make_demand_bitable_client(
+        runtime_config,
+        app_token=cfg["app_token"],
+        table_id=cfg["table_id"],
+        client_factory=client_factory,
+    )
     return client.update_record(
         cfg["table_id"],
         record_id,
@@ -126,7 +162,7 @@ class SystemScreenshotDemandPoller:
         job_service: Any,  # noqa: ANN401
         emit_log: Callable[[str], None] | None = None,
         role_mode_getter: Callable[[], str] | None = None,
-        client_factory: Callable[[str], FeishuBitableClient] | None = None,
+        client_factory: Callable[[str, str], FeishuBitableClient] | None = None,
     ) -> None:
         self._runtime_config_getter = runtime_config_getter
         self._job_service = job_service
@@ -166,10 +202,13 @@ class SystemScreenshotDemandPoller:
         except Exception:
             return ""
 
-    def _client(self, app_token: str) -> FeishuBitableClient:
-        if callable(self._client_factory):
-            return self._client_factory(app_token)
-        return FeishuBitableClient(app_token)
+    def _client(self, cfg: Dict[str, Any]) -> FeishuBitableClient:
+        return make_demand_bitable_client(
+            self._runtime_config(),
+            app_token=str(cfg.get("app_token", "") or ""),
+            table_id=str(cfg.get("table_id", "") or ""),
+            client_factory=self._client_factory,
+        )
 
     def _set_snapshot(self, **updates: Any) -> None:
         with self._lock:
@@ -274,7 +313,7 @@ class SystemScreenshotDemandPoller:
             return result
         if not cfg["app_token"] or not cfg["table_id"]:
             raise ValueError("系统截图同步需求表配置缺失")
-        client = self._client(cfg["app_token"])
+        client = self._client(cfg)
         records = client.list_records(
             table_id=cfg["table_id"],
             page_size=int(cfg.get("page_size", 100) or 100),

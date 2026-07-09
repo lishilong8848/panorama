@@ -58,7 +58,7 @@ def test_poll_does_not_submit_when_request_unchecked():
         runtime_config_getter=_config,
         job_service=jobs,
         role_mode_getter=lambda: "external",
-        client_factory=lambda _app_token: client,
+        client_factory=lambda _app_token, _table_id: client,
     )
 
     result = poller.poll_once()
@@ -79,7 +79,7 @@ def test_poll_submits_one_demand_upload_job_when_request_checked():
         runtime_config_getter=_config,
         job_service=jobs,
         role_mode_getter=lambda: "external",
-        client_factory=lambda _app_token: client,
+        client_factory=lambda _app_token, _table_id: client,
     )
 
     result = poller.poll_once()
@@ -102,7 +102,7 @@ def test_poll_skips_when_system_screenshot_job_is_active():
         runtime_config_getter=_config,
         job_service=jobs,
         role_mode_getter=lambda: "external",
-        client_factory=lambda _app_token: client,
+        client_factory=lambda _app_token, _table_id: client,
     )
 
     result = poller.poll_once()
@@ -123,7 +123,7 @@ def test_mark_demand_record_completed_unchecks_request_and_marks_completed():
             "demand_request_field": "同步需求",
             "demand_completed_field": "上传完成",
         },
-        client_factory=lambda _app_token: client,
+        client_factory=lambda _app_token, _table_id: client,
     )
 
     assert client.updated == [("demand-table", "rec-1", {"同步需求": False, "上传完成": True})]
