@@ -302,6 +302,42 @@ class ReviewBuildingDocumentStore:
             "updated_at": str(row["updated_at"] or ""),
         }
 
+    @staticmethod
+    def _normalize_dirty_regions(raw: Any) -> Dict[str, bool]:
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key or "").strip(): bool(value)
+            for key, value in raw.items()
+            if str(key or "").strip()
+        }
+
+    @classmethod
+    def _merge_unsynced_dirty_regions(
+        cls,
+        *,
+        previous_dirty_regions: Any,
+        incoming_dirty_regions: Any,
+        current_revision: int,
+        sync_state: Dict[str, Any],
+    ) -> Dict[str, bool]:
+        merged = cls._normalize_dirty_regions(incoming_dirty_regions)
+        synced_revision = int(sync_state.get("synced_revision", 0) or 0) if isinstance(sync_state, dict) else 0
+        status = str(sync_state.get("status", "") if isinstance(sync_state, dict) else "").strip().lower()
+        has_unsynced_previous = synced_revision < int(current_revision or 0) or status in {
+            "pending",
+            "running",
+            "syncing",
+            "failed",
+        }
+        if not has_unsynced_previous:
+            return merged
+        previous = cls._normalize_dirty_regions(previous_dirty_regions)
+        for key, value in previous.items():
+            if value:
+                merged[key] = True
+        return merged
+
     def get_document(self, session_id: str) -> Dict[str, Any] | None:
         self.ensure_read_ready()
         with self.connect(read_only=True) as conn:
@@ -396,6 +432,13 @@ class ReviewBuildingDocumentStore:
             current_revision = int(previous_row["revision"] or 0)
             if current_revision != int(base_revision or 0):
                 raise ValueError("revision_conflict")
+            current_sync = self.get_sync_state_from_conn(conn, session_id)
+            next_dirty_regions = self._merge_unsynced_dirty_regions(
+                previous_dirty_regions=previous.get("dirty_regions", {}) if isinstance(previous, dict) else {},
+                incoming_dirty_regions=dirty_regions,
+                current_revision=current_revision,
+                sync_state=current_sync,
+            )
             conn.execute(
                 """
                 UPDATE review_documents
@@ -411,7 +454,7 @@ class ReviewBuildingDocumentStore:
                 (
                     next_revision,
                     _json_dumps(document if isinstance(document, dict) else {}),
-                    _json_dumps(dirty_regions if isinstance(dirty_regions, dict) else {}),
+                    _json_dumps(next_dirty_regions),
                     source_excel_path,
                     source_excel_mtime,
                     source_excel_size,
@@ -419,7 +462,6 @@ class ReviewBuildingDocumentStore:
                     session_id,
                 ),
             )
-            current_sync = self.get_sync_state_from_conn(conn, session_id)
             self._upsert_sync_state_conn(
                 conn,
                 session_id=session_id,

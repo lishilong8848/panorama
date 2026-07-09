@@ -59,6 +59,18 @@ class ReviewDocumentWriter:
             fixed_cells["A1"] = str(document.get("title", "") or "")
         return apply_forced_fixed_cell_values(fixed_cells)
 
+    @staticmethod
+    def _fixed_cells_need_sync(ws, fixed_cells: Dict[str, str]) -> bool:
+        for cell_name, value in (fixed_cells or {}).items():
+            cell = str(cell_name or "").strip().upper()
+            if not cell:
+                continue
+            current = ws[cell].value
+            current_text = "" if current is None else str(current)
+            if current_text != str(value if value is not None else ""):
+                return True
+        return False
+
     def _normalize_section_columns(self, section: Dict[str, Any]) -> List[Dict[str, Any]]:
         columns = section.get("columns", [])
         if isinstance(columns, list) and columns:
@@ -162,8 +174,8 @@ class ReviewDocumentWriter:
             sheet_name = self._sheet_name()
             ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
 
-            if normalized_dirty.get("fixed_blocks"):
-                fixed_cells = self._fixed_cells_from_document(document)
+            fixed_cells = self._fixed_cells_from_document(document)
+            if normalized_dirty.get("fixed_blocks") or self._fixed_cells_need_sync(ws, fixed_cells):
                 for cell_name, value in fixed_cells.items():
                     ws[cell_name] = value
 
