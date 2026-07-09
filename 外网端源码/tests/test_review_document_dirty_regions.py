@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
+from handover_log_module.service.handover_xlsx_write_queue_service import HandoverXlsxWriteQueueService
 from handover_log_module.service.review_document_writer import ReviewDocumentWriter
 
 
@@ -116,3 +118,36 @@ def test_writer_syncs_fixed_cells_when_dirty_region_was_lost(tmp_path: Path) -> 
         assert reloaded.active["B4"].value == "长白岗：新值"
     finally:
         reloaded.close()
+
+
+def test_download_full_sync_overrides_pending_incremental_sync(tmp_path: Path) -> None:
+    config = {"_global_paths": {"runtime_state_root": str(tmp_path / "runtime")}}
+    queue = HandoverXlsxWriteQueueService(config)
+    queue._start_worker = lambda building: None  # type: ignore[method-assign]
+    session = _session(tmp_path, revision=3)
+
+    queue.enqueue_review_excel_sync(
+        session,
+        target_revision=3,
+        force_all_regions=False,
+    )
+    queue.enqueue_review_excel_sync(
+        session,
+        target_revision=3,
+        force_all_regions=True,
+    )
+
+    store = ReviewBuildingDocumentStore(config=config, building="A楼")
+    with store.connect(read_only=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM xlsx_write_jobs
+             WHERE task_type='review_excel_sync'
+               AND dedupe_key=?
+               AND status='pending'
+            """,
+            (session["session_id"],),
+        ).fetchall()
+
+    assert len(rows) == 1
+    assert json.loads(rows[0]["payload_json"])["force_all_regions"] is True

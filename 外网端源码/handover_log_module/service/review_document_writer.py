@@ -71,6 +71,15 @@ class ReviewDocumentWriter:
                 return True
         return False
 
+    def fixed_cells_need_sync_for_file(self, *, output_file: str, document: Dict[str, Any]) -> bool:
+        workbook = load_workbook_quietly(output_file, read_only=True, data_only=False)
+        try:
+            sheet_name = self._sheet_name()
+            ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
+            return self._fixed_cells_need_sync(ws, self._fixed_cells_from_document(document))
+        finally:
+            workbook.close()
+
     def _normalize_section_columns(self, section: Dict[str, Any]) -> List[Dict[str, Any]]:
         columns = section.get("columns", [])
         if isinstance(columns, list) and columns:

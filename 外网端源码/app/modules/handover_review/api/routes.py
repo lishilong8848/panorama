@@ -4568,35 +4568,53 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     try:
         state = existing_document_state
         if not isinstance(state, dict) or not callable(getattr(document_state, "attach_excel_sync", None)):
-            document_state.force_sync_session_dict(target, reason="download")
+            document_state.force_sync_session_dict(target, reason="download", force_all_regions=True)
         else:
             document_revision = int(state.get("revision", target.get("revision", 0)) or 0)
-            sync_state = document_state.attach_excel_sync(target).get("excel_sync", {})
-            synced_revision = int(sync_state.get("synced_revision", 0) or 0) if isinstance(sync_state, dict) else 0
-            sync_status = str(sync_state.get("status", "") if isinstance(sync_state, dict) else "").strip().lower()
-            if sync_status not in {"synced", "success"} or synced_revision < document_revision:
-                queue_service = _build_xlsx_write_queue_service(
-                    container,
-                    review_service=service,
-                    document_state=document_state,
-                )
-                queue_service.enqueue_review_excel_sync(target, target_revision=document_revision)
-                barrier = queue_service.wait_for_barrier(
-                    building=building,
-                    session_id=session_id_text,
-                    reason="download",
-                    timeout_sec=120,
-                )
-                if str(barrier.get("status", "")).strip().lower() != "success":
-                    download_warning = str(barrier.get("error", "") or "").strip() or "交接班文件写入队列失败"
-                latest_sync = document_state.attach_excel_sync(target).get("excel_sync", {})
-                latest_status = str(latest_sync.get("status", "") if isinstance(latest_sync, dict) else "").strip().lower()
-                latest_synced_revision = int(latest_sync.get("synced_revision", 0) or 0) if isinstance(latest_sync, dict) else 0
-                if latest_status not in {"synced", "success"} or latest_synced_revision < document_revision:
-                    download_warning = (
-                        str(latest_sync.get("error", "") if isinstance(latest_sync, dict) else "").strip()
-                        or f"交接班文件尚未同步到最新版本: synced={latest_synced_revision}, target={document_revision}"
+            document_for_sync = state.get("document", {})
+            if not isinstance(document_for_sync, dict):
+                document_for_sync = {}
+            queue_service = _build_xlsx_write_queue_service(
+                container,
+                review_service=service,
+                document_state=document_state,
+            )
+            queue_service.enqueue_review_excel_sync(
+                target,
+                target_revision=document_revision,
+                force_all_regions=True,
+            )
+            barrier = queue_service.wait_for_barrier(
+                building=building,
+                session_id=session_id_text,
+                reason="download",
+                timeout_sec=120,
+            )
+            if str(barrier.get("status", "")).strip().lower() != "success":
+                download_warning = str(barrier.get("error", "") or "").strip() or "交接班文件写入队列失败"
+            latest_sync = document_state.attach_excel_sync(target).get("excel_sync", {})
+            latest_status = str(latest_sync.get("status", "") if isinstance(latest_sync, dict) else "").strip().lower()
+            latest_synced_revision = int(latest_sync.get("synced_revision", 0) or 0) if isinstance(latest_sync, dict) else 0
+            latest_fixed_cells_need_sync = False
+            try:
+                latest_fixed_cells_need_sync = bool(
+                    writer.fixed_cells_need_sync_for_file(
+                        output_file=str(output_file),
+                        document=document_for_sync,
                     )
+                )
+            except Exception as exc:  # noqa: BLE001
+                latest_fixed_cells_need_sync = True
+                container.add_system_log(
+                    "[交接班][下载成品] 固定单元格重新校验失败 "
+                    f"building={building}, session_id={session_id_text}, error={exc}"
+                )
+            if latest_status not in {"synced", "success"} or latest_synced_revision < document_revision or latest_fixed_cells_need_sync:
+                download_warning = str(latest_sync.get("error", "") if isinstance(latest_sync, dict) else "").strip()
+                if latest_fixed_cells_need_sync:
+                    download_warning = "交接班文件固定单元格尚未同步到最新审核内容"
+                if not download_warning:
+                    download_warning = f"交接班文件尚未同步到最新版本: synced={latest_synced_revision}, target={document_revision}"
     except ReviewDocumentStateError as exc:
         download_warning = str(exc)
     except HandoverXlsxWriteQueueTimeoutError as exc:

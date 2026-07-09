@@ -132,7 +132,13 @@ class HandoverXlsxWriteQueueService:
             self._workers[key] = worker
             worker.start()
 
-    def enqueue_review_excel_sync(self, session: Dict[str, Any], *, target_revision: int | None = None) -> Dict[str, Any]:
+    def enqueue_review_excel_sync(
+        self,
+        session: Dict[str, Any],
+        *,
+        target_revision: int | None = None,
+        force_all_regions: bool = False,
+    ) -> Dict[str, Any]:
         building = _text(session.get("building"))
         session_id = _text(session.get("session_id"))
         revision = int(target_revision or session.get("revision", 0) or 0)
@@ -150,11 +156,16 @@ class HandoverXlsxWriteQueueService:
             task_type="review_excel_sync",
             session_id=session_id,
             dedupe_key=session_id,
-            payload={"session_id": session_id, "target_revision": revision},
+            payload={
+                "session_id": session_id,
+                "target_revision": revision,
+                "force_all_regions": bool(force_all_regions),
+            },
         )
         self.emit_log(
             f"[交接班][xlsx队列] 已入队 building={building}, task=review_excel_sync, "
-            f"session_id={session_id}, revision={revision}, job_id={job.get('job_id', '-')}"
+            f"session_id={session_id}, revision={revision}, "
+            f"force_all_regions={bool(force_all_regions)}, job_id={job.get('job_id', '-')}"
         )
         self._start_worker(building)
         return sync_state
@@ -312,7 +323,11 @@ class HandoverXlsxWriteQueueService:
         if not isinstance(session, dict):
             raise ReviewSessionNotFoundError("review session not found")
         if task_type == "review_excel_sync":
-            self.document_state.force_sync_session_dict(session, reason="xlsx_queue")
+            self.document_state.force_sync_session_dict(
+                session,
+                reason="xlsx_queue",
+                force_all_regions=bool(payload.get("force_all_regions")),
+            )
             return
         if task_type == "capacity_overlay_sync":
             self._execute_capacity_overlay(session=session, payload=payload)

@@ -785,6 +785,7 @@ class ReviewDocumentStateService:
         target_revision: int | None = None,
         reason: str = "manual",
         reconcile_sync_job: bool = True,
+        force_all_regions: bool = False,
     ) -> Dict[str, Any]:
         store = self._store(building)
         state = store.get_document(session_id)
@@ -802,7 +803,14 @@ class ReviewDocumentStateService:
         output_path = Path(output_file)
         if not output_path.exists() or not output_path.is_file():
             raise ReviewDocumentStateError(f"交接班文件不存在，无法同步最新审核内容: {output_path}")
-        dirty_regions = state.get("dirty_regions", {}) if isinstance(state.get("dirty_regions", {}), dict) else {}
+        if force_all_regions:
+            dirty_regions = {
+                "fixed_blocks": True,
+                "sections": True,
+                "footer_inventory": True,
+            }
+        else:
+            dirty_regions = state.get("dirty_regions", {}) if isinstance(state.get("dirty_regions", {}), dict) else {}
 
         store.update_sync_state(
             session_id=session_id,
@@ -857,7 +865,13 @@ class ReviewDocumentStateService:
         )
         return sync
 
-    def force_sync_session_dict(self, session: Dict[str, Any], *, reason: str = "manual") -> Dict[str, Any]:
+    def force_sync_session_dict(
+        self,
+        session: Dict[str, Any],
+        *,
+        reason: str = "manual",
+        force_all_regions: bool = False,
+    ) -> Dict[str, Any]:
         self.ensure_document_for_session(session)
         store = self._store(self._building(session))
         state = store.get_document(self._session_id(session))
@@ -879,6 +893,7 @@ class ReviewDocumentStateService:
             target_revision=document_revision or None,
             reason=reason,
             reconcile_sync_job=True,
+            force_all_regions=force_all_regions,
         )
 
     def persist_defaults_from_document(
