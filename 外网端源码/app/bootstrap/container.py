@@ -85,6 +85,7 @@ _EXTERNAL_SCHEDULER_LEGACY_EXIT_SOURCE_HINTS = (
     "用户退出当前系统",
 )
 _WARNING_RE = re.compile(r"(^|:)\s*(?:\w+)?Warning:", re.IGNORECASE)
+_LEADING_LOG_TIMESTAMP_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*")
 _ERROR_PATTERNS = (
     "traceback (most recent call last):",
     "exception",
@@ -382,7 +383,7 @@ class AppContainer:
         suppress_alert_upload: bool = False,
     ) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        raw_text = str(text or "").strip()
+        raw_text = _LEADING_LOG_TIMESTAMP_RE.sub("", str(text or "").strip()).strip()
         line = f"[{timestamp}] {raw_text}"
         level = self._classify_log_level(raw_text)
         normalized_source = self._normalize_log_source(source=source, level=level, text=raw_text)

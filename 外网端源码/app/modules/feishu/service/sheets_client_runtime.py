@@ -839,6 +839,13 @@ class FeishuSheetsClientRuntime:
         end_index: int,
         pixel_size: int,
     ) -> Dict[str, Any]:
+        normalized_start_index = max(0, int(start_index or 0))
+        normalized_end_index = max(normalized_start_index, int(end_index or 0))
+        if normalized_end_index <= normalized_start_index:
+            return {
+                "updateCount": 0,
+                "majorDimension": str(major_dimension or "ROWS").strip().upper(),
+            }
         body = self._request_json_with_auth_retry(
             "PUT",
             self.DIMENSION_RANGE_URL.format(spreadsheet_token=spreadsheet_token),
@@ -846,8 +853,8 @@ class FeishuSheetsClientRuntime:
                 "dimension": {
                     "sheetId": str(sheet_id or "").strip(),
                     "majorDimension": str(major_dimension or "ROWS").strip().upper(),
-                    "startIndex": int(start_index) + 1,
-                    "endIndex": max(int(start_index) + 1, int(end_index)),
+                    "startIndex": normalized_start_index,
+                    "endIndex": normalized_end_index,
                 },
                 "dimensionProperties": {
                     "fixedSize": int(pixel_size),
@@ -902,8 +909,8 @@ class FeishuSheetsClientRuntime:
                 "dimension": {
                     "sheetId": normalized_sheet_id,
                     "majorDimension": normalized_dimension,
-                    "startIndex": normalized_start_index + 1,
-                    "endIndex": max(normalized_start_index + 1, normalized_end_index),
+                    "startIndex": normalized_start_index,
+                    "endIndex": normalized_end_index,
                 }
             },
         )

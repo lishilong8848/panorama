@@ -1502,6 +1502,7 @@ class HandoverCloudSheetSyncService:
         current_cols: int,
         target_rows: int,
         target_cols: int,
+        sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
         timings: Dict[str, int] | None = None,
     ) -> None:
         if current_rows < target_rows:
@@ -1515,14 +1516,18 @@ class HandoverCloudSheetSyncService:
             self._add_elapsed_ms(timings, "dimension_ms", started)
         elif current_rows > target_rows:
             started = time.perf_counter()
-            client.delete_dimension(
-                spreadsheet_token,
-                sheet_id=sheet_id,
-                major_dimension="ROWS",
-                start_index=target_rows,
-                end_index=current_rows,
-            )
-            self._add_elapsed_ms(timings, "dimension_ms", started)
+            try:
+                self._delete_trailing_dimension(
+                    client=client,
+                    spreadsheet_token=spreadsheet_token,
+                    sheet_id=sheet_id,
+                    major_dimension="ROWS",
+                    target_count=target_rows,
+                    current_count=current_rows,
+                    sheet_cache=sheet_cache,
+                )
+            finally:
+                self._add_elapsed_ms(timings, "dimension_ms", started)
 
         if current_cols < target_cols:
             started = time.perf_counter()
@@ -1535,14 +1540,74 @@ class HandoverCloudSheetSyncService:
             self._add_elapsed_ms(timings, "dimension_ms", started)
         elif current_cols > target_cols:
             started = time.perf_counter()
+            try:
+                self._delete_trailing_dimension(
+                    client=client,
+                    spreadsheet_token=spreadsheet_token,
+                    sheet_id=sheet_id,
+                    major_dimension="COLUMNS",
+                    target_count=target_cols,
+                    current_count=current_cols,
+                    sheet_cache=sheet_cache,
+                )
+            finally:
+                self._add_elapsed_ms(timings, "dimension_ms", started)
+
+    @staticmethod
+    def _is_stale_dimension_end_error(exc: Exception) -> bool:
+        text = str(exc or "").strip().lower()
+        return "90202" in text and "endindex" in text
+
+    def _delete_trailing_dimension(
+        self,
+        *,
+        client: FeishuSheetsClientRuntime,
+        spreadsheet_token: str,
+        sheet_id: str,
+        major_dimension: str,
+        target_count: int,
+        current_count: int,
+        sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
+    ) -> None:
+        normalized_dimension = str(major_dimension or "ROWS").strip().upper()
+        normalized_target = max(1, int(target_count or 1))
+        normalized_current = max(1, int(current_count or 1))
+        try:
             client.delete_dimension(
                 spreadsheet_token,
                 sheet_id=sheet_id,
-                major_dimension="COLUMNS",
-                start_index=target_cols,
-                end_index=current_cols,
+                major_dimension=normalized_dimension,
+                start_index=normalized_target,
+                end_index=normalized_current,
             )
-            self._add_elapsed_ms(timings, "dimension_ms", started)
+            return
+        except Exception as exc:  # noqa: BLE001
+            if not self._is_stale_dimension_end_error(exc):
+                raise
+            refreshed = self._find_sheet_by_id(
+                client.query_sheets(spreadsheet_token, sheet_cache=sheet_cache, force_refresh=True),
+                sheet_id,
+            )
+            count_key = "row_count" if normalized_dimension == "ROWS" else "column_count"
+            actual_count = max(0, int(refreshed.get(count_key, 0) or 0))
+            if actual_count <= 0 or actual_count == normalized_current:
+                raise
+
+        if actual_count < normalized_target:
+            client.add_dimension(
+                spreadsheet_token,
+                sheet_id=sheet_id,
+                major_dimension=normalized_dimension,
+                length=normalized_target - actual_count,
+            )
+        elif actual_count > normalized_target:
+            client.delete_dimension(
+                spreadsheet_token,
+                sheet_id=sheet_id,
+                major_dimension=normalized_dimension,
+                start_index=normalized_target,
+                end_index=actual_count,
+            )
 
     def _rebuild_temp_sheet(
         self,
@@ -1575,6 +1640,7 @@ class HandoverCloudSheetSyncService:
             current_cols=max(1, int(temp_sheet.get("column_count", 0) or 1)),
             target_rows=target_rows,
             target_cols=target_cols,
+            sheet_cache=sheet_cache,
             timings=timings,
         )
         refreshed_sheet = self._find_sheet_by_id(
@@ -1747,6 +1813,7 @@ class HandoverCloudSheetSyncService:
             current_cols=max(1, int(target_sheet.get("column_count", 0) or 1)),
             target_rows=target_rows,
             target_cols=target_cols,
+            sheet_cache=sheet_cache,
             timings=timings,
         )
         refreshed_sheet = self._find_sheet_by_id(

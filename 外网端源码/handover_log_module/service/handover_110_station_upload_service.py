@@ -35,10 +35,30 @@ _NIGHT_SUBSTATION_VALUE_COLUMNS = (6, 7, 8, 9, 10)
 _ROW_SPECS = [
     {"row_id": "incoming_akai", "label": "阿开", "group": "incoming", "tokens": ("阿开",)},
     {"row_id": "incoming_ajia", "label": "阿家", "group": "incoming", "tokens": ("阿家",)},
-    {"row_id": "transformer_1", "label": "1#主变", "group": "transformer", "tokens": ("#1主变", "1#主变")},
-    {"row_id": "transformer_2", "label": "2#主变", "group": "transformer", "tokens": ("#2主变", "2#主变")},
-    {"row_id": "transformer_3", "label": "3#主变", "group": "transformer", "tokens": ("#3主变", "3#主变")},
-    {"row_id": "transformer_4", "label": "4#主变", "group": "transformer", "tokens": ("#4主变", "4#主变")},
+    {
+        "row_id": "transformer_1",
+        "label": "1#主变",
+        "group": "transformer",
+        "tokens": ("#1主变", "1#主变", "1号主变"),
+    },
+    {
+        "row_id": "transformer_2",
+        "label": "2#主变",
+        "group": "transformer",
+        "tokens": ("#2主变", "2#主变", "2号主变"),
+    },
+    {
+        "row_id": "transformer_3",
+        "label": "3#主变",
+        "group": "transformer",
+        "tokens": ("#3主变", "3#主变", "3号主变"),
+    },
+    {
+        "row_id": "transformer_4",
+        "label": "4#主变",
+        "group": "transformer",
+        "tokens": ("#4主变", "4#主变", "4号主变"),
+    },
 ]
 _VALUE_KEYS = ("line_voltage", "current", "power_kw", "power_factor", "load_rate")
 
@@ -157,7 +177,12 @@ def _count_source_sheet_data_rows(worksheet: Any) -> int:
 
 
 def _normalize_match_text(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "").strip()).replace("（", "(").replace("）", ")")
+    return (
+        re.sub(r"\s+", "", str(value or "").strip())
+        .replace("（", "(")
+        .replace("）", ")")
+        .replace("＃", "#")
+    )
 
 
 def _normalize_column_indexes(values: Sequence[Any]) -> List[int]:
@@ -170,6 +195,17 @@ def _normalize_column_indexes(values: Sequence[Any]) -> List[int]:
         if column > 0 and column not in columns:
             columns.append(column)
     return columns
+
+
+def _runtime_path_identity(config: Dict[str, Any], value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    path = _resolve_runtime_file_path(config, text)
+    try:
+        return str(path.resolve(strict=False)).casefold()
+    except Exception:  # noqa: BLE001
+        return str(path.absolute()).casefold()
 
 
 def _empty_cloud_sync(status: str = "") -> Dict[str, Any]:
@@ -375,19 +411,77 @@ class Handover110StationUploadService:
     def _parse_workbook(self, path: Path, *, duty_shift: str) -> Dict[str, Any]:
         workbook = load_workbook_quietly(path, data_only=True)
         try:
-            layout = self._substation_parse_layout(duty_shift)
-            substation_sheet_index = int(layout.get("sheet_index", _DAY_SUBSTATION_SHEET_INDEX) or _DAY_SUBSTATION_SHEET_INDEX)
-            required_sheet_count = substation_sheet_index + 1
-            if len(workbook.worksheets) < required_sheet_count:
-                required_text = "3个sheet页" if _normalize_shift(duty_shift) == "night" else "2个sheet页"
-                raise ValueError(f"110站{('夜班' if _normalize_shift(duty_shift) == 'night' else '白班')}文件至少需要包含{required_text}")
+            if not workbook.worksheets:
+                raise ValueError("110站文件没有可读取的sheet页")
+            requested_shift = _normalize_shift(duty_shift) or "day"
+            opposite_shift = "night" if requested_shift == "day" else "day"
             first_ws = workbook.worksheets[0]
-            substation_ws = workbook.worksheets[substation_sheet_index]
-            parsed_rows = self._parse_substation_sheet(
-                substation_ws,
-                label_columns=layout["label_columns"],
-                value_columns=layout["value_columns"],
-            )
+            attempts: List[Dict[str, Any]] = []
+            selected: Dict[str, Any] = {}
+            shift_mismatch: Dict[str, Any] = {}
+            for candidate_shift in (requested_shift, opposite_shift):
+                layout = self._substation_parse_layout(candidate_shift)
+                preferred_index = int(layout.get("sheet_index", 0) or 0)
+                sheet_indexes = [preferred_index] if preferred_index < len(workbook.worksheets) else []
+                sheet_indexes.extend(
+                    index for index in range(len(workbook.worksheets)) if index not in sheet_indexes
+                )
+                for sheet_index in sheet_indexes:
+                    worksheet = workbook.worksheets[sheet_index]
+                    rows, missing = self._match_substation_sheet(
+                        worksheet,
+                        label_columns=layout["label_columns"],
+                        value_columns=layout["value_columns"],
+                    )
+                    candidate = {
+                        "shift": candidate_shift,
+                        "layout": str(layout.get("layout", "")).strip(),
+                        "label_columns": list(layout["label_columns"]),
+                        "value_columns": list(layout["value_columns"]),
+                        "sheet_index": sheet_index,
+                        "worksheet": worksheet,
+                        "rows": rows,
+                        "missing": missing,
+                    }
+                    attempts.append(candidate)
+                    if missing:
+                        continue
+                    if candidate_shift == requested_shift:
+                        selected = candidate
+                    else:
+                        shift_mismatch = candidate
+                    break
+                if selected or shift_mismatch:
+                    break
+
+            if not selected:
+                if shift_mismatch:
+                    requested_text = "白班" if requested_shift == "day" else "夜班"
+                    detected_text = "白班" if shift_mismatch["shift"] == "day" else "夜班"
+                    mismatch_ws = shift_mismatch["worksheet"]
+                    raise ValueError(
+                        f"110站文件识别为{detected_text}版式，与当前{requested_text}批次不一致；"
+                        f"识别sheet={mismatch_ws.title}，请切换到正确班次后重新上传"
+                    )
+                best = min(
+                    attempts,
+                    key=lambda item: (len(item.get("missing", [])), int(item.get("sheet_index", 0))),
+                    default={},
+                )
+                if best:
+                    best_ws = best["worksheet"]
+                    missing_text = ", ".join(best.get("missing", [])) or "未知"
+                    raise ValueError(
+                        "110站目标sheet未识别到完整关键行: "
+                        f"最佳候选={best_ws.title}(第{int(best['sheet_index']) + 1}页), "
+                        f"layout={best.get('layout', '-')}, "
+                        f"已识别={len(best.get('rows', []))}/{len(_ROW_SPECS)}, 缺少={missing_text}"
+                    )
+                raise ValueError("110站目标sheet未识别到关键行")
+
+            substation_ws = selected["worksheet"]
+            substation_sheet_index = int(selected["sheet_index"])
+            parsed_rows = selected["rows"]
             main_transformer_parse_error = ""
             try:
                 main_transformer_rows = parse_110_main_transformer_rows(path, strict=False)
@@ -405,9 +499,11 @@ class Handover110StationUploadService:
                 "substation_sheet": {
                     "title": str(substation_ws.title or "").strip(),
                     "sheet_index": substation_sheet_index + 1,
-                    "layout": str(layout.get("layout", "")).strip(),
-                    "label_columns": list(layout["label_columns"]),
-                    "value_columns": list(layout["value_columns"]),
+                    "layout": str(selected.get("layout", "")).strip(),
+                    "requested_shift": requested_shift,
+                    "detected_shift": str(selected.get("shift", "")).strip(),
+                    "label_columns": list(selected["label_columns"]),
+                    "value_columns": list(selected["value_columns"]),
                     "max_row": int(substation_ws.max_row or 0),
                     "max_column": int(substation_ws.max_column or 0),
                     "parsed_row_count": len(parsed_rows),
@@ -426,6 +522,22 @@ class Handover110StationUploadService:
         label_columns: Sequence[int],
         value_columns: Sequence[int],
     ) -> List[Dict[str, Any]]:
+        rows, missing = self._match_substation_sheet(
+            worksheet,
+            label_columns=label_columns,
+            value_columns=value_columns,
+        )
+        if missing:
+            raise ValueError(f"110站目标sheet未识别到关键行: {', '.join(missing)}")
+        return rows
+
+    def _match_substation_sheet(
+        self,
+        worksheet: Any,
+        *,
+        label_columns: Sequence[int],
+        value_columns: Sequence[int],
+    ) -> tuple[List[Dict[str, Any]], List[str]]:
         matched: Dict[str, Dict[str, Any]] = {}
         safe_label_columns = _normalize_column_indexes(label_columns)
         safe_value_columns = _normalize_column_indexes(value_columns)
@@ -461,9 +573,44 @@ class Handover110StationUploadService:
                 break
 
         missing = [spec["label"] for spec in _ROW_SPECS if spec["row_id"] not in matched]
+        rows = [matched[spec["row_id"]] for spec in _ROW_SPECS if spec["row_id"] in matched]
+        return rows, missing
+
+    @staticmethod
+    def _normalize_edited_substation_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for raw in rows or []:
+            if not isinstance(raw, dict):
+                continue
+            row_id = str(raw.get("row_id", "") or "").strip()
+            spec = next((item for item in _ROW_SPECS if item["row_id"] == row_id), None)
+            if spec is None or row_id in by_id:
+                continue
+            row = {
+                "row_id": row_id,
+                "label": spec["label"],
+                "group": spec["group"],
+            }
+            for key in _VALUE_KEYS:
+                value = raw.get(key, "")
+                row[key] = "" if value is None else str(value).strip()
+            by_id[row_id] = row
+
+        missing = [spec["label"] for spec in _ROW_SPECS if spec["row_id"] not in by_id]
+        blank = [
+            spec["label"]
+            for spec in _ROW_SPECS
+            if spec["row_id"] in by_id
+            and not any(str(by_id[spec["row_id"]].get(key, "")).strip() for key in _VALUE_KEYS)
+        ]
+        problems: List[str] = []
         if missing:
-            raise ValueError(f"110站目标sheet未识别到关键行: {', '.join(missing)}")
-        return [matched[spec["row_id"]] for spec in _ROW_SPECS]
+            problems.append(f"缺少行: {', '.join(missing)}")
+        if blank:
+            problems.append(f"整行无数据: {', '.join(blank)}")
+        if problems:
+            raise ValueError(f"110站识别结果不完整，{'；'.join(problems)}")
+        return [by_id[spec["row_id"]] for spec in _ROW_SPECS]
 
     def _ensure_cloud_batch(
         self,
@@ -572,19 +719,22 @@ class Handover110StationUploadService:
     ) -> Dict[str, Any]:
         context = self.resolve_context(duty_date=duty_date, duty_shift=duty_shift)
         batch_key = context["batch_key"]
-        next_rows = [dict(item) for item in (rows or []) if isinstance(item, dict)]
-        if not next_rows:
-            raise ValueError("110站识别结果不能为空")
+        next_rows = self._normalize_edited_substation_rows(rows)
         with _batch_lock(batch_key):
             current = self._load_state(batch_key)
             current_status = str(current.get("status", "") or "").strip().lower()
+            recovered_from_failure = current_status == "failed"
+            if recovered_from_failure:
+                stored_path = _resolve_runtime_file_path(self.config, current.get("stored_path", ""))
+                if not stored_path.exists():
+                    raise ValueError(f"110站上传文件不存在，无法恢复解析状态: {stored_path}")
             payload = {
                 **current,
                 "batch_key": batch_key,
                 "duty_date": context["duty_date"],
                 "duty_shift": context["duty_shift"],
-                "status": current_status or "parsed",
-                "error": "" if current_status != "failed" else str(current.get("error", "") or "").strip(),
+                "status": "success" if recovered_from_failure else (current_status or "parsed"),
+                "error": "",
                 "parsed_110kv_rows": next_rows,
                 "parsed_main_transformer_rows": normalize_110_main_transformer_rows(
                     main_transformer_rows
@@ -594,10 +744,13 @@ class Handover110StationUploadService:
                 "main_transformer_parse_error": "",
                 "updated_at": _now_text(),
             }
-            saved_state = self._save_state(batch_key, payload)
+            if recovered_from_failure:
+                payload["cloud_sync"] = _empty_cloud_sync("pending")
             self._save_substation_rows(batch_key=batch_key, rows=next_rows)
+            saved_state = self._save_state(batch_key, payload)
             emit_log(
-                f"[交接班][110站解析] 前端修改已保存 batch={batch_key}, rows={len(next_rows)}"
+                f"[交接班][110站解析] 前端修改已保存 batch={batch_key}, rows={len(next_rows)}, "
+                f"recovered={recovered_from_failure}"
             )
             return {
                 "ok": True,
@@ -820,6 +973,25 @@ class Handover110StationUploadService:
         state = self._load_state(target_batch)
         if str(state.get("status", "")).strip().lower() != "success":
             return {"status": "skipped", "reason": "no_success_upload", "upload": state}
+        cloud_sync = state.get("cloud_sync", {}) if isinstance(state.get("cloud_sync", {}), dict) else {}
+        batch_meta = self._review_service.get_cloud_batch(target_batch) or {}
+        stored_identity = _runtime_path_identity(self.config, state.get("stored_path", ""))
+        synced_identity = _runtime_path_identity(self.config, cloud_sync.get("source_file", ""))
+        cloud_token = str(cloud_sync.get("spreadsheet_token", "") or "").strip()
+        batch_token = str(batch_meta.get("spreadsheet_token", "") or "").strip()
+        if (
+            str(cloud_sync.get("status", "") or "").strip().lower() == "success"
+            and stored_identity
+            and stored_identity == synced_identity
+            and cloud_token
+            and cloud_token == batch_token
+        ):
+            emit_log(f"[交接班][110站云表] 同一文件已同步成功，本次跳过 batch={target_batch}")
+            return {
+                "status": "skipped",
+                "reason": "already_synced_same_source",
+                "upload": state,
+            }
         synced = self._sync_state_to_cloud(state=state, emit_log=emit_log)
         return {
             "status": str(synced.get("cloud_sync", {}).get("status", "")).strip().lower() or "failed",
