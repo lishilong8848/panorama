@@ -208,6 +208,50 @@ class HandoverDownloadService:
         base_cfg["report_kind"] = "building_full_cabinet_power"
         return base_cfg
 
+    def _air_conditioner_temperature_humidity_download_config(self) -> Dict[str, Any]:
+        base_cfg = copy.deepcopy(
+            self.config.get("download", {}) if isinstance(self.config.get("download", {}), dict) else {}
+        )
+        root_cfg = (
+            self.config.get("air_conditioner_temperature_humidity", {})
+            if isinstance(self.config.get("air_conditioner_temperature_humidity", {}), dict)
+            else {}
+        )
+        download_cfg = (
+            root_cfg.get("download", {})
+            if isinstance(root_cfg.get("download", {}), dict)
+            else {}
+        )
+        base_cfg.update(copy.deepcopy(download_cfg))
+        base_cfg["template_name"] = str(
+            download_cfg.get("template_name")
+            or root_cfg.get("template_name")
+            or "空调温湿度报表"
+        ).strip()
+        # 该报表只填写开始时间、结束时间和查询刻度，不能触发配置 Sheet 控件。
+        base_cfg["sheet_name"] = ""
+        base_cfg["scale_label"] = str(
+            download_cfg.get("scale_label")
+            or root_cfg.get("scale_label")
+            or "5分钟"
+        ).strip()
+        base_cfg["export_button_text"] = str(
+            download_cfg.get("export_button_text")
+            or root_cfg.get("export_button_text")
+            or base_cfg.get("export_button_text")
+            or "原样导出"
+        ).strip()
+        base_cfg["query_result_timeout_ms"] = max(
+            _as_int(base_cfg.get("query_result_timeout_ms", 120000), 120000),
+            120000,
+        )
+        base_cfg["page_refresh_retry_count"] = max(
+            _as_int(base_cfg.get("page_refresh_retry_count", 2), 2),
+            2,
+        )
+        base_cfg["report_kind"] = "air_conditioner_temperature_humidity"
+        return base_cfg
+
     @staticmethod
     def _top5_monthly_report_template_name(building: str) -> str:
         normalized = str(building or "").strip()
@@ -492,6 +536,29 @@ class HandoverDownloadService:
             emit_log=emit_log,
         )
         result["report_kind"] = "building_full_cabinet_power"
+        return result
+
+    def run_air_conditioner_temperature_humidity_only(
+        self,
+        buildings: List[str] | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        switch_network: bool = True,
+        reuse_cached: bool = True,
+        emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        cloned_service = self._clone_with_download_config(
+            self._air_conditioner_temperature_humidity_download_config()
+        )
+        result = cloned_service.run(
+            buildings=buildings,
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=switch_network,
+            reuse_cached=reuse_cached,
+            emit_log=emit_log,
+        )
+        result["report_kind"] = "air_conditioner_temperature_humidity"
         return result
 
     def run_top5_monthly_report_only(

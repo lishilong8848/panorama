@@ -81,6 +81,7 @@ _LATEST_REFRESHABLE_SOURCE_FAMILIES = {
     "branch_current_family": "支路电流源文件",
     "branch_switch_family": "支路开关源文件",
     "building_full_cabinet_power_family": "楼栋全机柜功率源文件",
+    "air_conditioner_temperature_humidity_family": "空调温湿度源文件",
     "chiller_mode_switch_family": "制冷单元模式切换参数源文件",
     "alarm_event_family": "告警信息源文件",
 }
@@ -118,6 +119,7 @@ def _internal_summary_has_runtime_signal(payload: Any) -> bool:
         "branch_current_family",
         "branch_switch_family",
         "building_full_cabinet_power_family",
+        "air_conditioner_temperature_humidity_family",
         "chiller_mode_switch_family",
         "alarm_event_family",
     ):
@@ -170,6 +172,7 @@ def _wrap_internal_light_snapshot(snapshot: Any) -> Dict[str, Any]:
         "branch_current_family",
         "branch_switch_family",
         "building_full_cabinet_power_family",
+        "air_conditioner_temperature_humidity_family",
         "alarm_event_family",
     )
     if not any(isinstance(raw.get(key), dict) for key in family_keys) and "current_hour_bucket" not in raw:

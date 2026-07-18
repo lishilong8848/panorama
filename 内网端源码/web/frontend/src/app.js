@@ -8,6 +8,7 @@ const SOURCE_FAMILIES = [
   ["branch_current_family", "支路电流源文件"],
   ["branch_switch_family", "支路开关源文件"],
   ["building_full_cabinet_power_family", "楼栋全机柜功率源文件"],
+  ["air_conditioner_temperature_humidity_family", "空调温湿度源文件"],
   ["chiller_mode_switch_family", "制冷单元模式切换参数源文件"],
   ["alarm_event_family", "告警信息源文件"],
   ["alarm_rule_export_family", "告警规则导出文件"],
@@ -24,11 +25,11 @@ const SOURCE_FILTERS = [
   { key: "all", label: "全部", families: SOURCE_FAMILIES.map(([key]) => key) },
   { key: "problem", label: "只看异常", families: SOURCE_FAMILIES.map(([key]) => key) },
   { key: "hourly", label: "当前小时", families: ["handover_log_family", "handover_capacity_report_family"] },
-  { key: "daily", label: "每日整日", families: ["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family"] },
+  { key: "daily", label: "每日整日", families: ["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family", "air_conditioner_temperature_humidity_family"] },
   { key: "monthly", label: "月报/TOP5", families: ["monthly_report_family", "top5_monthly_report_family", "alarm_rule_export_family"] },
   { key: "special", label: "告警/制冷", families: ["alarm_event_family", "chiller_mode_switch_family"] },
 ];
-const DAILY_SOURCE_FAMILIES = new Set(["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family"]);
+const DAILY_SOURCE_FAMILIES = new Set(["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family", "air_conditioner_temperature_humidity_family"]);
 const MONTHLY_SOURCE_FAMILIES = new Set(["monthly_report_family", "top5_monthly_report_family", "alarm_rule_export_family"]);
 const HOURLY_SOURCE_FAMILIES = new Set(["handover_log_family", "handover_capacity_report_family"]);
 const SPECIAL_SOURCE_FAMILIES = new Set(["alarm_event_family", "chiller_mode_switch_family"]);

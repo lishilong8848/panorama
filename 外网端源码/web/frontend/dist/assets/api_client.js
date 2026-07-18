@@ -175,6 +175,10 @@ export async function submitSystemScreenshotUploadJob(payload = {}) {
   return startJsonJobApi("/api/jobs/system-screenshot/upload", payload || {});
 }
 
+export async function submitTemperatureHumidityUploadJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/temperature-humidity/upload", payload || {});
+}
+
 export async function getJobApi(jobId) {
   return apiJson(`/api/jobs/${jobId}`);
 }
@@ -477,6 +481,25 @@ export async function getSystemScreenshotUploadSchedulerStatusApi() {
 
 export async function saveSystemScreenshotUploadSchedulerConfigApi(payload) {
   return apiJson("/api/scheduler/system-screenshot-upload/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function startTemperatureHumidityUploadSchedulerApi() {
+  return apiJson("/api/scheduler/temperature-humidity-upload/start", { method: "POST", body: "{}" });
+}
+
+export async function stopTemperatureHumidityUploadSchedulerApi() {
+  return apiJson("/api/scheduler/temperature-humidity-upload/stop", { method: "POST", body: "{}" });
+}
+
+export async function getTemperatureHumidityUploadSchedulerStatusApi() {
+  return apiJson("/api/scheduler/temperature-humidity-upload/status");
+}
+
+export async function saveTemperatureHumidityUploadSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/temperature-humidity-upload/config", {
     method: "POST",
     body: JSON.stringify(payload),
   });

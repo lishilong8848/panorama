@@ -250,6 +250,13 @@ def present_scheduler_overview_items(
             ("features", "system_screenshot_upload", "scheduler"),
         )
     )
+    temperature_humidity_upload_cfg = _dict(
+        _cfg_get(
+            config_payload,
+            ("temperature_humidity_upload", "scheduler"),
+            ("features", "temperature_humidity_upload", "scheduler"),
+        )
+    )
     monthly_event_cfg = _dict(
         _cfg_get(
             config_payload,
@@ -273,6 +280,9 @@ def present_scheduler_overview_items(
     branch_power_snapshot = _dict(summary_payload.get("branch_power_upload_scheduler"))
     alarm_snapshot = _dict(summary_payload.get("alarm_event_upload_scheduler"))
     system_screenshot_upload_snapshot = _dict(summary_payload.get("system_screenshot_upload_scheduler"))
+    temperature_humidity_upload_snapshot = _dict(
+        summary_payload.get("temperature_humidity_upload_scheduler")
+    )
     monthly_event_snapshot = _dict(summary_payload.get("monthly_event_report_scheduler"))
     monthly_change_snapshot = _dict(summary_payload.get("monthly_change_report_scheduler"))
 
@@ -284,6 +294,10 @@ def present_scheduler_overview_items(
     branch_power_display = present_scheduler_state(branch_power_snapshot, role_mode=role_mode)
     alarm_display = present_scheduler_state(alarm_snapshot, role_mode=role_mode)
     system_screenshot_upload_display = present_scheduler_state(system_screenshot_upload_snapshot, role_mode=role_mode)
+    temperature_humidity_upload_display = present_scheduler_state(
+        temperature_humidity_upload_snapshot,
+        role_mode=role_mode,
+    )
     monthly_event_display = present_scheduler_state(monthly_event_snapshot, role_mode=role_mode)
     monthly_change_display = present_scheduler_state(monthly_change_snapshot, role_mode=role_mode)
 
@@ -565,6 +579,36 @@ def present_scheduler_overview_items(
                     next_run_time=system_screenshot_upload_snapshot.get("next_run_time"),
                     last_trigger_at=system_screenshot_upload_snapshot.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(system_screenshot_upload_snapshot.get("last_trigger_result")),
+                )
+            ],
+        },
+        {
+            "key": "temperature_humidity_upload",
+            "title": "空调温湿度上传",
+            "module_id": "temperature_humidity_upload",
+            "focus_key": "",
+            "tone": temperature_humidity_upload_display.get("tone", "neutral"),
+            "status_text": temperature_humidity_upload_display.get("status_text", "未启动"),
+            "summary_text": _summary_choice(
+                _map_scheduler_decision_text(
+                    temperature_humidity_upload_snapshot.get("last_decision")
+                ),
+                _map_scheduler_trigger_text(
+                    temperature_humidity_upload_snapshot.get("last_trigger_result")
+                ),
+                temperature_humidity_upload_display.get("summary_text", ""),
+                fallback="每天读取 A-E 楼空调温湿度源文件并全量替换目标表",
+            ),
+            "parts": [
+                _overview_part(
+                    label="每日调度",
+                    run_time_text=_text(temperature_humidity_upload_cfg.get("run_time"))
+                    or "未设置",
+                    next_run_time=temperature_humidity_upload_snapshot.get("next_run_time"),
+                    last_trigger_at=temperature_humidity_upload_snapshot.get("last_trigger_at"),
+                    result_text=_map_scheduler_trigger_text(
+                        temperature_humidity_upload_snapshot.get("last_trigger_result")
+                    ),
                 )
             ],
         },

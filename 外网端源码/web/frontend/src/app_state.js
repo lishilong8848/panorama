@@ -625,6 +625,27 @@ export function createAppState(vueApi) {
         callback_name: "",
       },
     },
+    temperature_humidity_upload: {
+      enabled: false,
+      scheduler: {
+        enabled: false,
+        running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
+        status: "未初始化",
+        run_time: "02:30:00",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "",
+      },
+    },
     deployment: {
       role_mode: "",
       node_id: "",
@@ -769,6 +790,7 @@ export function createAppState(vueApi) {
   const branchPowerUploadSchedulerQuickSaving = ref(false);
   const alarmEventUploadSchedulerQuickSaving = ref(false);
   const systemScreenshotUploadSchedulerQuickSaving = ref(false);
+  const temperatureHumidityUploadSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
   const schedulerToggleState = reactive({
@@ -780,6 +802,7 @@ export function createAppState(vueApi) {
     branch_power_upload: { mode: "idle", rememberedOverride: null },
     alarm_event_upload: { mode: "idle", rememberedOverride: null },
     system_screenshot_upload: { mode: "idle", rememberedOverride: null },
+    temperature_humidity_upload: { mode: "idle", rememberedOverride: null },
     monthly_event_report: { mode: "idle", rememberedOverride: null },
     monthly_change_report: { mode: "idle", rememberedOverride: null },
   });
@@ -825,6 +848,7 @@ export function createAppState(vueApi) {
   const alarmRuleExportUploadYear = ref(String(new Date().getFullYear()));
   const alarmRuleExportUploadMonth = ref(new Date().getMonth() + 1);
   const systemScreenshotUploadDate = ref(todayText());
+  const temperatureHumidityUploadDate = ref(todayText());
   const handoverFile = ref(null);
   const handoverFilesByBuilding = reactive({});
   const handoverDutyDate = ref(todayText());
@@ -2046,6 +2070,7 @@ export function createAppState(vueApi) {
     branchPowerUploadSchedulerQuickSaving,
     alarmEventUploadSchedulerQuickSaving,
     systemScreenshotUploadSchedulerQuickSaving,
+    temperatureHumidityUploadSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
     schedulerToggleState,
@@ -2079,6 +2104,7 @@ export function createAppState(vueApi) {
     alarmRuleExportUploadYear,
     alarmRuleExportUploadMonth,
     systemScreenshotUploadDate,
+    temperatureHumidityUploadDate,
     handoverFile,
     handoverFilesByBuilding,
     handoverDutyDate,

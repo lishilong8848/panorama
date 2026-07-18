@@ -14,6 +14,7 @@ from app.shared.utils.atomic_file import (
     validate_non_empty_file,
 )
 from app.shared.utils.artifact_naming import (
+    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
     FAMILY_CHILLER_MODE_SWITCH,
@@ -376,6 +377,8 @@ class HandoverSourceFileCacheService:
             return FAMILY_BRANCH_POWER
         if "制冷单元模式切换参数" in text:
             return FAMILY_CHILLER_MODE_SWITCH
+        if "空调温湿度报表" in text:
+            return FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
         if "容量" in text or "每日报表合集" in text:
             return FAMILY_HANDOVER_CAPACITY_REPORT
         return FAMILY_HANDOVER_LOG

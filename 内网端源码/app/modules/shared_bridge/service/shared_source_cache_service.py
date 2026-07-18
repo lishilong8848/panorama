@@ -57,6 +57,7 @@ FAMILY_BRANCH_POWER = "branch_power_family"
 FAMILY_BRANCH_CURRENT = "branch_current_family"
 FAMILY_BRANCH_SWITCH = "branch_switch_family"
 FAMILY_BUILDING_FULL_CABINET_POWER = "building_full_cabinet_power_family"
+FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY = "air_conditioner_temperature_humidity_family"
 FAMILY_CHILLER_MODE_SWITCH = "chiller_mode_switch_family"
 LEGACY_FAMILY_ALIASES = {
     FAMILY_HANDOVER_LOG: ("handover_family",),
@@ -72,6 +73,7 @@ FAMILY_DIR_NAMES = {
     FAMILY_BRANCH_CURRENT: "branch_current",
     FAMILY_BRANCH_SWITCH: "branch_switch",
     FAMILY_BUILDING_FULL_CABINET_POWER: "building_full_cabinet_power",
+    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: "air_conditioner_temperature_humidity",
     FAMILY_CHILLER_MODE_SWITCH: "chiller_mode_switch",
 }
 FAMILY_LABELS = {
@@ -84,6 +86,7 @@ FAMILY_LABELS = {
     FAMILY_BRANCH_CURRENT: "支路电流源文件",
     FAMILY_BRANCH_SWITCH: "支路开关源文件",
     FAMILY_BUILDING_FULL_CABINET_POWER: "楼栋全机柜功率源文件",
+    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: "空调温湿度源文件",
     FAMILY_CHILLER_MODE_SWITCH: "制冷单元模式切换参数源文件",
 }
 DAILY_AUTO_SOURCE_FAMILIES = (
@@ -91,6 +94,7 @@ DAILY_AUTO_SOURCE_FAMILIES = (
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_SWITCH,
     FAMILY_BUILDING_FULL_CABINET_POWER,
+    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
 )
 
 ALARM_EVENT_BITABLE_TARGET_FIELDS = {
@@ -269,6 +273,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_CURRENT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_BRANCH_SWITCH: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_BUILDING_FULL_CABINET_POWER: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_CHILLER_MODE_SWITCH: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
         }
         self._light_building_status: Dict[str, Dict[str, Dict[str, Any]]] = {
@@ -281,6 +286,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_CURRENT: {},
             FAMILY_BRANCH_SWITCH: {},
             FAMILY_BUILDING_FULL_CABINET_POWER: {},
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: {},
             FAMILY_CHILLER_MODE_SWITCH: {},
         }
         self._current_hour_refresh: Dict[str, Any] = {
@@ -571,6 +577,7 @@ class SharedSourceCacheService:
         branch_current_bucket = self.branch_power_day_bucket()
         branch_switch_bucket = self.branch_power_day_bucket()
         building_full_cabinet_power_bucket = self.building_full_cabinet_power_day_bucket()
+        air_conditioner_temperature_humidity_bucket = self.air_conditioner_temperature_humidity_day_bucket()
         chiller_mode_switch_bucket = (
             str(self._family_status.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
             or self.current_chiller_mode_switch_bucket()
@@ -588,6 +595,9 @@ class SharedSourceCacheService:
         self._family_status.setdefault(FAMILY_BRANCH_CURRENT, {})["current_bucket"] = branch_current_bucket
         self._family_status.setdefault(FAMILY_BRANCH_SWITCH, {})["current_bucket"] = branch_switch_bucket
         self._family_status.setdefault(FAMILY_BUILDING_FULL_CABINET_POWER, {})["current_bucket"] = building_full_cabinet_power_bucket
+        self._family_status.setdefault(FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY, {})[
+            "current_bucket"
+        ] = air_conditioner_temperature_humidity_bucket
         self._family_status.setdefault(FAMILY_CHILLER_MODE_SWITCH, {})["current_bucket"] = chiller_mode_switch_bucket
         for family_name, bucket_key in (
             (FAMILY_HANDOVER_LOG, current_bucket),
@@ -599,6 +609,7 @@ class SharedSourceCacheService:
             (FAMILY_BRANCH_CURRENT, branch_current_bucket),
             (FAMILY_BRANCH_SWITCH, branch_switch_bucket),
             (FAMILY_BUILDING_FULL_CABINET_POWER, building_full_cabinet_power_bucket),
+            (FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY, air_conditioner_temperature_humidity_bucket),
             (FAMILY_CHILLER_MODE_SWITCH, chiller_mode_switch_bucket),
         ):
             family_cache = self._light_building_status.setdefault(family_name, {})
@@ -835,6 +846,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_CURRENT,
             FAMILY_BRANCH_SWITCH,
             FAMILY_BUILDING_FULL_CABINET_POWER,
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
         }:
             bucket_scope_text = "整日"
         elif family_key == FAMILY_MONTHLY_REPORT:
@@ -868,6 +880,9 @@ class SharedSourceCacheService:
         include_latest_selection = True
         alarm_bucket = str(families.get(FAMILY_ALARM_EVENT, {}).get("current_bucket", "") or "").strip() or self.current_alarm_bucket()
         branch_bucket = self.branch_power_day_bucket()
+        air_conditioner_temperature_humidity_bucket = (
+            self.air_conditioner_temperature_humidity_day_bucket()
+        )
         chiller_mode_switch_bucket = (
             str(families.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
             or self.current_chiller_mode_switch_bucket()
@@ -951,6 +966,18 @@ class SharedSourceCacheService:
             building_full_cabinet_power_family = {"current_bucket": branch_bucket, "buildings": []}
             snapshot_error = snapshot_error or str(exc)
         try:
+            air_conditioner_temperature_humidity_family = self._build_family_health_snapshot(
+                source_family=FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+                current_bucket=air_conditioner_temperature_humidity_bucket,
+                include_latest_selection=include_latest_selection,
+            )
+        except Exception as exc:  # noqa: BLE001
+            air_conditioner_temperature_humidity_family = {
+                "current_bucket": air_conditioner_temperature_humidity_bucket,
+                "buildings": [],
+            }
+            snapshot_error = snapshot_error or str(exc)
+        try:
             chiller_mode_switch_family = self._build_family_health_snapshot(
                 source_family=FAMILY_CHILLER_MODE_SWITCH,
                 current_bucket=chiller_mode_switch_bucket,
@@ -987,6 +1014,10 @@ class SharedSourceCacheService:
             **families.get(FAMILY_BUILDING_FULL_CABINET_POWER, {}),
             **building_full_cabinet_power_family,
         }
+        families[FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY] = {
+            **families.get(FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY, {}),
+            **air_conditioner_temperature_humidity_family,
+        }
         families[FAMILY_CHILLER_MODE_SWITCH] = {
             **families.get(FAMILY_CHILLER_MODE_SWITCH, {}),
             **chiller_mode_switch_family,
@@ -1011,6 +1042,10 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_CURRENT: families.get(FAMILY_BRANCH_CURRENT, {}),
             FAMILY_BRANCH_SWITCH: families.get(FAMILY_BRANCH_SWITCH, {}),
             FAMILY_BUILDING_FULL_CABINET_POWER: families.get(FAMILY_BUILDING_FULL_CABINET_POWER, {}),
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: families.get(
+                FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+                {},
+            ),
             FAMILY_CHILLER_MODE_SWITCH: families.get(FAMILY_CHILLER_MODE_SWITCH, {}),
             FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
         }
@@ -1405,6 +1440,11 @@ class SharedSourceCacheService:
                 current_bucket=self.building_full_cabinet_power_day_bucket(),
                 buildings=buildings,
             ),
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: self._build_fast_external_family_from_index(
+                source_family=FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+                current_bucket=self.air_conditioner_temperature_humidity_day_bucket(),
+                buildings=buildings,
+            ),
             FAMILY_CHILLER_MODE_SWITCH: self._build_fast_external_family_from_index(
                 source_family=FAMILY_CHILLER_MODE_SWITCH,
                 current_bucket=str(self._family_status.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
@@ -1499,7 +1539,17 @@ class SharedSourceCacheService:
                 family = self._normalize_source_family(str(item or ""))
                 if family in DAILY_AUTO_SOURCE_FAMILIES and family not in normalized_daily_families:
                     normalized_daily_families.append(family)
-        self._daily_source_families = tuple(normalized_daily_families or DAILY_AUTO_SOURCE_FAMILIES)
+        if not normalized_daily_families:
+            normalized_daily_families = list(DAILY_AUTO_SOURCE_FAMILIES)
+        # 旧配置中的 families 列表不包含新增报表；升级后按业务要求自动纳入每日下载。
+        elif (
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
+            not in normalized_daily_families
+        ):
+            normalized_daily_families.append(
+                FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
+            )
+        self._daily_source_families = tuple(normalized_daily_families)
         chiller_mode_switch_cfg = (
             self.runtime_config.get("handover_log", {}).get("chiller_mode_switch", {})
             if isinstance(self.runtime_config.get("handover_log", {}), dict)
@@ -1520,6 +1570,11 @@ class SharedSourceCacheService:
         self._branch_switch_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_BRANCH_SWITCH] if self.shared_root else None
         self._building_full_cabinet_power_cache_root = (
             self.shared_root / FAMILY_LABELS[FAMILY_BUILDING_FULL_CABINET_POWER] if self.shared_root else None
+        )
+        self._air_conditioner_temperature_humidity_cache_root = (
+            self.shared_root / FAMILY_LABELS[FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY]
+            if self.shared_root
+            else None
         )
         self._chiller_mode_switch_cache_root = self.shared_root / FAMILY_LABELS[FAMILY_CHILLER_MODE_SWITCH] if self.shared_root else None
         self._tmp_root = self.shared_root / "tmp" / "source_cache" if self.shared_root else None
@@ -1567,6 +1622,11 @@ class SharedSourceCacheService:
             return FAMILY_BRANCH_SWITCH
         if text in {FAMILY_BUILDING_FULL_CABINET_POWER, "building_full_cabinet_power"}:
             return FAMILY_BUILDING_FULL_CABINET_POWER
+        if text in {
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+            "air_conditioner_temperature_humidity",
+        }:
+            return FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
         if text in {FAMILY_CHILLER_MODE_SWITCH, "chiller_mode_switch"}:
             return FAMILY_CHILLER_MODE_SWITCH
         return text
@@ -1716,6 +1776,9 @@ class SharedSourceCacheService:
             branch_current_bucket = branch_bucket
             branch_switch_bucket = branch_bucket
             building_full_cabinet_power_bucket = self.building_full_cabinet_power_day_bucket()
+            air_conditioner_temperature_humidity_bucket = (
+                self.air_conditioner_temperature_humidity_day_bucket()
+            )
             chiller_mode_switch_bucket = (
                 str(families.get(FAMILY_CHILLER_MODE_SWITCH, {}).get("current_bucket", "") or "").strip()
                 or self.current_chiller_mode_switch_bucket()
@@ -1768,6 +1831,15 @@ class SharedSourceCacheService:
                 cached_rows=light_building_status.get(FAMILY_BUILDING_FULL_CABINET_POWER, {}),
                 active_downloads=active_downloads,
             )
+            air_conditioner_temperature_humidity_family = self._build_internal_light_family_snapshot(
+                source_family=FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+                current_bucket=air_conditioner_temperature_humidity_bucket,
+                cached_rows=light_building_status.get(
+                    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+                    {},
+                ),
+                active_downloads=active_downloads,
+            )
             chiller_mode_switch_family = self._build_internal_light_family_snapshot(
                 source_family=FAMILY_CHILLER_MODE_SWITCH,
                 current_bucket=chiller_mode_switch_bucket,
@@ -1803,6 +1875,10 @@ class SharedSourceCacheService:
                 **families.get(FAMILY_BUILDING_FULL_CABINET_POWER, {}),
                 **building_full_cabinet_power_family,
             }
+            families[FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY] = {
+                **families.get(FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY, {}),
+                **air_conditioner_temperature_humidity_family,
+            }
             families[FAMILY_CHILLER_MODE_SWITCH] = {
                 **families.get(FAMILY_CHILLER_MODE_SWITCH, {}),
                 **chiller_mode_switch_family,
@@ -1833,6 +1909,10 @@ class SharedSourceCacheService:
                 FAMILY_BRANCH_CURRENT: families.get(FAMILY_BRANCH_CURRENT, {}),
                 FAMILY_BRANCH_SWITCH: families.get(FAMILY_BRANCH_SWITCH, {}),
                 FAMILY_BUILDING_FULL_CABINET_POWER: families.get(FAMILY_BUILDING_FULL_CABINET_POWER, {}),
+                FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: families.get(
+                    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+                    {},
+                ),
                 FAMILY_CHILLER_MODE_SWITCH: families.get(FAMILY_CHILLER_MODE_SWITCH, {}),
                 FAMILY_ALARM_EVENT: families.get(FAMILY_ALARM_EVENT, {}),
             }
@@ -2086,6 +2166,8 @@ class SharedSourceCacheService:
             self._branch_switch_cache_root.mkdir(parents=True, exist_ok=True)
         if self._building_full_cabinet_power_cache_root is not None:
             self._building_full_cabinet_power_cache_root.mkdir(parents=True, exist_ok=True)
+        if self._air_conditioner_temperature_humidity_cache_root is not None:
+            self._air_conditioner_temperature_humidity_cache_root.mkdir(parents=True, exist_ok=True)
         if self._chiller_mode_switch_cache_root is not None:
             self._chiller_mode_switch_cache_root.mkdir(parents=True, exist_ok=True)
         self._tmp_root.mkdir(parents=True, exist_ok=True)
@@ -2107,6 +2189,11 @@ class SharedSourceCacheService:
             FAMILY_BUILDING_FULL_CABINET_POWER: (
                 str(self._building_full_cabinet_power_cache_root)
                 if self._building_full_cabinet_power_cache_root is not None
+                else ""
+            ),
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: (
+                str(self._air_conditioner_temperature_humidity_cache_root)
+                if self._air_conditioner_temperature_humidity_cache_root is not None
                 else ""
             ),
             FAMILY_CHILLER_MODE_SWITCH: str(self._chiller_mode_switch_cache_root) if self._chiller_mode_switch_cache_root is not None else "",
@@ -2214,6 +2301,11 @@ class SharedSourceCacheService:
             and self._building_full_cabinet_power_cache_root is not None
         ):
             return self._building_full_cabinet_power_cache_root
+        if (
+            normalized_family == FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
+            and self._air_conditioner_temperature_humidity_cache_root is not None
+        ):
+            return self._air_conditioner_temperature_humidity_cache_root
         if normalized_family == FAMILY_CHILLER_MODE_SWITCH and self._chiller_mode_switch_cache_root is not None:
             return self._chiller_mode_switch_cache_root
         raise RuntimeError("共享缓存根目录未配置")
@@ -3440,6 +3532,7 @@ class SharedSourceCacheService:
                         FAMILY_BRANCH_CURRENT,
                         FAMILY_BRANCH_SWITCH,
                         FAMILY_BUILDING_FULL_CABINET_POWER,
+                        FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
                     }
                     and _parse_hour_bucket(target_bucket) is None
                 ):
@@ -3927,6 +4020,27 @@ class SharedSourceCacheService:
         bucket_keys = [day_dt.replace(hour=hour).strftime("%Y-%m-%d %H") for hour in range(24)]
         return start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S"), bucket_keys
 
+    def air_conditioner_temperature_humidity_day_bucket(self, when: datetime | None = None) -> str:
+        return (when or datetime.now()).strftime("%Y-%m-%d")
+
+    def _air_conditioner_temperature_humidity_day_query_window(
+        self,
+        when: datetime | None = None,
+    ) -> tuple[str, str, List[str]]:
+        end_dt = (when or datetime.now()).replace(microsecond=0)
+        start_dt = end_dt - timedelta(minutes=20)
+        bucket_cursor = start_dt.replace(minute=0, second=0, microsecond=0)
+        bucket_end = end_dt.replace(minute=0, second=0, microsecond=0)
+        bucket_keys: List[str] = []
+        while bucket_cursor <= bucket_end:
+            bucket_keys.append(bucket_cursor.strftime("%Y-%m-%d %H"))
+            bucket_cursor += timedelta(hours=1)
+        return (
+            start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            bucket_keys,
+        )
+
     def _chiller_mode_switch_query_window(self, bucket_key: str) -> tuple[str, str]:
         end_dt = self._parse_chiller_mode_switch_bucket(bucket_key)
         start_dt = end_dt - timedelta(minutes=11)
@@ -4196,6 +4310,102 @@ class SharedSourceCacheService:
             emit_log=emit_log,
         )
         success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
+        if not success_files:
+            raise RuntimeError(f"{family_label}整日源文件下载失败: {building}")
+        item = success_files[0]
+        source_path = Path(str(item.get("file_path", "") or "").strip())
+        if not source_path.exists():
+            raise FileNotFoundError(f"下载完成后的{family_label}整日源文件不存在: {source_path}")
+        return self._store_entry(
+            source_family=source_family,
+            building=building,
+            bucket_kind="daily",
+            bucket_key=resolved_business_date,
+            duty_date=resolved_business_date,
+            duty_shift="",
+            source_path=source_path,
+            status="ready",
+            metadata=entry_metadata,
+        )
+
+    def fill_air_conditioner_temperature_humidity_day_latest(
+        self,
+        *,
+        building: str,
+        business_date: str = "",
+        bucket_key: str = "",
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        source_family = FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
+        family_label = FAMILY_LABELS.get(source_family, source_family)
+        self._ensure_internal_source_writer(f"{family_label}整日源文件补采")
+        query_end_at = datetime.now().replace(microsecond=0)
+        requested_bucket = str(business_date or bucket_key or "").strip()
+        resolved_business_date = (
+            self._date_text_from_bucket_key(requested_bucket)
+            or query_end_at.strftime("%Y-%m-%d")
+        )
+        start_time, end_time, covered_buckets = (
+            self._air_conditioner_temperature_humidity_day_query_window(
+                query_end_at
+            )
+        )
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存临时目录未配置")
+        entry_metadata = {
+            "family": source_family,
+            "building": building,
+            "granularity": "day",
+            "business_date": resolved_business_date,
+            "data_day": resolved_business_date,
+            "covered_data_hour_buckets": covered_buckets,
+            "query_start": start_time,
+            "query_end": end_time,
+            "scale_label": "5分钟",
+            "range_query": True,
+            "day_query": True,
+            "report_name": "空调温湿度报表",
+        }
+        existing_entry = self._store_existing_canonical_entry_if_ready(
+            source_family=source_family,
+            building=building,
+            bucket_kind="daily",
+            bucket_key=resolved_business_date,
+            duty_date=resolved_business_date,
+            metadata=entry_metadata,
+            emit_log=emit_log,
+        )
+        if existing_entry:
+            return existing_entry
+        temp_root = (
+            self._tmp_root
+            / "air_conditioner_temperature_humidity_daily"
+            / resolved_business_date
+            / building
+        )
+        cfg = load_handover_config(self.runtime_config)
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=temp_root,
+        )
+        emit_log(
+            f"[{family_label}整日源文件补采] 开始 building={building}, "
+            f"business_date={resolved_business_date}, query={start_time}~{end_time}, scale=5分钟"
+        )
+        result = service.run_air_conditioner_temperature_humidity_only(
+            buildings=[building],
+            start_time=start_time,
+            end_time=end_time,
+            switch_network=False,
+            reuse_cached=False,
+            emit_log=emit_log,
+        )
+        success_files = (
+            result.get("success_files", [])
+            if isinstance(result.get("success_files", []), list)
+            else []
+        )
         if not success_files:
             raise RuntimeError(f"{family_label}整日源文件下载失败: {building}")
         item = success_files[0]
@@ -6185,6 +6395,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_CURRENT,
             FAMILY_BRANCH_SWITCH,
             FAMILY_BUILDING_FULL_CABINET_POWER,
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
         } and _parse_hour_bucket(bucket_key) is None:
             bucket_kind_for_entry = "daily"
         with self._lock:
@@ -6825,19 +7036,33 @@ class SharedSourceCacheService:
                 self._last_chiller_mode_switch_run_monotonic = time.monotonic()
                 self._last_run_at = _now_text()
 
-    def _daily_source_steps(self, *, business_date: str) -> List[tuple[str, str, Callable[..., Any]]]:
+    def _daily_source_steps(
+        self,
+        *,
+        business_date: str,
+        run_at: datetime | None = None,
+    ) -> List[tuple[str, str, Callable[..., Any]]]:
         fill_funcs: Dict[str, Callable[..., Any]] = {
             FAMILY_BRANCH_POWER: self.fill_branch_power_day_latest,
             FAMILY_BRANCH_CURRENT: self.fill_branch_current_day_latest,
             FAMILY_BRANCH_SWITCH: self.fill_branch_switch_day_latest,
             FAMILY_BUILDING_FULL_CABINET_POWER: self.fill_building_full_cabinet_power_day_latest,
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: (
+                self.fill_air_conditioner_temperature_humidity_day_latest
+            ),
         }
         steps: List[tuple[str, str, Callable[..., Any]]] = []
         for source_family in self._daily_source_families:
             normalized_family = self._normalize_source_family(source_family)
             fill_func = fill_funcs.get(normalized_family)
             if fill_func is not None:
-                steps.append((normalized_family, business_date, fill_func))
+                target_bucket = (
+                    self.air_conditioner_temperature_humidity_day_bucket(run_at)
+                    if normalized_family
+                    == FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
+                    else business_date
+                )
+                steps.append((normalized_family, target_bucket, fill_func))
         return steps
 
     def _mark_daily_source_refresh(self, **fields: Any) -> None:
@@ -6866,7 +7091,10 @@ class SharedSourceCacheService:
             ):
                 return
             self._last_daily_source_run_monotonic = now_mono
-        steps = self._daily_source_steps(business_date=business_date)
+        steps = self._daily_source_steps(
+            business_date=business_date,
+            run_at=now_dt,
+        )
         if not steps:
             return
         self._ensure_dirs()
@@ -7114,6 +7342,12 @@ class SharedSourceCacheService:
                 "bucket_key": self.building_full_cabinet_power_day_bucket(),
                 "fill_func": self.fill_building_full_cabinet_power_day_latest,
             }
+        if normalized_family == FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY:
+            return {
+                "source_family": normalized_family,
+                "bucket_key": self.air_conditioner_temperature_humidity_day_bucket(),
+                "fill_func": self.fill_air_conditioner_temperature_humidity_day_latest,
+            }
         if normalized_family == FAMILY_CHILLER_MODE_SWITCH:
             return {
                 "source_family": normalized_family,
@@ -7150,6 +7384,7 @@ class SharedSourceCacheService:
             FAMILY_BRANCH_CURRENT,
             FAMILY_BRANCH_SWITCH,
             FAMILY_BUILDING_FULL_CABINET_POWER,
+            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
         }:
             return "daily"
         return "latest"

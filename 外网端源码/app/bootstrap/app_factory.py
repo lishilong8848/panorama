@@ -47,6 +47,9 @@ from app.modules.scheduler.api.monthly_change_report_routes import router as mon
 from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
 from app.modules.scheduler.api.routes import router as scheduler_router
 from app.modules.scheduler.api.system_screenshot_upload_routes import router as system_screenshot_upload_scheduler_router
+from app.modules.scheduler.api.temperature_humidity_upload_routes import (
+    router as temperature_humidity_upload_scheduler_router,
+)
 from app.modules.scheduler.api.wet_bulb_collection_routes import router as wet_bulb_collection_scheduler_router
 from app.modules.sheet_import.api.routes import router as sheet_import_router
 from app.modules.tasks.api.routes import router as tasks_router
@@ -231,6 +234,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(chiller_mode_upload_scheduler_router)
     app.include_router(alarm_event_upload_scheduler_router)
     app.include_router(system_screenshot_upload_scheduler_router)
+    app.include_router(temperature_humidity_upload_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
     app.include_router(monthly_change_report_scheduler_router)
     app.include_router(monthly_event_report_scheduler_router)
@@ -505,6 +509,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_branch_power_upload_scheduler(source="关闭自动")
             if container.alarm_event_upload_scheduler:
                 container.stop_alarm_event_upload_scheduler(source="关闭自动")
+            if getattr(container, "temperature_humidity_upload_scheduler", None):
+                container.stop_temperature_humidity_upload_scheduler(source="关闭自动")
             if getattr(container, "top5_power_report_scheduler", None):
                 container.stop_top5_power_report_scheduler(source="关闭自动")
             if container.monthly_change_report_scheduler:
@@ -2448,6 +2454,51 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(f"[系统截图上传调度] 提交失败：{error_text}")
             return False, error_text
 
+    def temperature_humidity_upload_scheduler_callback(source: str) -> tuple[bool, str]:
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[空调温湿度上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+        if role_mode != "external":
+            detail = "当前未确认有效角色，无法执行空调温湿度上传调度"
+            container.add_system_log(f"[空调温湿度上传调度] {detail}")
+            return False, detail
+
+        source_date = datetime.now().strftime("%Y-%m-%d")
+        started_at = datetime.now()
+        try:
+            job = container.job_service.start_worker_job(
+                name=f"空调温湿度专项上传 {source_date}",
+                worker_handler="temperature_humidity_upload",
+                worker_payload={"source_date": source_date},
+                resource_keys=[f"temperature_humidity_upload:{source_date}"],
+                priority="scheduler",
+                feature="temperature_humidity_upload",
+                dedupe_key=f"temperature_humidity_upload:{source_date}",
+                submitted_by="scheduler",
+            )
+            duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+            container.record_temperature_humidity_upload_external_run(
+                status="submitted",
+                source="scheduler_job",
+                detail=f"job_id={job.job_id}",
+                duration_ms=duration_ms,
+            )
+            detail = f"已提交空调温湿度上传任务 job_id={job.job_id}, date={source_date}"
+            container.add_system_log(f"[空调温湿度上传调度] {detail}")
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+            container.record_temperature_humidity_upload_external_run(
+                status="failed",
+                source="scheduler_job",
+                detail=str(exc),
+                duration_ms=duration_ms,
+            )
+            error_text = str(exc)
+            container.add_system_log(f"[空调温湿度上传调度] 提交失败：{error_text}")
+            return False, error_text
+
     def top5_power_report_scheduler_callback(source: str) -> tuple[bool, str]:
         role_mode = _deployment_role_mode()
         if role_mode == "internal":
@@ -2675,6 +2726,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     setter = getattr(container, "set_system_screenshot_upload_scheduler_callback", None)
     if callable(setter):
         setter(system_screenshot_upload_scheduler_callback)
+    setter = getattr(container, "set_temperature_humidity_upload_scheduler_callback", None)
+    if callable(setter):
+        setter(temperature_humidity_upload_scheduler_callback)
     setter = getattr(container, "set_top5_power_report_scheduler_callback", None)
     if callable(setter):
         setter(top5_power_report_scheduler_callback)

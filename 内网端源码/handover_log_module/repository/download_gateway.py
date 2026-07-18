@@ -240,6 +240,11 @@ class DownloadGateway:
         return "楼栋全机柜功率" in text
 
     @staticmethod
+    def _is_air_conditioner_temperature_humidity_download(*, template_name: str, sheet_name: str) -> bool:
+        text = f"{template_name or ''} {sheet_name or ''}"
+        return "空调温湿度报表" in text
+
+    @staticmethod
     def _is_top5_monthly_report_download(*, template_name: str, sheet_name: str) -> bool:
         text = f"{template_name or ''} {sheet_name or ''}"
         return any(
@@ -702,6 +707,7 @@ class DownloadGateway:
         slow_report = (
             self._is_branch_source_download(template_name=template_name, sheet_name="")
             or self._is_building_full_cabinet_power_download(template_name=template_name, sheet_name="")
+            or self._is_air_conditioner_temperature_humidity_download(template_name=template_name, sheet_name="")
             or self._is_top5_monthly_report_download(template_name=template_name, sheet_name="")
         )
         if slow_report:
@@ -1022,7 +1028,15 @@ class DownloadGateway:
                 template_name=template_name,
                 sheet_name=sheet_name,
             )
-            needs_sheet_name = not (is_chiller_mode_switch or is_building_full_cabinet_power)
+            is_air_conditioner_temperature_humidity = self._is_air_conditioner_temperature_humidity_download(
+                template_name=template_name,
+                sheet_name=sheet_name,
+            )
+            needs_sheet_name = not (
+                is_chiller_mode_switch
+                or is_building_full_cabinet_power
+                or is_air_conditioner_temperature_humidity
+            )
             await self._fill_text_input_by_widget_or_label(
                 frame2,
                 label_text="开始时间",
@@ -1355,14 +1369,31 @@ class DownloadGateway:
                 template_name=template_name,
                 sheet_name=sheet_name,
             )
+            is_air_conditioner_temperature_humidity = self._is_air_conditioner_temperature_humidity_download(
+                template_name=template_name,
+                sheet_name=sheet_name,
+            )
             is_top5_monthly_report = self._is_top5_monthly_report_download(
                 template_name=template_name,
                 sheet_name=sheet_name,
             )
-            query_session_attempts = 3 if (is_branch_source or is_building_full_cabinet_power or is_top5_monthly_report) else 1
+            query_session_attempts = (
+                3
+                if (
+                    is_branch_source
+                    or is_building_full_cabinet_power
+                    or is_air_conditioner_temperature_humidity
+                    or is_top5_monthly_report
+                )
+                else 1
+            )
             query_wait_timeout_ms = (
                 int(query_result_timeout_ms)
-                if (is_building_full_cabinet_power or is_top5_monthly_report)
+                if (
+                    is_building_full_cabinet_power
+                    or is_air_conditioner_temperature_humidity
+                    or is_top5_monthly_report
+                )
                 else (15000 if is_branch_source else int(query_result_timeout_ms))
             )
             frame2 = None

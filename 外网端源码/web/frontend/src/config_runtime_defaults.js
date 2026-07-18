@@ -141,6 +141,7 @@ function ensureRoot(cfg) {
   cfg.wet_bulb_collection = cfg.wet_bulb_collection || {};
   cfg.chiller_mode_upload = cfg.chiller_mode_upload || {};
   cfg.system_screenshot_upload = cfg.system_screenshot_upload || {};
+  cfg.temperature_humidity_upload = cfg.temperature_humidity_upload || {};
   cfg.handover_log.template = cfg.handover_log.template || {};
   cfg.handover_log.review_ui = cfg.handover_log.review_ui || {};
   cfg.web = cfg.web || {};
@@ -222,6 +223,7 @@ function ensureRoot(cfg) {
   cfg.chiller_mode_upload.fields = cfg.chiller_mode_upload.fields || {};
   cfg.chiller_mode_upload.mode_value_map = cfg.chiller_mode_upload.mode_value_map || {};
   cfg.system_screenshot_upload.scheduler = cfg.system_screenshot_upload.scheduler || {};
+  cfg.temperature_humidity_upload.scheduler = cfg.temperature_humidity_upload.scheduler || {};
   cfg.alarm_export.scheduler = cfg.alarm_export.scheduler || {};
   cfg.alarm_export.feishu = cfg.alarm_export.feishu || {};
   cfg.alarm_export.shared_source_upload =
@@ -1092,6 +1094,20 @@ function applySystemScreenshotUploadDefaults(cfg) {
   setStringDefault(scheduler, "state_file", "system_screenshot_upload_scheduler_state.json");
 }
 
+function applyTemperatureHumidityUploadDefaults(cfg) {
+  const upload = cfg.temperature_humidity_upload;
+  const scheduler = upload.scheduler || {};
+  upload.scheduler = scheduler;
+  setBooleanDefault(upload, "enabled", true);
+  setBooleanDefault(scheduler, "enabled", true);
+  setBooleanDefault(scheduler, "auto_start_in_gui", true);
+  setStringDefault(scheduler, "run_time", "02:30:00");
+  setNumberDefault(scheduler, "check_interval_sec", 30);
+  setBooleanDefault(scheduler, "catch_up_if_missed", true);
+  setBooleanDefault(scheduler, "retry_failed_in_same_period", true);
+  setStringDefault(scheduler, "state_file", "temperature_humidity_upload_scheduler_state.json");
+}
+
 function applyNetworkDefaults(cfg) {
   setNumberDefault(cfg.network, "connect_poll_interval_sec", 1);
   delete cfg.network.enable_auto_switch_wifi;
@@ -1334,6 +1350,7 @@ export function ensureConfigShape(raw) {
   applyHandoverDefaults(cfg);
   applyAlarmExportDefaults(cfg);
   applySystemScreenshotUploadDefaults(cfg);
+  applyTemperatureHumidityUploadDefaults(cfg);
   applyNetworkDefaults(cfg);
   applyWetBulbCollectionDefaults(cfg);
   applyChillerModeUploadDefaults(cfg);

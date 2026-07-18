@@ -16,6 +16,9 @@ from app.modules.system_screenshot_upload.service.system_screenshot_upload_servi
 from app.modules.system_screenshot_upload.service.system_screenshot_demand_poller import (
     mark_demand_record_completed,
 )
+from app.modules.temperature_humidity_upload.service.temperature_humidity_upload_service import (
+    TemperatureHumidityUploadService,
+)
 from app.modules.report_pipeline.service.calculation_service import CalculationService
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
@@ -676,6 +679,27 @@ def handle_system_screenshot_upload(
         raise
 
 
+def handle_temperature_humidity_upload(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+    runtime: Any = None,  # noqa: ANN401
+) -> Dict[str, Any]:
+    notify = WebhookNotifyService(config)
+    source_date = str(payload.get("source_date", "") or payload.get("date", "") or "").strip()
+    try:
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        service = TemperatureHumidityUploadService(config)
+        result = service.run(source_date=source_date or None, emit_log=emit_log)
+        if runtime is not None:
+            runtime.raise_if_cancelled()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        notify.send_failure(stage="空调温湿度专项上传", detail=str(exc), emit_log=emit_log)
+        raise
+
+
 def handle_system_screenshot_demand_upload(
     config: Dict[str, Any],
     payload: Dict[str, Any],
@@ -1268,6 +1292,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "monthly_power_alert_report": handle_monthly_power_alert_report,
     "alarm_rule_export_upload": handle_alarm_rule_export_upload,
     "system_screenshot_upload": handle_system_screenshot_upload,
+    "temperature_humidity_upload": handle_temperature_humidity_upload,
     "system_screenshot_demand_upload": handle_system_screenshot_demand_upload,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,

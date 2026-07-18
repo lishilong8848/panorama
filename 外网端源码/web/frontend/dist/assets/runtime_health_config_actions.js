@@ -1736,6 +1736,18 @@ export function createRuntimeHealthConfigActions(ctx) {
         });
       }
     }
+    if (data.temperature_humidity_upload && typeof data.temperature_humidity_upload === "object") {
+      health.temperature_humidity_upload.enabled = Boolean(data.temperature_humidity_upload.enabled);
+      if (
+        data.temperature_humidity_upload.scheduler
+        && typeof data.temperature_humidity_upload.scheduler === "object"
+      ) {
+        Object.assign(
+          health.temperature_humidity_upload.scheduler,
+          data.temperature_humidity_upload.scheduler,
+        );
+      }
+    }
     if (data.deployment && typeof data.deployment === "object") {
       Object.assign(health.deployment, data.deployment);
     }
@@ -2040,6 +2052,14 @@ export function createRuntimeHealthConfigActions(ctx) {
       && health?.system_screenshot_upload?.scheduler
     ) {
       Object.assign(health.system_screenshot_upload.scheduler, systemScreenshotUpload);
+    }
+    const temperatureHumidityUpload = summary.temperature_humidity_upload_scheduler;
+    if (
+      temperatureHumidityUpload
+      && typeof temperatureHumidityUpload === "object"
+      && health?.temperature_humidity_upload?.scheduler
+    ) {
+      Object.assign(health.temperature_humidity_upload.scheduler, temperatureHumidityUpload);
     }
     const monthlyEvent = summary.monthly_event_report_scheduler;
     if (monthlyEvent && typeof monthlyEvent === "object" && health?.monthly_event_report?.scheduler) {

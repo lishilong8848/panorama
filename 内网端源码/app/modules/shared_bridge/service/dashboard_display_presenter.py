@@ -2283,6 +2283,8 @@ def present_internal_runtime_building_display(status: Any) -> Dict[str, Any]:
         "branch_power_family": "支路功率源文件",
         "branch_current_family": "支路电流源文件",
         "branch_switch_family": "支路开关源文件",
+        "building_full_cabinet_power_family": "楼栋全机柜功率源文件",
+        "air_conditioner_temperature_humidity_family": "空调温湿度源文件",
         "alarm_event_family": "告警信息源文件",
     }
     family_items = []

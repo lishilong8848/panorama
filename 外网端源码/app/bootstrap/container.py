@@ -59,6 +59,11 @@ _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...
     ("branch_power_upload", "自动上传支路功率", ("features", "branch_power_upload", "scheduler")),
     ("alarm_event_upload", "告警信息上传", ("features", "alarm_export", "scheduler")),
     ("system_screenshot_upload", "系统截图上传", ("features", "system_screenshot_upload", "scheduler")),
+    (
+        "temperature_humidity_upload",
+        "空调温湿度上传",
+        ("features", "temperature_humidity_upload", "scheduler"),
+    ),
     ("top5_power_report", "TOP5功率文件生成", ("features", "handover_log", "top5_power_report", "scheduler")),
     ("monthly_change_report", "月度变更统计表", ("features", "handover_log", "monthly_change_report", "scheduler")),
     ("monthly_event_report", "月度事件统计表", ("features", "handover_log", "monthly_event_report", "scheduler")),
@@ -75,6 +80,7 @@ _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "branch_power_upload": "branch_power_upload_scheduler",
     "alarm_event_upload": "alarm_event_upload_scheduler",
     "system_screenshot_upload": "system_screenshot_upload_scheduler",
+    "temperature_humidity_upload": "temperature_humidity_upload_scheduler",
     "top5_power_report": "top5_power_report_scheduler",
     "monthly_change_report": "monthly_change_report_scheduler",
     "monthly_event_report": "monthly_event_report_scheduler",
@@ -124,6 +130,8 @@ class AppContainer:
     system_screenshot_upload_scheduler: ApschedulerSchedulerFacade | None = None
     system_screenshot_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     system_screenshot_demand_poller: SystemScreenshotDemandPoller | None = None
+    temperature_humidity_upload_scheduler: ApschedulerSchedulerFacade | None = None
+    temperature_humidity_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     top5_power_report_scheduler: ApschedulerSchedulerFacade | None = None
     top5_power_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_change_report_scheduler: ApschedulerSchedulerFacade | None = None
@@ -267,6 +275,9 @@ class AppContainer:
         if not self.system_screenshot_demand_poller:
             _report_progress("building_system_screenshot_demand_poller")
             self.system_screenshot_demand_poller = self._build_system_screenshot_demand_poller()
+        if not self.temperature_humidity_upload_scheduler:
+            _report_progress("building_temperature_humidity_upload_scheduler")
+            self.temperature_humidity_upload_scheduler = self._build_temperature_humidity_upload_scheduler()
         if not self.top5_power_report_scheduler:
             _report_progress("building_top5_power_report_scheduler")
             self.top5_power_report_scheduler = self._build_top5_power_report_scheduler()
@@ -325,6 +336,11 @@ class AppContainer:
         if self.system_screenshot_upload_scheduler_callback and self.system_screenshot_upload_scheduler:
             _report_progress("binding_system_screenshot_upload_scheduler_callback")
             self.system_screenshot_upload_scheduler.run_callback = self.system_screenshot_upload_scheduler_callback
+        if self.temperature_humidity_upload_scheduler_callback and self.temperature_humidity_upload_scheduler:
+            _report_progress("binding_temperature_humidity_upload_scheduler_callback")
+            self.temperature_humidity_upload_scheduler.run_callback = (
+                self.temperature_humidity_upload_scheduler_callback
+            )
         if self.top5_power_report_scheduler_callback and self.top5_power_report_scheduler:
             _report_progress("binding_top5_power_report_scheduler_callback")
             self.top5_power_report_scheduler.run_callback = self.top5_power_report_scheduler_callback
@@ -632,6 +648,27 @@ class AppContainer:
             role_mode_getter=lambda: str(self._configured_deployment_snapshot().get("role_mode", "") or ""),
         )
 
+    def _build_temperature_humidity_upload_scheduler(self) -> ApschedulerSchedulerFacade:
+        upload_cfg = self.runtime_config.get("temperature_humidity_upload", {})
+        if not isinstance(upload_cfg, dict):
+            upload_cfg = {}
+        scheduler_cfg = upload_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        return ApschedulerSchedulerFacade(
+            scheduler_key="temperature_humidity_upload",
+            feature="temperature_humidity_upload",
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=self._runtime_state_root_text(),
+            emit_log=self.add_system_log,
+            run_callback=self.temperature_humidity_upload_scheduler_callback
+            or self._temperature_humidity_upload_scheduler_run_callback,
+            is_busy=self._job_busy_for_feature_prefixes("temperature_humidity_upload"),
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="daily",
+            source_name="空调温湿度上传",
+        )
+
     def _build_top5_power_report_scheduler(self) -> ApschedulerSchedulerFacade:
         handover_cfg = self.runtime_config.get("handover_log", {})
         if not isinstance(handover_cfg, dict):
@@ -747,6 +784,9 @@ class AppContainer:
 
     def _system_screenshot_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"系统截图上传调度回调尚未绑定执行器(source={source})"
+
+    def _temperature_humidity_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        return False, f"空调温湿度上传调度回调尚未绑定执行器(source={source})"
 
     def _top5_power_report_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"TOP5功率文件生成调度回调尚未绑定执行器(source={source})"
@@ -921,6 +961,30 @@ class AppContainer:
             name = getattr(getattr(callback, "__func__", None), "__name__", "")
         return str(name or "-")
 
+    def is_temperature_humidity_upload_scheduler_executor_bound(self) -> bool:
+        callback = None
+        if self.temperature_humidity_upload_scheduler:
+            callback = getattr(self.temperature_humidity_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.temperature_humidity_upload_scheduler_callback
+        return not self._is_placeholder_callback(
+            callback,
+            self._temperature_humidity_upload_scheduler_run_callback,
+        )
+
+    def temperature_humidity_upload_scheduler_executor_name(self) -> str:
+        callback = None
+        if self.temperature_humidity_upload_scheduler:
+            callback = getattr(self.temperature_humidity_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.temperature_humidity_upload_scheduler_callback
+        if callback is None:
+            callback = self._temperature_humidity_upload_scheduler_run_callback
+        name = getattr(callback, "__name__", "")
+        if not name:
+            name = getattr(getattr(callback, "__func__", None), "__name__", "")
+        return str(name or "-")
+
     def is_top5_power_report_scheduler_executor_bound(self) -> bool:
         callback = None
         if self.top5_power_report_scheduler:
@@ -1028,6 +1092,14 @@ class AppContainer:
         self.system_screenshot_upload_scheduler_callback = callback
         if self.system_screenshot_upload_scheduler:
             self.system_screenshot_upload_scheduler.run_callback = callback
+
+    def set_temperature_humidity_upload_scheduler_callback(
+        self,
+        callback: Callable[[str], tuple[bool, str]],
+    ) -> None:
+        self.temperature_humidity_upload_scheduler_callback = callback
+        if self.temperature_humidity_upload_scheduler:
+            self.temperature_humidity_upload_scheduler.run_callback = callback
 
     def set_top5_power_report_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
         self.top5_power_report_scheduler_callback = callback
@@ -1827,6 +1899,29 @@ class AppContainer:
             self.add_system_log("[系统截图上传][同步需求] 轮询已禁用")
 
         self.add_system_log(
+            "[空调温湿度上传调度] 启动阶段执行器状态: "
+            f"executor_bound={self.is_temperature_humidity_upload_scheduler_executor_bound()}, "
+            f"callback={self.temperature_humidity_upload_scheduler_executor_name()}"
+        )
+        temperature_humidity_status = self.temperature_humidity_upload_scheduler_status()
+        if role_mode == "internal":
+            self.add_system_log("[空调温湿度上传调度] 当前为内网端，启动时不自动开启")
+        elif bool(temperature_humidity_status.get("enabled", False)):
+            temperature_humidity_cfg = self.runtime_config.get("temperature_humidity_upload", {})
+            if not isinstance(temperature_humidity_cfg, dict):
+                temperature_humidity_cfg = {}
+            temperature_humidity_scheduler_cfg = temperature_humidity_cfg.get("scheduler", {})
+            if not isinstance(temperature_humidity_scheduler_cfg, dict):
+                temperature_humidity_scheduler_cfg = {}
+            if bool(temperature_humidity_scheduler_cfg.get("auto_start_in_gui", False)):
+                _report_progress("starting_temperature_humidity_upload_scheduler")
+                self.start_temperature_humidity_upload_scheduler(source=source)
+            else:
+                self.add_system_log("[空调温湿度上传调度] 启动时未自动开启")
+        else:
+            self.add_system_log("[空调温湿度上传调度] 已禁用")
+
+        self.add_system_log(
             f"[TOP5功率文件生成调度] 启动阶段执行器状态: executor_bound={self.is_top5_power_report_scheduler_executor_bound()}, "
             f"callback={self.top5_power_report_scheduler_executor_name()}"
         )
@@ -1979,6 +2074,14 @@ class AppContainer:
                 self.system_screenshot_upload_scheduler,
             ),
             (
+                "空调温湿度上传调度",
+                ("features", "temperature_humidity_upload", "scheduler"),
+                bool(self.temperature_humidity_upload_scheduler.is_running())
+                if self.temperature_humidity_upload_scheduler
+                else False,
+                self.temperature_humidity_upload_scheduler,
+            ),
+            (
                 "月度变更统计表调度",
                 ("features", "handover_log", "monthly_change_report", "scheduler"),
                 bool(self.monthly_change_report_scheduler.is_running()) if self.monthly_change_report_scheduler else False,
@@ -2089,6 +2192,10 @@ class AppContainer:
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
             ("system_screenshot_upload_scheduler", self.stop_system_screenshot_upload_scheduler),
             ("system_screenshot_demand_poller", self.stop_system_screenshot_demand_poller),
+            (
+                "temperature_humidity_upload_scheduler",
+                self.stop_temperature_humidity_upload_scheduler,
+            ),
             ("top5_power_report_scheduler", self.stop_top5_power_report_scheduler),
             ("monthly_change_report_scheduler", self.stop_monthly_change_report_scheduler),
             ("monthly_event_report_scheduler", self.stop_monthly_event_report_scheduler),
@@ -2345,6 +2452,74 @@ class AppContainer:
         self.add_system_log(
             "[系统截图上传][同步需求] "
             f"{source}停止请求: reason={result.get('reason', '-')}, running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_temperature_humidity_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.temperature_humidity_upload_scheduler:
+            self.temperature_humidity_upload_scheduler = self._build_temperature_humidity_upload_scheduler()
+        result = self.temperature_humidity_upload_scheduler.start()
+        self.add_system_log(
+            f"[空调温湿度上传调度] {source}启动请求: "
+            f"原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}, "
+            f"executor_bound={self.is_temperature_humidity_upload_scheduler_executor_bound()}, "
+            f"callback={self.temperature_humidity_upload_scheduler_executor_name()}"
+        )
+        return result
+
+    def rebuild_temperature_humidity_upload_scheduler(
+        self,
+        source: str = "配置热重载",
+    ) -> Dict[str, Any]:
+        was_running = (
+            self.temperature_humidity_upload_scheduler.is_running()
+            if self.temperature_humidity_upload_scheduler
+            else False
+        )
+        if self.temperature_humidity_upload_scheduler:
+            self.temperature_humidity_upload_scheduler.stop()
+        self.temperature_humidity_upload_scheduler = self._build_temperature_humidity_upload_scheduler()
+        if self.temperature_humidity_upload_scheduler_callback:
+            self.temperature_humidity_upload_scheduler.run_callback = (
+                self.temperature_humidity_upload_scheduler_callback
+            )
+        upload_cfg = self.runtime_config.get("temperature_humidity_upload", {})
+        if not isinstance(upload_cfg, dict):
+            upload_cfg = {}
+        scheduler_cfg = upload_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        should_start = was_running or bool(scheduler_cfg.get("auto_start_in_gui", False))
+        action: Dict[str, Any] = {
+            "started": False,
+            "running": False,
+            "reason": "not_auto_started",
+        }
+        if should_start:
+            action = self.start_temperature_humidity_upload_scheduler(source=source)
+        self.add_system_log(
+            "[空调温湿度上传调度] 已按最新配置重建: "
+            f"was_running={was_running}, "
+            f"auto_start={bool(scheduler_cfg.get('auto_start_in_gui', False))}, "
+            f"action={action}"
+        )
+        return {
+            "reloaded": True,
+            "was_running": was_running,
+            "auto_start_in_gui": bool(scheduler_cfg.get("auto_start_in_gui", False)),
+            "action": action,
+        }
+
+    def stop_temperature_humidity_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.temperature_humidity_upload_scheduler:
+            result = self.temperature_humidity_upload_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[空调温湿度上传调度] {source}停止请求: "
+            f"原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
         )
         return result
 
@@ -3072,6 +3247,41 @@ class AppContainer:
             payload,
         )
 
+    def temperature_humidity_upload_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("temperature_humidity_upload")
+        if not self.temperature_humidity_upload_scheduler:
+            payload = {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+                **memory_fields,
+            }
+            return self._record_scheduler_runtime_snapshot(
+                "temperature_humidity_upload",
+                "temperature_humidity_upload",
+                payload,
+            )
+        runtime = self.temperature_humidity_upload_scheduler.get_runtime_snapshot()
+        payload = {
+            "enabled": bool(self.temperature_humidity_upload_scheduler.enabled),
+            "status": self.temperature_humidity_upload_scheduler.status_text(),
+            "next_run_time": self.temperature_humidity_upload_scheduler.next_run_text(),
+            **runtime,
+            **memory_fields,
+        }
+        return self._record_scheduler_runtime_snapshot(
+            "temperature_humidity_upload",
+            "temperature_humidity_upload",
+            payload,
+        )
+
     def top5_power_report_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("top5_power_report")
         if not self.top5_power_report_scheduler:
@@ -3266,6 +3476,23 @@ class AppContainer:
             duration_ms=duration_ms,
         )
 
+    def record_temperature_humidity_upload_external_run(
+        self,
+        *,
+        status: str,
+        source: str,
+        detail: str = "",
+        duration_ms: int = 0,
+    ) -> None:
+        if not self.temperature_humidity_upload_scheduler:
+            return
+        self.temperature_humidity_upload_scheduler.record_external_run(
+            status=status,
+            source=source,
+            detail=detail,
+            duration_ms=duration_ms,
+        )
+
     def record_monthly_event_report_external_run(
         self,
         *,
@@ -3348,6 +3575,11 @@ class AppContainer:
         was_system_screenshot_upload_running = (
             self.system_screenshot_upload_scheduler.is_running() if self.system_screenshot_upload_scheduler else False
         )
+        was_temperature_humidity_upload_running = (
+            self.temperature_humidity_upload_scheduler.is_running()
+            if self.temperature_humidity_upload_scheduler
+            else False
+        )
         was_top5_power_report_running = (
             self.top5_power_report_scheduler.is_running() if self.top5_power_report_scheduler else False
         )
@@ -3380,6 +3612,8 @@ class AppContainer:
             self.alarm_event_upload_scheduler.stop()
         if self.system_screenshot_upload_scheduler:
             self.system_screenshot_upload_scheduler.stop()
+        if self.temperature_humidity_upload_scheduler:
+            self.temperature_humidity_upload_scheduler.stop()
         if self.top5_power_report_scheduler:
             self.top5_power_report_scheduler.stop()
         if self.monthly_change_report_scheduler:
@@ -3400,6 +3634,7 @@ class AppContainer:
         self.branch_power_upload_scheduler = self._build_branch_power_upload_scheduler()
         self.alarm_event_upload_scheduler = self._build_alarm_event_upload_scheduler()
         self.system_screenshot_upload_scheduler = self._build_system_screenshot_upload_scheduler()
+        self.temperature_humidity_upload_scheduler = self._build_temperature_humidity_upload_scheduler()
         self.top5_power_report_scheduler = self._build_top5_power_report_scheduler()
         self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
         self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
@@ -3434,6 +3669,10 @@ class AppContainer:
             self.alarm_event_upload_scheduler.run_callback = self.alarm_event_upload_scheduler_callback
         if self.system_screenshot_upload_scheduler_callback:
             self.system_screenshot_upload_scheduler.run_callback = self.system_screenshot_upload_scheduler_callback
+        if self.temperature_humidity_upload_scheduler_callback:
+            self.temperature_humidity_upload_scheduler.run_callback = (
+                self.temperature_humidity_upload_scheduler_callback
+            )
         if self.top5_power_report_scheduler_callback:
             self.top5_power_report_scheduler.run_callback = self.top5_power_report_scheduler_callback
         if self.monthly_change_report_scheduler_callback:
@@ -3537,6 +3776,19 @@ class AppContainer:
         system_screenshot_auto_start = bool(system_screenshot_scheduler_cfg.get("auto_start_in_gui", False))
         if was_system_screenshot_upload_running or (self.runtime_services_armed and system_screenshot_auto_start):
             self.system_screenshot_upload_scheduler.start()
+        temperature_humidity_cfg = self.runtime_config.get("temperature_humidity_upload", {})
+        if not isinstance(temperature_humidity_cfg, dict):
+            temperature_humidity_cfg = {}
+        temperature_humidity_scheduler_cfg = temperature_humidity_cfg.get("scheduler", {})
+        if not isinstance(temperature_humidity_scheduler_cfg, dict):
+            temperature_humidity_scheduler_cfg = {}
+        temperature_humidity_auto_start = bool(
+            temperature_humidity_scheduler_cfg.get("auto_start_in_gui", False)
+        )
+        if was_temperature_humidity_upload_running or (
+            self.runtime_services_armed and temperature_humidity_auto_start
+        ):
+            self.temperature_humidity_upload_scheduler.start()
         top5_cfg = self.runtime_config.get("handover_log", {})
         if not isinstance(top5_cfg, dict):
             top5_cfg = {}

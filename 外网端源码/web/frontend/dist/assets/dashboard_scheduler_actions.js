@@ -2,18 +2,21 @@ import {
   saveBranchPowerUploadSchedulerConfigApi,
   saveAlarmEventUploadSchedulerConfigApi,
   saveSystemScreenshotUploadSchedulerConfigApi,
+  saveTemperatureHumidityUploadSchedulerConfigApi,
   saveDayMetricUploadSchedulerConfigApi,
   saveHandoverSchedulerConfigApi,
   saveSchedulerConfigApi,
   startBranchPowerUploadSchedulerApi,
   startAlarmEventUploadSchedulerApi,
   startSystemScreenshotUploadSchedulerApi,
+  startTemperatureHumidityUploadSchedulerApi,
   startDayMetricUploadSchedulerApi,
   startHandoverSchedulerApi,
   startSchedulerApi,
   stopBranchPowerUploadSchedulerApi,
   stopAlarmEventUploadSchedulerApi,
   stopSystemScreenshotUploadSchedulerApi,
+  stopTemperatureHumidityUploadSchedulerApi,
   stopDayMetricUploadSchedulerApi,
   stopHandoverSchedulerApi,
   stopSchedulerApi,
@@ -49,6 +52,9 @@ const ACTION_KEYS = {
   systemScreenshotUploadSchedulerStart: "system_screenshot_upload_scheduler:start",
   systemScreenshotUploadSchedulerStop: "system_screenshot_upload_scheduler:stop",
   systemScreenshotUploadSchedulerSave: "system_screenshot_upload_scheduler:save",
+  temperatureHumidityUploadSchedulerStart: "temperature_humidity_upload_scheduler:start",
+  temperatureHumidityUploadSchedulerStop: "temperature_humidity_upload_scheduler:stop",
+  temperatureHumidityUploadSchedulerSave: "temperature_humidity_upload_scheduler:save",
 };
 
 function formatSchedulerActionReason(reason) {
@@ -82,6 +88,7 @@ export function createDashboardSchedulerActions(ctx) {
     branchPowerUploadSchedulerQuickSaving,
     alarmEventUploadSchedulerQuickSaving,
     systemScreenshotUploadSchedulerQuickSaving,
+    temperatureHumidityUploadSchedulerQuickSaving,
     fetchExternalDashboardSummary,
     scheduleExternalDashboardRefresh,
     runSingleFlight,
@@ -774,6 +781,139 @@ export function createDashboardSchedulerActions(ctx) {
     );
   }
 
+  async function startTemperatureHumidityUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.temperatureHumidityUploadSchedulerStart,
+      async () => {
+        markSchedulerToggle("temperature_humidity_upload", "starting", true);
+        try {
+          const data = await startTemperatureHumidityUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(
+            config.value?.temperature_humidity_upload?.scheduler,
+            true,
+            { enableOnStart: true },
+          );
+          applySchedulerSnapshot(
+            health?.temperature_humidity_upload?.scheduler,
+            { ...data, enabled: true, running: true },
+          );
+          markSchedulerToggle("temperature_humidity_upload", "idle", true);
+          triggerDashboardRefresh("temperature_humidity_upload_scheduler_start");
+          message.value = `空调温湿度上传调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          markSchedulerToggle("temperature_humidity_upload", "idle", null);
+          message.value = `启动空调温湿度上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function stopTemperatureHumidityUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.temperatureHumidityUploadSchedulerStop,
+      async () => {
+        markSchedulerToggle("temperature_humidity_upload", "stopping", false);
+        try {
+          const data = await stopTemperatureHumidityUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(
+            config.value?.temperature_humidity_upload?.scheduler,
+            false,
+          );
+          applySchedulerSnapshot(
+            health?.temperature_humidity_upload?.scheduler,
+            { ...data, running: false },
+          );
+          markSchedulerToggle("temperature_humidity_upload", "idle", false);
+          triggerDashboardRefresh("temperature_humidity_upload_scheduler_stop");
+          message.value = `空调温湿度上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          markSchedulerToggle("temperature_humidity_upload", "idle", null);
+          message.value = `停止空调温湿度上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+
+  async function saveTemperatureHumidityUploadSchedulerQuickConfig(overrides = {}) {
+    if (!config.value) return;
+    if (
+      !config.value.temperature_humidity_upload
+      || typeof config.value.temperature_humidity_upload !== "object"
+    ) {
+      config.value.temperature_humidity_upload = {};
+    }
+    if (
+      !config.value.temperature_humidity_upload.scheduler
+      || typeof config.value.temperature_humidity_upload.scheduler !== "object"
+    ) {
+      config.value.temperature_humidity_upload.scheduler = {};
+    }
+    const scheduler = config.value.temperature_humidity_upload.scheduler;
+    const previousScheduler = { ...scheduler };
+    const overrideValues = overrides && typeof overrides === "object" ? overrides : {};
+    const runTime = normalizeRunTimeText(
+      Object.prototype.hasOwnProperty.call(overrideValues, "run_time")
+        ? overrideValues.run_time
+        : scheduler.run_time,
+    );
+    const payload = {
+      enabled: true,
+      auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
+      run_time: runTime,
+      check_interval_sec: Number.parseInt(String(scheduler.check_interval_sec ?? 30), 10) || 30,
+      catch_up_if_missed: Boolean(scheduler.catch_up_if_missed ?? true),
+      retry_failed_in_same_period: Boolean(scheduler.retry_failed_in_same_period ?? true),
+      state_file: String(
+        scheduler.state_file || "temperature_humidity_upload_scheduler_state.json",
+      ).trim(),
+    };
+    if (!payload.run_time) {
+      message.value = "空调温湿度上传调度时间格式错误，必须是 HH:MM 或 HH:MM:SS";
+      return;
+    }
+    if (!payload.state_file) {
+      message.value = "空调温湿度上传调度状态文件不能为空";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.temperatureHumidityUploadSchedulerSave,
+      async () => {
+        try {
+          temperatureHumidityUploadSchedulerQuickSaving.value = true;
+          const data = await saveTemperatureHumidityUploadSchedulerConfigApi(payload);
+          if (
+            data?.scheduler_config
+            && config.value?.temperature_humidity_upload?.scheduler
+          ) {
+            Object.assign(
+              config.value.temperature_humidity_upload.scheduler,
+              data.scheduler_config,
+            );
+          }
+          applySchedulerSnapshot(
+            health?.temperature_humidity_upload?.scheduler,
+            data?.scheduler_status || data,
+          );
+          triggerDashboardRefresh("temperature_humidity_upload_scheduler_save");
+          message.value = data?.message || "空调温湿度上传调度配置已更新";
+        } catch (err) {
+          if (config.value?.temperature_humidity_upload?.scheduler) {
+            Object.assign(
+              config.value.temperature_humidity_upload.scheduler,
+              previousScheduler,
+            );
+          }
+          message.value = `空调温湿度上传调度自动更新失败: ${err}`;
+        } finally {
+          temperatureHumidityUploadSchedulerQuickSaving.value = false;
+        }
+      },
+      { cooldownMs: 0, queueLatest: true },
+    );
+  }
+
   return {
     startScheduler,
     saveSchedulerQuickConfig,
@@ -793,5 +933,8 @@ export function createDashboardSchedulerActions(ctx) {
     startSystemScreenshotUploadScheduler,
     stopSystemScreenshotUploadScheduler,
     saveSystemScreenshotUploadSchedulerQuickConfig,
+    startTemperatureHumidityUploadScheduler,
+    stopTemperatureHumidityUploadScheduler,
+    saveTemperatureHumidityUploadSchedulerQuickConfig,
   };
 }

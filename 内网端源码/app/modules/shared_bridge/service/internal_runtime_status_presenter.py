@@ -230,6 +230,19 @@ def build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             title="楼栋全机柜功率源文件",
             fallback_bucket=str(raw_cache.get("building_full_cabinet_power_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
         ),
+        "air_conditioner_temperature_humidity_family": _complete_internal_source_family(
+            raw_cache.get("air_conditioner_temperature_humidity_family", {}),
+            key="air_conditioner_temperature_humidity_family",
+            title="空调温湿度源文件",
+            fallback_bucket=str(
+                raw_cache.get("air_conditioner_temperature_humidity_family", {}).get(
+                    "current_bucket",
+                    "",
+                )
+                or ""
+            ).strip()
+            or current_bucket,
+        ),
         "chiller_mode_switch_family": _complete_internal_source_family(
             raw_cache.get("chiller_mode_switch_family", {}),
             key="chiller_mode_switch_family",
@@ -328,6 +341,19 @@ def build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building
                 building=building,
                 fallback_bucket=str(raw_cache.get("building_full_cabinet_power_family", {}).get("current_bucket", "") or "").strip() or current_bucket,
                 source_family="building_full_cabinet_power_family",
+            ),
+            "air_conditioner_temperature_humidity_family": select_internal_runtime_building_row(
+                raw_cache.get("air_conditioner_temperature_humidity_family", {}),
+                building=building,
+                fallback_bucket=str(
+                    raw_cache.get("air_conditioner_temperature_humidity_family", {}).get(
+                        "current_bucket",
+                        "",
+                    )
+                    or ""
+                ).strip()
+                or current_bucket,
+                source_family="air_conditioner_temperature_humidity_family",
             ),
             "branch_switch_family": select_internal_runtime_building_row(
                 raw_cache.get("branch_switch_family", {}),

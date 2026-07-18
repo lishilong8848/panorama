@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 from app.modules.shared_bridge.service.shared_source_cache_service import (  # noqa: E402
     DAILY_AUTO_SOURCE_FAMILIES,
+    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_POWER,
     FAMILY_BRANCH_SWITCH,
@@ -19,6 +20,8 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (  # n
     FAMILY_TOP5_MONTHLY_REPORT,
     SharedSourceCacheService,
 )
+from app.shared.utils.artifact_naming import build_source_artifact_path  # noqa: E402
+from handover_log_module.service.handover_download_service import HandoverDownloadService  # noqa: E402
 
 
 def _build_service(tmp_path: Path) -> SharedSourceCacheService:
@@ -70,7 +73,16 @@ def test_daily_source_download_runs_after_configured_time_once_per_business_date
     assert len(calls) == 1
     assert calls[0]["force_retry_failed"] is True
     assert calls[0]["force_refresh_existing"] is False
-    assert calls[0]["steps"] == [(source_family, "2026-06-28") for source_family in DAILY_AUTO_SOURCE_FAMILIES]
+    expected_steps = [
+        (
+            source_family,
+            "2026-06-29"
+            if source_family == FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
+            else "2026-06-28",
+        )
+        for source_family in DAILY_AUTO_SOURCE_FAMILIES
+    ]
+    assert calls[0]["steps"] == expected_steps
     assert service._daily_source_refresh["last_success_business_date"] == "2026-06-28"
 
     service._run_daily_source_files_if_due(datetime(2026, 6, 29, 1, 0, 0))
@@ -105,30 +117,44 @@ def test_daily_source_download_retries_failed_business_date_after_cooldown(tmp_p
     assert len(calls) == 2
 
 
-def test_branch_daily_source_query_windows_cover_business_day_hours(tmp_path):
+def test_daily_source_query_windows_follow_each_report_rule(tmp_path):
     service = _build_service(tmp_path)
 
     branch_start, branch_end, branch_buckets = service._branch_day_query_window("2026-06-28")
     full_start, full_end, full_buckets = service._building_full_cabinet_power_day_query_window("2026-06-28")
+    temperature_start, temperature_end, temperature_buckets = (
+        service._air_conditioner_temperature_humidity_day_query_window(
+            datetime(2026, 6, 29, 0, 10, 30)
+        )
+    )
 
     assert branch_start == "2026-06-27 23:50:00"
     assert branch_end == "2026-06-28 23:50:00"
     assert full_start == "2026-06-27 23:50:00"
     assert full_end == "2026-06-29 00:10:00"
+    assert temperature_start == "2026-06-28 23:50:30"
+    assert temperature_end == "2026-06-29 00:10:30"
     assert branch_buckets == [f"2026-06-28 {hour:02d}" for hour in range(24)]
     assert full_buckets == branch_buckets
+    assert temperature_buckets == ["2026-06-28 23", "2026-06-29 00"]
 
 
 def test_internal_light_daily_source_snapshot_uses_current_business_day_bucket(tmp_path, monkeypatch):
     service = _build_service(tmp_path)
     monkeypatch.setattr(service, "branch_power_day_bucket", lambda when=None: "2026-06-28")
     monkeypatch.setattr(service, "building_full_cabinet_power_day_bucket", lambda when=None: "2026-06-28")
+    monkeypatch.setattr(
+        service,
+        "air_conditioner_temperature_humidity_day_bucket",
+        lambda when=None: "2026-06-28",
+    )
 
     daily_families = [
         FAMILY_BRANCH_POWER,
         FAMILY_BRANCH_CURRENT,
         FAMILY_BRANCH_SWITCH,
         FAMILY_BUILDING_FULL_CABINET_POWER,
+        FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
     ]
     for source_family in daily_families:
         service._family_status.setdefault(source_family, {})["current_bucket"] = "2026-06-01"
@@ -140,6 +166,119 @@ def test_internal_light_daily_source_snapshot_uses_current_business_day_bucket(t
         assert family_snapshot["current_bucket"] == "2026-06-28"
         assert "整日" in family_snapshot["status_text"]
         assert {row["bucket_key"] for row in family_snapshot["buildings"]} == {"2026-06-28"}
+
+
+def test_air_conditioner_temperature_humidity_download_config_only_fills_time_and_scale(tmp_path):
+    service = HandoverDownloadService(
+        {
+            "download": {
+                "template_name": "交接班日志（李世龙）",
+                "sheet_name": "配置",
+                "scale_label": "小时",
+            },
+            "air_conditioner_temperature_humidity": {
+                "download": {
+                    "template_name": "空调温湿度报表",
+                    "sheet_name": "不应使用",
+                    "scale_label": "5分钟",
+                    "query_result_timeout_ms": 120000,
+                }
+            },
+        },
+        business_root_override=tmp_path,
+    )
+
+    download_cfg = service._air_conditioner_temperature_humidity_download_config()
+
+    assert download_cfg["template_name"] == "空调温湿度报表"
+    assert download_cfg["sheet_name"] == ""
+    assert download_cfg["scale_label"] == "5分钟"
+    assert download_cfg["query_result_timeout_ms"] >= 120000
+    assert download_cfg["report_kind"] == "air_conditioner_temperature_humidity"
+
+
+def test_air_conditioner_temperature_humidity_daily_artifact_path_is_canonical():
+    artifact = build_source_artifact_path(
+        source_family=FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+        building="A楼",
+        suffix=".xlsx",
+        bucket_kind="daily",
+        bucket_key="2026-06-28",
+        duty_date="2026-06-28",
+    )
+
+    assert artifact.relative_path.as_posix() == (
+        "空调温湿度源文件/202606/20260628--整日/"
+        "20260628--整日--空调温湿度源文件--A楼.xlsx"
+    )
+
+
+def test_air_conditioner_temperature_humidity_reuses_existing_daily_file(tmp_path, monkeypatch):
+    service = _build_service(tmp_path)
+    captured = {}
+    existing_entry = {
+        "source_family": FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+        "building": "A楼",
+        "bucket_kind": "daily",
+        "bucket_key": "2026-06-28",
+        "status": "ready",
+    }
+
+    def fake_store_existing(**kwargs):
+        captured.update(kwargs)
+        return existing_entry
+
+    monkeypatch.setattr(
+        service,
+        "_store_existing_canonical_entry_if_ready",
+        fake_store_existing,
+    )
+
+    result = service.fill_air_conditioner_temperature_humidity_day_latest(
+        building="A楼",
+        business_date="2026-06-28",
+        emit_log=lambda _message: None,
+    )
+
+    assert result is existing_entry
+    assert captured["bucket_key"] == "2026-06-28"
+    assert captured["duty_date"] == "2026-06-28"
+    assert captured["metadata"]["business_date"] == "2026-06-28"
+
+
+def test_air_conditioner_temperature_humidity_uses_refresh_bucket_across_midnight(
+    tmp_path,
+    monkeypatch,
+):
+    service = _build_service(tmp_path)
+    captured = {}
+    existing_entry = {
+        "source_family": FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+        "building": "A楼",
+        "bucket_kind": "daily",
+        "bucket_key": "2026-06-28",
+        "status": "ready",
+    }
+
+    def fake_store_existing(**kwargs):
+        captured.update(kwargs)
+        return existing_entry
+
+    monkeypatch.setattr(
+        service,
+        "_store_existing_canonical_entry_if_ready",
+        fake_store_existing,
+    )
+
+    result = service.fill_air_conditioner_temperature_humidity_day_latest(
+        building="A楼",
+        bucket_key="2026-06-28",
+        emit_log=lambda _message: None,
+    )
+
+    assert result is existing_entry
+    assert captured["bucket_key"] == "2026-06-28"
+    assert captured["metadata"]["business_date"] == "2026-06-28"
 
 
 def test_internal_light_monthly_source_snapshot_uses_latest_target_bucket(tmp_path, monkeypatch):

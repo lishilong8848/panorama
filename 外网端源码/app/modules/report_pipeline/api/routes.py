@@ -41,6 +41,9 @@ from app.modules.alarm_rule_export_upload.service.alarm_rule_export_upload_servi
 from app.modules.system_screenshot_upload.service.system_screenshot_upload_service import (
     SystemScreenshotUploadService,
 )
+from app.modules.temperature_humidity_upload.service.temperature_humidity_upload_service import (
+    TemperatureHumidityUploadService,
+)
 from app.modules.report_pipeline.service.resume_checkpoint_store import (
     resolve_resume_index_path as resolve_monthly_resume_index_path,
 )
@@ -3509,6 +3512,9 @@ def health(
     branch_power_upload_scheduler_snapshot = _safe_scheduler_snapshot("branch_power_upload_scheduler_status")
     alarm_event_upload_scheduler_snapshot = _safe_scheduler_snapshot("alarm_event_upload_scheduler_status")
     system_screenshot_upload_scheduler_snapshot = _safe_scheduler_snapshot("system_screenshot_upload_scheduler_status")
+    temperature_humidity_upload_scheduler_snapshot = _safe_scheduler_snapshot(
+        "temperature_humidity_upload_scheduler_status"
+    )
     top5_power_report_scheduler_snapshot = _safe_scheduler_snapshot("top5_power_report_scheduler_status")
     monthly_report_delivery_service = MonthlyReportDeliveryService(runtime_cfg)
     include_monthly_delivery = role_mode != "internal" and not is_lite_mode
@@ -4127,6 +4133,68 @@ def health(
                     "memory_source": str(system_screenshot_upload_scheduler_snapshot.get("memory_source", "") or ""),
                     "executor_bound": _safe_bool_method("is_system_screenshot_upload_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("system_screenshot_upload_scheduler_executor_name"),
+                },
+            },
+            "temperature_humidity_upload": {
+                "enabled": bool(runtime_cfg.get("temperature_humidity_upload", {}).get("enabled", True))
+                if isinstance(runtime_cfg.get("temperature_humidity_upload", {}), dict)
+                else True,
+                "scheduler": {
+                    "enabled": bool(temperature_humidity_upload_scheduler_snapshot.get("enabled", False)),
+                    "running": bool(temperature_humidity_upload_scheduler_snapshot.get("running", False)),
+                    "status": str(
+                        temperature_humidity_upload_scheduler_snapshot.get("status", "未初始化")
+                    ),
+                    "run_time": str(
+                        (
+                            runtime_cfg.get("temperature_humidity_upload", {}).get("scheduler", {})
+                            if isinstance(runtime_cfg.get("temperature_humidity_upload", {}), dict)
+                            and isinstance(
+                                runtime_cfg.get("temperature_humidity_upload", {}).get("scheduler", {}),
+                                dict,
+                            )
+                            else {}
+                        ).get("run_time", "")
+                    ),
+                    "next_run_time": str(
+                        temperature_humidity_upload_scheduler_snapshot.get("next_run_time", "")
+                    ),
+                    "last_check_at": str(
+                        temperature_humidity_upload_scheduler_snapshot.get("last_check_at", "")
+                    ),
+                    "last_decision": str(
+                        temperature_humidity_upload_scheduler_snapshot.get("last_decision", "")
+                    ),
+                    "last_trigger_at": str(
+                        temperature_humidity_upload_scheduler_snapshot.get("last_trigger_at", "")
+                    ),
+                    "last_trigger_result": str(
+                        temperature_humidity_upload_scheduler_snapshot.get("last_trigger_result", "")
+                    ),
+                    "state_path": str(
+                        temperature_humidity_upload_scheduler_snapshot.get("state_path", "")
+                    ),
+                    "state_exists": bool(
+                        temperature_humidity_upload_scheduler_snapshot.get("state_exists", False)
+                    ),
+                    "remembered_enabled": bool(
+                        temperature_humidity_upload_scheduler_snapshot.get("remembered_enabled", False)
+                    ),
+                    "effective_auto_start_in_gui": bool(
+                        temperature_humidity_upload_scheduler_snapshot.get(
+                            "effective_auto_start_in_gui",
+                            False,
+                        )
+                    ),
+                    "memory_source": str(
+                        temperature_humidity_upload_scheduler_snapshot.get("memory_source", "") or ""
+                    ),
+                    "executor_bound": _safe_bool_method(
+                        "is_temperature_humidity_upload_scheduler_executor_bound"
+                    ),
+                    "callback_name": _safe_text_method(
+                        "temperature_humidity_upload_scheduler_executor_name"
+                    ),
                 },
             },
         "updater": {
@@ -5166,6 +5234,41 @@ def job_system_screenshot_upload_run(
             submitted_by="manual",
         )
         container.add_system_log(f"[任务] 已提交: 系统截图上传 {capture_date} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/jobs/temperature-humidity/upload")
+def job_temperature_humidity_upload_run(
+    request: Request,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    role_mode = _deployment_role_mode(container)
+    if role_mode == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，请在外网端上传空调温湿度数据")
+
+    raw_date = str(payload.get("source_date", "") or payload.get("date", "") or "").strip()
+    try:
+        source_date = TemperatureHumidityUploadService.normalize_source_date(raw_date or None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        job = _start_background_job(
+            container,
+            name=f"空调温湿度专项上传 {source_date}",
+            run_func=None,
+            worker_handler="temperature_humidity_upload",
+            worker_payload={"source_date": source_date},
+            resource_keys=_job_resource_keys(f"temperature_humidity_upload:{source_date}"),
+            priority="manual",
+            feature="temperature_humidity_upload",
+            dedupe_key=f"temperature_humidity_upload:{source_date}",
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: 空调温湿度专项上传 {source_date} ({job.job_id})")
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -7089,6 +7192,9 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
         "system_screenshot_upload_scheduler": _safe_scheduler("system_screenshot_upload_scheduler_status"),
+        "temperature_humidity_upload_scheduler": _safe_scheduler(
+            "temperature_humidity_upload_scheduler_status"
+        ),
         "top5_power_report_scheduler": _safe_scheduler("top5_power_report_scheduler_status"),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
@@ -7794,6 +7900,9 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
         "system_screenshot_upload_scheduler": _safe_scheduler("system_screenshot_upload_scheduler_status"),
+        "temperature_humidity_upload_scheduler": _safe_scheduler(
+            "temperature_humidity_upload_scheduler_status"
+        ),
         "top5_power_report_scheduler": _safe_scheduler("top5_power_report_scheduler_status"),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),

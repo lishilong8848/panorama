@@ -974,6 +974,22 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
         fallback_bucket=building_full_cabinet_power_bucket,
         bucket_scope_text="本小时",
     )
+    air_conditioner_temperature_humidity_bucket = (
+        _string(
+            source_cache.get("air_conditioner_temperature_humidity_family", {}).get(
+                "current_bucket",
+                "",
+            )
+        )
+        or branch_power_bucket
+    )
+    air_conditioner_temperature_humidity_family = present_source_cache_family(
+        source_cache.get("air_conditioner_temperature_humidity_family", {}),
+        key="air_conditioner_temperature_humidity_family",
+        title="空调温湿度源文件",
+        fallback_bucket=air_conditioner_temperature_humidity_bucket,
+        bucket_scope_text="整日",
+    )
     chiller_mode_switch_bucket = _string(source_cache.get("chiller_mode_switch_family", {}).get("current_bucket", "")) or current_hour_bucket
     chiller_mode_switch_family = present_source_cache_family(
         source_cache.get("chiller_mode_switch_family", {}),
@@ -991,13 +1007,14 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
         branch_current_family,
         branch_switch_family,
         building_full_cabinet_power_family,
+        air_conditioner_temperature_humidity_family,
         chiller_mode_switch_family,
         alarm_family,
     ]
 
     tone = "warning"
     status_text = "准备中"
-    summary_text = "内网端会维护共享源文件：交接班日志源文件、交接班容量报表源文件、支路三源文件、制冷单元模式切换参数源文件、全景平台月报源文件，以及按策略拉取的告警信息源文件。"
+    summary_text = "内网端会维护共享源文件：交接班日志源文件、交接班容量报表源文件、支路三源文件、楼栋全机柜功率源文件、空调温湿度源文件、制冷单元模式切换参数源文件、全景平台月报源文件，以及按策略拉取的告警信息源文件。"
     if not enabled:
         tone = "warning"
         status_text = "未启用"
@@ -1009,11 +1026,11 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
     elif families and all(bool(item.get("all_ready", False)) and bool(item.get("buildings")) for item in families):
         tone = "success"
         status_text = "本轮共享文件已全部就绪"
-        summary_text = "交接班、容量报表、支路功率、支路电流、支路开关、制冷单元模式切换参数、月报和告警信息共享文件都已就绪。"
+        summary_text = "交接班、容量报表、支路功率、支路电流、支路开关、楼栋全机柜功率、空调温湿度、制冷单元模式切换参数、月报和告警信息共享文件都已就绪。"
     elif scheduler_running:
         tone = "warning"
         status_text = "运行中"
-        summary_text = "共享缓存仓正在维护交接班、容量报表、支路三源、制冷单元模式切换参数、月报和最近应执行的告警信息文件。"
+        summary_text = "共享缓存仓正在维护交接班、容量报表、支路三源、楼栋全机柜功率、空调温湿度、制冷单元模式切换参数、月报和最近应执行的告警信息文件。"
     reason_code = "waiting"
     if not enabled:
         reason_code = "disabled"
@@ -1150,6 +1167,7 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
         ("branch_current_family", "支路电流源文件"),
         ("branch_switch_family", "支路开关源文件"),
         ("building_full_cabinet_power_family", "楼栋全机柜功率源文件"),
+        ("air_conditioner_temperature_humidity_family", "空调温湿度源文件"),
         ("chiller_mode_switch_family", "制冷单元模式切换参数源文件"),
         ("monthly_report_family", "全景平台月报源文件"),
         ("top5_monthly_report_family", "TOP5月报源文件"),
@@ -1293,7 +1311,7 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
         "summary_text": summary_text,
         "detail_text": error_text or summary_text,
         "reason_code": reason_code,
-            "display_note_text": "交接班容量报表源文件、支路功率源文件、支路电流源文件、支路开关源文件和楼栋全机柜功率源文件仅在状态页同步展示，不单独阻断外网默认流程。",
+            "display_note_text": "交接班容量报表源文件、支路功率源文件、支路电流源文件、支路开关源文件、楼栋全机柜功率源文件和空调温湿度源文件仅在状态页同步展示，不单独阻断外网默认流程。",
         "reference_bucket_key": reference_bucket_key,
         "error_text": error_text,
         "families": families,

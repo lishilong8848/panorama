@@ -15,6 +15,7 @@ FAMILY_BRANCH_POWER = "branch_power_family"
 FAMILY_BRANCH_CURRENT = "branch_current_family"
 FAMILY_BRANCH_SWITCH = "branch_switch_family"
 FAMILY_BUILDING_FULL_CABINET_POWER = "building_full_cabinet_power_family"
+FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY = "air_conditioner_temperature_humidity_family"
 FAMILY_CHILLER_MODE_SWITCH = "chiller_mode_switch_family"
 
 SOURCE_TYPE_FOLDERS = {
@@ -27,6 +28,7 @@ SOURCE_TYPE_FOLDERS = {
     FAMILY_BRANCH_CURRENT: "支路电流源文件",
     FAMILY_BRANCH_SWITCH: "支路开关源文件",
     FAMILY_BUILDING_FULL_CABINET_POWER: "楼栋全机柜功率源文件",
+    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: "空调温湿度源文件",
     FAMILY_CHILLER_MODE_SWITCH: "制冷单元模式切换参数源文件",
 }
 
@@ -168,6 +170,7 @@ def source_bucket_segment(
         FAMILY_BRANCH_CURRENT,
         FAMILY_BRANCH_SWITCH,
         FAMILY_BUILDING_FULL_CABINET_POWER,
+        FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
     } and normalized_kind in {"day", "daily"}:
         return f"{duty_digits}--整日"
     return duty_digits
