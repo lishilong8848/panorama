@@ -404,7 +404,12 @@ class TemperatureHumidityUploadService:
                 column_e = values[2] if len(values) > 2 else None
                 if not column_d:
                     continue
-                if column_d in {"温度", "湿度"}:
+                measurement_key = ""
+                if "温度" in column_d:
+                    measurement_key = "temperature"
+                elif "湿度" in column_d:
+                    measurement_key = "humidity"
+                if measurement_key:
                     if column_c:
                         current_temperature_position = column_c
                     if not current_temperature_position:
@@ -420,7 +425,7 @@ class TemperatureHumidityUploadService:
                         current_temperature_position,
                         {"building": building, "position": current_temperature_position},
                     )
-                    item["temperature" if column_d == "温度" else "humidity"] = number
+                    item[measurement_key] = number
                     continue
 
                 # 运行状态行结束当前温湿度合并单元格分组，避免后续缺位置行误沿用旧位置。

@@ -17,15 +17,17 @@ def _write_source_file(
     temperature: float,
     humidity: float,
     invalid_status: bool = False,
+    temperature_label: str = "温度",
+    humidity_label: str = "湿度",
 ) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "sheet1"
     sheet.merge_cells("C3:C4")
     sheet["C3"] = "B-144变电所P1_TH-01"
-    sheet["D3"] = "温度"
+    sheet["D3"] = temperature_label
     sheet["E3"] = temperature
-    sheet["D4"] = "湿度"
+    sheet["D4"] = humidity_label
     sheet["E4"] = humidity
     sheet["D6"] = "B-111-CRAH-01_运行状态"
     sheet["E6"] = 1
@@ -178,6 +180,27 @@ def test_parse_workbook_merges_temperature_humidity_and_maps_binary_status(tmp_p
     }
     assert result["rows"][1]["running_status"] == "开启"
     assert result["rows"][2]["running_status"] == "关闭"
+
+
+def test_parse_workbook_accepts_labels_containing_temperature_or_humidity(tmp_path):
+    source = tmp_path / "source-with-prefixed-labels.xlsx"
+    _write_source_file(
+        source,
+        temperature=28.88,
+        humidity=61.25,
+        temperature_label="室内温度值",
+        humidity_label="相对湿度",
+    )
+
+    result = TemperatureHumidityUploadService.parse_workbook(source, building="C楼")
+
+    assert result["temperature_location_count"] == 1
+    assert result["rows"][0] == {
+        "building": "C楼",
+        "position": "B-144变电所P1_TH-01",
+        "temperature": 28.88,
+        "humidity": 61.25,
+    }
 
 
 def test_parse_workbook_rejects_non_binary_running_status(tmp_path):
