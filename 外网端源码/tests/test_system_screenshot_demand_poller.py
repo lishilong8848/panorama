@@ -89,7 +89,10 @@ def test_poll_submits_one_demand_upload_job_when_request_checked():
     job = jobs.started[0]
     assert job["worker_handler"] == "system_screenshot_demand_upload"
     assert job["feature"] == "system_screenshot_upload"
-    assert job["resource_keys"] == [f"system_screenshot_upload:{job['worker_payload']['capture_date']}"]
+    assert job["resource_keys"] == [
+        "network:external",
+        f"system_screenshot_upload:{job['worker_payload']['capture_date']}",
+    ]
     assert job["worker_payload"]["demand_record_id"] == "rec-1"
     assert job["worker_payload"]["trigger_internal_capture"] is True
     assert job["worker_payload"]["internal_capture_force"] is True

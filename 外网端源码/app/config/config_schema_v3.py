@@ -70,7 +70,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "on_upload_failure": True,
             "task_failure_webhook_enabled": True,
             "task_failure_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499",
-            "task_failure_webhook_timeout": 5,
+            "task_failure_webhook_timeout": 15,
         },
         "feishu_auth": {
             "app_id": "",
@@ -1309,6 +1309,8 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "max_records": 5000,
                 "delete_batch_size": 500,
                 "create_batch_size": 200,
+                "create_timeout_sec": 60,
+                "create_retry_count": 3,
                 "replace_existing": True,
             },
             "fields": {

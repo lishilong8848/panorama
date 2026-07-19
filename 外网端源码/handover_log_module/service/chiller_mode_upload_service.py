@@ -45,8 +45,8 @@ class ChillerModeUploadService:
                 "max_records": 5000,
                 "delete_batch_size": 500,
                 "create_batch_size": 100,
-                "create_timeout_sec": 20,
-                "create_retry_count": 1,
+                "create_timeout_sec": 60,
+                "create_retry_count": 3,
                 "replace_existing": True,
             },
             "fields": {
@@ -143,8 +143,8 @@ class ChillerModeUploadService:
         target["max_records"] = max(1, int(target.get("max_records", 5000) or 5000))
         target["delete_batch_size"] = max(1, int(target.get("delete_batch_size", 500) or 500))
         target["create_batch_size"] = max(1, min(100, int(target.get("create_batch_size", 100) or 100)))
-        target["create_timeout_sec"] = max(5, int(target.get("create_timeout_sec", 20) or 20))
-        target["create_retry_count"] = max(0, int(target.get("create_retry_count", 1) or 1))
+        target["create_timeout_sec"] = max(5, int(target.get("create_timeout_sec", 60) or 60))
+        target["create_retry_count"] = max(0, int(target.get("create_retry_count", 3) or 3))
         target["replace_existing"] = bool(target.get("replace_existing", True))
         cfg["target"] = target
 
@@ -212,6 +212,135 @@ class ChillerModeUploadService:
             canonical_metric_name_fn=lambda value: str(value or "").strip(),
             dimension_mapping={},
         )
+
+    @staticmethod
+    def _extract_created_record_ids(responses: List[Dict[str, Any]]) -> List[str]:
+        record_ids: List[str] = []
+        for response in responses if isinstance(responses, list) else []:
+            if not isinstance(response, dict):
+                continue
+            payload = response.get("data", {}) if isinstance(response.get("data", {}), dict) else {}
+            records = payload.get("records", [])
+            if not isinstance(records, list):
+                records = payload.get("items", []) if isinstance(payload.get("items", []), list) else []
+            for item in records:
+                if not isinstance(item, dict):
+                    continue
+                record_id = str(item.get("record_id", "") or "").strip()
+                if record_id:
+                    record_ids.append(record_id)
+        return record_ids
+
+    def _replace_target_records_safely(
+        self,
+        *,
+        client: FeishuBitableClient,
+        table_id: str,
+        rows: List[Dict[str, Any]],
+        target: Dict[str, Any],
+        list_field_names: List[str],
+        emit_log: Callable[[str], None],
+    ) -> tuple[int, int]:
+        page_size = int(target.get("page_size", 500) or 500)
+        delete_batch_size = int(target.get("delete_batch_size", 500) or 500)
+        existing_record_ids = client.list_record_ids(
+            table_id=table_id,
+            page_size=page_size,
+            field_names=list_field_names,
+        )
+        emit_log(
+            f"[制冷模式参数上传] 已保存目标表现有记录快照: existing={len(existing_record_ids)}"
+        )
+
+        batch_size = max(1, int(target.get("create_batch_size", 100) or 100))
+        total_batches = (len(rows) + batch_size - 1) // batch_size
+        created_count = 0
+        created_record_ids: List[str] = []
+        original_timeout = int(getattr(client, "timeout", 30) or 30)
+        original_retry_count = int(getattr(client, "request_retry_count", 3) or 3)
+        client.timeout = max(original_timeout, int(target.get("create_timeout_sec", 60) or 60))
+        client.request_retry_count = max(
+            original_retry_count,
+            int(target.get("create_retry_count", 3) or 3),
+        )
+        try:
+            for batch_index, start in enumerate(range(0, len(rows), batch_size), start=1):
+                chunk = rows[start : start + batch_size]
+                emit_log(
+                    f"[制冷模式参数上传] 批量写入开始: batch={batch_index}/{total_batches}, "
+                    f"records={len(chunk)}, uploaded={created_count}/{len(rows)}, "
+                    f"timeout={client.timeout}s, retries={client.request_retry_count}"
+                )
+                batch_started = time.perf_counter()
+                try:
+                    responses = client.batch_create_records(
+                        table_id=table_id,
+                        fields_list=chunk,
+                        batch_size=len(chunk),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(
+                        f"[制冷模式参数上传][失败] 批量写入失败: batch={batch_index}/{total_batches}, "
+                        f"uploaded={created_count}/{len(rows)}, error={exc}"
+                    )
+                    raise
+                created_record_ids.extend(self._extract_created_record_ids(responses))
+                created_count += len(chunk)
+                emit_log(
+                    f"[制冷模式参数上传] 批量写入进度: uploaded={created_count}/{len(rows)}, "
+                    f"batch={batch_index}/{total_batches}, elapsed_ms={int((time.perf_counter() - batch_started) * 1000)}"
+                )
+        except Exception:
+            if created_record_ids:
+                try:
+                    cleaned = client.batch_delete_records(
+                        table_id=table_id,
+                        record_ids=created_record_ids,
+                        batch_size=delete_batch_size,
+                    )
+                    emit_log(
+                        f"[制冷模式参数上传] 写入失败，已清理本次确认创建的记录: cleaned={cleaned}; "
+                        f"旧记录保留={len(existing_record_ids)}"
+                    )
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    emit_log(
+                        f"[制冷模式参数上传] 写入失败且新记录清理失败，旧记录仍未删除: error={cleanup_exc}"
+                    )
+            else:
+                emit_log(
+                    f"[制冷模式参数上传] 写入失败，未删除旧记录: existing={len(existing_record_ids)}"
+                )
+            raise
+        finally:
+            client.timeout = original_timeout
+            client.request_retry_count = original_retry_count
+
+        deleted_count = 0
+        if bool(target.get("replace_existing", True)) and existing_record_ids:
+            client.timeout = max(original_timeout, int(target.get("create_timeout_sec", 60) or 60))
+            client.request_retry_count = max(
+                original_retry_count,
+                int(target.get("create_retry_count", 3) or 3),
+            )
+            try:
+                deleted_count = client.batch_delete_records(
+                    table_id=table_id,
+                    record_ids=existing_record_ids,
+                    batch_size=delete_batch_size,
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_log(
+                    f"[制冷模式参数上传][失败] 新记录已完整写入，但旧记录清理失败；"
+                    f"保留新旧记录供下次重跑清理: created={created_count}, error={exc}"
+                )
+                raise
+            finally:
+                client.timeout = original_timeout
+                client.request_retry_count = original_retry_count
+        emit_log(
+            f"[制冷模式参数上传] 安全替换完成: created={created_count}, deleted_old={deleted_count}"
+        )
+        return deleted_count, created_count
 
     @staticmethod
     def _field_name(item: Dict[str, Any]) -> str:
@@ -593,52 +722,19 @@ class ChillerModeUploadService:
                 "target": resolved_target,
             }
         emit_log(
-            f"[制冷模式参数上传] 全部解析成功，开始清表重传: files={len(parsed_files)}, records={len(prepared_rows)}, table_id={table_id}"
+            f"[制冷模式参数上传] 全部解析成功，开始安全替换: files={len(parsed_files)}, "
+            f"records={len(prepared_rows)}, table_id={table_id}; 新记录完整写入后才清理旧记录"
         )
-        deleted_count = client.clear_table(
+        deleted_count, created_count = self._replace_target_records_safely(
+            client=client,
             table_id=table_id,
-            list_page_size=int(target.get("page_size", 500) or 500),
-            delete_batch_size=int(target.get("delete_batch_size", 500) or 500),
-            list_field_names=[str(normalized_cfg.get("fields", {}).get("building", "楼栋") or "楼栋").strip()],
+            rows=prepared_rows,
+            target=target,
+            list_field_names=[
+                str(normalized_cfg.get("fields", {}).get("building", "楼栋") or "楼栋").strip()
+            ],
+            emit_log=emit_log,
         )
-        emit_log(f"[制冷模式参数上传] 目标表清空完成: deleted={deleted_count}")
-        batch_size = max(1, int(target.get("create_batch_size", 100) or 100))
-        total_batches = (len(prepared_rows) + batch_size - 1) // batch_size
-        created_count = 0
-        original_timeout = int(getattr(client, "timeout", 30) or 30)
-        original_retry_count = int(getattr(client, "request_retry_count", 3) or 3)
-        client.timeout = min(original_timeout, int(target.get("create_timeout_sec", 20) or 20))
-        client.request_retry_count = min(original_retry_count, int(target.get("create_retry_count", 1) or 1))
-        try:
-            for batch_index, start in enumerate(range(0, len(prepared_rows), batch_size), start=1):
-                chunk = prepared_rows[start : start + batch_size]
-                emit_log(
-                    f"[制冷模式参数上传] 批量写入开始: batch={batch_index}/{total_batches}, "
-                    f"records={len(chunk)}, uploaded={created_count}/{len(prepared_rows)}, "
-                    f"timeout={client.timeout}s, retries={client.request_retry_count}"
-                )
-                batch_started = time.perf_counter()
-                try:
-                    client.batch_create_records(
-                        table_id=table_id,
-                        fields_list=chunk,
-                        batch_size=len(chunk),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    emit_log(
-                        f"[制冷模式参数上传][失败] 批量写入失败: batch={batch_index}/{total_batches}, "
-                        f"uploaded={created_count}/{len(prepared_rows)}, error={exc}"
-                    )
-                    raise
-                created_count += len(chunk)
-                emit_log(
-                    f"[制冷模式参数上传] 批量写入进度: uploaded={created_count}/{len(prepared_rows)}, "
-                    f"batch={batch_index}/{total_batches}, elapsed_ms={int((time.perf_counter() - batch_started) * 1000)}"
-                )
-        finally:
-            client.timeout = original_timeout
-            client.request_retry_count = original_retry_count
-        emit_log(f"[制冷模式参数上传] 批量写入完成: created={created_count}")
         hvac_sync_result = HvacBitableSyncService(self.runtime_config).safe_sync_after_chiller_upload(
             emit_log=emit_log,
             chiller_cfg=normalized_cfg,

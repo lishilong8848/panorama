@@ -360,7 +360,7 @@ class SystemScreenshotDemandPoller:
                 "demand_request_field": cfg["request_field"],
                 "demand_completed_field": cfg["completed_field"],
             },
-            resource_keys=[f"system_screenshot_upload:{capture_date}"],
+            resource_keys=["network:external", f"system_screenshot_upload:{capture_date}"],
             priority="scheduler",
             feature="system_screenshot_upload",
             dedupe_key=f"system_screenshot_upload:demand:{capture_date}:{record_id}",

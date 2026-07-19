@@ -1078,7 +1078,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         job_kwargs = {
             "name": name,
             "run_func": run_func,
-            "resource_keys": [resource_key],
+            "resource_keys": ["network:external", resource_key],
             "priority": "scheduler",
             "feature": feature,
             "submitted_by": "scheduler",
@@ -2426,7 +2426,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 name=f"系统截图上传 {capture_date}",
                 worker_handler="system_screenshot_upload",
                 worker_payload={"capture_date": capture_date},
-                resource_keys=[f"system_screenshot_upload:{capture_date}"],
+                resource_keys=["network:external", f"system_screenshot_upload:{capture_date}"],
                 priority="scheduler",
                 feature="system_screenshot_upload",
                 dedupe_key=f"system_screenshot_upload:{capture_date}",

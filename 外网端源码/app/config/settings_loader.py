@@ -1418,6 +1418,24 @@ def _validate_chiller_mode_upload(cfg: Dict[str, Any]) -> None:
             raise ValueError(f"配置错误: features.chiller_mode_upload.target.{key} 必须是正整数") from exc
         if number <= 0:
             raise ValueError(f"配置错误: features.chiller_mode_upload.target.{key} 必须大于0")
+    try:
+        create_timeout_sec = int(target.get("create_timeout_sec", 60))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "配置错误: features.chiller_mode_upload.target.create_timeout_sec 必须是正整数"
+        ) from exc
+    if create_timeout_sec <= 0:
+        raise ValueError("配置错误: features.chiller_mode_upload.target.create_timeout_sec 必须大于0")
+    try:
+        create_retry_count = int(target.get("create_retry_count", 3))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "配置错误: features.chiller_mode_upload.target.create_retry_count 必须是非负整数"
+        ) from exc
+    if create_retry_count < 0:
+        raise ValueError(
+            "配置错误: features.chiller_mode_upload.target.create_retry_count 不能小于0"
+        )
     for key in ("building", "controller", "point", "value", "chiller_mode"):
         if not str(fields.get(key, "")).strip():
             raise ValueError(f"配置错误: features.chiller_mode_upload.fields.{key} 不能为空")
