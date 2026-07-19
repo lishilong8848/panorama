@@ -686,6 +686,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "page_size": 500,
                     "max_records": 5000,
                     "delete_batch_size": 200,
+                    "upload_timeout_sec": 120,
                 },
                 "fields": {
                     "type": "类型",

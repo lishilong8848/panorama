@@ -588,7 +588,7 @@ class FeishuBitableClient:
                 break
         return fields
 
-    def upload_attachment(self, file_path: str) -> str:
+    def upload_attachment(self, file_path: str, timeout: Optional[int] = None) -> str:
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(file_path)
@@ -598,6 +598,7 @@ class FeishuBitableClient:
             file_name=path.name,
             content=content,
             mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            timeout=timeout,
         )
 
     def upload_attachment_bytes(

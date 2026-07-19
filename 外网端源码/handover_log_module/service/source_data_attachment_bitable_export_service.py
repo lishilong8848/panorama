@@ -52,6 +52,7 @@ class SourceDataAttachmentBitableExportService:
                 "page_size": 500,
                 "max_records": 5000,
                 "delete_batch_size": 200,
+                "upload_timeout_sec": 120,
             },
             "fields": {
                 "type": "类型",
@@ -94,6 +95,7 @@ class SourceDataAttachmentBitableExportService:
         source["page_size"] = max(1, int(source.get("page_size", 500) or 500))
         source["max_records"] = max(1, int(source.get("max_records", 5000) or 5000))
         source["delete_batch_size"] = max(1, int(source.get("delete_batch_size", 200) or 200))
+        source["upload_timeout_sec"] = max(1, int(source.get("upload_timeout_sec", 120) or 120))
         cfg["source"] = source
 
         for key, default in (
@@ -338,7 +340,10 @@ class SourceDataAttachmentBitableExportService:
                 duty_shift=shift_key,
                 cfg=cfg,
             )
-            file_token = client.upload_attachment(data_file_text)
+            file_token = client.upload_attachment(
+                data_file_text,
+                timeout=int(source.get("upload_timeout_sec", 120) or 120),
+            )
             row_fields = {
                 str(fields.get("type", "类型")).strip(): str(fixed_values.get("type", "动环数据")).strip(),
                 str(fields.get("building", "楼栋")).strip(): building_text,

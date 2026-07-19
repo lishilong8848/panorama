@@ -1452,7 +1452,7 @@ def _validate_handover_source_data_attachment_export(cfg: Dict[str, Any]) -> Non
             raise ValueError("配置错误: features.handover_log.source_data_attachment_export.source.app_token 不能为空")
         if not str(source.get("table_id", "")).strip():
             raise ValueError("配置错误: features.handover_log.source_data_attachment_export.source.table_id 不能为空")
-        for key in ("page_size", "max_records", "delete_batch_size"):
+        for key in ("page_size", "max_records", "delete_batch_size", "upload_timeout_sec"):
             if int(source.get(key, 0)) <= 0:
                 raise ValueError(
                     f"配置错误: features.handover_log.source_data_attachment_export.source.{key} 必须大于0"
