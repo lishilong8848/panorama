@@ -42,6 +42,10 @@ def _field_text(value: Any) -> str:
 
 
 def _field_text_with_option_map(value: Any, option_map: Dict[str, str]) -> str:
+    if isinstance(value, dict):
+        option_id = str(value.get("id") or value.get("option_id") or "").strip()
+        if option_id:
+            return str(option_map.get(option_id, option_id)).strip()
     text = _field_text(value)
     if not text:
         return ""
@@ -138,6 +142,18 @@ def _building_matches(target_building: str, values: List[str]) -> bool:
     return False
 
 
+def _infer_building_values_from_item(item_text: str) -> List[str]:
+    raw = str(item_text or "").strip().upper()
+    if not raw:
+        return []
+    output: List[str] = []
+    for match in re.finditer(r"(?<![A-Z0-9])([A-E])\s*(?:楼|栋)", raw):
+        building = f"{match.group(1)}楼"
+        if building not in output:
+            output.append(building)
+    return output
+
+
 def _infer_duty_by_now(now: datetime | None = None) -> tuple[str, str]:
     cursor = now or datetime.now()
     second_of_day = cursor.hour * 3600 + cursor.minute * 60 + cursor.second
@@ -178,7 +194,7 @@ MaintenanceRowsByBuilding = Dict[str, List[MaintenanceManagementRow]]
 class MaintenanceManagementRepository:
     def __init__(self, handover_cfg: Dict[str, Any]) -> None:
         self.handover_cfg = handover_cfg
-        self._field_option_maps_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
+        self._field_option_maps_cache: Dict[Tuple[str, Tuple[str, ...]], Dict[str, Dict[str, str]]] = {}
 
     @staticmethod
     def _defaults() -> Dict[str, Any]:
@@ -232,6 +248,12 @@ class MaintenanceManagementRepository:
         source["page_size"] = max(1, int(source.get("page_size", 500) or 500))
         source["max_records"] = max(1, int(source.get("max_records", 5000) or 5000))
         cfg["source"] = source
+        fields = cfg.get("fields", {}) if isinstance(cfg.get("fields", {}), dict) else {}
+        if str(fields.get("building", "")).strip() in {"", "楼栋-L"}:
+            fields["building"] = "楼栋"
+        if str(fields.get("specialty", "")).strip() in {"", "专业-L"}:
+            fields["specialty"] = "专业"
+        cfg["fields"] = fields
         return cfg
 
     def get_config(self) -> Dict[str, Any]:
@@ -299,7 +321,8 @@ class MaintenanceManagementRepository:
         if not table_key or not field_names:
             return {}
 
-        cached = self._field_option_maps_cache.get(table_key)
+        cache_key = (table_key, tuple(field_names))
+        cached = self._field_option_maps_cache.get(cache_key)
         if cached is not None:
             return {field_name: dict(cached.get(field_name, {})) for field_name in field_names}
 
@@ -323,7 +346,7 @@ class MaintenanceManagementRepository:
                 continue
             output[field_name] = self._extract_option_map_from_field(field_def)
 
-        self._field_option_maps_cache[table_key] = {key: dict(value) for key, value in output.items()}
+        self._field_option_maps_cache[cache_key] = {key: dict(value) for key, value in output.items()}
         counts = ", ".join(f"{field_name}={len(output.get(field_name, {}))}" for field_name in field_names)
         emit_log(f"[交接班][维护管理] 字段选项映射已加载: {counts}")
         return {field_name: dict(output.get(field_name, {})) for field_name in field_names}
@@ -347,6 +370,8 @@ class MaintenanceManagementRepository:
                 "end_time_after_shift_skipped": 0,
                 "end_time_before_start_skipped": 0,
                 "blank_item_skipped": 0,
+                "building_inferred_from_item": 0,
+                "blank_building_unresolved": 0,
             }
 
         source = cfg.get("source", {})
@@ -412,6 +437,8 @@ class MaintenanceManagementRepository:
         end_time_after_shift_skipped = 0
         end_time_before_start_skipped = 0
         blank_item_skipped = 0
+        building_inferred_from_item = 0
+        blank_building_unresolved = 0
 
         for item in records:
             if not isinstance(item, dict):
@@ -455,6 +482,12 @@ class MaintenanceManagementRepository:
             if not item_text:
                 blank_item_skipped += 1
                 continue
+            if not building_values:
+                building_values = _infer_building_values_from_item(item_text)
+                if building_values:
+                    building_inferred_from_item += 1
+                else:
+                    blank_building_unresolved += 1
 
             in_shift += 1
             rows.append(
@@ -481,6 +514,8 @@ class MaintenanceManagementRepository:
             "end_time_after_shift_skipped": end_time_after_shift_skipped,
             "end_time_before_start_skipped": end_time_before_start_skipped,
             "blank_item_skipped": blank_item_skipped,
+            "building_inferred_from_item": building_inferred_from_item,
+            "blank_building_unresolved": blank_building_unresolved,
         }
 
     def list_current_shift_rows(
@@ -507,7 +542,9 @@ class MaintenanceManagementRepository:
             f"end_time_before_shift_skipped={counters.get('end_time_before_shift_skipped', 0)}, "
             f"end_time_after_shift_skipped={counters.get('end_time_after_shift_skipped', 0)}, "
             f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}, "
-            f"blank_item_skipped={counters.get('blank_item_skipped', 0)}"
+            f"blank_item_skipped={counters.get('blank_item_skipped', 0)}, "
+            f"building_inferred_from_item={counters.get('building_inferred_from_item', 0)}, "
+            f"blank_building_unresolved={counters.get('blank_building_unresolved', 0)}"
         )
         return matched_rows, cfg
 
@@ -549,7 +586,9 @@ class MaintenanceManagementRepository:
             f"end_time_before_shift_skipped={counters.get('end_time_before_shift_skipped', 0)}, "
             f"end_time_after_shift_skipped={counters.get('end_time_after_shift_skipped', 0)}, "
             f"end_time_before_start_skipped={counters.get('end_time_before_start_skipped', 0)}, "
-            f"blank_item_skipped={counters.get('blank_item_skipped', 0)}"
+            f"blank_item_skipped={counters.get('blank_item_skipped', 0)}, "
+            f"building_inferred_from_item={counters.get('building_inferred_from_item', 0)}, "
+            f"blank_building_unresolved={counters.get('blank_building_unresolved', 0)}"
         )
         emit_log(
             "[交接班][维护管理] 批量分桶完成: "

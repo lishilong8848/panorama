@@ -726,12 +726,16 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(maintenanceManagement.source, "table_id", "tblk7QuEsiE4p3nZ");
   setNumberDefault(maintenanceManagement.source, "page_size", 500);
   setNumberDefault(maintenanceManagement.source, "max_records", 5000);
-  setStringDefault(maintenanceManagement.fields, "building", "楼栋");
+  if (!String(maintenanceManagement.fields.building || "").trim() || String(maintenanceManagement.fields.building || "").trim() === "楼栋-L") {
+    maintenanceManagement.fields.building = "楼栋";
+  }
   setStringDefault(maintenanceManagement.fields, "start_time", "实际开始时间");
   setStringDefault(maintenanceManagement.fields, "updated_time", "最新更新时间");
   setStringDefault(maintenanceManagement.fields, "actual_end_time", "实际结束时间");
   setStringDefault(maintenanceManagement.fields, "item", "名称");
-  setStringDefault(maintenanceManagement.fields, "specialty", "专业");
+  if (!String(maintenanceManagement.fields.specialty || "").trim() || String(maintenanceManagement.fields.specialty || "").trim() === "专业-L") {
+    maintenanceManagement.fields.specialty = "专业";
+  }
   setStringDefault(maintenanceManagement.sections, "maintenance_management", "维护管理");
   setStringDefault(maintenanceManagement.fixed_values, "vendor_internal", "自维");
   setStringDefault(maintenanceManagement.fixed_values, "vendor_external", "厂维");
