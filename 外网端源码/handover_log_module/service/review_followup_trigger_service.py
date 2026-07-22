@@ -526,8 +526,14 @@ class ReviewFollowupTriggerService:
             }
         if not bool(session.get("confirmed", False)):
             sessions = self._review_service.list_batch_sessions(target_batch)
+            blocked_detail = f"{target_building or '当前楼栋'}尚未确认，未执行云文档上传"
+            emit_log(
+                f"[交接班][确认后上传] 已阻止: batch={target_batch}, "
+                f"building={target_building or '-'}, reason={blocked_detail}"
+            )
             return {
                 "status": "blocked",
+                "error": blocked_detail,
                 "batch_key": target_batch,
                 "uploaded_buildings": [],
                 "skipped_buildings": [],
@@ -541,6 +547,7 @@ class ReviewFollowupTriggerService:
                     "failed_buildings": [{"building": target_building, "error": "pending_review"}],
                     "details": {},
                     "blocked_reason": "pending_review",
+                    "error": blocked_detail,
                 },
                 "daily_report_record_export": self._existing_daily_report_record_export(sessions),
                 "cabinet_shift_record_export": self._existing_cabinet_shift_record_export(sessions),

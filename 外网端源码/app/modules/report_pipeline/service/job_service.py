@@ -811,6 +811,31 @@ class JobService:
 
     @staticmethod
     def _job_failure_detail(job: JobState) -> str:
+        def _payload_failure_detail(payload: Any) -> str:
+            if not isinstance(payload, dict):
+                return ""
+            for key in ("error", "last_error", "message", "summary", "detail", "blocked_reason", "reason"):
+                value = str(payload.get(key, "") or "").strip()
+                if value and value.lower() not in {"ok", "success"}:
+                    return value
+            failed_items = payload.get("failed_buildings", [])
+            if isinstance(failed_items, list):
+                details: List[str] = []
+                for item in failed_items:
+                    if not isinstance(item, dict):
+                        continue
+                    building = str(item.get("building", "") or "").strip()
+                    detail = str(item.get("error", "") or item.get("reason", "") or "").strip()
+                    if detail:
+                        details.append(f"{building}: {detail}" if building else detail)
+                if details:
+                    return "；".join(details)
+            for key in ("cloud_sheet_sync", "followup_progress", "daily_report_record_export"):
+                detail = _payload_failure_detail(payload.get(key))
+                if detail:
+                    return detail
+            return ""
+
         error_text = str(job.error or "").strip()
         if not error_text:
             for stage in reversed(list(getattr(job, "stages", []) or [])):
@@ -823,13 +848,7 @@ class JobService:
             for stage in list(getattr(job, "stages", []) or []):
                 candidate_payloads.append(getattr(stage, "result", None))
             for payload in candidate_payloads:
-                if not isinstance(payload, dict):
-                    continue
-                for key in ("error", "last_error", "message", "summary", "detail"):
-                    value = str(payload.get(key, "") or "").strip()
-                    if value and value.lower() not in {"ok", "success"}:
-                        error_text = value
-                        break
+                error_text = _payload_failure_detail(payload)
                 if error_text:
                     break
         if not error_text:
