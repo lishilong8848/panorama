@@ -196,6 +196,7 @@ class HandoverXlsxWriteQueueService:
             session_id=session_id,
             dedupe_key=f"{session_id}|{output_file}",
             payload=payload,
+            dedupe_running_if_payload_matches=True,
         )
         self.emit_log(
             f"[交接班][xlsx队列] 已入队 building={building}, task=capacity_overlay_sync, "

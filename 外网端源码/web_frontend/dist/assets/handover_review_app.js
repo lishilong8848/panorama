@@ -48,6 +48,7 @@ const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
 ];
 const REVIEW_PATH_RE = /^\/handover\/review\/([a-e](?:楼)?|h(?:楼)?|110(?:站)?)\/?$/i;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
+const MIN_POLL_INTERVAL_MS = 5000;
 const REVIEW_LOCK_HEARTBEAT_MS = 15000;
 const SUBSTATION_110KV_AUTO_SAVE_DEBOUNCE_MS = 350;
 const SUBSTATION_110KV_PREVIEW_SYNC_DEBOUNCE_MS = 150;
@@ -2242,6 +2243,7 @@ export function mountHandoverReviewApp(Vue) {
       let substation110kvDirtyMarkPromise = Promise.resolve(true);
       let activeLoadController = null;
       let activeMetaControllers = [];
+      let backgroundLoadInFlight = false;
 
       const cloudSyncBusy = computed(() => retryingCloudSync.value || updatingHistoryCloudSync.value);
       const capacitySync = computed(() => {
@@ -3033,7 +3035,7 @@ export function mountHandoverReviewApp(Vue) {
 
       function resolvePollInterval(reviewUi = {}) {
         return Math.max(
-          1000,
+          MIN_POLL_INTERVAL_MS,
           Number(reviewUi.poll_interval_sec || DEFAULT_POLL_INTERVAL_MS / 1000) * 1000,
         );
       }
@@ -3150,10 +3152,6 @@ export function mountHandoverReviewApp(Vue) {
           ...sharedBlockLocks.value,
           substation_110kv: incomingLock,
         };
-        if (sharedBlockLocks.value.substation_110kv?.is_editing_elsewhere && pollIntervalMs.value > 1000) {
-          pollIntervalMs.value = 1000;
-          restartPollTimer();
-        }
         if (sharedBlockLocks.value.substation_110kv?.client_holds_lock) {
           restartSubstation110kvHeartbeat();
           scheduleSubstation110kvIdleRelease();
@@ -3562,7 +3560,8 @@ export function mountHandoverReviewApp(Vue) {
           pollTimer.value = null;
         }
         pollTimer.value = window.setInterval(() => {
-          loadReviewData({ background: true });
+          if (backgroundLoadInFlight) return;
+          void loadReviewData({ background: true });
         }, pollIntervalMs.value);
       }
 
@@ -3636,6 +3635,9 @@ export function mountHandoverReviewApp(Vue) {
           }
           return false;
         }
+        if (background && backgroundLoadInFlight) {
+          return false;
+        }
         if (background && (saving.value || loading.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value || capacityImageSending.value)) {
           return false;
         }
@@ -3646,6 +3648,9 @@ export function mountHandoverReviewApp(Vue) {
         }
         clearMetaControllers();
         activeLoadController = createRequestController();
+        if (background) {
+          backgroundLoadInFlight = true;
+        }
         try {
           if (!background) {
             loading.value = true;
@@ -3749,6 +3754,9 @@ export function mountHandoverReviewApp(Vue) {
           }
           return false;
         } finally {
+          if (background) {
+            backgroundLoadInFlight = false;
+          }
           if (requestSeq === latestLoadRequestSeq) {
             activeLoadController = null;
           }

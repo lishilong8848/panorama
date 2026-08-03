@@ -148,6 +148,10 @@ def _verify_capacity_image_send_token(
         return "容量表图片发送确认令牌终端不匹配，请刷新审核页后点击按钮重试"
     return ""
 _REVIEW_API_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="handover-review-api")
+_REVIEW_BOOTSTRAP_API_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix="handover-review-bootstrap",
+)
 _REVIEW_SLOW_LOG_INTERVAL_SEC = 60.0
 _REVIEW_SLOW_LOG_LOCK = threading.Lock()
 _REVIEW_SLOW_LOG_STATE: dict[str, dict[str, Any]] = {}
@@ -155,11 +159,12 @@ _REVIEW_SLOW_LOG_STATE: dict[str, dict[str, Any]] = {}
 
 def shutdown_handover_review_api_executor() -> None:
     _REVIEW_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _REVIEW_BOOTSTRAP_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
-async def _run_review_api(func):
+async def _run_review_api(func, *, executor):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_REVIEW_API_EXECUTOR, func)
+    return await loop.run_in_executor(executor, func)
 
 
 def _emit_review_slow_request_log(container, *, endpoint: str, elapsed_ms: int) -> None:
@@ -199,12 +204,15 @@ def _emit_review_slow_request_log(container, *, endpoint: str, elapsed_ms: int) 
         )
 
 
-def _dedicated_review_endpoint(func):
+def _dedicated_review_endpoint_with_executor(func, *, executor):
     @functools.wraps(func)
     async def _wrapper(*args, **kwargs):
         started = time.perf_counter()
         try:
-            return await _run_review_api(lambda: func(*args, **kwargs))
+            return await _run_review_api(
+                lambda: func(*args, **kwargs),
+                executor=executor,
+            )
         finally:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             if elapsed_ms >= 3000:
@@ -221,6 +229,20 @@ def _dedicated_review_endpoint(func):
 
     _wrapper.__signature__ = inspect.signature(func)
     return _wrapper
+
+
+def _dedicated_review_endpoint(func):
+    return _dedicated_review_endpoint_with_executor(
+        func,
+        executor=_REVIEW_API_EXECUTOR,
+    )
+
+
+def _dedicated_review_bootstrap_endpoint(func):
+    return _dedicated_review_endpoint_with_executor(
+        func,
+        executor=_REVIEW_BOOTSTRAP_API_EXECUTOR,
+    )
 
 
 async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int) -> bytes:
@@ -4202,7 +4224,7 @@ def handover_review_data(
 
 
 @router.get("/api/handover/review/{building_code}/snapshot")
-@_dedicated_review_endpoint
+@_dedicated_review_bootstrap_endpoint
 def handover_review_snapshot(
     building_code: str,
     request: Request,
@@ -4281,7 +4303,7 @@ def handover_review_snapshot(
 
 
 @router.get("/api/handover/review/{building_code}/bootstrap")
-@_dedicated_review_endpoint
+@_dedicated_review_bootstrap_endpoint
 def handover_review_bootstrap(
     building_code: str,
     request: Request,
@@ -4677,19 +4699,18 @@ def handover_review_capacity_download(
             review_service=service,
             document_state=document_state,
         )
-        queue_service.enqueue_capacity_overlay_sync(
+        overlay_job = queue_service.enqueue_capacity_overlay_sync(
             target,
             tracked_cells=tracked_cells,
             client_id=str(client_id or "").strip(),
         )
-        barrier = queue_service.wait_for_barrier(
+        completed_job = queue_service.wait_for_job(
             building=building,
-            session_id=session_id_text,
-            reason="capacity_download",
-            timeout_sec=120,
+            job_id=str(overlay_job.get("job_id", "") or "").strip(),
+            timeout_sec=240,
         )
-        if str(barrier.get("status", "")).strip().lower() != "success":
-            detail = str(barrier.get("error", "") or "").strip() or "容量报表写入队列失败"
+        if str(completed_job.get("status", "")).strip().lower() != "success":
+            detail = str(completed_job.get("error", "") or "").strip() or "容量报表写入队列失败"
             container.add_system_log(
                 f"[交接班][下载容量报表] 补写失败，已阻止下载旧容量表 building={building}, session_id={session_id_text}, error={detail}"
             )

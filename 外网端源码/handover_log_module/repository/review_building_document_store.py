@@ -954,6 +954,7 @@ class ReviewBuildingDocumentStore:
         session_id: str = "",
         dedupe_key: str = "",
         payload: Dict[str, Any] | None = None,
+        dedupe_running_if_payload_matches: bool = False,
     ) -> Dict[str, Any]:
         self.ensure_ready()
         task_type_text = str(task_type or "").strip().lower()
@@ -995,6 +996,22 @@ class ReviewBuildingDocumentStore:
                         (str(pending["job_id"] or ""),),
                     ).fetchone()
                     return self._row_to_xlsx_job(row) or {}
+                if dedupe_running_if_payload_matches:
+                    running = conn.execute(
+                        """
+                        SELECT *
+                          FROM xlsx_write_jobs
+                         WHERE task_type=?
+                           AND dedupe_key=?
+                           AND status='running'
+                           AND payload_json=?
+                         ORDER BY created_at DESC
+                         LIMIT 1
+                        """,
+                        (task_type_text, dedupe_key_text, payload_text),
+                    ).fetchone()
+                    if running is not None:
+                        return self._row_to_xlsx_job(running) or {}
             job_id = uuid.uuid4().hex
             conn.execute(
                 """

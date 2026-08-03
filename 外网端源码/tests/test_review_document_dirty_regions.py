@@ -151,3 +151,68 @@ def test_download_full_sync_overrides_pending_incremental_sync(tmp_path: Path) -
 
     assert len(rows) == 1
     assert json.loads(rows[0]["payload_json"])["force_all_regions"] is True
+
+
+def test_capacity_overlay_reuses_identical_running_job(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = {
+        "session_id": "A楼|2026-07-09|day",
+        "client_id": "review-client",
+        "tracked_cells": {"D8": "120"},
+    }
+    first = store.enqueue_xlsx_write_job(
+        task_type="capacity_overlay_sync",
+        session_id=payload["session_id"],
+        dedupe_key=f"{payload['session_id']}|capacity.xlsx",
+        payload=payload,
+        dedupe_running_if_payload_matches=True,
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE xlsx_write_jobs SET status='running' WHERE job_id=?",
+            (first["job_id"],),
+        )
+
+    second = store.enqueue_xlsx_write_job(
+        task_type="capacity_overlay_sync",
+        session_id=payload["session_id"],
+        dedupe_key=f"{payload['session_id']}|capacity.xlsx",
+        payload=payload,
+        dedupe_running_if_payload_matches=True,
+    )
+
+    assert second["job_id"] == first["job_id"]
+    with store.connect(read_only=True) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM xlsx_write_jobs WHERE task_type='capacity_overlay_sync'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_capacity_overlay_keeps_new_job_when_running_payload_changed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    session_id = "A楼|2026-07-09|day"
+    dedupe_key = f"{session_id}|capacity.xlsx"
+    first = store.enqueue_xlsx_write_job(
+        task_type="capacity_overlay_sync",
+        session_id=session_id,
+        dedupe_key=dedupe_key,
+        payload={"session_id": session_id, "tracked_cells": {"D8": "120"}},
+        dedupe_running_if_payload_matches=True,
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE xlsx_write_jobs SET status='running' WHERE job_id=?",
+            (first["job_id"],),
+        )
+
+    second = store.enqueue_xlsx_write_job(
+        task_type="capacity_overlay_sync",
+        session_id=session_id,
+        dedupe_key=dedupe_key,
+        payload={"session_id": session_id, "tracked_cells": {"D8": "121"}},
+        dedupe_running_if_payload_matches=True,
+    )
+
+    assert second["job_id"] != first["job_id"]
+    assert second["status"] == "pending"
