@@ -413,7 +413,7 @@ function applyHandoverDefaults(cfg) {
     top5PowerReport.scheduler.run_time = "09:30:00";
   }
   setNumberDefault(top5PowerReport.scheduler, "check_interval_sec", 30);
-  setBooleanDefault(top5PowerReport.scheduler, "catch_up_if_missed", true);
+  top5PowerReport.scheduler.catch_up_if_missed = false;
   setBooleanDefault(top5PowerReport.scheduler, "retry_failed_on_next_tick", true);
   setStringDefault(top5PowerReport.scheduler, "state_file", "top5_power_report_scheduler_state.json");
   setBooleanDefault(top5PowerReport.notification, "enabled", true);

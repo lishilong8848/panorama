@@ -914,6 +914,7 @@ async def _check_lightweight_routes_async() -> None:
             "/api/scheduler/day-metric-upload/status",
             "/api/scheduler/alarm-event-upload/status",
             "/api/scheduler/handover/status",
+            "/api/scheduler/top5-power-report/status",
             "/api/scheduler/monthly-change-report/status",
             "/api/scheduler/monthly-event-report/status",
         )

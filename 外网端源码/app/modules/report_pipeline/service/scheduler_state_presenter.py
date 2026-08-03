@@ -257,6 +257,13 @@ def present_scheduler_overview_items(
             ("features", "temperature_humidity_upload", "scheduler"),
         )
     )
+    top5_power_report_cfg = _dict(
+        _cfg_get(
+            config_payload,
+            ("handover_log", "top5_power_report", "scheduler"),
+            ("features", "handover_log", "top5_power_report", "scheduler"),
+        )
+    )
     monthly_event_cfg = _dict(
         _cfg_get(
             config_payload,
@@ -283,6 +290,7 @@ def present_scheduler_overview_items(
     temperature_humidity_upload_snapshot = _dict(
         summary_payload.get("temperature_humidity_upload_scheduler")
     )
+    top5_power_report_snapshot = _dict(summary_payload.get("top5_power_report_scheduler"))
     monthly_event_snapshot = _dict(summary_payload.get("monthly_event_report_scheduler"))
     monthly_change_snapshot = _dict(summary_payload.get("monthly_change_report_scheduler"))
 
@@ -298,6 +306,7 @@ def present_scheduler_overview_items(
         temperature_humidity_upload_snapshot,
         role_mode=role_mode,
     )
+    top5_power_report_display = present_scheduler_state(top5_power_report_snapshot, role_mode=role_mode)
     monthly_event_display = present_scheduler_state(monthly_event_snapshot, role_mode=role_mode)
     monthly_change_display = present_scheduler_state(monthly_change_snapshot, role_mode=role_mode)
 
@@ -481,6 +490,34 @@ def present_scheduler_overview_items(
                     next_run_time=chiller_mode_snapshot.get("next_run_time"),
                     last_trigger_at=chiller_mode_snapshot.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(chiller_mode_snapshot.get("last_trigger_result")),
+                )
+            ],
+        },
+        {
+            "key": "top5_power_report",
+            "title": "TOP5功率文件生成",
+            "module_id": "top5_power_report",
+            "focus_key": "",
+            "tone": top5_power_report_display.get("tone", "neutral"),
+            "status_text": top5_power_report_display.get("status_text", "未启动"),
+            "summary_text": _summary_choice(
+                _map_scheduler_decision_text(top5_power_report_snapshot.get("last_decision")),
+                _map_scheduler_trigger_text(top5_power_report_snapshot.get("last_trigger_result")),
+                top5_power_report_display.get("summary_text", ""),
+                fallback="按配置月份日期生成 TOP5 文件并发送完成通知",
+            ),
+            "parts": [
+                _overview_part(
+                    label="月度调度",
+                    run_time_text=_monthly_run_text(
+                        top5_power_report_cfg.get("day_of_month"),
+                        top5_power_report_cfg.get("run_time"),
+                    ),
+                    next_run_time=top5_power_report_snapshot.get("next_run_time"),
+                    last_trigger_at=top5_power_report_snapshot.get("last_trigger_at"),
+                    result_text=_map_scheduler_trigger_text(
+                        top5_power_report_snapshot.get("last_trigger_result")
+                    ),
                 )
             ],
         },

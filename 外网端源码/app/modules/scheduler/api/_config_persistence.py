@@ -31,6 +31,10 @@ def _handover_common_scheduler_path(path: Sequence[str]) -> tuple[str, ...] | No
             "monthly_change_report",
             "scheduler",
         ),
+        ("features", "handover_log", "top5_power_report", "scheduler"): (
+            "top5_power_report",
+            "scheduler",
+        ),
     }
     return mapping.get(normalized)
 

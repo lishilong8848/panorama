@@ -96,7 +96,7 @@ _TOP5_SCHEDULER_DEFAULTS: Dict[str, Any] = {
     "day_of_month": 3,
     "run_time": "09:30:00",
     "check_interval_sec": 30,
-    "catch_up_if_missed": True,
+    "catch_up_if_missed": False,
     "retry_failed_on_next_tick": True,
     "state_file": "top5_power_report_scheduler_state.json",
 }
@@ -122,6 +122,7 @@ def _normalize_top5_scheduler_cfg(value: Any) -> Dict[str, Any]:
     cfg["auto_start_in_gui"] = bool(cfg.get("auto_start_in_gui", True))
     cfg["day_of_month"] = day_of_month
     cfg["run_time"] = run_time
+    cfg["catch_up_if_missed"] = False
     return cfg
 
 

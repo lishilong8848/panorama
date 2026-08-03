@@ -50,6 +50,7 @@ from app.modules.scheduler.api.system_screenshot_upload_routes import router as 
 from app.modules.scheduler.api.temperature_humidity_upload_routes import (
     router as temperature_humidity_upload_scheduler_router,
 )
+from app.modules.scheduler.api.top5_power_report_routes import router as top5_power_report_scheduler_router
 from app.modules.scheduler.api.wet_bulb_collection_routes import router as wet_bulb_collection_scheduler_router
 from app.modules.sheet_import.api.routes import router as sheet_import_router
 from app.modules.tasks.api.routes import router as tasks_router
@@ -236,6 +237,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(system_screenshot_upload_scheduler_router)
     app.include_router(temperature_humidity_upload_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
+    app.include_router(top5_power_report_scheduler_router)
     app.include_router(monthly_change_report_scheduler_router)
     app.include_router(monthly_event_report_scheduler_router)
     app.include_router(feishu_router)

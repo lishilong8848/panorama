@@ -2061,6 +2061,10 @@ export function createRuntimeHealthConfigActions(ctx) {
     ) {
       Object.assign(health.temperature_humidity_upload.scheduler, temperatureHumidityUpload);
     }
+    const top5PowerReport = summary.top5_power_report_scheduler;
+    if (top5PowerReport && typeof top5PowerReport === "object" && health?.top5_power_report?.scheduler) {
+      Object.assign(health.top5_power_report.scheduler, top5PowerReport);
+    }
     const monthlyEvent = summary.monthly_event_report_scheduler;
     if (monthlyEvent && typeof monthlyEvent === "object" && health?.monthly_event_report?.scheduler) {
       Object.assign(health.monthly_event_report.scheduler, monthlyEvent);

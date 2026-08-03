@@ -278,7 +278,7 @@ class Top5PowerReportService:
                 "day_of_month": 3,
                 "run_time": "09:30:00",
                 "check_interval_sec": 30,
-                "catch_up_if_missed": True,
+                "catch_up_if_missed": False,
                 "retry_failed_on_next_tick": True,
                 "state_file": "top5_power_report_scheduler_state.json",
             },

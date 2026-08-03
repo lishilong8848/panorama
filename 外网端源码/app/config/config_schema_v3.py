@@ -469,6 +469,18 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "state_file": "monthly_change_report_scheduler_state.json",
                 },
             },
+            "top5_power_report": {
+                "scheduler": {
+                    "enabled": True,
+                    "auto_start_in_gui": True,
+                    "day_of_month": 3,
+                    "run_time": "09:30:00",
+                    "check_interval_sec": 30,
+                    "catch_up_if_missed": False,
+                    "retry_failed_on_next_tick": True,
+                    "state_file": "top5_power_report_scheduler_state.json",
+                },
+            },
             "change_management_section": {
                 "enabled": True,
                 "source": {

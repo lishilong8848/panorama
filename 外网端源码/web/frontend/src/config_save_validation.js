@@ -1455,8 +1455,8 @@ function validateAndNormalizeTop5PowerReport(payload) {
   if (!Number.isFinite(top5.scheduler.day_of_month) || top5.scheduler.day_of_month < 1) {
     top5.scheduler.day_of_month = 3;
   }
-  if (top5.scheduler.day_of_month > 28) {
-    top5.scheduler.day_of_month = 28;
+  if (top5.scheduler.day_of_month > 31) {
+    top5.scheduler.day_of_month = 31;
   }
   top5.scheduler.run_time = String(top5.scheduler.run_time || "09:30:00").trim();
   if (
@@ -1471,7 +1471,7 @@ function validateAndNormalizeTop5PowerReport(payload) {
   if (!Number.isFinite(top5.scheduler.check_interval_sec) || top5.scheduler.check_interval_sec < 10) {
     top5.scheduler.check_interval_sec = 30;
   }
-  top5.scheduler.catch_up_if_missed = top5.scheduler.catch_up_if_missed !== false;
+  top5.scheduler.catch_up_if_missed = false;
   top5.scheduler.retry_failed_on_next_tick = Boolean(top5.scheduler.retry_failed_on_next_tick);
   top5.scheduler.state_file = String(top5.scheduler.state_file || "top5_power_report_scheduler_state.json").trim();
   top5.notification.enabled = top5.notification.enabled !== false;

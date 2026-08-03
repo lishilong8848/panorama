@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.bootstrap.container import _normalize_top5_scheduler_cfg
+from app.modules.scheduler.api._config_persistence import _handover_common_scheduler_path
 
 
 class Top5SchedulerDefaultsTest(unittest.TestCase):
@@ -12,7 +13,11 @@ class Top5SchedulerDefaultsTest(unittest.TestCase):
         self.assertTrue(cfg["auto_start_in_gui"])
         self.assertEqual(cfg["day_of_month"], 3)
         self.assertEqual(cfg["run_time"], "09:30:00")
-        self.assertTrue(cfg["catch_up_if_missed"])
+        self.assertFalse(cfg["catch_up_if_missed"])
+
+    def test_startup_catch_up_is_always_disabled(self) -> None:
+        cfg = _normalize_top5_scheduler_cfg({"catch_up_if_missed": True})
+        self.assertFalse(cfg["catch_up_if_missed"])
 
     def test_legacy_three_oclock_default_is_migrated(self) -> None:
         cfg = _normalize_top5_scheduler_cfg(
@@ -38,6 +43,14 @@ class Top5SchedulerDefaultsTest(unittest.TestCase):
         self.assertFalse(cfg["auto_start_in_gui"])
         self.assertEqual(cfg["day_of_month"], 5)
         self.assertEqual(cfg["run_time"], "10:15:00")
+
+    def test_scheduler_config_uses_handover_common_segment(self) -> None:
+        self.assertEqual(
+            _handover_common_scheduler_path(
+                ("features", "handover_log", "top5_power_report", "scheduler")
+            ),
+            ("top5_power_report", "scheduler"),
+        )
 
 
 if __name__ == "__main__":

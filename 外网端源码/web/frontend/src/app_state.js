@@ -404,6 +404,25 @@ export function createAppState(vueApi) {
         resolved_at: "",
       },
     },
+    top5_power_report: {
+      enabled: true,
+      scheduler: {
+        running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
+        status: "-",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "-",
+      },
+    },
     monthly_event_report: {
       enabled: false,
       scheduler: {
@@ -791,6 +810,7 @@ export function createAppState(vueApi) {
   const alarmEventUploadSchedulerQuickSaving = ref(false);
   const systemScreenshotUploadSchedulerQuickSaving = ref(false);
   const temperatureHumidityUploadSchedulerQuickSaving = ref(false);
+  const top5PowerReportSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
   const schedulerToggleState = reactive({
@@ -803,6 +823,7 @@ export function createAppState(vueApi) {
     alarm_event_upload: { mode: "idle", rememberedOverride: null },
     system_screenshot_upload: { mode: "idle", rememberedOverride: null },
     temperature_humidity_upload: { mode: "idle", rememberedOverride: null },
+    top5_power_report: { mode: "idle", rememberedOverride: null },
     monthly_event_report: { mode: "idle", rememberedOverride: null },
     monthly_change_report: { mode: "idle", rememberedOverride: null },
   });
@@ -1645,6 +1666,12 @@ export function createAppState(vueApi) {
   const chillerModeUploadSchedulerTriggerText = computed(() =>
     readSchedulerDisplayText(health.chiller_mode_upload?.scheduler, "trigger_text", "暂无记录"),
   );
+  const top5PowerReportSchedulerDecisionText = computed(() =>
+    readSchedulerDisplayText(health.top5_power_report?.scheduler, "decision_text", "暂无记录"),
+  );
+  const top5PowerReportSchedulerTriggerText = computed(() =>
+    readSchedulerDisplayText(health.top5_power_report?.scheduler, "trigger_text", "暂无记录"),
+  );
   const monthlyEventReportSchedulerDecisionText = computed(() =>
     readSchedulerDisplayText(health.monthly_event_report?.scheduler, "decision_text", "暂无记录"),
   );
@@ -2071,6 +2098,7 @@ export function createAppState(vueApi) {
     alarmEventUploadSchedulerQuickSaving,
     systemScreenshotUploadSchedulerQuickSaving,
     temperatureHumidityUploadSchedulerQuickSaving,
+    top5PowerReportSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
     schedulerToggleState,
@@ -2162,6 +2190,8 @@ export function createAppState(vueApi) {
     wetBulbSchedulerTriggerText,
     chillerModeUploadSchedulerDecisionText,
     chillerModeUploadSchedulerTriggerText,
+    top5PowerReportSchedulerDecisionText,
+    top5PowerReportSchedulerTriggerText,
     dayMetricUploadSchedulerDecisionText,
     dayMetricUploadSchedulerTriggerText,
     branchPowerUploadSchedulerDecisionText,

@@ -6,6 +6,87 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
             </div>
 
             <div class="day-metric-top-grid dashboard-module-primary-grid">
+              <article class="task-block dashboard-module-scheduler-card">
+                <div class="task-block-head">
+                  <div>
+                    <div class="task-block-kicker">调度卡</div>
+                    <h3 class="card-title">TOP5 月度生成调度</h3>
+                  </div>
+                  <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('top5_power_report')">
+                    {{ getSchedulerStatusText('top5_power_report') || '-' }}
+                  </span>
+                </div>
+                <div class="status-metric-grid status-metric-grid-compact">
+                  <div class="status-metric">
+                    <div class="status-metric-label">下次执行</div>
+                    <strong class="status-metric-value">{{ getSchedulerDisplayText('top5_power_report', 'next_run_text', '-') }}</strong>
+                  </div>
+                  <div class="status-metric">
+                    <div class="status-metric-label">最近触发</div>
+                    <strong class="status-metric-value">{{ getSchedulerDisplayText('top5_power_report', 'last_trigger_text', '-') }}</strong>
+                  </div>
+                  <div class="status-metric">
+                    <div class="status-metric-label">最近决策</div>
+                    <strong class="status-metric-value">{{ top5PowerReportSchedulerDecisionText || '-' }}</strong>
+                  </div>
+                </div>
+                <div class="ops-focus-card">
+                  <div class="ops-focus-card-label">执行规则</div>
+                  <div class="ops-focus-card-title">仅在设定的月度时间点生成并通知</div>
+                  <div class="ops-focus-card-meta">启动项目只恢复调度，不补跑已错过的时间点。触发结果：{{ top5PowerReportSchedulerTriggerText || '-' }}</div>
+                </div>
+                <div class="task-grid two-col">
+                  <div class="form-row">
+                    <label class="label">每月几号</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="31"
+                      :value="config.handover_log.top5_power_report.scheduler.day_of_month"
+                      :disabled="top5PowerReportSchedulerQuickSaving"
+                      @change="saveTop5PowerReportSchedulerQuickConfig({ day_of_month: $event.target.value })"
+                    />
+                  </div>
+                  <div class="form-row">
+                    <label class="label">时间（HH:mm:ss）</label>
+                    <input
+                      type="time"
+                      step="1"
+                      :value="config.handover_log.top5_power_report.scheduler.run_time"
+                      :disabled="top5PowerReportSchedulerQuickSaving"
+                      @change="saveTop5PowerReportSchedulerQuickConfig({ run_time: $event.target.value })"
+                    />
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label class="label">检查间隔（秒）</label>
+                  <input
+                    type="number"
+                    min="10"
+                    :value="config.handover_log.top5_power_report.scheduler.check_interval_sec"
+                    :disabled="top5PowerReportSchedulerQuickSaving"
+                    @change="saveTop5PowerReportSchedulerQuickConfig({ check_interval_sec: $event.target.value })"
+                  />
+                </div>
+                <div class="btn-line">
+                  <button
+                    class="btn btn-success"
+                    :disabled="top5PowerReportSchedulerQuickSaving || isSchedulerStartDisabled('top5_power_report', actionKeyTop5PowerReportSchedulerStart, actionKeyTop5PowerReportSchedulerStop)"
+                    @click="startTop5PowerReportScheduler"
+                  >
+                    {{ getSchedulerStartButtonText('top5_power_report') }}
+                  </button>
+                  <button
+                    class="btn btn-danger"
+                    :disabled="top5PowerReportSchedulerQuickSaving || isSchedulerStopDisabled('top5_power_report', actionKeyTop5PowerReportSchedulerStart, actionKeyTop5PowerReportSchedulerStop)"
+                    @click="stopTop5PowerReportScheduler"
+                  >
+                    {{ getSchedulerStopButtonText('top5_power_report') }}
+                  </button>
+                </div>
+                <div class="hint">{{ top5PowerReportSchedulerQuickSaving ? 'TOP5 调度配置同步中...' : '修改日期、时间或检查间隔后立即生效。' }}</div>
+              </article>
+
               <article class="task-block task-block-accent">
                 <div class="task-block-head">
                   <div>

@@ -571,6 +571,25 @@ export async function saveMonthlyChangeReportSchedulerConfigApi(payload) {
   });
 }
 
+export async function startTop5PowerReportSchedulerApi() {
+  return apiJson("/api/scheduler/top5-power-report/start", { method: "POST", body: "{}" });
+}
+
+export async function stopTop5PowerReportSchedulerApi() {
+  return apiJson("/api/scheduler/top5-power-report/stop", { method: "POST", body: "{}" });
+}
+
+export async function getTop5PowerReportSchedulerStatusApi() {
+  return apiJson("/api/scheduler/top5-power-report/status");
+}
+
+export async function saveTop5PowerReportSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/top5-power-report/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getHandoverEngineerDirectoryApi() {
   return apiJson("/api/handover/engineer-directory");
 }

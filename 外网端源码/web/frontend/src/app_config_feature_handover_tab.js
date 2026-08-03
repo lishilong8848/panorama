@@ -427,10 +427,10 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
           <div class="form-row"><label class="label">TOP5 输出目录</label><input type="text" v-model="config.handover_log.top5_power_report.template.output_dir" /></div>
           <div class="form-row"><label class="label">TOP5 文件命名规则</label><input type="text" v-model="config.handover_log.top5_power_report.template.file_name_pattern" /></div>
           <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.top5_power_report.scheduler.enabled" /> 启用 TOP5 月度调度</label></div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.top5_power_report.scheduler.auto_start_in_gui" /> 启动后自动运行 TOP5 月度调度</label></div>
+          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.top5_power_report.scheduler.auto_start_in_gui" /> 启动后自动启用 TOP5 月度调度（不会立即生成）</label></div>
           <div class="form-row inline-fields">
             <label class="label">TOP5 调度日期</label>
-            <input type="number" min="1" max="28" v-model.number="config.handover_log.top5_power_report.scheduler.day_of_month" />
+            <input type="number" min="1" max="31" v-model.number="config.handover_log.top5_power_report.scheduler.day_of_month" />
             <span class="inline-text">号</span>
             <label class="label compact">时间</label>
             <input type="time" step="1" v-model="config.handover_log.top5_power_report.scheduler.run_time" />
