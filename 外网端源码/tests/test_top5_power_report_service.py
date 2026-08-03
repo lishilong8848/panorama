@@ -289,12 +289,34 @@ class Top5PowerReportWorkerHandlerTest(unittest.TestCase):
                 self.config = config
 
             def upload_report(self, *, file_path, year, month, emit_log):  # noqa: ANN001
-                return {"status": "ok", "file_path": file_path, "year": str(year), "month": f"{int(month):02d}"}
+                return {
+                    "status": "ok",
+                    "file_path": file_path,
+                    "year": str(year),
+                    "month": f"{int(month):02d}",
+                    "link": "https://example.test/top5.xlsx",
+                }
+
+        class FakeCompletionNotifyService:
+            calls: list[dict[str, Any]] = []
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def send_completion(self, **kwargs):  # noqa: ANN003
+                self.calls.append(dict(kwargs))
+                return {
+                    "status": "sent",
+                    "sent": True,
+                    "chat_id": "oc_3bc648b9b761f24a65366a9b04b32eb2",
+                    "table_url": "https://vnet.feishu.cn/wiki/node?table=table",
+                }
 
         with (
             patch.object(task_handlers.shared_bridge_runtime_module, "SharedBridgeRuntimeService", FakeBridgeRuntime),
             patch.object(task_handlers, "Top5PowerReportService", FakeTop5Service),
             patch.object(task_handlers, "Top5PowerReportBitableUploadService", FakeUploadService),
+            patch.object(task_handlers, "Top5CompletionNotifyService", FakeCompletionNotifyService),
         ):
             result = task_handlers.handle_top5_power_report(
                 {},
@@ -303,6 +325,15 @@ class Top5PowerReportWorkerHandlerTest(unittest.TestCase):
             )
 
         self.assertEqual(result["bitable_upload"]["status"], "ok")
+        self.assertEqual(result["completion_notification"]["status"], "sent")
+        self.assertEqual(len(FakeCompletionNotifyService.calls), 1)
+        self.assertEqual(FakeCompletionNotifyService.calls[0]["year"], "2026")
+        self.assertEqual(FakeCompletionNotifyService.calls[0]["month"], 5)
+        self.assertEqual(FakeCompletionNotifyService.calls[0]["file_name"], "top5.xlsx")
+        self.assertEqual(
+            FakeCompletionNotifyService.calls[0]["upload_result"]["link"],
+            "https://example.test/top5.xlsx",
+        )
         self.assertEqual(FakeBridgeRuntime.instances[0].monthly_args["buildings"], ["A楼"])
         self.assertEqual(FakeTop5Service.monthly_entries[0]["building"], "A楼")
 
@@ -381,10 +412,18 @@ class Top5PowerReportWorkerHandlerTest(unittest.TestCase):
             def upload_report(self, *, file_path, year, month, emit_log):  # noqa: ANN001
                 return {"status": "ok", "file_path": file_path, "year": str(year), "month": f"{int(month):02d}"}
 
+        class FakeCompletionNotifyService:
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def send_completion(self, **_kwargs):  # noqa: ANN003
+                return {"status": "sent", "sent": True}
+
         with (
             patch.object(task_handlers.shared_bridge_runtime_module, "SharedBridgeRuntimeService", FakeBridgeRuntime),
             patch.object(task_handlers, "Top5PowerReportService", FakeTop5Service),
             patch.object(task_handlers, "Top5PowerReportBitableUploadService", FakeUploadService),
+            patch.object(task_handlers, "Top5CompletionNotifyService", FakeCompletionNotifyService),
         ):
             result = task_handlers.handle_top5_power_report(
                 {},

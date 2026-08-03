@@ -196,6 +196,7 @@ function ensureRoot(cfg) {
   cfg.handover_log.monthly_change_report.template = cfg.handover_log.monthly_change_report.template || {};
   cfg.handover_log.monthly_change_report.scheduler = cfg.handover_log.monthly_change_report.scheduler || {};
   cfg.handover_log.top5_power_report.template = cfg.handover_log.top5_power_report.template || {};
+  cfg.handover_log.top5_power_report.notification = cfg.handover_log.top5_power_report.notification || {};
   cfg.handover_log.top5_power_report.over_power_attachment =
     cfg.handover_log.top5_power_report.over_power_attachment || {};
   cfg.handover_log.source_data_attachment_export.source = cfg.handover_log.source_data_attachment_export.source || {};
@@ -393,18 +394,36 @@ function applyHandoverDefaults(cfg) {
   setStringDefault(download, "export_button_text", "原样导出");
   top5PowerReport.template = top5PowerReport.template || {};
   top5PowerReport.scheduler = top5PowerReport.scheduler || {};
+  top5PowerReport.notification = top5PowerReport.notification || {};
   top5PowerReport.over_power_attachment = top5PowerReport.over_power_attachment || {};
   top5PowerReport.monthly_power_alert_report = top5PowerReport.monthly_power_alert_report || {};
   setStringDefault(top5PowerReport.template, "source_path", "");
   setStringDefault(top5PowerReport.template, "output_dir", `${businessRoot}\\TOP5功率文件`);
   setStringDefault(top5PowerReport.template, "file_name_pattern", "TOP5功率文件_{timestamp}.xlsx");
   setBooleanDefault(top5PowerReport.scheduler, "enabled", true);
-  setBooleanDefault(top5PowerReport.scheduler, "auto_start_in_gui", false);
+  setBooleanDefault(top5PowerReport.scheduler, "auto_start_in_gui", true);
   setNumberDefault(top5PowerReport.scheduler, "day_of_month", 3);
-  setStringDefault(top5PowerReport.scheduler, "run_time", "03:00:00");
+  setStringDefault(top5PowerReport.scheduler, "run_time", "09:30:00");
+  if (
+    Number(top5PowerReport.scheduler.day_of_month) === 3 &&
+    String(top5PowerReport.scheduler.run_time || "").trim() === "03:00:00" &&
+    top5PowerReport.scheduler.auto_start_in_gui === false
+  ) {
+    top5PowerReport.scheduler.auto_start_in_gui = true;
+    top5PowerReport.scheduler.run_time = "09:30:00";
+  }
   setNumberDefault(top5PowerReport.scheduler, "check_interval_sec", 30);
+  setBooleanDefault(top5PowerReport.scheduler, "catch_up_if_missed", true);
   setBooleanDefault(top5PowerReport.scheduler, "retry_failed_on_next_tick", true);
   setStringDefault(top5PowerReport.scheduler, "state_file", "top5_power_report_scheduler_state.json");
+  setBooleanDefault(top5PowerReport.notification, "enabled", true);
+  setStringDefault(top5PowerReport.notification, "chat_id", "oc_3bc648b9b761f24a65366a9b04b32eb2");
+  setStringDefault(top5PowerReport.notification, "receive_id_type", "chat_id");
+  setStringDefault(
+    top5PowerReport.notification,
+    "table_url",
+    "https://vnet.feishu.cn/wiki/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblkh6YCMYtS8nHa",
+  );
   setBooleanDefault(top5PowerReport.over_power_attachment, "enabled", true);
   setStringDefault(top5PowerReport.over_power_attachment, "app_token", "MliKbC3fXa8PXrsndKscmxjdn1g");
   setStringDefault(top5PowerReport.over_power_attachment, "table_id", "tblkh6YCMYtS8nHa");

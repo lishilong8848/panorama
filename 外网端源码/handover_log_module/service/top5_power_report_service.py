@@ -272,6 +272,25 @@ class Top5PowerReportService:
                 "output_dir": r"D:\QLDownload\TOP5功率文件生成",
                 "file_name_pattern": "TOP5功率文件_{timestamp}.xlsx",
             },
+            "scheduler": {
+                "enabled": True,
+                "auto_start_in_gui": True,
+                "day_of_month": 3,
+                "run_time": "09:30:00",
+                "check_interval_sec": 30,
+                "catch_up_if_missed": True,
+                "retry_failed_on_next_tick": True,
+                "state_file": "top5_power_report_scheduler_state.json",
+            },
+            "notification": {
+                "enabled": True,
+                "chat_id": "oc_3bc648b9b761f24a65366a9b04b32eb2",
+                "receive_id_type": "chat_id",
+                "table_url": (
+                    "https://vnet.feishu.cn/wiki/MliKbC3fXa8PXrsndKscmxjdn1g"
+                    "?table=tblkh6YCMYtS8nHa"
+                ),
+            },
             "over_power_attachment": {
                 "enabled": True,
                 "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",

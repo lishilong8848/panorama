@@ -90,6 +90,41 @@ _EXTERNAL_SCHEDULER_LEGACY_EXIT_SOURCE_HINTS = (
     "退出当前系统",
     "用户退出当前系统",
 )
+_TOP5_SCHEDULER_DEFAULTS: Dict[str, Any] = {
+    "enabled": True,
+    "auto_start_in_gui": True,
+    "day_of_month": 3,
+    "run_time": "09:30:00",
+    "check_interval_sec": 30,
+    "catch_up_if_missed": True,
+    "retry_failed_on_next_tick": True,
+    "state_file": "top5_power_report_scheduler_state.json",
+}
+
+
+def _normalize_top5_scheduler_cfg(value: Any) -> Dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    cfg = {**_TOP5_SCHEDULER_DEFAULTS, **raw}
+    try:
+        day_of_month = max(1, min(31, int(cfg.get("day_of_month", 3) or 3)))
+    except (TypeError, ValueError):
+        day_of_month = 3
+    run_time = str(cfg.get("run_time", "") or "").strip() or "09:30:00"
+    legacy_default = (
+        day_of_month == 3
+        and run_time == "03:00:00"
+        and raw.get("auto_start_in_gui") is False
+    )
+    if legacy_default:
+        run_time = "09:30:00"
+        cfg["auto_start_in_gui"] = True
+    cfg["enabled"] = bool(cfg.get("enabled", True))
+    cfg["auto_start_in_gui"] = bool(cfg.get("auto_start_in_gui", True))
+    cfg["day_of_month"] = day_of_month
+    cfg["run_time"] = run_time
+    return cfg
+
+
 _WARNING_RE = re.compile(r"(^|:)\s*(?:\w+)?Warning:", re.IGNORECASE)
 _LEADING_LOG_TIMESTAMP_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*")
 _ERROR_PATTERNS = (
@@ -676,9 +711,7 @@ class AppContainer:
         top5_cfg = handover_cfg.get("top5_power_report", {})
         if not isinstance(top5_cfg, dict):
             top5_cfg = {}
-        scheduler_cfg = top5_cfg.get("scheduler", {})
-        if not isinstance(scheduler_cfg, dict):
-            scheduler_cfg = {}
+        scheduler_cfg = _normalize_top5_scheduler_cfg(top5_cfg.get("scheduler", {}))
         return ApschedulerSchedulerFacade(
             scheduler_key="top5_power_report",
             feature="top5_power_report",
@@ -1155,6 +1188,8 @@ class AppContainer:
         states: Dict[str, bool] = {}
         for key, _label, path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS:
             cfg = self._dict_path(source, path)
+            if key == "top5_power_report":
+                cfg = _normalize_top5_scheduler_cfg(cfg)
             states[key] = bool(cfg.get("auto_start_in_gui", False)) if isinstance(cfg, dict) else False
         return states
 
@@ -1409,6 +1444,11 @@ class AppContainer:
                     loaded_states[key] = bool(config_snapshot.get(key, False))
                 memory_source = memory_source or "config_fallback"
                 changed = True
+        top5_auto_start = bool(config_snapshot.get("top5_power_report", True))
+        if bool(loaded_states.get("top5_power_report", False)) != top5_auto_start:
+            loaded_states["top5_power_report"] = top5_auto_start
+            memory_source = "top5_config_repair"
+            changed = True
         if changed:
             try:
                 self._write_external_scheduler_autostart_state(loaded_states, source=memory_source)
@@ -1929,16 +1969,7 @@ class AppContainer:
         if role_mode == "internal":
             self.add_system_log("[TOP5功率文件生成调度] 当前为内网端，启动时不自动开启")
         elif bool(top5_status.get("enabled", False)):
-            handover_cfg = self.runtime_config.get("handover_log", {})
-            if not isinstance(handover_cfg, dict):
-                handover_cfg = {}
-            top5_cfg = handover_cfg.get("top5_power_report", {})
-            if not isinstance(top5_cfg, dict):
-                top5_cfg = {}
-            top5_scheduler_cfg = top5_cfg.get("scheduler", {})
-            if not isinstance(top5_scheduler_cfg, dict):
-                top5_scheduler_cfg = {}
-            if bool(top5_scheduler_cfg.get("auto_start_in_gui", False)):
+            if bool(getattr(self.top5_power_report_scheduler, "auto_start_in_gui", False)):
                 _report_progress("starting_top5_power_report_scheduler")
                 self.start_top5_power_report_scheduler(source=source)
             else:
@@ -3789,16 +3820,7 @@ class AppContainer:
             self.runtime_services_armed and temperature_humidity_auto_start
         ):
             self.temperature_humidity_upload_scheduler.start()
-        top5_cfg = self.runtime_config.get("handover_log", {})
-        if not isinstance(top5_cfg, dict):
-            top5_cfg = {}
-        top5_power_report_cfg = top5_cfg.get("top5_power_report", {})
-        if not isinstance(top5_power_report_cfg, dict):
-            top5_power_report_cfg = {}
-        top5_scheduler_cfg = top5_power_report_cfg.get("scheduler", {})
-        if not isinstance(top5_scheduler_cfg, dict):
-            top5_scheduler_cfg = {}
-        top5_auto_start = bool(top5_scheduler_cfg.get("auto_start_in_gui", False))
+        top5_auto_start = bool(getattr(self.top5_power_report_scheduler, "auto_start_in_gui", False))
         if was_top5_power_report_running or (self.runtime_services_armed and top5_auto_start):
             self.top5_power_report_scheduler.start()
         if was_monthly_change_report_running or (self.runtime_services_armed and monthly_change_auto_start):

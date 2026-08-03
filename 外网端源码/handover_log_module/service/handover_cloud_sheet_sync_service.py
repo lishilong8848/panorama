@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List
 
 import openpyxl
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import coordinate_to_tuple
 
 from app.modules.feishu.service.sheets_client_runtime import FeishuSheetsClientRuntime
 from handover_log_module.repository.excel_reader import load_workbook_quietly
@@ -454,28 +455,35 @@ class HandoverCloudSheetSyncService:
             self._add_elapsed_ms(timings, "workbook_ms", workbook_started)
             try:
                 worksheet = workbook[sheet_title] if sheet_title in workbook.sheetnames else workbook.active
-                self._apply_station_h_cells(worksheet, cell_values)
-                snapshot_started = time.perf_counter()
-                snapshot = self._collect_generic_sheet_snapshot(worksheet)
-                self._add_elapsed_ms(timings, "snapshot_ms", snapshot_started)
+                required_row_count, required_column_count = self._station_h_required_dimensions()
+                if (
+                    int(worksheet.max_row or 0) < required_row_count
+                    or int(worksheet.max_column or 0) < required_column_count
+                ):
+                    raise RuntimeError(
+                        "H楼本地模板尺寸不足: "
+                        f"actual={int(worksheet.max_row or 0)}x{int(worksheet.max_column or 0)}, "
+                        f"required={required_row_count}x{required_column_count}"
+                    )
             finally:
                 workbook.close()
 
-            applied = self._overwrite_named_target_sheet(
+            snapshot_started = time.perf_counter()
+            applied = self._update_station_h_values_preserving_layout(
                 client=client,
                 spreadsheet_token=spreadsheet_token,
                 sheet_title=sheet_title,
-                target_index=len(self.MANAGED_BUILDINGS),
-                snapshot=snapshot,
-                previous_cloud_sync={},
+                cell_values=cell_values,
                 emit_log=emit_log,
                 sheet_cache=sheet_cache,
                 timings=timings,
             )
+            self._add_elapsed_ms(timings, "snapshot_ms", snapshot_started)
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             emit_log(
                 f"[交接班][H楼云表] 完成 batch={normalized_batch.get('batch_key', '-')}, "
-                f"rows={snapshot.get('max_row', 0)}, cols={snapshot.get('max_column', 0)}, elapsed_ms={elapsed_ms}"
+                f"rows={applied.get('synced_row_count', 0)}, cols={applied.get('synced_column_count', 0)}, "
+                f"mode={applied.get('rebuild_mode', '-')}, elapsed_ms={elapsed_ms}"
             )
             return {
                 "status": "success",
@@ -484,10 +492,11 @@ class HandoverCloudSheetSyncService:
                 "spreadsheet_url": spreadsheet_url,
                 "spreadsheet_title": spreadsheet_title,
                 "source_file": str(template_path),
-                "synced_row_count": int(applied.get("synced_row_count", snapshot.get("max_row", 0)) or 0),
-                "synced_column_count": int(applied.get("synced_column_count", snapshot.get("max_column", 0)) or 0),
+                "synced_row_count": int(applied.get("synced_row_count", 0) or 0),
+                "synced_column_count": int(applied.get("synced_column_count", 0) or 0),
                 "synced_merges": self._normalize_merge_ranges(applied.get("synced_merges", [])),
                 "dynamic_merge_signature": str(applied.get("dynamic_merge_signature", "")).strip(),
+                "rebuild_mode": str(applied.get("rebuild_mode", "")).strip(),
                 "error": "",
             }
         except Exception as exc:  # noqa: BLE001
@@ -1272,10 +1281,93 @@ class HandoverCloudSheetSyncService:
             return path if path.is_absolute() else Path(__file__).resolve().parents[2] / path
         return Path(__file__).resolve().parents[2] / self.STATION_H_TEMPLATE_FILE_NAME
 
-    def _apply_station_h_cells(self, worksheet: Any, cell_values: Dict[str, Any]) -> None:
-        payload = cell_values if isinstance(cell_values, dict) else {}
-        for cell in self.STATION_H_ALLOWED_CELLS:
-            worksheet[cell] = payload.get(cell, "")
+    @classmethod
+    def _station_h_required_dimensions(cls) -> tuple[int, int]:
+        positions = [coordinate_to_tuple(coordinate) for coordinate in cls.STATION_H_ALLOWED_CELLS]
+        return max(row for row, _column in positions), max(column for _row, column in positions)
+
+    @staticmethod
+    def _station_h_cloud_value(value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+        return value
+
+    def _update_station_h_values_preserving_layout(
+        self,
+        *,
+        client: FeishuSheetsClientRuntime,
+        spreadsheet_token: str,
+        sheet_title: str,
+        cell_values: Dict[str, Any],
+        emit_log: Callable[[str], None],
+        sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
+        timings: Dict[str, int] | None = None,
+    ) -> Dict[str, Any]:
+        ensure_started = time.perf_counter()
+        target_sheet = client.dedupe_named_sheets(
+            spreadsheet_token,
+            sheet_title,
+            sheet_cache=sheet_cache,
+        )
+        self._add_elapsed_ms(timings, "ensure_sheet_ms", ensure_started)
+        if not target_sheet:
+            raise RuntimeError(f"H楼目标 sheet 不存在，请检查云表模板: {sheet_title}")
+
+        target_sheet_id = str(target_sheet.get("sheet_id", "") or "").strip()
+        if not target_sheet_id:
+            raise RuntimeError(f"H楼目标 sheet 缺少 sheet_id: {sheet_title}")
+
+        required_rows, required_columns = self._station_h_required_dimensions()
+        target_rows = int(target_sheet.get("row_count", 0) or 0)
+        target_columns = int(target_sheet.get("column_count", 0) or 0)
+        if target_rows < required_rows or target_columns < required_columns:
+            raise RuntimeError(
+                "H楼目标 sheet 尺寸不足，已停止写入以保护模板格式: "
+                f"actual={target_rows}x{target_columns}, required={required_rows}x{required_columns}"
+            )
+
+        existing_merges = self._normalize_merge_ranges(target_sheet.get("merges", []))
+        if not existing_merges:
+            raise RuntimeError("H楼目标 sheet 未检测到模板合并结构，已停止写入以避免生成无格式页面")
+
+        payload = {
+            str(coordinate or "").strip().upper(): value
+            for coordinate, value in (cell_values.items() if isinstance(cell_values, dict) else [])
+        }
+        value_ranges: List[Dict[str, Any]] = []
+        for coordinate in sorted(self.STATION_H_ALLOWED_CELLS, key=coordinate_to_tuple):
+            row_index, column_index = coordinate_to_tuple(coordinate)
+            value_ranges.append(
+                {
+                    "range": FeishuSheetsClientRuntime.build_sheet_id_range(
+                        sheet_id=target_sheet_id,
+                        start_row_index=row_index - 1,
+                        end_row_index=row_index,
+                        start_column_index=column_index - 1,
+                        end_column_index=column_index,
+                    ),
+                    "values": [[self._station_h_cloud_value(payload.get(coordinate, ""))]],
+                }
+            )
+
+        value_started = time.perf_counter()
+        client.batch_update_values(spreadsheet_token, value_ranges)
+        self._add_elapsed_ms(timings, "value_ms", value_started)
+        emit_log(
+            f"[交接班][H楼云表] 仅更新动态单元格并保留模板格式 sheet={sheet_title}, "
+            f"cells={len(value_ranges)}, rows={target_rows}, cols={target_columns}, merges={len(existing_merges)}"
+        )
+        return {
+            "sheet_id": target_sheet_id,
+            "sheet_title": sheet_title,
+            "synced_row_count": target_rows,
+            "synced_column_count": target_columns,
+            "synced_merges": existing_merges,
+            "dynamic_merge_signature": self._build_dynamic_merge_signature(existing_merges),
+            "rebuild_mode": "values_only_preserve_layout",
+        }
 
     def _build_abcdeh_work_content_workbook(self, work_content: Dict[str, Dict[str, Any]]) -> openpyxl.Workbook:
         workbook = openpyxl.Workbook()

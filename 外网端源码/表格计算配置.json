@@ -4460,6 +4460,12 @@
       },
       "sites": [],
       "top5_power_report": {
+        "notification": {
+          "enabled": true,
+          "chat_id": "oc_3bc648b9b761f24a65366a9b04b32eb2",
+          "receive_id_type": "chat_id",
+          "table_url": "https://vnet.feishu.cn/wiki/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblkh6YCMYtS8nHa"
+        },
         "monthly_power_alert_report": {
           "enabled": true,
           "file_name_pattern": "EA118机柜超功耗告警统计{month}月份_{timestamp}.xlsx",
@@ -4480,10 +4486,11 @@
         },
         "scheduler": {
           "enabled": true,
-          "auto_start_in_gui": false,
+          "auto_start_in_gui": true,
           "day_of_month": 3,
-          "run_time": "03:00:00",
+          "run_time": "09:30:00",
           "check_interval_sec": 30,
+          "catch_up_if_missed": true,
           "retry_failed_on_next_tick": true,
           "state_file": "top5_power_report_scheduler_state.json"
         }

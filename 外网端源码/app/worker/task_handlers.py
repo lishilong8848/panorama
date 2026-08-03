@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Tuple
 
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
+from app.modules.notify.service.top5_completion_notify_service import Top5CompletionNotifyService
 from app.modules.alarm_rule_export_upload.service.alarm_rule_export_upload_service import (
     AlarmRuleExportUploadService,
 )
@@ -573,6 +574,24 @@ def handle_top5_power_report(
             emit_log=emit_log,
         )
         result["bitable_upload"] = upload_result
+        output_file = str(result.get("output_file", "") or "").strip()
+        file_name = str(result.get("file_name", "") or "").strip() or Path(output_file).name or "-"
+        try:
+            completion_notification = Top5CompletionNotifyService(config).send_completion(
+                year=upload_year,
+                month=upload_month,
+                file_name=file_name,
+                upload_result=upload_result,
+                emit_log=emit_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            completion_notification = {
+                "status": "failed",
+                "sent": False,
+                "error": str(exc),
+            }
+            emit_log(f"[TOP5功率文件生成][完成通知] 发送异常但不影响任务结果: {exc}")
+        result["completion_notification"] = completion_notification
         return result
     except Exception as exc:  # noqa: BLE001
         notify.send_failure(stage="TOP5功率文件生成", detail=str(exc), emit_log=emit_log)
