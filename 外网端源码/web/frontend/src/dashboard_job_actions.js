@@ -886,8 +886,13 @@ if (!canRun.value) return;
 
   async function runTop5PowerReport() {
     if (!canRun.value) return;
-    const yearText = String(top5PowerReportYear?.value || new Date().getFullYear()).trim();
-    const monthNumber = Number.parseInt(String(top5PowerReportMonth?.value || new Date().getMonth() + 1), 10);
+    const now = new Date();
+    const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const yearText = String(top5PowerReportYear?.value || previousMonth.getFullYear()).trim();
+    const monthNumber = Number.parseInt(
+      String(top5PowerReportMonth?.value || previousMonth.getMonth() + 1),
+      10,
+    );
     if (!/^20\d{2}$/.test(yearText)) {
       message.value = "TOP5上传年份格式错误，请填写四位年份";
       return;

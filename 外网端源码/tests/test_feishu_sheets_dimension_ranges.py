@@ -36,6 +36,34 @@ def test_dimension_range_payloads_use_zero_based_half_open_indexes():
     assert calls[1][2]["dimension"]["endIndex"] == 199
 
 
+def test_batch_update_styles_uses_styles_batch_update_contract():
+    client = object.__new__(FeishuSheetsClientRuntime)
+    calls = []
+
+    def request(method, url, *, payload=None, **_kwargs):
+        calls.append((method, url, payload))
+        return {"code": 0, "data": {"updated": True}}
+
+    client._request_json_with_auth_retry = request
+    style_ranges = [
+        {
+            "ranges": ["sheet_1!H1:H50"],
+            "style": {"hAlign": 1, "vAlign": 1, "clean": False},
+        }
+    ]
+
+    result = client.batch_update_styles("sheet_token", style_ranges)
+
+    assert result == {"updated": True}
+    assert calls == [
+        (
+            "PUT",
+            client.STYLES_BATCH_UPDATE_URL.format(spreadsheet_token="sheet_token"),
+            {"data": style_ranges},
+        )
+    ]
+
+
 def test_resize_rechecks_actual_sheet_size_after_stale_end_index_error():
     service = object.__new__(HandoverCloudSheetSyncService)
 

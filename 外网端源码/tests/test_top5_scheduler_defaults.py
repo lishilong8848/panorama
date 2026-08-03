@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 
+from app.bootstrap.app_factory import _previous_calendar_year_month
 from app.bootstrap.container import _normalize_top5_scheduler_cfg
 from app.modules.scheduler.api._config_persistence import _handover_common_scheduler_path
 
 
 class Top5SchedulerDefaultsTest(unittest.TestCase):
+    def test_scheduled_report_targets_previous_calendar_month(self) -> None:
+        self.assertEqual(
+            _previous_calendar_year_month(datetime(2026, 8, 3, 9, 30)),
+            ("2026", 7),
+        )
+        self.assertEqual(
+            _previous_calendar_year_month(datetime(2026, 1, 3, 9, 30)),
+            ("2025", 12),
+        )
+
     def test_new_defaults_run_on_third_at_nine_thirty(self) -> None:
         cfg = _normalize_top5_scheduler_cfg({})
         self.assertTrue(cfg["enabled"])

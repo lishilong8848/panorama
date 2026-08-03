@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import openpyxl
+from openpyxl.styles import Alignment, Border, Font, Side
 
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 
@@ -10,6 +11,9 @@ def _write_station_h_template(path) -> None:
     worksheet = workbook.active
     worksheet.title = "H楼"
     worksheet["H50"] = "template-boundary"
+    worksheet["H12"].font = Font(name="宋体", size=10, bold=True, color="000000")
+    worksheet["H12"].alignment = Alignment(horizontal="center", vertical="center")
+    worksheet["H12"].border = Border(right=Side(style="thin", color="1F2329"))
     workbook.save(path)
     workbook.close()
 
@@ -18,6 +22,7 @@ class _FakeSheetsClient:
     def __init__(self, target_sheet):
         self.target_sheet = dict(target_sheet) if target_sheet else {}
         self.value_batches = []
+        self.style_batches = []
 
     def query_sheets(self, _spreadsheet_token, *, sheet_cache=None, force_refresh=False):
         del sheet_cache, force_refresh
@@ -29,6 +34,10 @@ class _FakeSheetsClient:
 
     def batch_update_values(self, _spreadsheet_token, value_ranges):
         self.value_batches.append(list(value_ranges))
+        return {}
+
+    def batch_update_styles(self, _spreadsheet_token, style_ranges):
+        self.style_batches.append(list(style_ranges))
         return {}
 
     def batch_unmerge_cells(self, *_args, **_kwargs):
@@ -87,6 +96,7 @@ def test_station_h_sync_updates_only_allowed_values_and_preserves_cloud_layout(t
     assert result["synced_row_count"] == 200
     assert result["synced_column_count"] == 20
     assert len(client.value_batches) == 1
+    assert len(client.style_batches) == 1
 
     value_ranges = client.value_batches[0]
     assert len(value_ranges) == len(service.STATION_H_ALLOWED_CELLS)
@@ -96,6 +106,25 @@ def test_station_h_sync_updates_only_allowed_values_and_preserves_cloud_layout(t
     assert "h_sheet!H7:H7" not in values_by_range
     assert "h_sheet!H8:H8" not in values_by_range
     assert "h_sheet!H9:H9" not in values_by_range
+
+    style_ranges = client.style_batches[0]
+    h12_styles = [
+        item["style"]
+        for item in style_ranges
+        if any("H12" in range_name for range_name in item.get("ranges", []))
+    ]
+    assert any(
+        style.get("hAlign") == 1
+        and style.get("vAlign") == 1
+        and style.get("font", {}).get("bold") is True
+        and style.get("font", {}).get("fontSize") == "10pt/1.5"
+        for style in h12_styles
+    )
+    assert any(
+        style.get("borderType") == "RIGHT_BORDER"
+        and style.get("borderColor") == "#1F2329"
+        for style in h12_styles
+    )
 
 
 def test_station_h_sync_rejects_sheet_without_template_merge_structure(tmp_path):
@@ -120,3 +149,4 @@ def test_station_h_sync_rejects_sheet_without_template_merge_structure(tmp_path)
     assert result["status"] == "failed"
     assert "未检测到模板合并结构" in result["error"]
     assert client.value_batches == []
+    assert client.style_batches == []

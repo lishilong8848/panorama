@@ -860,8 +860,9 @@ export function createAppState(vueApi) {
   const branchPowerBusinessDate = ref(yesterdayText());
   const branchPowerBusinessDateEnd = ref(yesterdayText());
   const branchPowerBusinessDatesText = ref("");
-  const top5PowerReportYear = ref(String(new Date().getFullYear()));
-  const top5PowerReportMonth = ref(new Date().getMonth() + 1);
+  const top5DefaultMonth = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1);
+  const top5PowerReportYear = ref(String(top5DefaultMonth.getFullYear()));
+  const top5PowerReportMonth = ref(top5DefaultMonth.getMonth() + 1);
   const top5OverPowerYear = ref(String(new Date().getFullYear()));
   const top5OverPowerMonth = ref(new Date().getMonth() + 1);
   const monthlyPowerAlertReportYear = ref(String(new Date().getFullYear()));

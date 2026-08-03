@@ -78,6 +78,13 @@ _EXTERNAL_REVIEW_ALLOWED_EXACT = {
     "/favicon.ico",
 }
 
+
+def _previous_calendar_year_month(now_dt: datetime | None = None) -> tuple[str, int]:
+    current = now_dt or datetime.now()
+    previous_month = current.replace(day=1) - timedelta(days=1)
+    return str(previous_month.year), int(previous_month.month)
+
+
 _ROLE_SELECTION_ALLOWED_EXACT = {
     "/",
     "/index.html",
@@ -2506,9 +2513,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         if role_mode == "internal":
             container.add_system_log("[TOP5功率文件生成调度] 当前为内网端，调度跳过；请在外网端启用该调度")
             return True, "internal_role_skip"
-        now_dt = datetime.now()
-        year = str(now_dt.year)
-        month = int(now_dt.month)
+        year, month = _previous_calendar_year_month()
         try:
             service = Top5PowerReportService(container.runtime_config)
             buildings = service.all_buildings()

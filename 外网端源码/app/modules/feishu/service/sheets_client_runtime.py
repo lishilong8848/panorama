@@ -823,6 +823,17 @@ class FeishuSheetsClientRuntime:
         )
         return body.get("data") or {}
 
+    def batch_update_styles(self, spreadsheet_token: str, style_ranges: List[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized_ranges = [dict(item) for item in style_ranges if isinstance(item, dict)]
+        if not normalized_ranges:
+            return {}
+        body = self._request_json_with_auth_retry(
+            "PUT",
+            self.STYLES_BATCH_UPDATE_URL.format(spreadsheet_token=spreadsheet_token),
+            payload={"data": normalized_ranges},
+        )
+        return body.get("data") or {}
+
     def apply_blank_style_matrix(self, spreadsheet_token: str, range_name: str, rows: int, cols: int) -> Dict[str, Any]:
         row_count = max(1, int(rows or 1))
         col_count = max(1, int(cols or 1))

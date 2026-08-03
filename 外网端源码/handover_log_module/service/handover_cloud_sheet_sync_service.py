@@ -422,6 +422,7 @@ class HandoverCloudSheetSyncService:
             "ensure_sheet_ms": 0,
             "clear_ms": 0,
             "value_ms": 0,
+            "style_ms": 0,
             "dimension_ms": 0,
             "merge_ms": 0,
         }
@@ -465,6 +466,7 @@ class HandoverCloudSheetSyncService:
                         f"actual={int(worksheet.max_row or 0)}x{int(worksheet.max_column or 0)}, "
                         f"required={required_row_count}x{required_column_count}"
                     )
+                station_h_style_ranges = self._collect_station_h_column_style_ranges(worksheet)
             finally:
                 workbook.close()
 
@@ -474,6 +476,7 @@ class HandoverCloudSheetSyncService:
                 spreadsheet_token=spreadsheet_token,
                 sheet_title=sheet_title,
                 cell_values=cell_values,
+                template_style_ranges=station_h_style_ranges,
                 emit_log=emit_log,
                 sheet_cache=sheet_cache,
                 timings=timings,
@@ -1294,6 +1297,151 @@ class HandoverCloudSheetSyncService:
             return value.strftime("%Y-%m-%d %H:%M:%S")
         return value
 
+    @staticmethod
+    def _openpyxl_color_hex(color: Any, *, default: str = "") -> str:
+        if color is None:
+            return default
+        color_type = str(getattr(color, "type", "") or "").strip().lower()
+        if color_type != "rgb":
+            return default
+        raw = str(getattr(color, "rgb", "") or "").strip().lstrip("#")
+        if len(raw) == 8:
+            raw = raw[-6:]
+        if len(raw) != 6:
+            return default
+        try:
+            int(raw, 16)
+        except ValueError:
+            return default
+        return f"#{raw.upper()}"
+
+    @staticmethod
+    def _station_h_font_size_text(value: Any) -> str:
+        try:
+            size = float(value)
+        except (TypeError, ValueError):
+            size = 11.0
+        size_text = f"{size:.2f}".rstrip("0").rstrip(".")
+        return f"{size_text}pt/1.5"
+
+    @classmethod
+    def _station_h_base_cell_style(cls, cell: Any) -> Dict[str, Any]:
+        font = getattr(cell, "font", None)
+        alignment = getattr(cell, "alignment", None)
+        style: Dict[str, Any] = {
+            "font": {
+                "bold": bool(getattr(font, "bold", False)),
+                "italic": bool(getattr(font, "italic", False)),
+                "fontSize": cls._station_h_font_size_text(getattr(font, "sz", None)),
+                "clean": False,
+            },
+            "textDecoration": (
+                (1 if bool(getattr(font, "underline", False)) else 0)
+                | (2 if bool(getattr(font, "strike", False)) else 0)
+            ),
+            "clean": False,
+        }
+        horizontal = str(getattr(alignment, "horizontal", "") or "").strip().lower()
+        vertical = str(getattr(alignment, "vertical", "") or "").strip().lower()
+        horizontal_map = {"left": 0, "center": 1, "centercontinuous": 1, "right": 2}
+        vertical_map = {"top": 0, "center": 1, "bottom": 2}
+        if horizontal in horizontal_map:
+            style["hAlign"] = horizontal_map[horizontal]
+        if vertical in vertical_map:
+            style["vAlign"] = vertical_map[vertical]
+
+        foreground = cls._openpyxl_color_hex(getattr(font, "color", None))
+        if foreground:
+            style["foreColor"] = foreground
+        fill = getattr(cell, "fill", None)
+        if str(getattr(fill, "fill_type", "") or "").strip().lower() == "solid":
+            background = cls._openpyxl_color_hex(getattr(fill, "fgColor", None))
+            if background:
+                style["backColor"] = background
+        return style
+
+    @staticmethod
+    def _compress_station_h_style_rows(rows: List[int]) -> List[str]:
+        ordered = sorted({max(1, int(row)) for row in rows})
+        if not ordered:
+            return []
+        ranges: List[str] = []
+        start = previous = ordered[0]
+        for row in ordered[1:]:
+            if row == previous + 1:
+                previous = row
+                continue
+            ranges.append(f"H{start}:H{previous}")
+            start = previous = row
+        ranges.append(f"H{start}:H{previous}")
+        return ranges
+
+    @classmethod
+    def _collect_station_h_column_style_ranges(cls, worksheet: Any) -> List[Dict[str, Any]]:
+        base_groups: Dict[str, Dict[str, Any]] = {}
+        border_groups: Dict[str, Dict[str, Any]] = {}
+        border_types = {
+            "left": "LEFT_BORDER",
+            "right": "RIGHT_BORDER",
+            "top": "TOP_BORDER",
+            "bottom": "BOTTOM_BORDER",
+        }
+        for row_index in range(1, max(1, int(worksheet.max_row or 1)) + 1):
+            cell = worksheet.cell(row=row_index, column=8)
+            base_style = cls._station_h_base_cell_style(cell)
+            base_key = json.dumps(base_style, ensure_ascii=False, sort_keys=True)
+            base_group = base_groups.setdefault(base_key, {"rows": [], "style": base_style})
+            base_group["rows"].append(row_index)
+
+            border = getattr(cell, "border", None)
+            sides = {
+                side_name: getattr(border, side_name, None)
+                for side_name in border_types
+            }
+            present_sides = {
+                side_name: side
+                for side_name, side in sides.items()
+                if str(getattr(side, "style", "") or "").strip()
+            }
+            if not present_sides:
+                continue
+            side_colors = {
+                side_name: cls._openpyxl_color_hex(getattr(side, "color", None), default="#000000")
+                for side_name, side in present_sides.items()
+            }
+            if len(present_sides) == 4 and len(set(side_colors.values())) == 1:
+                border_styles = [
+                    {
+                        "borderType": "FULL_BORDER",
+                        "borderColor": next(iter(side_colors.values())),
+                        "clean": False,
+                    }
+                ]
+            else:
+                border_styles = [
+                    {
+                        "borderType": border_types[side_name],
+                        "borderColor": side_colors[side_name],
+                        "clean": False,
+                    }
+                    for side_name in border_types
+                    if side_name in present_sides
+                ]
+            for border_style in border_styles:
+                border_key = json.dumps(border_style, ensure_ascii=False, sort_keys=True)
+                border_group = border_groups.setdefault(
+                    border_key,
+                    {"rows": [], "style": border_style},
+                )
+                border_group["rows"].append(row_index)
+
+        output: List[Dict[str, Any]] = []
+        for group in [*base_groups.values(), *border_groups.values()]:
+            ranges = cls._compress_station_h_style_rows(group.get("rows", []))
+            if ranges:
+                output.append({"ranges": ranges, "style": dict(group.get("style", {}))})
+        return output
+
     def _update_station_h_values_preserving_layout(
         self,
         *,
@@ -1301,6 +1449,7 @@ class HandoverCloudSheetSyncService:
         spreadsheet_token: str,
         sheet_title: str,
         cell_values: Dict[str, Any],
+        template_style_ranges: List[Dict[str, Any]],
         emit_log: Callable[[str], None],
         sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
         timings: Dict[str, int] | None = None,
@@ -1355,9 +1504,26 @@ class HandoverCloudSheetSyncService:
         value_started = time.perf_counter()
         client.batch_update_values(spreadsheet_token, value_ranges)
         self._add_elapsed_ms(timings, "value_ms", value_started)
+
+        qualified_style_ranges: List[Dict[str, Any]] = []
+        for item in template_style_ranges if isinstance(template_style_ranges, list) else []:
+            ranges = [
+                f"{target_sheet_id}!{str(range_name or '').strip()}"
+                for range_name in (item.get("ranges") if isinstance(item.get("ranges"), list) else [])
+                if str(range_name or "").strip()
+            ]
+            style = item.get("style") if isinstance(item.get("style"), dict) else {}
+            if ranges and style:
+                qualified_style_ranges.append({"ranges": ranges, "style": dict(style)})
+        if not qualified_style_ranges:
+            raise RuntimeError("H楼本地模板未提取到 H列样式，已停止写入以避免继续丢失格式")
+        style_started = time.perf_counter()
+        client.batch_update_styles(spreadsheet_token, qualified_style_ranges)
+        self._add_elapsed_ms(timings, "style_ms", style_started)
         emit_log(
-            f"[交接班][H楼云表] 仅更新动态单元格并保留模板格式 sheet={sheet_title}, "
-            f"cells={len(value_ranges)}, rows={target_rows}, cols={target_columns}, merges={len(existing_merges)}"
+            f"[交接班][H楼云表] 已更新动态单元格并恢复 H列模板样式 sheet={sheet_title}, "
+            f"cells={len(value_ranges)}, style_ranges={len(qualified_style_ranges)}, "
+            f"rows={target_rows}, cols={target_columns}, merges={len(existing_merges)}"
         )
         return {
             "sheet_id": target_sheet_id,
@@ -1367,6 +1533,8 @@ class HandoverCloudSheetSyncService:
             "synced_merges": existing_merges,
             "dynamic_merge_signature": self._build_dynamic_merge_signature(existing_merges),
             "rebuild_mode": "values_only_preserve_layout",
+            "style_repair": "template_h_column",
+            "synced_style_range_count": len(qualified_style_ranges),
         }
 
     def _build_abcdeh_work_content_workbook(self, work_content: Dict[str, Dict[str, Any]]) -> openpyxl.Workbook:
