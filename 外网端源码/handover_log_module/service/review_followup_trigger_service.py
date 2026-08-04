@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable, Dict, List
 
 from handover_log_module.core.shift_window import format_duty_date_text
@@ -25,7 +26,11 @@ from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateError,
     ReviewDocumentStateService,
 )
-from handover_log_module.service.review_session_service import ReviewSessionNotFoundError, ReviewSessionService
+from handover_log_module.service.review_session_service import (
+    ReviewSessionNotFoundError,
+    ReviewSessionService,
+    ReviewSessionStoreUnavailableError,
+)
 from handover_log_module.service.station_h_review_selection_service import (
     StationHReviewSelectionService,
     station_h_default_long_day_people_from_roster,
@@ -573,7 +578,7 @@ class ReviewFollowupTriggerService:
             sessions=[refreshed_session],
             emit_log=emit_log,
         )
-        refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
+        refreshed_sessions = self._list_batch_sessions_resilient(target_batch, emit_log=emit_log)
         self._maybe_mark_first_full_cloud_sync_completed(
             batch_key=target_batch,
             sessions=refreshed_sessions,
@@ -594,7 +599,7 @@ class ReviewFollowupTriggerService:
             cloud_result=cloud_result,
             emit_log=emit_log,
         )
-        refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
+        refreshed_sessions = self._list_batch_sessions_resilient(target_batch, emit_log=emit_log)
         daily_report_record_export = self._existing_daily_report_record_export(refreshed_sessions or [session])
         if self._all_sessions_cloud_synced_current_revision(refreshed_sessions):
             cloud_summary = self._summarize_cloud_sheet_sync(
@@ -607,7 +612,7 @@ class ReviewFollowupTriggerService:
                 cloud_result=cloud_summary,
                 emit_log=emit_log,
             )
-            refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
+            refreshed_sessions = self._list_batch_sessions_resilient(target_batch, emit_log=emit_log)
         return self._compose_followup_result(
             batch_key=target_batch,
             export_result=export_result,
@@ -835,6 +840,27 @@ class ReviewFollowupTriggerService:
                 return session
         return None
 
+    def _list_batch_sessions_resilient(
+        self,
+        batch_key: str,
+        *,
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        retry_delays = (0.25, 0.75)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                return self._review_service.list_batch_sessions(batch_key)
+            except ReviewSessionStoreUnavailableError as exc:
+                if attempt >= len(retry_delays):
+                    raise
+                delay = retry_delays[attempt]
+                emit_log(
+                    f"[交接班][云表最终上传] 状态库读取短暂失败，正在重试 "
+                    f"batch={batch_key}, attempt={attempt + 1}/{len(retry_delays) + 1}, wait_sec={delay}, error={exc}"
+                )
+                time.sleep(delay)
+        return []
+
     def _update_cloud_sheet_sync_resilient(
         self,
         *,
@@ -844,33 +870,46 @@ class ReviewFollowupTriggerService:
         cloud_sheet_sync: Dict[str, Any],
         emit_log: Callable[[str], None],
     ) -> bool:
-        session = self._resolve_session_for_cloud_sync(
-            batch_key=batch_key,
-            building=building,
-            session_id=session_id,
-        )
-        if not isinstance(session, dict):
-            emit_log(
-                f"[交接班][云表最终上传] 状态回写跳过: batch={batch_key}, building={building}, 原因={_followup_reason_text('session_not_found')}"
-            )
-            return False
-        target_session_id = str(session.get("session_id", "")).strip()
-        if not target_session_id:
-            emit_log(
-                f"[交接班][云表最终上传] 状态回写跳过: batch={batch_key}, building={building}, 原因={_followup_reason_text('missing_session_id')}"
-            )
-            return False
-        try:
-            self._review_service.update_cloud_sheet_sync(
-                session_id=target_session_id,
-                cloud_sheet_sync=cloud_sheet_sync,
-            )
-            return True
-        except ReviewSessionNotFoundError as exc:
-            emit_log(
-                f"[交接班][云表最终上传] 状态回写失败: batch={batch_key}, building={building}, 错误={exc}"
-            )
-            return False
+        retry_delays = (0.25, 0.75)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                session = self._resolve_session_for_cloud_sync(
+                    batch_key=batch_key,
+                    building=building,
+                    session_id=session_id,
+                )
+                if not isinstance(session, dict):
+                    emit_log(
+                        f"[交接班][云表最终上传] 状态回写跳过: batch={batch_key}, building={building}, 原因={_followup_reason_text('session_not_found')}"
+                    )
+                    return False
+                target_session_id = str(session.get("session_id", "")).strip()
+                if not target_session_id:
+                    emit_log(
+                        f"[交接班][云表最终上传] 状态回写跳过: batch={batch_key}, building={building}, 原因={_followup_reason_text('missing_session_id')}"
+                    )
+                    return False
+                self._review_service.update_cloud_sheet_sync(
+                    session_id=target_session_id,
+                    cloud_sheet_sync=cloud_sheet_sync,
+                )
+                return True
+            except ReviewSessionNotFoundError as exc:
+                emit_log(
+                    f"[交接班][云表最终上传] 状态回写失败: batch={batch_key}, building={building}, 错误={exc}"
+                )
+                return False
+            except ReviewSessionStoreUnavailableError as exc:
+                if attempt >= len(retry_delays):
+                    raise
+                delay = retry_delays[attempt]
+                emit_log(
+                    f"[交接班][云表最终上传] 状态回写短暂失败，正在重试 "
+                    f"batch={batch_key}, building={building}, attempt={attempt + 1}/{len(retry_delays) + 1}, "
+                    f"wait_sec={delay}, error={exc}"
+                )
+                time.sleep(delay)
+        return False
 
     def _summarize_cloud_sheet_sync(
         self,

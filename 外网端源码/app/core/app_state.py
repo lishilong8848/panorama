@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator
@@ -24,6 +25,8 @@ class AppStateRepository:
     """Local SQLite foundation for runtime state that must not live on UNC paths."""
 
     DB_FILE = "app_state.sqlite3"
+    SNAPSHOT_CACHE_TTL_SEC = 30.0
+    SNAPSHOT_APPROXIMATE_TABLES = frozenset({"task_events", "power_alert_daily_stats"})
 
     def __init__(self, *, runtime_config: Dict[str, Any] | None = None, app_dir: Path | None = None) -> None:
         self.app_dir = Path(app_dir or get_app_dir()).resolve()
@@ -35,19 +38,24 @@ class AppStateRepository:
         self.db_path = self.runtime_root / self.DB_FILE
         self._lock = threading.RLock()
         self._ready = False
+        self._snapshot_cache_lock = threading.Lock()
+        self._snapshot_cache: Dict[str, Any] | None = None
+        self._snapshot_cached_at = 0.0
 
     @contextmanager
     def connect(self, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
-        with self._lock:
+        lock_context = nullcontext() if read_only else self._lock
+        with lock_context:
             conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             try:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=NORMAL")
                 conn.execute("PRAGMA busy_timeout=30000")
                 conn.execute("PRAGMA foreign_keys=ON")
                 if read_only:
                     conn.execute("PRAGMA query_only=ON")
+                else:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA synchronous=NORMAL")
                 yield conn
                 if not read_only and conn.in_transaction:
                     conn.commit()
@@ -639,6 +647,18 @@ class AppStateRepository:
         return [grouped[key] for key in order[:safe_limit]]
 
     def snapshot(self) -> Dict[str, Any]:
+        now = time.monotonic()
+        with self._snapshot_cache_lock:
+            cached = self._snapshot_cache
+            if cached is not None and now - self._snapshot_cached_at < self.SNAPSHOT_CACHE_TTL_SEC:
+                return {
+                    **cached,
+                    "table_counts": dict(cached.get("table_counts", {})),
+                    "table_counts_approximate": list(cached.get("table_counts_approximate", [])),
+                    "checked_at": _now_text(),
+                    "cached": True,
+                }
+
         self.ensure_ready()
         with self.connect(read_only=True) as conn:
             table_counts: Dict[str, int] = {}
@@ -654,10 +674,13 @@ class AppStateRepository:
                 "bridge_source_index",
                 "power_alert_daily_stats",
             ):
-                row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {table_name}").fetchone()
+                if table_name in self.SNAPSHOT_APPROXIMATE_TABLES:
+                    row = conn.execute(f"SELECT COALESCE(MAX(rowid), 0) AS cnt FROM {table_name}").fetchone()
+                else:
+                    row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {table_name}").fetchone()
                 table_counts[table_name] = int(row["cnt"] if row else 0)
             schema_row = conn.execute("SELECT value, updated_at FROM app_meta WHERE key='schema_version'").fetchone()
-        return {
+        snapshot = {
             "db_path": str(self.db_path),
             "runtime_root": str(self.runtime_root),
             "ready": True,
@@ -665,4 +688,14 @@ class AppStateRepository:
             "schema_version": str(schema_row["value"] if schema_row else "2"),
             "schema_updated_at": str(schema_row["updated_at"] if schema_row else ""),
             "table_counts": table_counts,
+            "table_counts_approximate": sorted(self.SNAPSHOT_APPROXIMATE_TABLES),
+            "cached": False,
         }
+        with self._snapshot_cache_lock:
+            self._snapshot_cache = {
+                **snapshot,
+                "table_counts": dict(table_counts),
+                "table_counts_approximate": list(snapshot["table_counts_approximate"]),
+            }
+            self._snapshot_cached_at = time.monotonic()
+        return snapshot

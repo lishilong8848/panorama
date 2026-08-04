@@ -44,6 +44,12 @@ from handover_log_module.service.wet_bulb_collection_service import WetBulbColle
 from pipeline_utils import get_app_dir
 
 
+def _exception_detail(exc: BaseException) -> str:
+    message = str(exc).strip()
+    exception_type = type(exc).__name__
+    return f"{exception_type}: {message}" if message else exception_type
+
+
 def _parse_datetime_text(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -1096,7 +1102,11 @@ def handle_handover_followup_continue(
             emit_log=emit_log,
         )
     except Exception as exc:  # noqa: BLE001
-        notify.send_failure(stage="handover_followup_continue", detail=str(exc), emit_log=emit_log)
+        detail = _exception_detail(exc)
+        try:
+            notify.send_failure(stage="handover_followup_continue", detail=detail, emit_log=emit_log)
+        except Exception as notify_exc:  # noqa: BLE001
+            emit_log(f"[交接班][后续上传] 失败通知发送异常: {_exception_detail(notify_exc)}")
         raise
 
 

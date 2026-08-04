@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import socket
 import sys
 import threading
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict
@@ -78,6 +80,28 @@ def _json_ready(value: Any) -> Any:
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _exception_detail(exc: BaseException) -> str:
+    message = str(exc).strip()
+    exception_type = type(exc).__name__
+    return f"{exception_type}: {message}" if message else exception_type
+
+
+def _invoke_handler(
+    handler: Callable[..., Any],
+    config_snapshot: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+    runtime: "WorkerRuntime",
+) -> Any:
+    """Choose the supported handler signature without executing it twice."""
+
+    try:
+        inspect.signature(handler).bind(config_snapshot, payload, emit_log, runtime)
+    except (TypeError, ValueError):
+        return handler(config_snapshot, payload, emit_log)
+    return handler(config_snapshot, payload, emit_log, runtime)
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -244,10 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = 1
     try:
         runtime.raise_if_cancelled()
-        try:
-            result = handler(config_snapshot, payload, emit_log, runtime)
-        except TypeError:
-            result = handler(config_snapshot, payload, emit_log)
+        result = _invoke_handler(handler, config_snapshot, payload, emit_log, runtime)
         runtime.raise_if_cancelled()
         _emit_event(
             {
@@ -286,9 +307,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         exit_code = 130
     except Exception as exc:  # noqa: BLE001
-        detail = str(exc)
+        detail = _exception_detail(exc)
+        traceback_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
         cancel_context.run_cleanup()
         _emit_log(stage_id, f"[worker] failed: {detail}", level="error")
+        if traceback_text:
+            _emit_log(stage_id, f"[worker] traceback:\n{traceback_text}", level="error")
         _emit_event(
             {
                 "type": "result",
@@ -296,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ok": False,
                 "handler": handler_name,
                 "error": detail,
+                "exception_type": type(exc).__name__,
                 "ts": _now_text(),
             }
         )

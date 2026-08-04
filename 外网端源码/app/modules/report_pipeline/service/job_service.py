@@ -32,6 +32,12 @@ class TaskEngineUnavailableError(RuntimeError):
     pass
 
 
+def _exception_detail(exc: BaseException) -> str:
+    message = str(exc).strip()
+    exception_type = type(exc).__name__
+    return f"{exception_type}: {message}" if message else exception_type
+
+
 def _is_recoverable_task_engine_error(exc: Exception) -> bool:
     if isinstance(exc, TaskEngineUnavailableError):
         return True
@@ -668,6 +674,8 @@ class JobService:
         level: str,
         payload: Dict[str, Any],
     ) -> None:
+        if str(event_type or "").strip().lower() == "heartbeat":
+            return
         repository = self._app_state_repository
         if repository is None:
             return
@@ -720,8 +728,6 @@ class JobService:
                 self._persist_stage_snapshot(job, stage)
                 if stage_payload:
                     stage.revision = int(stage_payload.get("revision") or 0)
-                    stage.worker_status = str(stage_payload.get("worker_status", "") or "")
-                    stage.last_heartbeat_at = str(stage_payload.get("last_heartbeat_at", "") or "")
         except Exception as exc:  # noqa: BLE001
             if not _is_recoverable_task_engine_error(exc):
                 raise
@@ -1520,6 +1526,7 @@ class JobService:
                                 detail = (
                                     str(worker_result.get("error", "") or "").strip()
                                     or str(worker_result.get("message", "") or "").strip()
+                                    or str(worker_result.get("exception_type", "") or "").strip()
                                     or stderr_detail
                                     or f"worker exited with code {return_code}"
                                 )
@@ -1556,7 +1563,7 @@ class JobService:
                             },
                         )
                 except Exception as exc:  # noqa: BLE001
-                    detail = str(exc)
+                    detail = _exception_detail(exc)
                     unhandled_error_detail = detail
                     if self._is_worker_runtime_repairable_detail(detail) and not repair_retry_used:
                         repair_retry_used = True
@@ -1576,7 +1583,7 @@ class JobService:
                             )
                             retry_after_repair = True
                         except Exception as repair_exc:  # noqa: BLE001
-                            detail = f"{detail}; 自动修复失败: {repair_exc}"
+                            detail = f"{detail}; 自动修复失败: {_exception_detail(repair_exc)}"
                             unhandled_error_detail = detail
                     if not retry_after_repair:
                         with self._lock:
