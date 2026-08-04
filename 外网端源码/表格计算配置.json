@@ -1110,7 +1110,7 @@
           "D楼": {
             "cells": {
               "B13": "988",
-              "D13": "594",
+              "D13": "614",
               "F13": "0",
               "H13": "0"
             }
@@ -1118,7 +1118,7 @@
           "E楼": {
             "cells": {
               "B13": "1272",
-              "D13": "393",
+              "D13": "395",
               "F13": "0",
               "H13": "0"
             }
@@ -4486,9 +4486,9 @@
         },
         "scheduler": {
           "enabled": true,
-          "auto_start_in_gui": true,
+          "auto_start_in_gui": false,
           "day_of_month": 3,
-          "run_time": "09:30:00",
+          "run_time": "03:00:00",
           "check_interval_sec": 30,
           "catch_up_if_missed": false,
           "retry_failed_on_next_tick": true,
