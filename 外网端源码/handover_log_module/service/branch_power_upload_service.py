@@ -800,22 +800,59 @@ class BranchPowerUploadService:
                 f"[支路功率上传] 整日直传批量上传完成 business_date={resolved_business_date}, "
                 f"records={len(upload_records)}, parsed_hours={parsed_hour_count}, elapsed_ms={self._elapsed_ms(total_start)}",
             )
-            branch_power_alert_sync = PowerAlertSyncService(self.config).sync(
-                report_date=resolved_business_date,
-                only_keys=["branch"],
-                emit_log=emit_log,
-            )
         else:
             self._emit(
                 emit_log,
                 f"[支路功率上传] 跳过主表上传，直接同步动环功率相关统计表 business_date={resolved_business_date}, records={len(upload_records)}",
             )
-            branch_power_alert_sync = PowerAlertSyncService(self.config).sync_from_source_records(
-                report_date=resolved_business_date,
-                source_records=upload_records,
-                only_keys=["branch"],
-                emit_log=emit_log,
+        self._emit(
+            emit_log,
+            f"[支路功率上传] 使用本地整日解析结果同步单支路超功率表 business_date={resolved_business_date}, "
+            f"records={len(upload_records)}",
+        )
+        branch_power_alert_sync = PowerAlertSyncService(self.config).sync_from_source_records(
+            report_date=resolved_business_date,
+            source_records=upload_records,
+            only_keys=["branch"],
+            emit_log=emit_log,
+        )
+        branch_status = str(
+            branch_power_alert_sync.get("status", "")
+            if isinstance(branch_power_alert_sync, dict)
+            else ""
+        ).strip().lower()
+        branch_targets = (
+            branch_power_alert_sync.get("targets", {})
+            if isinstance(branch_power_alert_sync, dict)
+            and isinstance(branch_power_alert_sync.get("targets", {}), dict)
+            else {}
+        )
+        branch_target = branch_targets.get("branch") if isinstance(branch_targets.get("branch"), dict) else None
+        if branch_status != "success" or branch_target is None:
+            branch_error = (
+                str(branch_power_alert_sync.get("error", "") or "").strip()
+                if isinstance(branch_power_alert_sync, dict)
+                else ""
             )
+            raise RuntimeError(
+                "单支路超6.25KW同步失败: "
+                f"business_date={resolved_business_date}, status={branch_status or '-'}, "
+                f"error={branch_error or branch_power_alert_sync}"
+            )
+        if not bool(branch_target.get("dry_run", False)):
+            generated_count = int(branch_target.get("generated", 0) or 0)
+            created_count = int(branch_target.get("created", 0) or 0)
+            verified_count = int(branch_target.get("verified_count", -1) or 0)
+            if (
+                created_count != generated_count
+                or branch_target.get("verified") is not True
+                or verified_count != generated_count
+            ):
+                raise RuntimeError(
+                    "单支路超6.25KW同步结果不完整: "
+                    f"business_date={resolved_business_date}, generated={generated_count}, "
+                    f"created={created_count}, verified={verified_count}"
+                )
         full_cabinet_power_alert_sync = FullCabinetPowerStatsSyncService(self.config).sync_from_source_units(
             report_date=resolved_business_date,
             source_units=units,
@@ -823,11 +860,6 @@ class BranchPowerUploadService:
             emit_log=emit_log,
         )
         elapsed_ms = self._elapsed_ms(total_start)
-        branch_targets = (
-            branch_power_alert_sync.get("targets", {})
-            if isinstance(branch_power_alert_sync, dict) and isinstance(branch_power_alert_sync.get("targets", {}), dict)
-            else {}
-        )
         full_cabinet_targets = (
             full_cabinet_power_alert_sync.get("targets", {})
             if isinstance(full_cabinet_power_alert_sync, dict)

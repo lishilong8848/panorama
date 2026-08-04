@@ -1187,6 +1187,8 @@ class PowerAlertSyncService:
         page_size: int,
         batch_size: int,
         emit_log: Callable[[str], None],
+        verify_retry_count: int = 5,
+        verify_retry_interval_sec: float = 2.0,
     ) -> Dict[str, Any]:
         field_names = self.TARGET_FIELDS[table.key]
         field_meta = self._field_meta_map(client, table)
@@ -1218,6 +1220,9 @@ class PowerAlertSyncService:
                 "created": 0,
                 "same_date_existing": len(same_date_ids),
                 "dry_run": True,
+                "verified": True,
+                "verified_count": len(rows),
+                "verify_attempts": 0,
             }
         converted_rows = self._convert_target_rows(rows=rows, field_meta=field_meta, field_names=field_names)
         # Create first so a transient Feishu create failure cannot wipe the
@@ -1236,11 +1241,45 @@ class PowerAlertSyncService:
                 record_ids=same_date_ids,
                 batch_size=batch_size,
             )
+        verified_count = -1
+        verify_attempts = 0
+        last_verify_error = ""
+        for attempt in range(1, max(1, int(verify_retry_count or 1)) + 1):
+            verify_attempts = attempt
+            try:
+                verified_count = len(
+                    self._target_same_date_record_ids(
+                        client=client,
+                        table=table,
+                        report_date=report_date,
+                        page_size=page_size,
+                        emit_log=emit_log,
+                    )
+                )
+                last_verify_error = ""
+            except Exception as exc:  # noqa: BLE001
+                verified_count = -1
+                last_verify_error = str(exc)
+            if verified_count == len(converted_rows):
+                break
+            if attempt < max(1, int(verify_retry_count or 1)):
+                time.sleep(max(0.0, float(verify_retry_interval_sec or 0)))
+        if verified_count != len(converted_rows):
+            detail = (
+                f", last_error={last_verify_error}"
+                if last_verify_error
+                else ""
+            )
+            raise RuntimeError(
+                "动环功率目标表写后校验失败: "
+                f"date={report_date}, table={table.name}, expected={len(converted_rows)}, "
+                f"actual={verified_count}, attempts={verify_attempts}{detail}"
+            )
         self._emit(
             emit_log,
             f"[动环功率统计同步] 目标表完成 date={report_date}, table={table.name}, table_id={table.table_id}, "
             f"generated={len(rows)}, deleted={deleted}, created={len(converted_rows)}, "
-            f"same_date_existing={len(same_date_ids)}",
+            f"same_date_existing={len(same_date_ids)}, verified={verified_count}",
         )
         return {
             "table": table.name,
@@ -1250,6 +1289,9 @@ class PowerAlertSyncService:
             "created": len(converted_rows),
             "same_date_existing": len(same_date_ids),
             "dry_run": False,
+            "verified": True,
+            "verified_count": verified_count,
+            "verify_attempts": verify_attempts,
         }
 
     def sync(
@@ -1293,6 +1335,8 @@ class PowerAlertSyncService:
         dry_run = self._bool(cfg.get("dry_run"), False)
         page_size = max(1, self._as_int(cfg.get("page_size"), 500))
         batch_size = max(1, min(500, self._as_int(cfg.get("batch_size"), 200)))
+        verify_retry_count = max(1, self._as_int(cfg.get("verify_retry_count"), 5))
+        verify_retry_interval_sec = max(0.0, self._as_float(cfg.get("verify_retry_interval_sec"), 2.0))
         data_center_name = self._text(cfg.get("data_center_name")) or self._text(cfg.get("dataCenterName")) or "EA118"
         report_date_slash = self._normalize_date(report_date)
 
@@ -1373,6 +1417,8 @@ class PowerAlertSyncService:
                     dry_run=dry_run,
                     page_size=page_size,
                     batch_size=batch_size,
+                    verify_retry_count=verify_retry_count,
+                    verify_retry_interval_sec=verify_retry_interval_sec,
                     emit_log=emit_log,
                 )
             elapsed_ms = int((time.perf_counter() - started) * 1000)
