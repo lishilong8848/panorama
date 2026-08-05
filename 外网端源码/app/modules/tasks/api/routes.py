@@ -147,10 +147,14 @@ def list_tasks(request: Request, limit: int = 200, status: str = "active") -> Di
     container = request.app.state.container
     normalized_status = str(status or "active").strip().lower()
     statuses = _ACTIVE_STATUSES if normalized_status in {"", "active"} else _list_texts(normalized_status)
-    safe_limit = max(1, min(int(limit or 200), 2000))
+    safe_limit = max(1, min(int(limit or 200), 200))
     try:
-        raw_jobs = container.job_service.list_jobs(limit=safe_limit, statuses=statuses)
-        tasks = [present_job_item(job) for job in raw_jobs if isinstance(job, dict)]
+        raw_jobs = container.job_service.list_jobs(
+            limit=safe_limit,
+            statuses=statuses,
+            include_results=False,
+        )
+        tasks = [present_job_item(job, compact=True) for job in raw_jobs if isinstance(job, dict)]
         return {
             "ok": True,
             "tasks": tasks,

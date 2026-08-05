@@ -64,6 +64,14 @@ def _is_recoverable_task_engine_error(exc: Exception) -> bool:
 
 _INCOMPLETE_JOB_STATUSES = {"queued", "waiting_resource", "running"}
 _RUNNING_JOB_STATUSES = {"running"}
+_TERMINAL_JOB_STATUSES = {
+    "success",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "partial_failed",
+    "blocked_precondition",
+}
 _RESOURCE_CAPACITY_OVERRIDES = {
     "network:external": 3,
     "network:internal": 2,
@@ -110,7 +118,7 @@ class JobState:
     wait_started_monotonic: float = 0.0
     failure_notified_at: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, *, include_results: bool = True) -> Dict[str, Any]:
         return {
             "job_id": self.job_id,
             "name": self.name,
@@ -123,13 +131,13 @@ class JobState:
             "finished_at": self.finished_at,
             "summary": self.summary,
             "error": self.error,
-            "result": self.result,
+            "result": self.result if include_results else None,
             "log_count": len(self.logs),
             "priority": self.priority,
             "resource_keys": list(self.resource_keys),
             "wait_reason": self.wait_reason,
             "bridge_task_id": self.bridge_task_id,
-            "stages": [stage.to_dict() for stage in self.stages],
+            "stages": [stage.to_dict(include_results=include_results) for stage in self.stages],
             "cancel_requested": bool(self.cancel_requested),
             "revision": int(self.revision or 0),
             "last_event_id": int(self.last_event_id or 0),
@@ -156,7 +164,7 @@ class StageState:
     worker_status: str = ""
     last_heartbeat_at: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, *, include_results: bool = True) -> Dict[str, Any]:
         return {
             "stage_id": self.stage_id,
             "name": self.name,
@@ -169,7 +177,7 @@ class StageState:
             "finished_at": self.finished_at,
             "summary": self.summary,
             "error": self.error,
-            "result": self.result,
+            "result": self.result if include_results else None,
             "cancel_requested": bool(self.cancel_requested),
             "revision": int(self.revision or 0),
             "worker_status": self.worker_status,
@@ -214,6 +222,7 @@ class _StreamProxy(io.TextIOBase):
 
 class JobService:
     TASK_ENGINE_CLEANUP_INTERVAL_SEC = 600.0
+    MAX_TERMINAL_JOBS_IN_MEMORY = 32
 
     def __init__(self, log_buffer_size: int = 5000) -> None:
         self.log_buffer_size = max(200, int(log_buffer_size))
@@ -344,7 +353,28 @@ class JobService:
     def cleanup_terminal_jobs(self, *, retention_days: int = 14) -> int:
         if not self._task_engine_db:
             return 0
-        return int(self._task_engine_db.cleanup_terminal_jobs(retention_days=retention_days) or 0)
+        deleted = int(self._task_engine_db.cleanup_terminal_jobs(retention_days=retention_days) or 0)
+        with self._lock:
+            self._prune_terminal_jobs_in_memory_locked()
+        return deleted
+
+    def _prune_terminal_jobs_in_memory_locked(self) -> int:
+        if not self._task_engine_db:
+            return 0
+        terminal_jobs = [
+            job
+            for job in self._ordered_jobs()
+            if str(job.status or "").strip().lower() in _TERMINAL_JOB_STATUSES
+            and job.done_event.is_set()
+        ]
+        remove_count = max(0, len(terminal_jobs) - self.MAX_TERMINAL_JOBS_IN_MEMORY)
+        for job in terminal_jobs[:remove_count]:
+            self._jobs.pop(job.job_id, None)
+        return remove_count
+
+    def _prune_terminal_jobs_in_memory(self) -> int:
+        with self._lock:
+            return self._prune_terminal_jobs_in_memory_locked()
 
     def _maybe_cleanup_task_engine(self) -> None:
         if not self._task_engine_db:
@@ -357,6 +387,8 @@ class JobService:
             self._task_engine_db.cleanup_terminal_jobs(retention_days=14)
         except Exception:  # noqa: BLE001
             pass
+        with self._lock:
+            self._prune_terminal_jobs_in_memory_locked()
 
     def task_engine_runtime_snapshot(self) -> Dict[str, Any]:
         self._maybe_cleanup_task_engine()
@@ -1337,6 +1369,7 @@ class JobService:
             payload={"action": status, "summary": summary, "timestamp": now_text},
         )
         job.done_event.set()
+        self._prune_terminal_jobs_in_memory()
 
     def _prepare_job_for_restart(self, job: JobState, stage: StageState, *, summary: str) -> None:
         job.status = "queued"
@@ -1629,6 +1662,7 @@ class JobService:
                     if not retry_after_repair:
                         self._notify_job_failure_to_feishu_async(job)
                         job.done_event.set()
+                        self._prune_terminal_jobs_in_memory()
                 if retry_after_repair:
                     continue
                 break
@@ -2458,6 +2492,7 @@ class JobService:
                 job.acquired_resources = []
                 self._notify_job_failure_to_feishu_async(job)
                 job.done_event.set()
+                self._prune_terminal_jobs_in_memory()
 
         thread = threading.Thread(target=_run, daemon=True, name=f"job-{job_id[:8]}")
         job.thread = thread
@@ -2877,6 +2912,7 @@ class JobService:
                 payload={"error": detail, "bridge_task_id": job.bridge_task_id, "timestamp": now_text},
             )
             job.done_event.set()
+            self._prune_terminal_jobs_in_memory_locked()
             self._persist_resource_snapshot()
             self._notify_job_failure_to_feishu_async(job)
             return job
@@ -2920,6 +2956,7 @@ class JobService:
                     payload={"reason": "user_requested", "timestamp": now_text},
                 )
                 job.done_event.set()
+                self._prune_terminal_jobs_in_memory_locked()
                 self._condition.notify_all()
                 result = job.to_dict()
                 self._persist_resource_snapshot()
@@ -3026,10 +3063,20 @@ class JobService:
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    def list_jobs(self, *, limit: int = 50, statuses: List[str] | tuple[str, ...] | None = None) -> List[Dict[str, Any]]:
+    def list_jobs(
+        self,
+        *,
+        limit: int = 50,
+        statuses: List[str] | tuple[str, ...] | None = None,
+        include_results: bool = True,
+    ) -> List[Dict[str, Any]]:
         if self._task_engine_db:
             try:
-                return self._task_engine_db.list_jobs(limit=limit, statuses=statuses)
+                return self._task_engine_db.list_jobs(
+                    limit=limit,
+                    statuses=statuses,
+                    include_results=include_results,
+                )
             except Exception as exc:  # noqa: BLE001
                 if not _is_recoverable_task_engine_error(exc):
                     raise
@@ -3039,7 +3086,7 @@ class JobService:
             if normalized_statuses:
                 items = [item for item in items if str(item.status or "").strip().lower() in normalized_statuses]
             items = list(reversed(items[-max(1, int(limit or 1)) :]))
-            return [item.to_dict() for item in items]
+            return [item.to_dict(include_results=include_results) for item in items]
 
     def job_counts(self) -> Dict[str, int]:
         if self._task_engine_db:

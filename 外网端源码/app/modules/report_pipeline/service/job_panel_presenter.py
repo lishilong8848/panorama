@@ -28,8 +28,119 @@ _BRIDGE_WAITING_TEXTS = (
     "等待过旧楼栋共享文件更新",
     "等待共享文件",
 )
-_FULL_TASK_PANEL_LIMIT = 2000
+_FULL_TASK_PANEL_LIMIT = 200
 _RECENT_FINISHED_JOB_LIMIT = 20
+_DISPLAY_MAPPING_LIMIT = 80
+_DISPLAY_SEQUENCE_LIMIT = 20
+_DISPLAY_TEXT_LIMIT = 4096
+_DISPLAY_MAX_DEPTH = 4
+
+
+def _bounded_display_value(value: Any, *, depth: int = 0) -> tuple[Any, bool]:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, False
+    if isinstance(value, str):
+        if len(value) <= _DISPLAY_TEXT_LIMIT:
+            return value, False
+        return value[:_DISPLAY_TEXT_LIMIT], True
+    if depth >= _DISPLAY_MAX_DEPTH:
+        if isinstance(value, dict):
+            return {}, True
+        if isinstance(value, (list, tuple, set)):
+            return [], True
+        text = str(value)
+        return text[:_DISPLAY_TEXT_LIMIT], len(text) > _DISPLAY_TEXT_LIMIT
+    if isinstance(value, dict):
+        result: Dict[str, Any] = {}
+        truncated = len(value) > _DISPLAY_MAPPING_LIMIT
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _DISPLAY_MAPPING_LIMIT:
+                break
+            compact_item, item_truncated = _bounded_display_value(item, depth=depth + 1)
+            result[str(key)] = compact_item
+            truncated = truncated or item_truncated
+        return result, truncated
+    if isinstance(value, (list, tuple, set)):
+        rows = list(value)
+        result: List[Any] = []
+        truncated = len(rows) > _DISPLAY_SEQUENCE_LIMIT
+        for item in rows[:_DISPLAY_SEQUENCE_LIMIT]:
+            compact_item, item_truncated = _bounded_display_value(item, depth=depth + 1)
+            result.append(compact_item)
+            truncated = truncated or item_truncated
+        return result, truncated
+    text = str(value)
+    return text[:_DISPLAY_TEXT_LIMIT], len(text) > _DISPLAY_TEXT_LIMIT
+
+
+def _compact_job_for_list(job: Dict[str, Any]) -> Dict[str, Any]:
+    source = dict(job if isinstance(job, dict) else {})
+    result_available = source.get("result") is not None
+    source.pop("result", None)
+    stages = source.get("stages", []) if isinstance(source.get("stages", []), list) else []
+    source["stages"] = [
+        {key: value for key, value in stage.items() if key != "result"}
+        for stage in stages[:_DISPLAY_SEQUENCE_LIMIT]
+        if isinstance(stage, dict)
+    ]
+    compact, truncated = _bounded_display_value(source)
+    payload = compact if isinstance(compact, dict) else {}
+    payload["result"] = None
+    payload["result_available"] = bool(result_available)
+    if truncated or len(stages) > _DISPLAY_SEQUENCE_LIMIT:
+        payload["payload_truncated"] = True
+    return payload
+
+
+def _compact_bridge_for_list(task: Dict[str, Any]) -> Dict[str, Any]:
+    source = task if isinstance(task, dict) else {}
+    payload = {
+        key: (value[:_DISPLAY_TEXT_LIMIT] if isinstance(value, str) else value)
+        for key, value in source.items()
+        if value is None or isinstance(value, (bool, int, float, str))
+    }
+    stages = source.get("stages", []) if isinstance(source.get("stages", []), list) else []
+    payload["stages"] = [
+        {
+            key: (value[:_DISPLAY_TEXT_LIMIT] if isinstance(value, str) else value)
+            for key, value in stage.items()
+            if key not in {"result", "payload", "request", "response"}
+            and (value is None or isinstance(value, (bool, int, float, str)))
+        }
+        for stage in stages[:_DISPLAY_SEQUENCE_LIMIT]
+        if isinstance(stage, dict)
+    ]
+    artifacts = source.get("artifacts", []) if isinstance(source.get("artifacts", []), list) else []
+    payload["artifacts"] = [
+        {
+            key: value
+            for key, value in artifact.items()
+            if key in {"artifact_id", "artifact_kind", "building", "status", "file_name", "file_path", "updated_at"}
+            and (value is None or isinstance(value, (bool, int, float, str)))
+        }
+        for artifact in artifacts[:_DISPLAY_SEQUENCE_LIMIT]
+        if isinstance(artifact, dict)
+    ]
+    events = source.get("events", []) if isinstance(source.get("events", []), list) else []
+    payload["events"] = [
+        {
+            "event_id": event.get("event_id"),
+            "event_type": event.get("event_type"),
+            "level": event.get("level"),
+            "side": event.get("side"),
+            "created_at": event.get("created_at"),
+            "event_text": str(event.get("event_text", "") or "")[:1024],
+        }
+        for event in events[:_DISPLAY_SEQUENCE_LIMIT]
+        if isinstance(event, dict)
+    ]
+    if any(len(rows) > _DISPLAY_SEQUENCE_LIMIT for rows in (stages, artifacts, events)) or any(
+        isinstance(value, (dict, list, tuple, set))
+        for key, value in source.items()
+        if key not in {"stages", "artifacts", "events"}
+    ):
+        payload["payload_truncated"] = True
+    return payload
 
 
 def _format_job_status(status: Any) -> str:
@@ -135,7 +246,7 @@ def _is_handover_generation_job(job: Dict[str, Any]) -> bool:
     return feature in _HANDOVER_GENERATION_FEATURES and status in _JOB_INCOMPLETE_STATUSES
 
 
-def _present_job(job: Dict[str, Any]) -> Dict[str, Any]:
+def _present_job(job: Dict[str, Any], *, compact: bool = False) -> Dict[str, Any]:
     status = str(job.get("status", "") or "").strip().lower()
     dependency_status = _job_dependency_display_status(job)
     display_status = dependency_status or status
@@ -172,8 +283,9 @@ def _present_job(job: Dict[str, Any]) -> Dict[str, Any]:
             and isinstance(stages[0], dict)
             and str(stages[0].get("worker_handler", "") or "").strip()
         )
+    base_payload = _compact_job_for_list(job) if compact else job
     return {
-        **job,
+        **base_payload,
         "item_kind": "job",
         "__waiting_kind": "job",
         "__waiting_id": f"job:{job_id}",
@@ -217,10 +329,10 @@ def _present_job(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def present_job_item(job: Dict[str, Any]) -> Dict[str, Any]:
+def present_job_item(job: Dict[str, Any], *, compact: bool = False) -> Dict[str, Any]:
     if not isinstance(job, dict):
         return {}
-    return _present_job(job)
+    return _present_job(job, compact=compact)
 
 
 def _format_bridge_feature(feature: Any) -> str:
@@ -505,7 +617,7 @@ def _is_bridge_waiting_resource_task(task: Dict[str, Any]) -> bool:
     return any(text in combined for text in _BRIDGE_WAITING_TEXTS)
 
 
-def present_bridge_task(task: Dict[str, Any]) -> Dict[str, Any]:
+def present_bridge_task(task: Dict[str, Any], *, compact: bool = False) -> Dict[str, Any]:
     task_id = str(task.get("task_id", "") or "").strip()
     time_text = str(task.get("updated_at", "") or "").strip() or str(task.get("created_at", "") or "").strip()
     error_text = _format_bridge_task_error(task)
@@ -532,8 +644,9 @@ def present_bridge_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "expired",
         "blocked",
     }
+    base_payload = _compact_bridge_for_list(task) if compact else task
     return {
-        **task,
+        **base_payload,
         "item_kind": "bridge",
         "status_text": _format_bridge_task_status(task),
         "tone": _format_bridge_task_tone(task.get("status")),
@@ -580,7 +693,7 @@ def present_bridge_task(task: Dict[str, Any]) -> Dict[str, Any]:
 
 def _present_bridge_waiting_item(task: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        **present_bridge_task(task),
+        **present_bridge_task(task, compact=True),
         "__waiting_kind": "bridge",
         "__waiting_id": f"bridge:{str(task.get('task_id', '') or '').strip()}",
     }
@@ -592,7 +705,7 @@ def build_bridge_tasks_summary(
     count: int | None = None,
 ) -> Dict[str, Any]:
     normalized_tasks = [task for task in (tasks or []) if isinstance(task, dict)]
-    presented_tasks = [present_bridge_task(task) for task in normalized_tasks]
+    presented_tasks = [present_bridge_task(task, compact=True) for task in normalized_tasks]
     active_tasks = [
         item for item in presented_tasks if not _is_bridge_terminal_status(item)
     ]
@@ -645,6 +758,7 @@ def build_bridge_tasks_summary(
         next_action_text = "先看失败摘要，再决定是否重试或取消。"
 
     return {
+        "payload_compact": True,
         "tasks": presented_tasks,
         "count": int(count or len(normalized_tasks)),
         "display": {
@@ -746,7 +860,11 @@ def _safe_jobs(
     strict: bool = False,
 ) -> List[Dict[str, Any]]:
     try:
-        rows = container.job_service.list_jobs(limit=limit, statuses=statuses)
+        rows = container.job_service.list_jobs(
+            limit=limit,
+            statuses=statuses,
+            include_results=False,
+        )
     except TaskEngineUnavailableError:
         if strict:
             raise
@@ -824,7 +942,7 @@ def build_job_panel_summary(
         if job_id:
             jobs_by_id[job_id] = job
         jobs.append(job)
-    presented_jobs = [_present_job(job) for job in jobs if isinstance(job, dict)]
+    presented_jobs = [_present_job(job, compact=True) for job in jobs if isinstance(job, dict)]
     running_jobs = [item for item in presented_jobs if str(item.get("status", "")).strip().lower() in _JOB_RUNNING_STATUSES]
     waiting_jobs = [item for item in presented_jobs if str(item.get("status", "")).strip().lower() in _JOB_WAITING_STATUSES]
     recent_finished_jobs = [
@@ -895,6 +1013,7 @@ def build_job_panel_summary(
         next_action_text = "先看失败摘要，再决定是否重试。"
 
     return {
+        "payload_compact": True,
         "jobs": presented_jobs,
         "count": len(presented_jobs),
         "active_job_ids": _safe_active_job_ids(container),

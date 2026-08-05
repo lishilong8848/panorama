@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 from app.config.config_adapter import normalize_role_mode
-from app.modules.report_pipeline.service.job_panel_presenter import build_job_panel_summary
+from app.modules.report_pipeline.service.job_panel_presenter import (
+    build_bridge_tasks_summary,
+    build_job_panel_summary,
+)
 from app.modules.report_pipeline.service.job_service import TaskEngineUnavailableError
 from app.modules.shared_bridge.service.internal_runtime_status_presenter import (
     INTERNAL_RUNTIME_BUILDINGS,
@@ -25,6 +28,12 @@ _SCOPE_DASHBOARD_JOB_PANEL_SUMMARY = "job_panel_dashboard_summary"
 _SCOPE_BRIDGE_TASKS_SUMMARY = "bridge_tasks_summary"
 _SCOPE_DASHBOARD_BRIDGE_TASKS_SUMMARY = "bridge_tasks_dashboard_summary"
 _SCOPE_RUNTIME_RESOURCES_SUMMARY = "runtime_resources_summary"
+_COMPACT_TASK_SUMMARY_SCOPES = {
+    _SCOPE_JOB_PANEL_SUMMARY,
+    _SCOPE_DASHBOARD_JOB_PANEL_SUMMARY,
+    _SCOPE_BRIDGE_TASKS_SUMMARY,
+    _SCOPE_DASHBOARD_BRIDGE_TASKS_SUMMARY,
+}
 
 _EVENT_TRIGGER_KEYWORDS = (
     "[共享桥接]",
@@ -234,8 +243,18 @@ class RuntimeStatusCoordinator:
         with self._snapshot_cache_lock:
             entry = self._scope_cache.get(scope_text)
             if isinstance(entry, dict):
-                return copy.deepcopy(entry)
+                payload = entry.get("payload")
+                if scope_text not in _COMPACT_TASK_SUMMARY_SCOPES or (
+                    isinstance(payload, dict) and payload.get("payload_compact") is True
+                ):
+                    return copy.deepcopy(entry)
+                self._scope_cache.pop(scope_text, None)
         snapshot = self._store.read_scope_snapshot(scope_text)
+        payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
+        if scope_text in _COMPACT_TASK_SUMMARY_SCOPES and not (
+            isinstance(payload, dict) and payload.get("payload_compact") is True
+        ):
+            return None
         if isinstance(snapshot, dict) and snapshot:
             with self._snapshot_cache_lock:
                 self._scope_cache[scope_text] = copy.deepcopy(snapshot)
@@ -495,7 +514,7 @@ class RuntimeStatusCoordinator:
         }
 
     def _build_bridge_tasks_summary(self) -> Dict[str, Any]:
-        return self._build_bridge_tasks_summary_with_limit(limit=2000)
+        return self._build_bridge_tasks_summary_with_limit(limit=200)
 
     def _build_bridge_tasks_dashboard_summary(self) -> Dict[str, Any]:
         return self._build_bridge_tasks_summary_with_limit(limit=12)
@@ -504,12 +523,17 @@ class RuntimeStatusCoordinator:
         service = getattr(self._container, "shared_bridge_service", None)
         tasks = []
         if service is None:
-            return {"tasks": [], "count": 0}
+            return build_bridge_tasks_summary([], count=0)
+        safe_limit = max(1, min(int(limit or 1), 200))
         try:
             active_reader = getattr(service, "list_active_tasks", None)
-            active_tasks = active_reader(limit=max(limit, 2000)) if callable(active_reader) else []
+            active_tasks = active_reader(limit=200) if callable(active_reader) else []
             recent_reader = getattr(service, "list_recent_tasks", None)
-            recent_tasks = recent_reader(limit=limit) if callable(recent_reader) else service.list_tasks(limit=limit)
+            recent_tasks = (
+                recent_reader(limit=safe_limit)
+                if callable(recent_reader)
+                else service.list_tasks(limit=safe_limit)
+            )
             by_id = {}
             merged_candidates = [
                 *(active_tasks if isinstance(active_tasks, list) else []),
@@ -526,17 +550,20 @@ class RuntimeStatusCoordinator:
             checker = getattr(service, "_is_recoverable_store_error", None)
             if callable(checker) and checker(exc):
                 cache_reader = getattr(service, "get_cached_tasks", None)
-                tasks = cache_reader(limit=max(limit, 2000)) if callable(cache_reader) else []
+                tasks = cache_reader(limit=200) if callable(cache_reader) else []
             else:
                 if callable(self._emit_log):
                     self._emit_log(f"[运行状态] 刷新共享桥接任务摘要失败: {exc}")
                 tasks = []
-        normalized_tasks = [
+        visible_tasks = [
             task
             for task in (tasks if isinstance(tasks, list) else [])
             if str(task.get("feature", "") or "").strip().lower() != "alarm_export"
         ]
-        return {"tasks": normalized_tasks, "count": len(normalized_tasks)}
+        return build_bridge_tasks_summary(
+            visible_tasks[:safe_limit],
+            count=len(visible_tasks),
+        )
 
     def _safe_active_job_id(self) -> str:
         getter = getattr(self._container.job_service, "active_job_id", None)

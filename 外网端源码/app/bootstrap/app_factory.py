@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import gc
 import mimetypes
 from contextlib import asynccontextmanager
 import os
@@ -77,6 +78,19 @@ _EXTERNAL_REVIEW_ALLOWED_PREFIXES = (
 _EXTERNAL_REVIEW_ALLOWED_EXACT = {
     "/favicon.ico",
 }
+_MEMORY_PRESSURE_RESPONSE_BODY = b"service temporarily unavailable: memory pressure"
+
+
+def _exception_contains_memory_error(exc: BaseException) -> bool:
+    if isinstance(exc, MemoryError):
+        return True
+    nested = getattr(exc, "exceptions", ())
+    if not isinstance(nested, (list, tuple)):
+        return False
+    return any(
+        isinstance(item, BaseException) and _exception_contains_memory_error(item)
+        for item in nested
+    )
 
 
 def _previous_calendar_year_month(now_dt: datetime | None = None) -> tuple[str, int]:
@@ -662,6 +676,31 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 status_code=409,
             )
         return await call_next(request)
+
+    @app.middleware("http")
+    async def memory_pressure_guard(request: Request, call_next):
+        try:
+            return await call_next(request)
+        except BaseException as exc:
+            if not _exception_contains_memory_error(exc):
+                raise
+            try:
+                gc.collect()
+            except Exception:
+                pass
+            try:
+                container.add_system_log(
+                    f"[HTTP] 内存压力保护已触发 method={request.method}, path={request.url.path}",
+                    suppress_alert_upload=True,
+                )
+            except Exception:
+                pass
+            return Response(
+                content=_MEMORY_PRESSURE_RESPONSE_BODY,
+                status_code=503,
+                media_type="text/plain",
+                headers={"Retry-After": "5", "Connection": "close"},
+            )
 
     def _deployment_role_mode() -> str:
         snapshot = container.deployment_snapshot() if hasattr(container, "deployment_snapshot") else {}

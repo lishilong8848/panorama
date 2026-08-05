@@ -530,7 +530,14 @@ class TaskEngineDatabase:
 
         self._write(_op)
 
-    def _row_to_job(self, row: sqlite3.Row, stages: list[dict[str, Any]], last_event_id: int) -> dict[str, Any]:
+    def _row_to_job(
+        self,
+        row: sqlite3.Row,
+        stages: list[dict[str, Any]],
+        last_event_id: int,
+        *,
+        include_results: bool = True,
+    ) -> dict[str, Any]:
         return {
             "job_id": str(row["job_id"] or ""),
             "name": str(row["name"] or ""),
@@ -543,7 +550,7 @@ class TaskEngineDatabase:
             "finished_at": str(row["finished_at"] or ""),
             "summary": str(row["summary"] or ""),
             "error": str(row["error"] or ""),
-            "result": self._loads(row["result_json"], None),
+            "result": self._loads(row["result_json"], None) if include_results else None,
             "log_count": 0,
             "priority": str(row["priority"] or "manual"),
             "resource_keys": self._loads(row["resource_keys_json"], []),
@@ -555,16 +562,31 @@ class TaskEngineDatabase:
             "last_event_id": int(last_event_id or 0),
         }
 
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
+    def get_job(self, job_id: str, *, include_results: bool = True) -> dict[str, Any] | None:
         conn = self._connect()
         try:
-            row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (str(job_id or "").strip(),)).fetchone()
+            job_sql = "SELECT * FROM jobs WHERE job_id = ?"
+            if not include_results:
+                job_sql = """
+                    SELECT job_id, name, feature, dedupe_key, submitted_by, priority,
+                           resource_keys_json, wait_reason, bridge_task_id, status,
+                           created_at, started_at, finished_at, summary, error,
+                           'null' AS result_json, cancel_requested, revision
+                    FROM jobs WHERE job_id = ?
+                """
+            row = conn.execute(job_sql, (str(job_id or "").strip(),)).fetchone()
             if row is None:
                 return None
-            stage_rows = conn.execute(
-                "SELECT * FROM stages WHERE job_id = ? ORDER BY stage_id ASC",
-                (str(job_id or "").strip(),),
-            ).fetchall()
+            stage_sql = "SELECT * FROM stages WHERE job_id = ? ORDER BY stage_id ASC"
+            if not include_results:
+                stage_sql = """
+                    SELECT job_id, stage_id, name, status, resource_keys_json,
+                           resume_policy, worker_handler, worker_pid, started_at,
+                           finished_at, summary, error, 'null' AS result_json,
+                           cancel_requested, revision
+                    FROM stages WHERE job_id = ? ORDER BY stage_id ASC
+                """
+            stage_rows = conn.execute(stage_sql, (str(job_id or "").strip(),)).fetchall()
             worker_rows = {
                 (str(item["job_id"]), str(item["stage_id"])): item
                 for item in conn.execute("SELECT * FROM workers WHERE job_id = ?", (str(job_id or "").strip(),)).fetchall()
@@ -588,18 +610,29 @@ class TaskEngineDatabase:
                         "finished_at": str(item["finished_at"] or ""),
                         "summary": str(item["summary"] or ""),
                         "error": str(item["error"] or ""),
-                        "result": self._loads(item["result_json"], None),
+                        "result": self._loads(item["result_json"], None) if include_results else None,
                         "cancel_requested": bool(int(item["cancel_requested"] or 0)),
                         "revision": int(item["revision"] or 0),
                         "worker_status": str((worker["status"] if worker else "") or ""),
                         "last_heartbeat_at": str((worker["last_heartbeat_at"] if worker else "") or ""),
                     }
                 )
-            return self._row_to_job(row, stages, last_event_id)
+            return self._row_to_job(
+                row,
+                stages,
+                last_event_id,
+                include_results=include_results,
+            )
         finally:
             conn.close()
 
-    def list_jobs(self, *, limit: int = 50, statuses: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    def list_jobs(
+        self,
+        *,
+        limit: int = 50,
+        statuses: Iterable[str] | None = None,
+        include_results: bool = True,
+    ) -> list[dict[str, Any]]:
         normalized = [str(item or "").strip().lower() for item in (statuses or []) if str(item or "").strip()]
         conn = self._connect()
         try:
@@ -616,7 +649,7 @@ class TaskEngineDatabase:
             conn.close()
         items: list[dict[str, Any]] = []
         for job_id in job_ids:
-            payload = self.get_job(job_id)
+            payload = self.get_job(job_id, include_results=include_results)
             if payload:
                 items.append(payload)
         return items

@@ -6784,15 +6784,16 @@ def list_jobs(request: Request, limit: int = 60, statuses: str = "") -> Dict[str
         if str(item or "").strip()
     ]
     runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
-    safe_limit = max(1, min(int(limit or 60), 2000))
+    safe_limit = max(1, min(int(limit or 60), 200))
     if (
         not normalized_statuses
+        and safe_limit <= 12
         and runtime_status_coordinator is not None
         and callable(getattr(runtime_status_coordinator, "is_running", None))
         and runtime_status_coordinator.is_running()
     ):
         try:
-            snapshot = runtime_status_coordinator.read_scope_snapshot("job_panel_summary")
+            snapshot = runtime_status_coordinator.read_scope_snapshot("job_panel_dashboard_summary")
             payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
             if isinstance(payload, dict):
                 return payload
@@ -6800,9 +6801,13 @@ def list_jobs(request: Request, limit: int = 60, statuses: str = "") -> Dict[str
             pass
     try:
         if normalized_statuses:
-            raw_jobs = container.job_service.list_jobs(limit=safe_limit, statuses=normalized_statuses)
+            raw_jobs = container.job_service.list_jobs(
+                limit=safe_limit,
+                statuses=normalized_statuses,
+                include_results=False,
+            )
             jobs = [
-                present_job_item(job)
+                present_job_item(job, compact=True)
                 for job in (raw_jobs if isinstance(raw_jobs, list) else [])
                 if isinstance(job, dict)
             ]
@@ -6962,18 +6967,13 @@ def _build_external_health_lite_payload(request: Request) -> Dict[str, Any]:
 
 
 def _build_external_bridge_tasks_summary_fast(container) -> Dict[str, Any]:
-    bridge_tasks_summary = _external_read_scope(
-        container,
-        "bridge_tasks_summary",
-        reason_prefix="external_bridge_tasks",
-    )
-    if isinstance(bridge_tasks_summary, dict):
-        return bridge_tasks_summary
     bridge_tasks_summary_raw = _external_read_scope(
         container,
         "bridge_tasks_dashboard_summary",
         reason_prefix="external_bridge_tasks",
     ) or {"tasks": [], "count": 0}
+    if bridge_tasks_summary_raw.get("payload_compact") is True:
+        return bridge_tasks_summary_raw
     bridge_tasks_rows = (
         bridge_tasks_summary_raw.get("tasks", [])
         if isinstance(bridge_tasks_summary_raw, dict)
@@ -7100,8 +7100,7 @@ def _build_external_jobs_module(request: Request) -> Dict[str, Any]:
             },
         )
     job_panel_summary = (
-        _external_read_scope(container, "job_panel_summary", reason_prefix="external_jobs")
-        or _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
+        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_jobs")
         or _empty_job_panel_summary()
     )
     overview = (
@@ -7476,8 +7475,7 @@ def _build_external_system_module(request: Request) -> Dict[str, Any]:
     )
     task_overview = {}
     job_panel_summary = (
-        _external_read_scope(container, "job_panel_summary", reason_prefix="external_system")
-        or _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
+        _external_read_scope(container, "job_panel_dashboard_summary", reason_prefix="external_system")
         or _empty_job_panel_summary()
     )
     if isinstance(job_panel_summary.get("display", {}), dict):
@@ -7728,16 +7726,16 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         live_shared_bridge.get("internal_alert_status", {})
     )
     job_panel_summary = (
-        _read_scope("job_panel_summary")
-        or _read_scope("job_panel_dashboard_summary")
+        _read_scope("job_panel_dashboard_summary")
         or _empty_job_panel_summary()
     )
-    bridge_tasks_summary = _read_scope("bridge_tasks_summary")
-    if not isinstance(bridge_tasks_summary, dict):
-        bridge_tasks_summary_raw = _read_scope("bridge_tasks_dashboard_summary") or {
-            "tasks": [],
-            "count": 0,
-        }
+    bridge_tasks_summary_raw = _read_scope("bridge_tasks_dashboard_summary") or {
+        "tasks": [],
+        "count": 0,
+    }
+    if bridge_tasks_summary_raw.get("payload_compact") is True:
+        bridge_tasks_summary = bridge_tasks_summary_raw
+    else:
         bridge_tasks_rows = (
             bridge_tasks_summary_raw.get("tasks", [])
             if isinstance(bridge_tasks_summary_raw, dict)
