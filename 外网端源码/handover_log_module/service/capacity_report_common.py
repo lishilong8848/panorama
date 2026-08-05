@@ -727,6 +727,19 @@ def _hvdc_search_tokens(identifier: str, *, template_family: str) -> List[str]:
     return deduped
 
 
+_CAPACITY_TEMPLATE_IDENTIFIER_PATTERNS = {
+    "tr": re.compile(r"^[A-E]-\d{3}-TR-?\d{3}$", flags=re.IGNORECASE),
+    "ups": re.compile(r"^[A-E]-\d{3}-UPS-\d{3}$", flags=re.IGNORECASE),
+    "hvdc": re.compile(r"^[A-E]-\d{3}-HVDC-\d{3}$", flags=re.IGNORECASE),
+    "rpp": re.compile(r"^[A-E]-\d{3}-RPP-(?:AC|DC)-\d+$", flags=re.IGNORECASE),
+}
+
+
+def _is_capacity_template_identifier(identifier: str, *, kind: str) -> bool:
+    pattern = _CAPACITY_TEMPLATE_IDENTIFIER_PATTERNS.get(_text(kind).lower())
+    return bool(pattern and pattern.fullmatch(_text(identifier)))
+
+
 def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[str, Any]:
     building_code = _extract_building_code(building)
     template_family = (
@@ -745,6 +758,8 @@ def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[st
             if not raw_text:
                 continue
             identifier = _prefix_building_identifier(raw_text, building_code)
+            if not _is_capacity_template_identifier(identifier, kind=kind):
+                continue
             items.append({"row": row_idx, "identifier": identifier, "search_tokens": _search_tokens_for(identifier, kind=kind)})
         return items
 
@@ -755,6 +770,8 @@ def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[st
             if not raw_text:
                 continue
             identifier = _prefix_building_identifier(raw_text, building_code)
+            if not _is_capacity_template_identifier(identifier, kind=kind):
+                continue
             items.append({"row": row_idx, "identifier": identifier, "search_tokens": _search_tokens_for(identifier, kind=kind)})
         return items
 
@@ -1246,9 +1263,15 @@ def _build_ups_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> D
     return values
 
 
-def _build_hvdc_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> Dict[str, str]:
+def _build_hvdc_values(
+    query: CapacitySourceQuery,
+    snapshot: Dict[str, Any],
+    *,
+    context: Dict[str, Any] | None = None,
+) -> Dict[str, str]:
     values: Dict[str, str] = {}
     alias_map = {"P": ["电池组电压"], "Q": ["直流电压"], "R": ["直流总功率"]}
+    missing_power_identifiers: List[str] = []
     for entry in [item for item in snapshot.get("hvdc_entries", []) if isinstance(item, dict)]:
         row_idx = int(entry.get("row", 0) or 0)
         identifier = _text(entry.get("identifier"))
@@ -1262,7 +1285,15 @@ def _build_hvdc_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> 
             if cell_text:
                 values[f"{column_letter}{row_idx}"] = cell_text
             elif column_letter == "R":
-                values[f"{column_letter}{row_idx}"] = "0"
+                missing_power_identifiers.append(identifier)
+    if missing_power_identifiers:
+        preview = ",".join(missing_power_identifiers[:8])
+        suffix = f" 等{len(missing_power_identifiers)}项" if len(missing_power_identifiers) > 8 else ""
+        _emit_capacity_report_log(
+            context or {},
+            "[交接班][容量报表][HVDC] 源文件缺少直流总功率，已保留空值 "
+            f"building={_text((context or {}).get('building')) or '-'}, identifiers={preview}{suffix}",
+        )
     return values
 
 
@@ -1370,7 +1401,7 @@ def build_capacity_cells_with_config(context: Dict[str, Any], config: Dict[str, 
     values.update(_build_zone_summary_values(query, zone="east", running_units=running_units, context=context))
     values.update(_build_tr_values(query, snapshot))
     values.update(_build_ups_values(query, snapshot))
-    values.update(_build_hvdc_values(query, snapshot))
+    values.update(_build_hvdc_values(query, snapshot, context=context))
     values.update(_build_rpp_values(snapshot))
     values.update(_build_aircon_matrix_values(query, snapshot))
     return {cell: value for cell, value in values.items() if value != ""}
