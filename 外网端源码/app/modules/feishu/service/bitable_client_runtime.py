@@ -17,6 +17,7 @@ class FeishuBitableClient:
     GET_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
     LIST_FIELD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
     BATCH_CREATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
+    BATCH_GET_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_get"
     UPDATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
     BATCH_UPDATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
     BATCH_DELETE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_delete"
@@ -513,6 +514,35 @@ class FeishuBitableClient:
         payload = data.get("data") if isinstance(data, dict) else {}
         item = payload.get("record") if isinstance(payload, dict) else {}
         return item if isinstance(item, dict) else {}
+
+    def batch_get_records(
+        self,
+        table_id: str,
+        record_ids: List[str],
+        *,
+        with_shared_url: bool = False,
+    ) -> List[Dict[str, Any]]:
+        table_text = str(table_id or "").strip()
+        normalized_ids = [
+            str(record_id or "").strip()
+            for record_id in record_ids
+            if str(record_id or "").strip()
+        ]
+        if not table_text:
+            raise ValueError("table_id 不能为空")
+        if not normalized_ids:
+            return []
+        url = self.BATCH_GET_RECORD_URL.format(app_token=self.app_token, table_id=table_text)
+        data = self._post_json(
+            url,
+            {
+                "record_ids": normalized_ids,
+                "with_shared_url": bool(with_shared_url),
+            },
+        )
+        payload = data.get("data") if isinstance(data, dict) else {}
+        records = payload.get("records") if isinstance(payload, dict) else []
+        return [record for record in records if isinstance(record, dict)] if isinstance(records, list) else []
 
     def batch_delete_records(
         self,

@@ -35,7 +35,13 @@ class Top5CompletionNotifyServiceTest(unittest.TestCase):
                 year="2026",
                 month=7,
                 file_name="TOP5功率文件_202607.xlsx",
-                upload_result={"status": "ok", "link": "https://example.test/top5.xlsx"},
+                upload_result={
+                    "status": "ok",
+                    "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
+                    "table_id": "tblkh6YCMYtS8nHa",
+                    "shared_url": "https://vnet.feishu.cn/share/base/record_test",
+                    "link": "https://open.feishu.cn/open-apis/drive/v1/medias/file/download",
+                },
                 emit_log=lambda _message: None,
             )
 
@@ -47,10 +53,11 @@ class Top5CompletionNotifyServiceTest(unittest.TestCase):
         self.assertIn("目标月份：2026-07", message)
         self.assertIn("TOP5功率文件_202607.xlsx", message)
         self.assertIn(
-            "https://vnet.feishu.cn/wiki/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblkh6YCMYtS8nHa",
+            "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblkh6YCMYtS8nHa",
             message,
         )
-        self.assertIn("https://example.test/top5.xlsx", message)
+        self.assertIn("附件记录链接：https://vnet.feishu.cn/share/base/record_test", message)
+        self.assertNotIn("open.feishu.cn/open-apis", message)
 
     def test_disabled_notification_does_not_require_feishu_credentials(self) -> None:
         service = notify_module.Top5CompletionNotifyService(

@@ -15,6 +15,7 @@ from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.bitable_target_resolver import build_bitable_url
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook
@@ -287,7 +288,7 @@ class Top5PowerReportService:
                 "chat_id": "oc_3bc648b9b761f24a65366a9b04b32eb2",
                 "receive_id_type": "chat_id",
                 "table_url": (
-                    "https://vnet.feishu.cn/wiki/MliKbC3fXa8PXrsndKscmxjdn1g"
+                    "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g"
                     "?table=tblkh6YCMYtS8nHa"
                 ),
             },
@@ -962,25 +963,37 @@ class Top5PowerReportBitableUploadService:
             records = data.get("records") if isinstance(data, dict) else []
             if isinstance(records, list) and records:
                 record_id = str(records[0].get("record_id", "") or "").strip()
-        link = ""
+        attachment_ready = False
+        shared_url = ""
         if record_id:
             for attempt in range(1, 4):
                 record = client.get_record_by_id(table_id=table_id, record_id=record_id)
-                link = self._extract_attachment_link(record, fields["attachment"])
-                if link:
+                attachment_ready = bool(self._extract_attachment_link(record, fields["attachment"]))
+                if attachment_ready:
                     break
                 if attempt < 3:
                     time.sleep(attempt)
-            if link and fields.get("link"):
+            if attachment_ready:
                 try:
-                    client.update_record(table_id=table_id, record_id=record_id, fields={fields["link"]: link})
+                    records = client.batch_get_records(
+                        table_id=table_id,
+                        record_ids=[record_id],
+                        with_shared_url=True,
+                    )
+                    shared_url = str((records[0] if records else {}).get("shared_url", "") or "").strip()
+                except Exception as exc:  # noqa: BLE001
+                    emit_log(f"[TOP5功率文件生成] 记录分享链接读取失败，改用多维表入口: {exc}")
+                user_link = shared_url or build_bitable_url(str(cfg["app_token"]), table_id)
+            if attachment_ready and fields.get("link"):
+                try:
+                    client.update_record(table_id=table_id, record_id=record_id, fields={fields["link"]: user_link})
                 except Exception:
                     try:
                         client.batch_delete_records(table_id=table_id, record_ids=[record_id], batch_size=1)
                     except Exception:  # noqa: BLE001
                         pass
                     raise
-        if not link:
+        if not attachment_ready:
             if record_id:
                 try:
                     client.batch_delete_records(table_id=table_id, record_ids=[record_id], batch_size=1)
@@ -993,8 +1006,9 @@ class Top5PowerReportBitableUploadService:
             emit_log(f"[TOP5功率文件生成] 已删除旧多维记录: year={target_year}, month={target_month}, count={deleted}")
         emit_log(
             "[TOP5功率文件生成] 多维附件上传完成: "
-            f"target={target_year}-{target_month}, record_id={record_id or '-'}, link={'yes' if link else 'no'}"
+            f"target={target_year}-{target_month}, record_id={record_id or '-'}, shared_url={'yes' if shared_url else 'fallback'}"
         )
+        table_url = build_bitable_url(str(cfg["app_token"]), table_id)
         return {
             "status": "ok",
             "app_token": str(cfg["app_token"]),
@@ -1007,5 +1021,7 @@ class Top5PowerReportBitableUploadService:
             "record_id": record_id,
             "deleted_count": int(deleted or 0),
             "file_token": file_token,
-            "link": link,
+            "table_url": table_url,
+            "shared_url": shared_url,
+            "link": shared_url or table_url,
         }

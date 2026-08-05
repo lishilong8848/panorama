@@ -190,8 +190,19 @@ class _FakeBitableClient:
         self.created_fields.extend(fields_list)
         return [{"data": {"records": [{"record_id": "new_top5"}]}}]
 
+    def batch_get_records(self, table_id: str, record_ids: list[str], *, with_shared_url: bool = False) -> list[dict]:
+        return [
+            {
+                "record_id": record_ids[0],
+                "shared_url": "https://vnet.feishu.cn/share/base/record_test",
+            }
+        ]
+
     def get_record_by_id(self, table_id: str, record_id: str) -> dict:
-        return {"record_id": record_id, "fields": {"上传文件": [{"url": "https://example.test/top5.xlsx"}]}}
+        return {
+            "record_id": record_id,
+            "fields": {"上传文件": [{"url": "https://open.feishu.cn/open-apis/drive/v1/medias/file/download"}]},
+        }
 
     def update_record(self, table_id: str, record_id: str, fields: dict) -> dict:
         self.updated.append((record_id, fields))
@@ -226,7 +237,12 @@ class Top5PowerReportBitableUploadServiceTest(unittest.TestCase):
             self.assertEqual(client.created_fields[0]["年度"], "2026")
             self.assertEqual(client.created_fields[0]["月份"], "04")
             self.assertEqual(client.created_fields[0]["上传文件"], [{"file_token": "file_token_1"}])
-            self.assertEqual(client.updated, [("new_top5", {"链接": "https://example.test/top5.xlsx"})])
+            self.assertEqual(
+                client.updated,
+                [("new_top5", {"链接": "https://vnet.feishu.cn/share/base/record_test"})],
+            )
+            self.assertEqual(result["link"], "https://vnet.feishu.cn/share/base/record_test")
+            self.assertTrue(result["table_url"].startswith("https://vnet.feishu.cn/base/"))
 
 
 class Top5PowerReportWorkerHandlerTest(unittest.TestCase):

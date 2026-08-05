@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import Any, Callable, Dict
 
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
+from app.modules.feishu.service.bitable_target_resolver import build_bitable_url
 from app.modules.feishu.service.im_file_message_client import FeishuImFileMessageClient
 
 
 _DEFAULT_CHAT_ID = "oc_3bc648b9b761f24a65366a9b04b32eb2"
 _DEFAULT_TABLE_URL = (
-    "https://vnet.feishu.cn/wiki/MliKbC3fXa8PXrsndKscmxjdn1g"
+    "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g"
     "?table=tblkh6YCMYtS8nHa"
 )
 
@@ -39,6 +40,12 @@ class Top5CompletionNotifyService:
         if not isinstance(raw_cfg, dict):
             raw_cfg = {}
         cfg = {**self.defaults(), **raw_cfg}
+        report_upload = top5_cfg.get("report_upload", {})
+        if isinstance(report_upload, dict):
+            cfg["table_url"] = build_bitable_url(
+                str(report_upload.get("app_token", "") or ""),
+                str(report_upload.get("table_id", "") or ""),
+            ) or cfg.get("table_url", "")
         cfg["enabled"] = bool(cfg.get("enabled", True))
         for key in ("chat_id", "receive_id_type", "table_url"):
             cfg[key] = str(cfg.get(key, "") or "").strip()
@@ -66,16 +73,28 @@ class Top5CompletionNotifyService:
 
         upload_status = str(upload_result.get("status", "") or "").strip().lower()
         upload_status_text = "已上传多维表" if upload_status == "ok" else "多维表上传已跳过"
-        attachment_link = str(upload_result.get("link", "") or "").strip()
+        table_url = (
+            str(upload_result.get("table_url", "") or "").strip()
+            or build_bitable_url(
+                str(upload_result.get("app_token", "") or ""),
+                str(upload_result.get("table_id", "") or ""),
+            )
+            or cfg["table_url"]
+        )
+        attachment_link = str(
+            upload_result.get("shared_url", "") or upload_result.get("link", "") or ""
+        ).strip()
+        if "open.feishu.cn/open-apis/" in attachment_link:
+            attachment_link = ""
         lines = [
             "TOP5功率文件生成完成",
             f"目标月份：{str(year).strip()}-{int(month):02d}",
             f"文件：{str(file_name or '-').strip() or '-'}",
             f"多维状态：{upload_status_text}",
-            f"多维表链接：{cfg['table_url']}",
+            f"多维表链接：{table_url}",
         ]
         if attachment_link:
-            lines.append(f"附件链接：{attachment_link}")
+            lines.append(f"附件记录链接：{attachment_link}")
 
         auth = require_feishu_auth_settings(self.runtime_config)
         client = FeishuImFileMessageClient(
@@ -101,5 +120,5 @@ class Top5CompletionNotifyService:
             "chat_id": cfg["chat_id"],
             "receive_id_type": cfg["receive_id_type"],
             "message_id": message_id,
-            "table_url": cfg["table_url"],
+            "table_url": table_url,
         }
