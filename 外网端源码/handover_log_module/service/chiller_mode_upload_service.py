@@ -13,6 +13,9 @@ from app.config.config_compat_cleanup import sanitize_chiller_mode_upload_config
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
+from handover_log_module.service.chiller_mode_focus_state_service import (
+    ChillerModeFocusStateService,
+)
 from handover_log_module.service.hvac_bitable_sync_service import HvacBitableSyncService
 
 
@@ -170,7 +173,7 @@ class ChillerModeUploadService:
         return cfg
 
     def _new_target_resolver(self) -> BitableTargetResolver:
-        global_feishu = self.runtime_config.get("feishu", {}) if isinstance(self.runtime_config.get("feishu", {}), dict) else {}
+        global_feishu = require_feishu_auth_settings(self.runtime_config)
         return BitableTargetResolver(
             app_id=str(global_feishu.get("app_id", "") or "").strip(),
             app_secret=str(global_feishu.get("app_secret", "") or "").strip(),
@@ -735,6 +738,25 @@ class ChillerModeUploadService:
             ],
             emit_log=emit_log,
         )
+        duty_focus_state: Dict[str, Any] = {}
+        try:
+            duty_focus_state = ChillerModeFocusStateService(
+                self.runtime_config,
+                emit_log=emit_log,
+            ).record_rows(
+                prepared_rows,
+                observed_at=run_at,
+                source="chiller_mode_upload",
+                fields=normalized_cfg.get("fields", {}),
+                mode_map=normalized_cfg.get("mode_value_map", {}),
+            )
+            emit_log(
+                "[制冷模式参数上传] 值班关注点运行模式已更新: "
+                f"batch={duty_focus_state.get('batch_key', '-')}, "
+                f"buildings={','.join(duty_focus_state.get('accepted_buildings', [])) or '-'}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[制冷模式参数上传] 值班关注点状态更新失败，主上传结果保留: {exc}")
         hvac_sync_result = HvacBitableSyncService(self.runtime_config).safe_sync_after_chiller_upload(
             emit_log=emit_log,
             chiller_cfg=normalized_cfg,
@@ -747,5 +769,6 @@ class ChillerModeUploadService:
             "deleted_count": deleted_count,
             "created_count": created_count,
             "target": resolved_target,
+            "duty_focus_state": duty_focus_state,
             "hvac_bitable_sync": hvac_sync_result,
         }

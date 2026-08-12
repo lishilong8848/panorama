@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 from urllib.parse import urlparse
@@ -30,6 +31,10 @@ _SIGNATURE_MAGIC_V2 = b"CLIPFLOW_SIGENC_V2\n"
 _MAX_SIGNATURE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 _MAX_SIGNATURE_IMAGE_PIXELS = 25_000_000
 _SIGNATURE_DIRECTORY_REFRESH_LOCK = threading.Lock()
+_SIGNATURE_DIRECTORY_AUTO_REFRESH_LOCK = threading.Lock()
+_SIGNATURE_DIRECTORY_AUTO_REFRESH_COOLDOWN_SEC = 60.0
+_SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_AT = 0.0
+_SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR = ""
 
 
 class StationHSignatureError(RuntimeError):
@@ -341,6 +346,40 @@ class StationHSignatureService:
                     payload,
                 )
             return payload
+
+    def ensure_directory(self) -> Dict[str, Any]:
+        """Load the persistent directory and refresh it once when the cache is empty."""
+
+        global _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_AT
+        global _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR
+
+        cached = self.cached_directory()
+        if cached.get("people"):
+            return cached
+        with _SIGNATURE_DIRECTORY_AUTO_REFRESH_LOCK:
+            cached = self.cached_directory()
+            if cached.get("people"):
+                return cached
+            now = time.monotonic()
+            if (
+                _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_AT > 0
+                and now - _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_AT
+                < _SIGNATURE_DIRECTORY_AUTO_REFRESH_COOLDOWN_SEC
+            ):
+                result = dict(cached)
+                if _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR:
+                    result["error"] = _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR
+                return result
+            _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_AT = now
+            try:
+                refreshed = self.refresh_directory()
+            except Exception as exc:  # noqa: BLE001
+                _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR = f"签名目录自动刷新失败: {exc}"
+                result = dict(cached)
+                result["error"] = _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR
+                return result
+            _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR = ""
+            return refreshed
 
     @staticmethod
     def match_person(people: Iterable[Dict[str, Any]], name: Any) -> Dict[str, Any] | None:

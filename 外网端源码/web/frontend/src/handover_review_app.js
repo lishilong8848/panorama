@@ -4,6 +4,7 @@ import {
   claimHandoverReview110kvLockApi,
   claimHandoverReviewLockApi,
   confirmHandoverReviewApi,
+  downloadHandoverReviewStationHSignaturePreviewApi,
   downloadHandoverReviewStationHDutyFocusImageApi,
   downloadHandoverReviewStationHDutyFocusPrintApi,
   getHandoverEngineerDirectoryApi,
@@ -748,7 +749,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
         <div class="station-h-focus-context">
           <span>B3：{{ form.duty_focus.date_text || dutyDate || "-" }}</span>
           <span>C3：{{ (form.duty_focus.shift || dutyShift) === "night" ? "夜班" : "白班" }}</span>
-          <span v-if="form.duty_focus.auto_source.previous_batch">对比班次：{{ form.duty_focus.auto_source.previous_batch }}</span>
+          <span v-if="form.duty_focus.auto_source.mode_observed_at">制冷参数更新：{{ form.duty_focus.auto_source.mode_observed_at }}</span>
         </div>
 
         <div class="review-table-wrap station-h-focus-table-wrap">
@@ -769,7 +770,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
                   </select>
                 </td>
                 <td>
-                  <input class="review-input review-compact-input station-h-change-input" v-model="row.change_note" :disabled="saving || printing" placeholder="如 1#→2#" />
+                  <input class="review-input review-compact-input station-h-change-input" v-model="row.change_note" :disabled="saving || printing" placeholder="无" />
                 </td>
               </tr>
             </tbody>
@@ -785,6 +786,11 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
                 {{ person.name }} · {{ person.source_label }}{{ person.available ? "" : "（签名不可用）" }}
               </option>
             </select>
+            <div class="station-h-signature-preview">
+              <span v-if="signaturePreviewLoading.handover">正在加载签名...</span>
+              <img v-else-if="signaturePreviewUrls.handover" :src="signaturePreviewUrls.handover" alt="交班确认人签名预览" />
+              <span v-else>{{ signaturePreviewErrors.handover || "选择后显示签名预览" }}</span>
+            </div>
           </label>
           <label class="review-field">
             <span class="review-field-label">接班确认人签名（H3）</span>
@@ -794,6 +800,11 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
                 {{ person.name }} · {{ person.source_label }}{{ person.available ? "" : "（签名不可用）" }}
               </option>
             </select>
+            <div class="station-h-signature-preview">
+              <span v-if="signaturePreviewLoading.takeover">正在加载签名...</span>
+              <img v-else-if="signaturePreviewUrls.takeover" :src="signaturePreviewUrls.takeover" alt="接班确认人签名预览" />
+              <span v-else>{{ signaturePreviewErrors.takeover || "选择后显示签名预览" }}</span>
+            </div>
           </label>
         </div>
         <p v-if="state.duty_focus.signature_directory.error" class="review-inline-warning">{{ state.duty_focus.signature_directory.error }}</p>
@@ -1289,6 +1300,9 @@ function normalizeStationHDutyFocus(raw = {}) {
     record_id: String(value?.record_id || "").trim(),
     name: String(value?.name || "").trim(),
     signature_revision: String(value?.signature_revision || "").trim(),
+    match_source: ["auto", "manual"].includes(String(value?.match_source || "").trim().toLowerCase())
+      ? String(value.match_source).trim().toLowerCase()
+      : (String(value?.selection_id || "").trim() ? "manual" : "auto"),
   });
   const rawDirectory = raw?.signature_directory && typeof raw.signature_directory === "object"
     ? raw.signature_directory
@@ -2200,6 +2214,9 @@ function mountHandoverStationHApp(Vue) {
       const dutyFocusImageLoading = ref(false);
       const dutyFocusImageUrl = ref("");
       const dutyFocusImageError = ref("");
+      const signaturePreviewUrls = ref({ handover: "", takeover: "" });
+      const signaturePreviewLoading = ref({ handover: false, takeover: false });
+      const signaturePreviewErrors = ref({ handover: "", takeover: "" });
       const errorText = ref("");
       const statusText = ref("");
       const dutyDate = ref(String(initialSelection.dutyDate || "").trim());
@@ -2218,6 +2235,7 @@ function mountHandoverStationHApp(Vue) {
       let stationHCandidateRefreshTimer = null;
       let stationHCandidateBatchKey = "";
       let dutyFocusImageAttemptedBatchKey = "";
+      const signaturePreviewKeys = { handover: "", takeover: "" };
 
       const batchText = computed(() => {
         const date = dutyDate.value || state.value.batch.duty_date || "-";
@@ -2271,6 +2289,8 @@ function mountHandoverStationHApp(Vue) {
         ).trim();
         if (currentBatchKey && nextBatchKey && currentBatchKey !== nextBatchKey) {
           replaceDutyFocusImageUrl("");
+          clearSignaturePreview("handover");
+          clearSignaturePreview("takeover");
           dutyFocusImageError.value = "";
           dutyFocusImageAttemptedBatchKey = "";
         }
@@ -2285,12 +2305,73 @@ function mountHandoverStationHApp(Vue) {
         };
         scheduleStationHCandidateRefresh(normalized);
         scheduleDutyFocusImagePreview(normalized);
+        scheduleSignaturePreviews();
       }
 
       function replaceDutyFocusImageUrl(nextUrl) {
         const previous = String(dutyFocusImageUrl.value || "").trim();
         if (previous && previous !== nextUrl) URL.revokeObjectURL(previous);
         dutyFocusImageUrl.value = String(nextUrl || "");
+      }
+
+      function clearSignaturePreview(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        const previous = String(signaturePreviewUrls.value[targetSlot] || "").trim();
+        if (previous) URL.revokeObjectURL(previous);
+        signaturePreviewUrls.value = { ...signaturePreviewUrls.value, [targetSlot]: "" };
+        signaturePreviewLoading.value = { ...signaturePreviewLoading.value, [targetSlot]: false };
+        signaturePreviewErrors.value = { ...signaturePreviewErrors.value, [targetSlot]: "" };
+        signaturePreviewKeys[targetSlot] = "";
+      }
+
+      async function loadSignaturePreview(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        const signature = form.value.duty_focus?.signatures?.[targetSlot] || {};
+        const selectionId = String(signature.selection_id || "").trim();
+        const revision = String(signature.signature_revision || "").trim();
+        const previewKey = `${selectionId}:${revision}`;
+        if (!selectionId) {
+          clearSignaturePreview(targetSlot);
+          return;
+        }
+        if (
+          signaturePreviewKeys[targetSlot] === previewKey
+          && (signaturePreviewUrls.value[targetSlot] || signaturePreviewLoading.value[targetSlot])
+        ) return;
+        clearSignaturePreview(targetSlot);
+        signaturePreviewKeys[targetSlot] = previewKey;
+        signaturePreviewLoading.value = { ...signaturePreviewLoading.value, [targetSlot]: true };
+        try {
+          const blob = await downloadHandoverReviewStationHSignaturePreviewApi(selectionId);
+          const current = form.value.duty_focus?.signatures?.[targetSlot] || {};
+          const currentKey = `${String(current.selection_id || "").trim()}:${String(current.signature_revision || "").trim()}`;
+          if (currentKey !== previewKey) return;
+          const previousUrl = String(signaturePreviewUrls.value[targetSlot] || "").trim();
+          if (previousUrl) URL.revokeObjectURL(previousUrl);
+          signaturePreviewUrls.value = {
+            ...signaturePreviewUrls.value,
+            [targetSlot]: URL.createObjectURL(blob),
+          };
+        } catch (error) {
+          if (signaturePreviewKeys[targetSlot] !== previewKey) return;
+          signaturePreviewErrors.value = {
+            ...signaturePreviewErrors.value,
+            [targetSlot]: String(error?.message || error || "签名加载失败"),
+          };
+        } finally {
+          if (signaturePreviewKeys[targetSlot] === previewKey) {
+            signaturePreviewLoading.value = { ...signaturePreviewLoading.value, [targetSlot]: false };
+          }
+        }
+      }
+
+      function scheduleSignaturePreviews() {
+        Promise.resolve().then(() => {
+          void loadSignaturePreview("handover");
+          void loadSignaturePreview("takeover");
+        });
       }
 
       function scheduleDutyFocusImagePreview(normalized) {
@@ -2361,6 +2442,11 @@ function mountHandoverStationHApp(Vue) {
           signatures: {
             handover: { ...normalized.signatures.handover },
             takeover: { ...normalized.signatures.takeover },
+          },
+          auto_source: {
+            ...(normalized.auto_source && typeof normalized.auto_source === "object"
+              ? normalized.auto_source
+              : {}),
           },
         };
       }
@@ -2452,8 +2538,10 @@ function mountHandoverStationHApp(Vue) {
             record_id: String(person.record_id || ""),
             name: String(person.name || ""),
             signature_revision: String(person.signature_revision || ""),
+            match_source: "manual",
           }
-          : { selection_id: "", table_id: "", record_id: "", name: "", signature_revision: "" };
+          : { selection_id: "", table_id: "", record_id: "", name: "", signature_revision: "", match_source: "manual" };
+        void loadSignaturePreview(targetSlot);
       }
 
       async function saveSelection(options = {}) {
@@ -2601,6 +2689,8 @@ function mountHandoverStationHApp(Vue) {
       onBeforeUnmount(() => {
         clearStationHRefreshTimers();
         replaceDutyFocusImageUrl("");
+        clearSignaturePreview("handover");
+        clearSignaturePreview("takeover");
       });
 
       return {
@@ -2611,6 +2701,9 @@ function mountHandoverStationHApp(Vue) {
         dutyFocusImageLoading,
         dutyFocusImageUrl,
         dutyFocusImageError,
+        signaturePreviewUrls,
+        signaturePreviewLoading,
+        signaturePreviewErrors,
         errorText,
         statusText,
         dutyDate,

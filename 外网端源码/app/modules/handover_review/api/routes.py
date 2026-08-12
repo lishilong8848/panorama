@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.background import BackgroundTask
 
 from app.config.handover_segment_store import building_code_from_name, handover_building_segment_path
@@ -40,6 +40,7 @@ from handover_log_module.service.handover_xlsx_write_queue_service import (
     HandoverXlsxWriteQueueTimeoutError,
 )
 from handover_log_module.service.capacity_report_image_delivery_service import CapacityReportImageDeliveryService
+from handover_log_module.service.chiller_mode_focus_state_service import ChillerModeFocusStateService
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
 from handover_log_module.service.event_category_payload_builder import EventCategoryPayloadBuilder
@@ -72,6 +73,7 @@ from handover_log_module.service.station_h_duty_focus_service import (
     StationHDutyFocusService,
 )
 from handover_log_module.service.station_h_signature_service import (
+    StationHSignatureError,
     StationHSignatureService,
 )
 
@@ -1114,10 +1116,17 @@ def _build_station_h_signature_service(container) -> StationHSignatureService:
 
 
 def _build_station_h_duty_focus_service(container) -> StationHDutyFocusService:
+    handover_cfg = _handover_cfg(container)
     return StationHDutyFocusService(
-        _handover_cfg(container),
+        handover_cfg,
         review_service=_build_review_session_service(container),
         signature_service=_build_station_h_signature_service(container),
+        chiller_focus_service=ChillerModeFocusStateService(
+            handover_cfg,
+            app_state_repository=getattr(container, "app_state_repository", None),
+            app_dir=_station_h_service_app_dir(container),
+            emit_log=getattr(container, "add_system_log", None),
+        ),
         emit_log=getattr(container, "add_system_log", None),
     )
 
@@ -4131,6 +4140,35 @@ def handover_review_station_h_refresh_signatures(
         "count": len(directory.get("people", [])) if isinstance(directory.get("people", []), list) else 0,
     }
     return status
+
+
+@router.get("/api/handover/review/station-h/signature-preview")
+@_dedicated_review_endpoint
+def handover_review_station_h_signature_preview(
+    request: Request,
+    selection_id: str = "",
+) -> Response:
+    normalized = str(selection_id or "").strip()
+    if not normalized or ":" not in normalized or len(normalized) > 256:
+        raise HTTPException(status_code=400, detail="签名人员选择无效，请刷新签名后重新选择")
+    table_id, record_id = normalized.split(":", 1)
+    try:
+        result = _build_station_h_signature_service(request.app.state.container).resolve_signature_png(
+            table_id=table_id.strip(),
+            record_id=record_id.strip(),
+        )
+    except StationHSignatureError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"签名加载失败: {exc}") from exc
+    png = result.get("png", b"") if isinstance(result, dict) else b""
+    if not isinstance(png, (bytes, bytearray)) or not png:
+        raise HTTPException(status_code=502, detail="签名加载后内容为空")
+    return Response(
+        content=bytes(png),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @router.get("/api/handover/review/station-h/duty-focus/print")

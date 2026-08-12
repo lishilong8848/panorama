@@ -719,14 +719,14 @@ export async function getHandoverReview110StationStatusApi(params = {}) {
 }
 
 export async function getHandoverReviewStationHStatusApi(params = {}) {
-  return apiJsonWithTimeout(appendQuery("/api/handover/review/station-h/status", params), {}, 8000);
+  return apiJsonWithTimeout(appendQuery("/api/handover/review/station-h/status", params), {}, 30000);
 }
 
 export async function saveHandoverReviewStationHApi(payload = {}) {
   return apiJsonWithTimeout("/api/handover/review/station-h", {
     method: "PUT",
     body: JSON.stringify(payload || {}),
-  }, 8000);
+  }, 30000);
 }
 
 export async function refreshHandoverReviewStationHSignaturesApi(payload = {}) {
@@ -734,6 +734,40 @@ export async function refreshHandoverReviewStationHSignaturesApi(payload = {}) {
     method: "POST",
     body: JSON.stringify(payload || {}),
   }, 120000);
+}
+
+export async function downloadHandoverReviewStationHSignaturePreviewApi(selectionId) {
+  const normalized = String(selectionId || "").trim();
+  if (!normalized) throw new Error("未选择签名人员");
+  const url = appendQuery("/api/handover/review/station-h/signature-preview", {
+    selection_id: normalized,
+    _t: Date.now(),
+  });
+  const timeout = buildTimeoutSignal(60000, url);
+  try {
+    const resp = await fetch(url, timeout.signal ? { signal: timeout.signal } : {});
+    if (!resp.ok) {
+      const text = await resp.text();
+      let detail = String(text || "").trim();
+      try {
+        const parsed = detail ? JSON.parse(detail) : {};
+        detail = String(parsed?.detail || parsed?.error || detail).trim();
+      } catch {
+        // Keep the plain response body.
+      }
+      throw new Error(detail || `签名加载失败（HTTP ${resp.status}）`);
+    }
+    const blob = await resp.blob();
+    if (!blob.size) throw new Error("签名加载后内容为空");
+    return blob;
+  } catch (error) {
+    if (timeout.didTimeout() || error?.name === "TimeoutError") {
+      throw new Error("签名加载超时，请刷新签名后重试");
+    }
+    throw error;
+  } finally {
+    timeout.dispose();
+  }
 }
 
 export function buildHandoverReviewStationHDutyFocusPrintUrl(params = {}) {

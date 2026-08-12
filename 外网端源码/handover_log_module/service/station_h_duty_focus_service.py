@@ -11,7 +11,7 @@ import hashlib
 import json
 from functools import lru_cache
 from copy import copy
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
@@ -29,6 +29,9 @@ from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from handover_log_module.service.capacity_report_image_delivery_service import (
     _find_soffice_executable,
     _subprocess_creation_flags,
+)
+from handover_log_module.service.chiller_mode_focus_state_service import (
+    ChillerModeFocusStateService,
 )
 from handover_log_module.service.review_session_service import ReviewSessionService
 from handover_log_module.service.station_h_review_selection_service import (
@@ -85,13 +88,6 @@ def _safe_filename(value: Any) -> str:
     return text.strip("._") or "值班关注点"
 
 
-def _previous_context(duty_date: str, duty_shift: str) -> tuple[str, str]:
-    day = datetime.strptime(duty_date, "%Y-%m-%d")
-    if duty_shift == "night":
-        return duty_date, "day"
-    return (day - timedelta(days=1)).strftime("%Y-%m-%d"), "night"
-
-
 def _temperature(value: Any) -> str:
     text = _text(value).replace("℃", "").strip()
     if not text:
@@ -139,12 +135,17 @@ class StationHDutyFocusService:
         *,
         review_service: ReviewSessionService | None = None,
         signature_service: StationHSignatureService | None = None,
+        chiller_focus_service: ChillerModeFocusStateService | None = None,
         template_path: str | Path | None = None,
         emit_log: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config if isinstance(config, dict) else {}
         self.review_service = review_service or ReviewSessionService(self.config)
         self.signature_service = signature_service or StationHSignatureService(self.config, emit_log=emit_log)
+        self.chiller_focus_service = chiller_focus_service or ChillerModeFocusStateService(
+            self.config,
+            emit_log=emit_log,
+        )
         self._template_path = Path(template_path) if template_path else None
         self._emit_log = emit_log
 
@@ -199,25 +200,6 @@ class StationHDutyFocusService:
                     modes[str(unit)] = _mode_text(item.get("mode_text") or item.get("mode_code"))
         return modes
 
-    @staticmethod
-    def _running_units(modes: Dict[str, Any], zone_units: Iterable[int]) -> List[int]:
-        return [unit for unit in zone_units if _mode_text(modes.get(str(unit))) != "△"]
-
-    @classmethod
-    def _change_note(cls, previous_modes: Dict[str, Any], current_modes: Dict[str, Any]) -> str:
-        notes: List[str] = []
-        for zone_units in ((1, 2, 3), (4, 5, 6)):
-            previous = cls._running_units(previous_modes, zone_units)
-            current = cls._running_units(current_modes, zone_units)
-            removed = [unit for unit in previous if unit not in current]
-            added = [unit for unit in current if unit not in previous]
-            pair_count = max(len(removed), len(added))
-            for index in range(pair_count):
-                left = f"{removed[index]}#" if index < len(removed) else "△"
-                right = f"{added[index]}#" if index < len(added) else "△"
-                notes.append(f"{left}→{right}")
-        return "、".join(notes)
-
     def _check_labels(self) -> Dict[str, str]:
         fallback = {str(row): f"确认项 {row}" for row in STATION_H_DUTY_FOCUS_CHECK_ROWS}
         try:
@@ -240,39 +222,52 @@ class StationHDutyFocusService:
 
     def build_auto_focus(self, *, duty_date: str, duty_shift: str, selection: Dict[str, Any]) -> Dict[str, Any]:
         batch_key = station_h_build_batch_key(duty_date, duty_shift)
-        previous_date, previous_shift = _previous_context(duty_date, duty_shift)
-        previous_batch_key = station_h_build_batch_key(previous_date, previous_shift)
         try:
-            list_many = getattr(self.review_service, "list_batch_sessions_many", None)
-            if callable(list_many):
-                grouped_sessions = list_many([batch_key, previous_batch_key])
-                current_sessions = self._session_map(grouped_sessions.get(batch_key, []))
-                previous_sessions = self._session_map(grouped_sessions.get(previous_batch_key, []))
-            else:
+            chiller_state = self.chiller_focus_service.ensure_batch_state(batch_key)
+        except Exception as exc:  # noqa: BLE001
+            chiller_state = {"buildings": {}, "refresh_error": str(exc)}
+        chiller_buildings = (
+            chiller_state.get("buildings", {})
+            if isinstance(chiller_state.get("buildings", {}), dict)
+            else {}
+        )
+        complete_chiller_buildings = {
+            building
+            for building, item in chiller_buildings.items()
+            if isinstance(item, dict)
+            and isinstance(item.get("modes", {}), dict)
+            and set(item.get("modes", {})) == {str(unit) for unit in range(1, 7)}
+        }
+        current_sessions: Dict[str, Dict[str, Any]] = {}
+        if complete_chiller_buildings != set(STATION_H_DUTY_FOCUS_BUILDINGS):
+            try:
                 current_sessions = self._session_map(self.review_service.list_batch_sessions(batch_key))
-                previous_sessions = self._session_map(self.review_service.list_batch_sessions(previous_batch_key))
-        except Exception:
-            current_sessions = {}
-            previous_sessions = {}
+            except Exception:
+                current_sessions = {}
         rows: List[Dict[str, Any]] = []
         missing_buildings: List[str] = []
-        previous_missing_buildings: List[str] = []
         for building in STATION_H_DUTY_FOCUS_BUILDINGS:
             current_session = current_sessions.get(building)
-            previous_session = previous_sessions.get(building)
-            current_modes = self._modes_from_session(current_session)
-            previous_modes = self._modes_from_session(previous_session)
-            if not current_session:
+            chiller_building = chiller_buildings.get(building, {})
+            chiller_building = chiller_building if isinstance(chiller_building, dict) else {}
+            chiller_modes = chiller_building.get("modes", {})
+            chiller_modes = chiller_modes if isinstance(chiller_modes, dict) else {}
+            if set(chiller_modes) == {str(unit) for unit in range(1, 7)}:
+                current_modes = {
+                    str(unit): _mode_text(chiller_modes.get(str(unit)))
+                    for unit in range(1, 7)
+                }
+                change_note = _bounded_text(chiller_building.get("change_note"), 200) or "无"
+            else:
+                current_modes = self._modes_from_session(current_session)
+                change_note = "无"
+            if not chiller_modes and not current_session:
                 missing_buildings.append(building)
-            if not previous_session:
-                previous_missing_buildings.append(building)
             rows.append(
                 {
                     "building": building,
                     "modes": current_modes,
-                    "change_note": self._change_note(previous_modes, current_modes)
-                    if current_session and previous_session
-                    else "",
+                    "change_note": change_note,
                 }
             )
         checks = {str(row): "√" for row in STATION_H_DUTY_FOCUS_CHECK_ROWS}
@@ -285,15 +280,18 @@ class StationHDutyFocusService:
             "rows": rows,
             "checks": checks,
             "signatures": {
-                "handover": {"selection_id": "", "table_id": "", "record_id": "", "name": current_people[0] if current_people else ""},
-                "takeover": {"selection_id": "", "table_id": "", "record_id": "", "name": next_people[0] if next_people else ""},
+                "handover": {"selection_id": "", "table_id": "", "record_id": "", "name": current_people[0] if current_people else "", "match_source": "auto"},
+                "takeover": {"selection_id": "", "table_id": "", "record_id": "", "name": next_people[0] if next_people else "", "match_source": "auto"},
             },
             "source": "auto",
             "auto_source": {
                 "current_batch": batch_key,
-                "previous_batch": previous_batch_key,
                 "missing_buildings": missing_buildings,
-                "previous_missing_buildings": previous_missing_buildings,
+                "mode_revision": _text(chiller_state.get("mode_revision")),
+                "mode_observed_at": _text(chiller_state.get("observed_at")),
+                "mode_source": _text(chiller_state.get("source")),
+                "mode_error": _text(chiller_state.get("refresh_error")),
+                "mode_buildings": sorted(complete_chiller_buildings),
             },
         }
 
@@ -321,7 +319,6 @@ class StationHDutyFocusService:
     def _saved_focus_fallback(*, duty_date: str, duty_shift: str, selection: Dict[str, Any]) -> Dict[str, Any]:
         current_people = split_station_h_people(selection.get("current_people", selection.get("current_people_text", "")))
         next_people = split_station_h_people(selection.get("next_people", selection.get("next_people_text", "")))
-        previous_date, previous_shift = _previous_context(duty_date, duty_shift)
         return {
             "date_text": duty_date,
             "shift": duty_shift,
@@ -329,21 +326,24 @@ class StationHDutyFocusService:
                 {
                     "building": building,
                     "modes": {str(unit): "△" for unit in range(1, 7)},
-                    "change_note": "",
+                    "change_note": "无",
                 }
                 for building in STATION_H_DUTY_FOCUS_BUILDINGS
             ],
             "checks": {str(row): "" for row in STATION_H_DUTY_FOCUS_CHECK_ROWS},
             "signatures": {
-                "handover": {"name": current_people[0] if current_people else ""},
-                "takeover": {"name": next_people[0] if next_people else ""},
+                "handover": {"name": current_people[0] if current_people else "", "match_source": "auto"},
+                "takeover": {"name": next_people[0] if next_people else "", "match_source": "auto"},
             },
             "source": "manual",
             "auto_source": {
                 "current_batch": station_h_build_batch_key(duty_date, duty_shift),
-                "previous_batch": station_h_build_batch_key(previous_date, previous_shift),
                 "missing_buildings": [],
-                "previous_missing_buildings": [],
+                "mode_revision": "",
+                "mode_observed_at": "",
+                "mode_source": "",
+                "mode_error": "",
+                "mode_buildings": [],
             },
         }
 
@@ -357,6 +357,11 @@ class StationHDutyFocusService:
             table_id, record_id = selection_id.split(":", 1)
         if table_id and record_id:
             selection_id = f"{table_id}:{record_id}"
+        raw_match_source = _text(payload.get("match_source")).lower()
+        fallback_match_source = _text(fallback.get("match_source")).lower()
+        match_source = raw_match_source if raw_match_source in {"auto", "manual"} else fallback_match_source
+        if match_source not in {"auto", "manual"}:
+            match_source = "manual" if selection_id else "auto"
         return {
             "selection_id": selection_id,
             "table_id": table_id,
@@ -366,6 +371,7 @@ class StationHDutyFocusService:
                 _bounded_text(payload.get("signature_revision"), 128)
                 or _bounded_text(fallback.get("signature_revision"), 128)
             ),
+            "match_source": match_source,
         }
 
     @classmethod
@@ -407,6 +413,21 @@ class StationHDutyFocusService:
         }
         base_signatures = fallback.get("signatures", {}) if isinstance(fallback.get("signatures", {}), dict) else {}
         raw_signatures = payload.get("signatures", {}) if isinstance(payload.get("signatures", {}), dict) else {}
+        base_auto_source = (
+            dict(fallback.get("auto_source", {}))
+            if isinstance(fallback.get("auto_source", {}), dict)
+            else {}
+        )
+        raw_auto_source = payload.get("auto_source", {}) if isinstance(payload.get("auto_source", {}), dict) else {}
+        for key in (
+            "current_batch",
+            "mode_revision",
+            "mode_observed_at",
+            "mode_source",
+            "mode_error",
+        ):
+            if key in raw_auto_source:
+                base_auto_source[key] = _bounded_text(raw_auto_source.get(key), 256)
         return {
             "date_text": _text(payload.get("date_text")) or _text(fallback.get("date_text")),
             "shift": _text(payload.get("shift")).lower() if _text(payload.get("shift")).lower() in {"day", "night"} else _text(fallback.get("shift")),
@@ -417,7 +438,7 @@ class StationHDutyFocusService:
                 for slot in ("handover", "takeover")
             },
             "source": "manual" if isinstance(raw, dict) and raw else _text(fallback.get("source")) or "auto",
-            "auto_source": dict(fallback.get("auto_source", {})) if isinstance(fallback.get("auto_source", {}), dict) else {},
+            "auto_source": base_auto_source,
         }
 
     @classmethod
@@ -441,30 +462,67 @@ class StationHDutyFocusService:
 
     def build_status(self, *, duty_date: str, duty_shift: str, selection: Dict[str, Any]) -> Dict[str, Any]:
         saved_focus = selection.get("duty_focus") if isinstance(selection, dict) else None
-        if self._saved_focus_complete(saved_focus):
-            fallback = self._saved_focus_fallback(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                selection=selection,
-            )
-        else:
-            fallback = self.build_auto_focus(duty_date=duty_date, duty_shift=duty_shift, selection=selection)
+        fallback = self.build_auto_focus(duty_date=duty_date, duty_shift=duty_shift, selection=selection)
         focus = self.normalize_focus(saved_focus, fallback=fallback)
+        saved_auto_source = saved_focus.get("auto_source", {}) if isinstance(saved_focus, dict) else {}
+        saved_revision = _text(saved_auto_source.get("mode_revision")) if isinstance(saved_auto_source, dict) else ""
+        current_revision = _text(fallback.get("auto_source", {}).get("mode_revision"))
+        if self._saved_focus_complete(saved_focus) and current_revision and saved_revision != current_revision:
+            automatic_mode_buildings = {
+                _text(building)
+                for building in fallback.get("auto_source", {}).get("mode_buildings", [])
+                if _text(building)
+            }
+            automatic_rows = {
+                _text(item.get("building")): item
+                for item in fallback.get("rows", [])
+                if isinstance(item, dict)
+            }
+            for item in focus.get("rows", []):
+                if not isinstance(item, dict):
+                    continue
+                if _text(item.get("building")) not in automatic_mode_buildings:
+                    continue
+                automatic = automatic_rows.get(_text(item.get("building")), {})
+                if automatic:
+                    item["modes"] = dict(automatic.get("modes", {}))
+                    item["change_note"] = _text(automatic.get("change_note")) or "无"
+        focus["auto_source"] = dict(fallback.get("auto_source", {}))
         directory = self.signature_service.cached_directory()
+        if not directory.get("people"):
+            try:
+                ensure_directory = getattr(self.signature_service, "ensure_directory", None)
+                directory = ensure_directory() if callable(ensure_directory) else self.signature_service.refresh_directory()
+            except Exception as exc:  # noqa: BLE001
+                directory = dict(directory)
+                directory["error"] = f"签名目录自动刷新失败: {exc}"
         people = directory.get("people", []) if isinstance(directory.get("people", []), list) else []
         available_by_id = {
             _text(person.get("selection_id")): person
             for person in people
             if isinstance(person, dict) and bool(person.get("available"))
         }
+        current_people = split_station_h_people(selection.get("current_people", selection.get("current_people_text", "")))
+        next_people = split_station_h_people(selection.get("next_people", selection.get("next_people_text", "")))
+        expected_names = {
+            "handover": current_people[0] if current_people else "",
+            "takeover": next_people[0] if next_people else "",
+        }
         for slot in ("handover", "takeover"):
             selected = focus["signatures"][slot]
             selection_id = _text(selected.get("selection_id"))
-            matched = available_by_id.get(selection_id) if selection_id else None
-            if matched is None and not selection_id:
-                match = self.signature_service.match_person(people, selected.get("name"))
-                if match:
-                    matched = match
+            match_source = _text(selected.get("match_source")).lower()
+            expected_name = expected_names[slot]
+            auto_match = (
+                match_source == "auto"
+                or not selection_id
+                or (match_source not in {"auto", "manual"} and _text(selected.get("name")) == expected_name)
+            )
+            matched = None
+            if auto_match:
+                matched = self.signature_service.match_person(people, expected_name)
+            elif selection_id:
+                matched = available_by_id.get(selection_id)
             if matched:
                 focus["signatures"][slot] = {
                     "selection_id": _text(matched.get("selection_id")),
@@ -472,6 +530,16 @@ class StationHDutyFocusService:
                     "record_id": _text(matched.get("record_id")),
                     "name": _text(matched.get("name")),
                     "signature_revision": _text(matched.get("signature_revision")),
+                    "match_source": "auto" if auto_match else "manual",
+                }
+            elif auto_match:
+                focus["signatures"][slot] = {
+                    "selection_id": "",
+                    "table_id": "",
+                    "record_id": "",
+                    "name": expected_name,
+                    "signature_revision": "",
+                    "match_source": "auto",
                 }
         missing_signature_slots: List[str] = []
         for slot, label in (("handover", "交班确认人"), ("takeover", "接班确认人")):

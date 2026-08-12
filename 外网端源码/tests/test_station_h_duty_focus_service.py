@@ -106,6 +106,31 @@ class _SignatureService:
         return {"table_id": table_id, "record_id": record_id, "png": _signature_png(color)}
 
 
+class _ChillerFocusService:
+    @staticmethod
+    def ensure_batch_state(batch_key):
+        assert batch_key == "2026-08-12|day"
+        return {
+            "batch_key": batch_key,
+            "observed_at": "2026-08-12 10:10:00",
+            "source": "chiller_mode_upload",
+            "mode_revision": "revision-a",
+            "buildings": {
+                "A楼": {
+                    "modes": {
+                        "1": "停机",
+                        "2": "制冷",
+                        "3": "停机",
+                        "4": "停机",
+                        "5": "停机",
+                        "6": "板换",
+                    },
+                    "change_note": "1#→3#",
+                }
+            },
+        }
+
+
 def _service(tmp_path):
     project_template = Path(__file__).resolve().parents[1] / "值班关注点模板.xlsx"
     assert project_template.exists()
@@ -113,6 +138,7 @@ def _service(tmp_path):
         {"_global_paths": {"runtime_state_root": str(tmp_path)}},
         review_service=_ReviewService(),
         signature_service=_SignatureService(),
+        chiller_focus_service=_ChillerFocusService(),
         template_path=project_template,
     )
 
@@ -135,24 +161,97 @@ def test_auto_focus_uses_same_zone_changes_and_shared_temperature(tmp_path):
         "5": "△",
         "6": "板换",
     }
-    assert row["change_note"] == "1#→2#、4#→6#"
+    assert row["change_note"] == "1#→3#"
     assert focus["checks"]["11"] == "√"
     assert focus["checks"]["19"] == "27.7℃/25.8℃"
     assert focus["signatures"]["handover"]["signature_revision"] == "revision-handover-v1"
     assert focus["signatures"]["takeover"]["signature_revision"] == "revision-takeover-v1"
     assert focus["print_ready"] is True
-    assert service.review_service.many_calls == 1
-    assert service.review_service.single_calls == 0
+    assert service.review_service.many_calls == 0
+    assert service.review_service.single_calls == 1
 
 
-def test_change_note_never_pairs_across_chiller_sides():
-    previous = {str(unit): ("制冷" if unit == 1 else "△") for unit in range(1, 7)}
-    current = {str(unit): ("制冷" if unit == 4 else "△") for unit in range(1, 7)}
+def test_empty_signature_cache_refreshes_and_matches_current_people(tmp_path):
+    class _RefreshingSignatureService(_SignatureService):
+        def __init__(self):
+            super().__init__()
+            self.ensure_calls = 0
 
-    note = StationHDutyFocusService._change_note(previous, current)
+        @staticmethod
+        def cached_directory():
+            return {"people": [], "refreshed_at": "", "error": ""}
 
-    assert note == "1#→△、△→4#"
-    assert "1#→4#" not in note
+        def ensure_directory(self):
+            self.ensure_calls += 1
+            return {"people": self.people, "refreshed_at": "2026-08-12 10:20:00", "error": ""}
+
+    service = _service(tmp_path)
+    signatures = _RefreshingSignatureService()
+    service.signature_service = signatures
+
+    focus = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={"current_people": ["张三", "王五"], "next_people": ["李四", "赵六"]},
+    )
+
+    assert signatures.ensure_calls == 1
+    assert focus["signatures"]["handover"]["name"] == "张三"
+    assert focus["signatures"]["handover"]["match_source"] == "auto"
+    assert focus["signatures"]["takeover"]["name"] == "李四"
+    assert focus["print_ready"] is True
+
+
+def test_new_chiller_revision_refreshes_saved_modes_but_keeps_saved_checks(tmp_path):
+    service = _service(tmp_path)
+    first = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={"current_people": ["张三"], "next_people": ["李四"]},
+    )
+    saved = json.loads(json.dumps(first, ensure_ascii=False))
+    saved["checks"]["11"] = "人工确认"
+    saved["rows"][0]["modes"]["1"] = "预冷"
+
+    class _ChangedChillerFocusService:
+        @staticmethod
+        def ensure_batch_state(batch_key):
+            return {
+                "batch_key": batch_key,
+                "observed_at": "2026-08-12 10:20:00",
+                "source": "chiller_mode_upload",
+                "mode_revision": "revision-b",
+                "buildings": {
+                    "A楼": {
+                        "modes": {
+                            "1": "停机",
+                            "2": "制冷",
+                            "3": "制冷",
+                            "4": "停机",
+                            "5": "停机",
+                            "6": "板换",
+                        },
+                        "change_note": "无",
+                    }
+                },
+            }
+
+    service.chiller_focus_service = _ChangedChillerFocusService()
+    refreshed = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={
+            "current_people": ["张三"],
+            "next_people": ["李四"],
+            "duty_focus": saved,
+        },
+    )
+
+    assert refreshed["rows"][0]["modes"]["1"] == "△"
+    assert refreshed["rows"][0]["modes"]["3"] == "制冷"
+    assert refreshed["rows"][0]["change_note"] == "无"
+    assert refreshed["checks"]["11"] == "人工确认"
+    assert refreshed["auto_source"]["mode_revision"] == "revision-b"
 
 
 def test_build_workbook_preserves_template_and_embeds_two_signatures(tmp_path):
@@ -177,7 +276,7 @@ def test_build_workbook_preserves_template_and_embeds_two_signatures(tmp_path):
     assert worksheet["B5"].value == "△"
     assert worksheet["C5"].value == "制冷"
     assert worksheet["G5"].value == "板换"
-    assert worksheet["H5"].value == "1#→2#、4#→6#"
+    assert worksheet["H5"].value == "1#→3#"
     assert worksheet["H11"].value == "√"
     assert worksheet["H19"].value == "27.7℃/25.8℃"
     assert worksheet["B3"].font.name == "宋体"
@@ -365,6 +464,27 @@ def test_complete_saved_focus_does_not_reload_review_sessions(tmp_path):
 
     service = _service(tmp_path)
     service.review_service = _UnavailableReviewService()
+    service.chiller_focus_service = type(
+        "_CompleteChillerFocusService",
+        (),
+        {
+            "ensure_batch_state": staticmethod(
+                lambda batch_key: {
+                    "batch_key": batch_key,
+                    "observed_at": "2026-08-12 10:10:00",
+                    "source": "chiller_mode_upload",
+                    "mode_revision": "revision-all",
+                    "buildings": {
+                        building: {
+                            "modes": {str(unit): "停机" for unit in range(1, 7)},
+                            "change_note": "无",
+                        }
+                        for building in ("A楼", "B楼", "C楼", "D楼", "E楼")
+                    },
+                }
+            )
+        },
+    )()
     first_table, second_table = STATION_H_SIGNATURE_TABLES[0][0], STATION_H_SIGNATURE_TABLES[1][0]
     saved_focus = {
         "date_text": "2099-01-01",
@@ -392,6 +512,7 @@ def test_complete_saved_focus_does_not_reload_review_sessions(tmp_path):
                 "name": "李四",
             },
         },
+        "auto_source": {"mode_revision": "revision-all"},
     }
 
     focus = service.build_status(
@@ -405,7 +526,7 @@ def test_complete_saved_focus_does_not_reload_review_sessions(tmp_path):
     )
 
     assert focus["rows"][0]["modes"]["1"] == "△"
-    assert focus["auto_source"]["previous_batch"] == "2026-08-11|night"
+    assert focus["auto_source"]["mode_revision"] == "revision-all"
 
 
 def test_submitted_focus_is_bounded_and_forces_current_context():
