@@ -488,25 +488,40 @@ class StationHDutyFocusService:
                     item["modes"] = dict(automatic.get("modes", {}))
                     item["change_note"] = _text(automatic.get("change_note")) or "无"
         focus["auto_source"] = dict(fallback.get("auto_source", {}))
-        directory = self.signature_service.cached_directory()
-        if not directory.get("people"):
-            try:
-                ensure_directory = getattr(self.signature_service, "ensure_directory", None)
-                directory = ensure_directory() if callable(ensure_directory) else self.signature_service.refresh_directory()
-            except Exception as exc:  # noqa: BLE001
-                directory = dict(directory)
-                directory["error"] = f"签名目录自动刷新失败: {exc}"
-        people = directory.get("people", []) if isinstance(directory.get("people", []), list) else []
-        available_by_id = {
-            _text(person.get("selection_id")): person
-            for person in people
-            if isinstance(person, dict) and bool(person.get("available"))
-        }
         current_people = split_station_h_people(selection.get("current_people", selection.get("current_people_text", "")))
         next_people = split_station_h_people(selection.get("next_people", selection.get("next_people_text", "")))
         expected_names = {
             "handover": current_people[0] if current_people else "",
             "takeover": next_people[0] if next_people else "",
+        }
+        required_names: List[str] = []
+        required_selection_ids: List[str] = []
+        for slot in ("handover", "takeover"):
+            selected = focus["signatures"][slot]
+            selection_id = _text(selected.get("selection_id"))
+            if _text(selected.get("match_source")).lower() == "manual" and selection_id:
+                required_selection_ids.append(selection_id)
+            elif expected_names[slot]:
+                required_names.append(expected_names[slot])
+        directory = self.signature_service.cached_directory()
+        try:
+            ensure_directory = getattr(self.signature_service, "ensure_directory", None)
+            directory = (
+                ensure_directory(
+                    required_names=required_names,
+                    required_selection_ids=required_selection_ids,
+                )
+                if callable(ensure_directory)
+                else self.signature_service.refresh_directory()
+            )
+        except Exception as exc:  # noqa: BLE001
+            directory = dict(directory)
+            directory["error"] = f"签名目录自动刷新失败: {exc}"
+        people = directory.get("people", []) if isinstance(directory.get("people", []), list) else []
+        available_by_id = {
+            _text(person.get("selection_id")): person
+            for person in people
+            if isinstance(person, dict) and bool(person.get("available"))
         }
         for slot in ("handover", "takeover"):
             selected = focus["signatures"][slot]
@@ -690,6 +705,19 @@ class StationHDutyFocusService:
         cell.font = font
 
     @staticmethod
+    def _use_mode_font(cell: Any) -> None:
+        font = copy(cell.font)
+        font.name = "宋体"
+        font.charset = 134
+        font.sz = 11
+        font.bold = False
+        font.italic = False
+        font.underline = None
+        font.strike = False
+        font.color = "000000"
+        cell.font = font
+
+    @staticmethod
     def _column_pixels(worksheet: Any, start_col: int, end_col: int) -> int:
         pixels = 0
         for col_idx in range(start_col, end_col + 1):
@@ -786,7 +814,7 @@ class StationHDutyFocusService:
                     modes = item.get("modes", {}) if isinstance(item.get("modes", {}), dict) else {}
                     for unit in range(1, 7):
                         worksheet.cell(target_row, unit + 1).value = _mode_text(modes.get(str(unit)))
-                        self._use_text_font(worksheet.cell(target_row, unit + 1))
+                        self._use_mode_font(worksheet.cell(target_row, unit + 1))
                         self._center_cell(worksheet.cell(target_row, unit + 1))
                     worksheet.cell(target_row, 8).value = _text(item.get("change_note"))
                     self._center_cell(worksheet.cell(target_row, 8))

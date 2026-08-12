@@ -3006,11 +3006,33 @@ button:disabled,
   text-align: center;
 }
 
+.station-h-mode-select,
+.station-h-mode-select option {
+  font-family: "Microsoft Yahei", "宋体", sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+}
+
 .station-h-signature-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 16px;
+}
+
+.station-h-signature-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.station-h-signature-search span {
+  min-width: 62px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: right;
 }
 
 .station-h-signature-preview {

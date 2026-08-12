@@ -10,6 +10,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from openpyxl import load_workbook
 from PIL import Image
 
+from app.core.app_state import AppStateRepository
+import handover_log_module.service.station_h_signature_service as station_h_signature_module
 from handover_log_module.service.station_h_duty_focus_service import (
     StationHDutyFocusService,
 )
@@ -96,6 +98,9 @@ class _SignatureService:
     def cached_directory(self):
         return {"people": self.people, "refreshed_at": "2026-08-12 10:00:00", "error": ""}
 
+    def ensure_directory(self, *, required_names=(), required_selection_ids=()):
+        return self.cached_directory()
+
     @staticmethod
     def match_person(people, name):
         return StationHSignatureService.match_person(people, name)
@@ -181,8 +186,10 @@ def test_empty_signature_cache_refreshes_and_matches_current_people(tmp_path):
         def cached_directory():
             return {"people": [], "refreshed_at": "", "error": ""}
 
-        def ensure_directory(self):
+        def ensure_directory(self, *, required_names=(), required_selection_ids=()):
             self.ensure_calls += 1
+            assert tuple(required_names) == ("张三", "李四")
+            assert tuple(required_selection_ids) == ()
             return {"people": self.people, "refreshed_at": "2026-08-12 10:20:00", "error": ""}
 
     service = _service(tmp_path)
@@ -200,6 +207,81 @@ def test_empty_signature_cache_refreshes_and_matches_current_people(tmp_path):
     assert focus["signatures"]["handover"]["match_source"] == "auto"
     assert focus["signatures"]["takeover"]["name"] == "李四"
     assert focus["print_ready"] is True
+
+
+def test_stale_nonempty_signature_cache_refreshes_for_current_people(tmp_path):
+    class _StaleSignatureService(_SignatureService):
+        def __init__(self):
+            super().__init__()
+            self.ensure_calls = 0
+
+        @staticmethod
+        def cached_directory():
+            return {
+                "people": [
+                    {
+                        "selection_id": "old:unrelated",
+                        "table_id": "old",
+                        "record_id": "unrelated",
+                        "source_label": "人员签名",
+                        "name": "其他人员",
+                        "signature_revision": "old",
+                        "available": True,
+                    }
+                ],
+                "refreshed_at": "2026-08-11 10:00:00",
+                "error": "",
+            }
+
+        def ensure_directory(self, *, required_names=(), required_selection_ids=()):
+            self.ensure_calls += 1
+            assert tuple(required_names) == ("张三", "李四")
+            assert tuple(required_selection_ids) == ()
+            return {"people": self.people, "refreshed_at": "2026-08-12 10:20:00", "error": ""}
+
+    service = _service(tmp_path)
+    signatures = _StaleSignatureService()
+    service.signature_service = signatures
+
+    focus = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={"current_people": ["张三"], "next_people": ["李四"]},
+    )
+
+    assert signatures.ensure_calls == 1
+    assert focus["signatures"]["handover"]["name"] == "张三"
+    assert focus["signatures"]["takeover"]["name"] == "李四"
+    assert focus["print_ready"] is True
+
+
+def test_signature_directory_service_refreshes_stale_nonempty_cache(tmp_path, monkeypatch):
+    repository = AppStateRepository(
+        runtime_config={"paths": {"runtime_state_root": str(tmp_path / "runtime")}},
+        app_dir=tmp_path,
+    )
+    repository.ensure_ready()
+    service = StationHSignatureService({}, app_state_repository=repository)
+    stale = {
+        "people": [{"selection_id": "old:1", "name": "其他人员", "available": True}],
+        "refreshed_at": "2026-08-11 10:00:00",
+        "error": "",
+    }
+    fresh = {
+        "people": [{"selection_id": "new:1", "name": "张三", "available": True}],
+        "refreshed_at": "2026-08-12 10:00:00",
+        "error": "",
+    }
+    refresh_calls = []
+    monkeypatch.setattr(service, "cached_directory", lambda: stale)
+    monkeypatch.setattr(service, "refresh_directory", lambda: refresh_calls.append(True) or fresh)
+    monkeypatch.setattr(station_h_signature_module, "_SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_AT", 0.0)
+    monkeypatch.setattr(station_h_signature_module, "_SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR", "")
+
+    result = service.ensure_directory(required_names=["张三"])
+
+    assert refresh_calls == [True]
+    assert result == fresh
 
 
 def test_new_chiller_revision_refreshes_saved_modes_but_keeps_saved_checks(tmp_path):
@@ -280,7 +362,14 @@ def test_build_workbook_preserves_template_and_embeds_two_signatures(tmp_path):
     assert worksheet["H11"].value == "√"
     assert worksheet["H19"].value == "27.7℃/25.8℃"
     assert worksheet["B3"].font.name == "宋体"
-    assert worksheet["C5"].font.name == "宋体"
+    for row in range(5, 10):
+        for column in range(2, 8):
+            mode_cell = worksheet.cell(row=row, column=column)
+            assert mode_cell.font.name == "宋体"
+            assert mode_cell.font.sz == 11
+            assert mode_cell.font.bold is False
+            assert mode_cell.alignment.horizontal == "center"
+            assert mode_cell.alignment.vertical == "center"
     assert worksheet["H19"].font.name == "宋体"
     assert worksheet["H19"].alignment.horizontal == "center"
     assert len(worksheet._images) == 2

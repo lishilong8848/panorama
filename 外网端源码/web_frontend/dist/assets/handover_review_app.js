@@ -780,12 +780,17 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
         <div class="station-h-signature-grid">
           <label class="review-field">
             <span class="review-field-label">交班确认人签名（E3）</span>
+            <div class="station-h-signature-search">
+              <input class="review-input" type="search" v-model="signatureSearch.handover" :disabled="saving || printing || signatureRefreshing" placeholder="搜索姓名、工号、楼栋或岗位" />
+              <span>{{ filteredDutyFocusSignaturePeople('handover').length }} 位可用</span>
+            </div>
             <select class="review-input" v-model="form.duty_focus.signatures.handover.selection_id" :disabled="saving || printing || signatureRefreshing" @change="selectDutyFocusSignature('handover')">
               <option value="">请选择有签名的人员</option>
-              <option v-for="person in state.duty_focus.signature_directory.people" :key="'handover-signature-' + person.selection_id" :value="person.selection_id" :disabled="!person.available">
-                {{ person.name }} · {{ person.source_label }}{{ person.available ? "" : "（签名不可用）" }}
+              <option v-for="person in filteredDutyFocusSignaturePeople('handover')" :key="'handover-signature-' + person.selection_id" :value="person.selection_id">
+                {{ person.name }} · {{ person.building || "未标楼栋" }} · {{ person.source_label }}
               </option>
             </select>
+            <small v-if="signatureSearch.handover && !filteredDutyFocusSignaturePeople('handover').length" class="person-picker-hint">没有匹配的可用签名，请刷新签名后重试。</small>
             <div class="station-h-signature-preview">
               <span v-if="signaturePreviewLoading.handover">正在加载签名...</span>
               <img v-else-if="signaturePreviewUrls.handover" :src="signaturePreviewUrls.handover" alt="交班确认人签名预览" />
@@ -794,12 +799,17 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           </label>
           <label class="review-field">
             <span class="review-field-label">接班确认人签名（H3）</span>
+            <div class="station-h-signature-search">
+              <input class="review-input" type="search" v-model="signatureSearch.takeover" :disabled="saving || printing || signatureRefreshing" placeholder="搜索姓名、工号、楼栋或岗位" />
+              <span>{{ filteredDutyFocusSignaturePeople('takeover').length }} 位可用</span>
+            </div>
             <select class="review-input" v-model="form.duty_focus.signatures.takeover.selection_id" :disabled="saving || printing || signatureRefreshing" @change="selectDutyFocusSignature('takeover')">
               <option value="">请选择有签名的人员</option>
-              <option v-for="person in state.duty_focus.signature_directory.people" :key="'takeover-signature-' + person.selection_id" :value="person.selection_id" :disabled="!person.available">
-                {{ person.name }} · {{ person.source_label }}{{ person.available ? "" : "（签名不可用）" }}
+              <option v-for="person in filteredDutyFocusSignaturePeople('takeover')" :key="'takeover-signature-' + person.selection_id" :value="person.selection_id">
+                {{ person.name }} · {{ person.building || "未标楼栋" }} · {{ person.source_label }}
               </option>
             </select>
+            <small v-if="signatureSearch.takeover && !filteredDutyFocusSignaturePeople('takeover').length" class="person-picker-hint">没有匹配的可用签名，请刷新签名后重试。</small>
             <div class="station-h-signature-preview">
               <span v-if="signaturePreviewLoading.takeover">正在加载签名...</span>
               <img v-else-if="signaturePreviewUrls.takeover" :src="signaturePreviewUrls.takeover" alt="接班确认人签名预览" />
@@ -2210,6 +2220,7 @@ function mountHandoverStationHApp(Vue) {
       const loading = ref(true);
       const saving = ref(false);
       const signatureRefreshing = ref(false);
+      const signatureSearch = ref({ handover: "", takeover: "" });
       const printing = ref(false);
       const dutyFocusImageLoading = ref(false);
       const dutyFocusImageUrl = ref("");
@@ -2522,6 +2533,25 @@ function mountHandoverStationHApp(Vue) {
         form.value[key] = togglePersonNameValue(form.value[key], name);
       }
 
+      function filteredDutyFocusSignaturePeople(slot) {
+        const targetSlot = String(slot || "").trim();
+        const query = String(signatureSearch.value[targetSlot] || "").trim().replace(/\s+/g, "").toLocaleLowerCase();
+        const people = Array.isArray(state.value.duty_focus?.signature_directory?.people)
+          ? state.value.duty_focus.signature_directory.people
+          : [];
+        return people.filter((person) => {
+          if (!person?.available) return false;
+          if (!query) return true;
+          return [
+            person.name,
+            person.employee_no,
+            person.building,
+            person.role,
+            person.source_label,
+          ].some((value) => String(value || "").replace(/\s+/g, "").toLocaleLowerCase().includes(query));
+        });
+      }
+
       function selectDutyFocusSignature(slot) {
         const targetSlot = String(slot || "").trim();
         if (!["handover", "takeover"].includes(targetSlot)) return;
@@ -2541,6 +2571,9 @@ function mountHandoverStationHApp(Vue) {
             match_source: "manual",
           }
           : { selection_id: "", table_id: "", record_id: "", name: "", signature_revision: "", match_source: "manual" };
+        if (person) {
+          signatureSearch.value = { ...signatureSearch.value, [targetSlot]: String(person.name || "") };
+        }
         void loadSignaturePreview(targetSlot);
       }
 
@@ -2697,6 +2730,7 @@ function mountHandoverStationHApp(Vue) {
         loading,
         saving,
         signatureRefreshing,
+        signatureSearch,
         printing,
         dutyFocusImageLoading,
         dutyFocusImageUrl,
@@ -2723,6 +2757,7 @@ function mountHandoverStationHApp(Vue) {
         onDutyChange,
         hasName,
         togglePerson,
+        filteredDutyFocusSignaturePeople,
         selectDutyFocusSignature,
       };
     },

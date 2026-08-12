@@ -347,18 +347,57 @@ class StationHSignatureService:
                 )
             return payload
 
-    def ensure_directory(self) -> Dict[str, Any]:
-        """Load the persistent directory and refresh it once when the cache is empty."""
+    @classmethod
+    def _directory_satisfies(
+        cls,
+        directory: Dict[str, Any],
+        *,
+        required_names: Iterable[Any],
+        required_selection_ids: Iterable[Any],
+    ) -> bool:
+        people = directory.get("people", []) if isinstance(directory.get("people", []), list) else []
+        if not people:
+            return False
+        available_ids = {
+            _text(person.get("selection_id"))
+            for person in people
+            if isinstance(person, dict) and bool(person.get("available"))
+        }
+        if any(_text(value) not in available_ids for value in required_selection_ids if _text(value)):
+            return False
+        return all(
+            cls.match_person(people, name) is not None
+            for name in required_names
+            if _name_key(name)
+        )
+
+    def ensure_directory(
+        self,
+        *,
+        required_names: Iterable[Any] = (),
+        required_selection_ids: Iterable[Any] = (),
+    ) -> Dict[str, Any]:
+        """Refresh an empty or stale directory required by the current selections."""
 
         global _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_AT
         global _SIGNATURE_DIRECTORY_AUTO_REFRESH_LAST_ERROR
 
+        names = tuple(required_names or ())
+        selection_ids = tuple(required_selection_ids or ())
         cached = self.cached_directory()
-        if cached.get("people"):
+        if self._directory_satisfies(
+            cached,
+            required_names=names,
+            required_selection_ids=selection_ids,
+        ):
             return cached
         with _SIGNATURE_DIRECTORY_AUTO_REFRESH_LOCK:
             cached = self.cached_directory()
-            if cached.get("people"):
+            if self._directory_satisfies(
+                cached,
+                required_names=names,
+                required_selection_ids=selection_ids,
+            ):
                 return cached
             now = time.monotonic()
             if (
