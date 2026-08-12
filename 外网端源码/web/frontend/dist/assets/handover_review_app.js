@@ -6,7 +6,6 @@ import {
   confirmHandoverReviewApi,
   downloadHandoverReviewStationHSignaturePreviewApi,
   downloadHandoverReviewStationHDutyFocusImageApi,
-  downloadHandoverReviewStationHDutyFocusPrintApi,
   getHandoverEngineerDirectoryApi,
   getJobApi,
   getHandoverReviewApi,
@@ -632,7 +631,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
             {{ signatureRefreshing ? "刷新中..." : "刷新签名" }}
           </button>
           <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || !canPrintDutyFocus" :title="dutyFocusPrintReason" @click="printDutyFocus">
-            {{ printing ? "生成中..." : "打印值班关注点" }}
+            {{ printing ? "准备打印..." : "打印值班关注点" }}
           </button>
           <button class="btn btn-primary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing" @click="saveSelection">
             {{ saving ? "保存中..." : "保存全部" }}
@@ -937,6 +936,13 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
                 :title="canPrintDutyFocus ? '' : dutyFocusPrintReason"
                 @click="regenerateDutyFocusImage"
               >{{ dutyFocusImageLoading ? "生成中..." : "重新生成图片" }}</button>
+              <button
+                class="btn btn-primary btn-mini"
+                type="button"
+                :disabled="saving || printing || dutyFocusImageLoading || !canPrintDutyFocus"
+                :title="canPrintDutyFocus ? '使用当前成品图片直接打印' : dutyFocusPrintReason"
+                @click="printDutyFocus"
+              >{{ printing ? "准备打印..." : "直接打印" }}</button>
             </div>
           </div>
           <div class="station-h-focus-preview-canvas">
@@ -2342,6 +2348,8 @@ function mountHandoverStationHApp(Vue) {
       let stationHCandidateRefreshTimer = null;
       let stationHCandidateBatchKey = "";
       let dutyFocusImageAttemptedBatchKey = "";
+      let dutyFocusPrintFrame = null;
+      let dutyFocusPrintCleanupTimer = null;
       const signaturePreviewKeys = { handover: "", takeover: "" };
 
       const batchText = computed(() => {
@@ -2871,40 +2879,125 @@ function mountHandoverStationHApp(Vue) {
         return ensureDutyFocusImage({ force: true, silent: false });
       }
 
+      function cleanupDutyFocusPrintFrame() {
+        if (dutyFocusPrintCleanupTimer) {
+          window.clearTimeout(dutyFocusPrintCleanupTimer);
+          dutyFocusPrintCleanupTimer = null;
+        }
+        if (dutyFocusPrintFrame?.isConnected) dutyFocusPrintFrame.remove();
+        dutyFocusPrintFrame = null;
+      }
+
+      function printDutyFocusImage(imageUrl) {
+        const normalizedUrl = String(imageUrl || "").trim();
+        if (!normalizedUrl) return Promise.reject(new Error("值班关注点成品图片尚未生成"));
+        cleanupDutyFocusPrintFrame();
+        return new Promise((resolve, reject) => {
+          const frame = document.createElement("iframe");
+          frame.setAttribute("aria-hidden", "true");
+          frame.setAttribute("tabindex", "-1");
+          frame.style.position = "fixed";
+          frame.style.left = "-10000px";
+          frame.style.top = "0";
+          frame.style.width = "210mm";
+          frame.style.height = "297mm";
+          frame.style.border = "0";
+          frame.style.opacity = "0";
+          frame.style.pointerEvents = "none";
+          document.body.appendChild(frame);
+          dutyFocusPrintFrame = frame;
+
+          const printDocument = frame.contentDocument;
+          const printWindow = frame.contentWindow;
+          if (!printDocument || !printWindow) {
+            cleanupDutyFocusPrintFrame();
+            reject(new Error("浏览器未能初始化打印页面"));
+            return;
+          }
+          printDocument.open();
+          printDocument.write(`<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>值班关注点</title>
+    <style>
+      @page { size: A4 portrait; margin: 0; }
+      * { box-sizing: border-box; }
+      html, body { width: 210mm; min-height: 297mm; margin: 0; padding: 0; background: #fff; }
+      body { display: flex; align-items: center; justify-content: center; padding: 8mm; }
+      img { display: block; width: 194mm; height: 281mm; object-fit: contain; }
+    </style>
+  </head>
+  <body><img id="duty-focus-print-image" alt="值班关注点" /></body>
+</html>`);
+          printDocument.close();
+          printDocument.title = `值班关注点_${dutyDate.value || ""}_${dutyShift.value || ""}`;
+          const image = printDocument.getElementById("duty-focus-print-image");
+          if (!image) {
+            cleanupDutyFocusPrintFrame();
+            reject(new Error("打印页面缺少值班关注点图片"));
+            return;
+          }
+
+          let launched = false;
+          const loadTimeout = window.setTimeout(() => {
+            if (launched) return;
+            cleanupDutyFocusPrintFrame();
+            reject(new Error("值班关注点图片加载超时，未调用打印"));
+          }, 30000);
+          image.onerror = () => {
+            if (launched) return;
+            window.clearTimeout(loadTimeout);
+            cleanupDutyFocusPrintFrame();
+            reject(new Error("值班关注点图片加载失败，未调用打印"));
+          };
+          image.onload = () => {
+            if (launched) return;
+            launched = true;
+            window.clearTimeout(loadTimeout);
+            printWindow.addEventListener("afterprint", cleanupDutyFocusPrintFrame, { once: true });
+            dutyFocusPrintCleanupTimer = window.setTimeout(cleanupDutyFocusPrintFrame, 5 * 60 * 1000);
+            printWindow.requestAnimationFrame(() => {
+              printWindow.requestAnimationFrame(() => {
+                try {
+                  printWindow.focus();
+                  printWindow.print();
+                  resolve();
+                } catch (error) {
+                  cleanupDutyFocusPrintFrame();
+                  reject(error);
+                }
+              });
+            });
+          };
+          image.src = normalizedUrl;
+        });
+      }
+
       async function printDutyFocus() {
         if (!canPrintDutyFocus.value) {
           errorText.value = dutyFocusPrintReason.value || "签名不完整，暂不能打印";
           return;
         }
-        const printWindow = window.open("about:blank", "_blank");
-        if (!printWindow) {
-          errorText.value = "浏览器阻止了打印窗口，请允许本站弹出窗口后重试";
-          return;
-        }
-        printWindow.document.title = "值班关注点打印文件生成中";
-        printWindow.document.body.innerHTML = "<p style='font-family:Microsoft Yahei;padding:24px'>正在生成签名后的打印文件，请稍候...</p>";
         printing.value = true;
         errorText.value = "";
-        statusText.value = "正在保存并生成原样打印文件...";
+        statusText.value = "正在准备最新值班关注点图片并调用打印...";
         try {
-          if (hasUnsavedChanges.value) {
-            const saved = await saveSelection({ silent: true });
-            if (!saved) {
-              printWindow.close();
-              return;
-            }
+          const forceRegenerate = hasUnsavedChanges.value
+            || !Boolean(state.value.duty_focus?.image_status?.current);
+          const ready = await ensureDutyFocusImage({ force: forceRegenerate, silent: true });
+          if (!ready || !dutyFocusImageUrl.value) {
+            throw new Error(
+              dutyFocusImageError.value
+              || errorText.value
+              || "值班关注点成品图片准备失败",
+            );
           }
-          const printBlob = await downloadHandoverReviewStationHDutyFocusPrintApi({
-            ...buildContextPayload(),
-            _t: Date.now(),
-          });
-          const printUrl = URL.createObjectURL(printBlob);
-          printWindow.location.replace(printUrl);
-          window.setTimeout(() => URL.revokeObjectURL(printUrl), 5 * 60 * 1000);
-          statusText.value = "打印文件正在新窗口生成，生成后可直接打印。";
+          await printDutyFocusImage(dutyFocusImageUrl.value);
+          statusText.value = "已调用浏览器打印，可在系统打印窗口中确认。";
         } catch (error) {
-          printWindow.close();
-          errorText.value = String(error?.message || error || "生成打印文件失败");
+          cleanupDutyFocusPrintFrame();
+          errorText.value = String(error?.message || error || "调用值班关注点打印失败");
           statusText.value = "";
         } finally {
           printing.value = false;
@@ -2919,6 +3012,7 @@ function mountHandoverStationHApp(Vue) {
       onBeforeUnmount(() => {
         clearStationHRefreshTimers();
         replaceDutyFocusImageUrl("");
+        cleanupDutyFocusPrintFrame();
         clearSignaturePreview("handover");
         clearSignaturePreview("takeover");
       });
