@@ -778,44 +778,138 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
         </div>
 
         <div class="station-h-signature-grid">
-          <label class="review-field">
+          <div class="review-field">
             <span class="review-field-label">交班确认人签名（E3）</span>
-            <div class="station-h-signature-search">
-              <input class="review-input" type="search" v-model="signatureSearch.handover" :disabled="saving || printing || signatureRefreshing" placeholder="搜索姓名、工号、楼栋或岗位" />
-              <span>{{ filteredDutyFocusSignaturePeople('handover').length }} 位可用</span>
+            <div class="station-h-signature-picker" @focusout="closeSignaturePickerOnBlur('handover', $event)">
+              <div class="station-h-signature-search" :class="{ 'is-open': signaturePickerOpen.handover }">
+                <input
+                  class="review-input"
+                  type="search"
+                  v-model="signatureSearch.handover"
+                  :disabled="saving || printing || signatureRefreshing"
+                  placeholder="输入姓名、工号、楼栋或岗位"
+                  autocomplete="off"
+                  spellcheck="false"
+                  role="combobox"
+                  aria-label="搜索交班确认人签名"
+                  aria-controls="handover-signature-options"
+                  aria-autocomplete="list"
+                  :aria-expanded="signaturePickerOpen.handover ? 'true' : 'false'"
+                  :aria-activedescendant="signaturePickerOpen.handover && filteredDutyFocusSignaturePeople('handover').length ? 'handover-signature-option-' + signaturePickerActive.handover : undefined"
+                  @focus="openSignaturePicker('handover')"
+                  @input="onSignatureSearchInput('handover')"
+                  @keydown.down.prevent="moveSignaturePickerActive('handover', 1)"
+                  @keydown.up.prevent="moveSignaturePickerActive('handover', -1)"
+                  @keydown.enter.prevent="selectActiveDutyFocusSignature('handover')"
+                  @keydown.esc.prevent="closeSignaturePicker('handover')"
+                />
+                <button
+                  v-if="selectedDutyFocusSignaturePerson('handover') || signatureSearch.handover"
+                  class="station-h-signature-clear"
+                  type="button"
+                  :disabled="saving || printing || signatureRefreshing"
+                  title="清除交班签名选择"
+                  aria-label="清除交班签名选择"
+                  @click="clearDutyFocusSignature('handover')"
+                >×</button>
+                <span class="station-h-signature-count">{{ filteredDutyFocusSignaturePeople('handover').length }}/{{ availableDutyFocusSignaturePeople.length }}</span>
+              </div>
+              <div v-if="signaturePickerOpen.handover" id="handover-signature-options" class="station-h-signature-options" role="listbox" aria-label="交班确认人可用签名">
+                <button
+                  v-for="(person, index) in filteredDutyFocusSignaturePeople('handover')"
+                  :key="'handover-signature-' + person.selection_id"
+                  :id="'handover-signature-option-' + index"
+                  class="station-h-signature-option"
+                  :class="{ 'is-active': signaturePickerActive.handover === index, 'is-selected': form.duty_focus.signatures.handover.selection_id === person.selection_id }"
+                  type="button"
+                  role="option"
+                  :aria-selected="form.duty_focus.signatures.handover.selection_id === person.selection_id ? 'true' : 'false'"
+                  @mouseenter="setSignaturePickerActive('handover', index)"
+                  @mousedown.prevent
+                  @click="selectDutyFocusSignature('handover', person)"
+                >
+                  <span class="station-h-signature-option-main"><strong>{{ person.name }}</strong><small>{{ signaturePersonMeta(person) }}</small></span>
+                  <span class="station-h-signature-source">{{ person.source_label }}</span>
+                </button>
+                <div v-if="!filteredDutyFocusSignaturePeople('handover').length" class="station-h-signature-empty">没有匹配的可用签名，请修改关键词或刷新签名。</div>
+              </div>
             </div>
-            <select class="review-input" v-model="form.duty_focus.signatures.handover.selection_id" :disabled="saving || printing || signatureRefreshing" @change="selectDutyFocusSignature('handover')">
-              <option value="">请选择有签名的人员</option>
-              <option v-for="person in filteredDutyFocusSignaturePeople('handover')" :key="'handover-signature-' + person.selection_id" :value="person.selection_id">
-                {{ person.name }} · {{ person.building || "未标楼栋" }} · {{ person.source_label }}
-              </option>
-            </select>
-            <small v-if="signatureSearch.handover && !filteredDutyFocusSignaturePeople('handover').length" class="person-picker-hint">没有匹配的可用签名，请刷新签名后重试。</small>
+            <div v-if="selectedDutyFocusSignaturePerson('handover')" class="station-h-signature-selected">
+              <span><strong>{{ selectedDutyFocusSignaturePerson('handover').name }}</strong><small>{{ signaturePersonMeta(selectedDutyFocusSignaturePerson('handover')) }}</small></span>
+              <em>已选择</em>
+            </div>
             <div class="station-h-signature-preview">
               <span v-if="signaturePreviewLoading.handover">正在加载签名...</span>
               <img v-else-if="signaturePreviewUrls.handover" :src="signaturePreviewUrls.handover" alt="交班确认人签名预览" />
               <span v-else>{{ signaturePreviewErrors.handover || "选择后显示签名预览" }}</span>
             </div>
-          </label>
-          <label class="review-field">
+          </div>
+          <div class="review-field">
             <span class="review-field-label">接班确认人签名（H3）</span>
-            <div class="station-h-signature-search">
-              <input class="review-input" type="search" v-model="signatureSearch.takeover" :disabled="saving || printing || signatureRefreshing" placeholder="搜索姓名、工号、楼栋或岗位" />
-              <span>{{ filteredDutyFocusSignaturePeople('takeover').length }} 位可用</span>
+            <div class="station-h-signature-picker" @focusout="closeSignaturePickerOnBlur('takeover', $event)">
+              <div class="station-h-signature-search" :class="{ 'is-open': signaturePickerOpen.takeover }">
+                <input
+                  class="review-input"
+                  type="search"
+                  v-model="signatureSearch.takeover"
+                  :disabled="saving || printing || signatureRefreshing"
+                  placeholder="输入姓名、工号、楼栋或岗位"
+                  autocomplete="off"
+                  spellcheck="false"
+                  role="combobox"
+                  aria-label="搜索接班确认人签名"
+                  aria-controls="takeover-signature-options"
+                  aria-autocomplete="list"
+                  :aria-expanded="signaturePickerOpen.takeover ? 'true' : 'false'"
+                  :aria-activedescendant="signaturePickerOpen.takeover && filteredDutyFocusSignaturePeople('takeover').length ? 'takeover-signature-option-' + signaturePickerActive.takeover : undefined"
+                  @focus="openSignaturePicker('takeover')"
+                  @input="onSignatureSearchInput('takeover')"
+                  @keydown.down.prevent="moveSignaturePickerActive('takeover', 1)"
+                  @keydown.up.prevent="moveSignaturePickerActive('takeover', -1)"
+                  @keydown.enter.prevent="selectActiveDutyFocusSignature('takeover')"
+                  @keydown.esc.prevent="closeSignaturePicker('takeover')"
+                />
+                <button
+                  v-if="selectedDutyFocusSignaturePerson('takeover') || signatureSearch.takeover"
+                  class="station-h-signature-clear"
+                  type="button"
+                  :disabled="saving || printing || signatureRefreshing"
+                  title="清除接班签名选择"
+                  aria-label="清除接班签名选择"
+                  @click="clearDutyFocusSignature('takeover')"
+                >×</button>
+                <span class="station-h-signature-count">{{ filteredDutyFocusSignaturePeople('takeover').length }}/{{ availableDutyFocusSignaturePeople.length }}</span>
+              </div>
+              <div v-if="signaturePickerOpen.takeover" id="takeover-signature-options" class="station-h-signature-options" role="listbox" aria-label="接班确认人可用签名">
+                <button
+                  v-for="(person, index) in filteredDutyFocusSignaturePeople('takeover')"
+                  :key="'takeover-signature-' + person.selection_id"
+                  :id="'takeover-signature-option-' + index"
+                  class="station-h-signature-option"
+                  :class="{ 'is-active': signaturePickerActive.takeover === index, 'is-selected': form.duty_focus.signatures.takeover.selection_id === person.selection_id }"
+                  type="button"
+                  role="option"
+                  :aria-selected="form.duty_focus.signatures.takeover.selection_id === person.selection_id ? 'true' : 'false'"
+                  @mouseenter="setSignaturePickerActive('takeover', index)"
+                  @mousedown.prevent
+                  @click="selectDutyFocusSignature('takeover', person)"
+                >
+                  <span class="station-h-signature-option-main"><strong>{{ person.name }}</strong><small>{{ signaturePersonMeta(person) }}</small></span>
+                  <span class="station-h-signature-source">{{ person.source_label }}</span>
+                </button>
+                <div v-if="!filteredDutyFocusSignaturePeople('takeover').length" class="station-h-signature-empty">没有匹配的可用签名，请修改关键词或刷新签名。</div>
+              </div>
             </div>
-            <select class="review-input" v-model="form.duty_focus.signatures.takeover.selection_id" :disabled="saving || printing || signatureRefreshing" @change="selectDutyFocusSignature('takeover')">
-              <option value="">请选择有签名的人员</option>
-              <option v-for="person in filteredDutyFocusSignaturePeople('takeover')" :key="'takeover-signature-' + person.selection_id" :value="person.selection_id">
-                {{ person.name }} · {{ person.building || "未标楼栋" }} · {{ person.source_label }}
-              </option>
-            </select>
-            <small v-if="signatureSearch.takeover && !filteredDutyFocusSignaturePeople('takeover').length" class="person-picker-hint">没有匹配的可用签名，请刷新签名后重试。</small>
+            <div v-if="selectedDutyFocusSignaturePerson('takeover')" class="station-h-signature-selected">
+              <span><strong>{{ selectedDutyFocusSignaturePerson('takeover').name }}</strong><small>{{ signaturePersonMeta(selectedDutyFocusSignaturePerson('takeover')) }}</small></span>
+              <em>已选择</em>
+            </div>
             <div class="station-h-signature-preview">
               <span v-if="signaturePreviewLoading.takeover">正在加载签名...</span>
               <img v-else-if="signaturePreviewUrls.takeover" :src="signaturePreviewUrls.takeover" alt="接班确认人签名预览" />
               <span v-else>{{ signaturePreviewErrors.takeover || "选择后显示签名预览" }}</span>
             </div>
-          </label>
+          </div>
         </div>
         <p v-if="state.duty_focus.signature_directory.error" class="review-inline-warning">{{ state.duty_focus.signature_directory.error }}</p>
 
@@ -2221,6 +2315,8 @@ function mountHandoverStationHApp(Vue) {
       const saving = ref(false);
       const signatureRefreshing = ref(false);
       const signatureSearch = ref({ handover: "", takeover: "" });
+      const signaturePickerOpen = ref({ handover: false, takeover: false });
+      const signaturePickerActive = ref({ handover: 0, takeover: 0 });
       const printing = ref(false);
       const dutyFocusImageLoading = ref(false);
       const dutyFocusImageUrl = ref("");
@@ -2267,6 +2363,12 @@ function mountHandoverStationHApp(Vue) {
         const signatures = form.value.duty_focus?.signatures || {};
         return ["handover", "takeover"].every((slot) => available.has(String(signatures?.[slot]?.selection_id || "")));
       });
+      const availableDutyFocusSignaturePeople = computed(() => {
+        const people = Array.isArray(state.value.duty_focus?.signature_directory?.people)
+          ? state.value.duty_focus.signature_directory.people
+          : [];
+        return people.filter((person) => Boolean(person?.available));
+      });
       const dutyFocusPrintReason = computed(() => {
         if (canPrintDutyFocus.value) return "";
         const signatures = form.value.duty_focus?.signatures || {};
@@ -2304,6 +2406,9 @@ function mountHandoverStationHApp(Vue) {
           clearSignaturePreview("takeover");
           dutyFocusImageError.value = "";
           dutyFocusImageAttemptedBatchKey = "";
+          signatureSearch.value = { handover: "", takeover: "" };
+          signaturePickerOpen.value = { handover: false, takeover: false };
+          signaturePickerActive.value = { handover: 0, takeover: 0 };
         }
         state.value = normalized;
         if (normalized.batch.duty_date) dutyDate.value = normalized.batch.duty_date;
@@ -2535,32 +2640,117 @@ function mountHandoverStationHApp(Vue) {
 
       function filteredDutyFocusSignaturePeople(slot) {
         const targetSlot = String(slot || "").trim();
-        const query = String(signatureSearch.value[targetSlot] || "").trim().replace(/\s+/g, "").toLocaleLowerCase();
-        const people = Array.isArray(state.value.duty_focus?.signature_directory?.people)
-          ? state.value.duty_focus.signature_directory.people
-          : [];
-        return people.filter((person) => {
-          if (!person?.available) return false;
-          if (!query) return true;
-          return [
+        const tokens = String(signatureSearch.value[targetSlot] || "")
+          .normalize("NFKC")
+          .trim()
+          .toLocaleLowerCase()
+          .split(/[\s、,，/\\]+/)
+          .map((item) => item.replace(/[·•_\-]/g, ""))
+          .filter(Boolean);
+        return availableDutyFocusSignaturePeople.value.filter((person) => {
+          if (!tokens.length) return true;
+          const searchable = [
             person.name,
             person.employee_no,
             person.building,
             person.role,
             person.source_label,
-          ].some((value) => String(value || "").replace(/\s+/g, "").toLocaleLowerCase().includes(query));
+          ].map((value) => String(value || "").normalize("NFKC").toLocaleLowerCase().replace(/[\s·•、,，/\\_\-]+/g, ""))
+            .join("|");
+          return tokens.every((token) => searchable.includes(token));
         });
       }
 
-      function selectDutyFocusSignature(slot) {
+      function signaturePersonMeta(person) {
+        if (!person || typeof person !== "object") return "";
+        return [person.building, person.role, person.employee_no ? `工号 ${person.employee_no}` : ""]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+          .join(" · ") || "未标注楼栋和岗位";
+      }
+
+      function selectedDutyFocusSignaturePerson(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return null;
+        const selectionId = String(form.value.duty_focus?.signatures?.[targetSlot]?.selection_id || "").trim();
+        return availableDutyFocusSignaturePeople.value.find(
+          (person) => String(person.selection_id || "") === selectionId,
+        ) || null;
+      }
+
+      function setSignaturePickerActive(slot, index) {
         const targetSlot = String(slot || "").trim();
         if (!["handover", "takeover"].includes(targetSlot)) return;
-        const signature = form.value.duty_focus.signatures[targetSlot];
-        const selectionId = String(signature?.selection_id || "").trim();
-        const people = Array.isArray(state.value.duty_focus?.signature_directory?.people)
-          ? state.value.duty_focus.signature_directory.people
-          : [];
-        const person = people.find((item) => String(item.selection_id || "") === selectionId);
+        const length = filteredDutyFocusSignaturePeople(targetSlot).length;
+        const nextIndex = length ? Math.max(0, Math.min(Number(index) || 0, length - 1)) : 0;
+        signaturePickerActive.value = { ...signaturePickerActive.value, [targetSlot]: nextIndex };
+        window.requestAnimationFrame(() => {
+          const option = document.getElementById(`${targetSlot}-signature-option-${nextIndex}`);
+          option?.scrollIntoView({ block: "nearest" });
+        });
+      }
+
+      function openSignaturePicker(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        signaturePickerOpen.value = { ...signaturePickerOpen.value, [targetSlot]: true };
+        const selectedId = String(form.value.duty_focus?.signatures?.[targetSlot]?.selection_id || "").trim();
+        const selectedIndex = filteredDutyFocusSignaturePeople(targetSlot).findIndex(
+          (person) => String(person.selection_id || "") === selectedId,
+        );
+        setSignaturePickerActive(targetSlot, selectedIndex >= 0 ? selectedIndex : 0);
+      }
+
+      function closeSignaturePicker(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        signaturePickerOpen.value = { ...signaturePickerOpen.value, [targetSlot]: false };
+      }
+
+      function closeSignaturePickerOnBlur(slot, event) {
+        const currentTarget = event?.currentTarget;
+        const relatedTarget = event?.relatedTarget;
+        if (currentTarget && relatedTarget && currentTarget.contains(relatedTarget)) return;
+        closeSignaturePicker(slot);
+      }
+
+      function onSignatureSearchInput(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        signaturePickerOpen.value = { ...signaturePickerOpen.value, [targetSlot]: true };
+        setSignaturePickerActive(targetSlot, 0);
+      }
+
+      function moveSignaturePickerActive(slot, delta) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        const people = filteredDutyFocusSignaturePeople(targetSlot);
+        if (!people.length) return;
+        if (!signaturePickerOpen.value[targetSlot]) {
+          openSignaturePicker(targetSlot);
+          return;
+        }
+        const current = Number(signaturePickerActive.value[targetSlot]) || 0;
+        const next = (current + Number(delta || 0) + people.length) % people.length;
+        setSignaturePickerActive(targetSlot, next);
+      }
+
+      function selectActiveDutyFocusSignature(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        if (!signaturePickerOpen.value[targetSlot]) {
+          openSignaturePicker(targetSlot);
+          return;
+        }
+        const people = filteredDutyFocusSignaturePeople(targetSlot);
+        const person = people[Number(signaturePickerActive.value[targetSlot]) || 0];
+        if (person) selectDutyFocusSignature(targetSlot, person);
+      }
+
+      function selectDutyFocusSignature(slot, selectedPerson = null) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        const person = selectedPerson && selectedPerson.available ? selectedPerson : null;
         form.value.duty_focus.signatures[targetSlot] = person
           ? {
             selection_id: String(person.selection_id || ""),
@@ -2571,10 +2761,17 @@ function mountHandoverStationHApp(Vue) {
             match_source: "manual",
           }
           : { selection_id: "", table_id: "", record_id: "", name: "", signature_revision: "", match_source: "manual" };
-        if (person) {
-          signatureSearch.value = { ...signatureSearch.value, [targetSlot]: String(person.name || "") };
-        }
+        signatureSearch.value = { ...signatureSearch.value, [targetSlot]: "" };
+        closeSignaturePicker(targetSlot);
         void loadSignaturePreview(targetSlot);
+      }
+
+      function clearDutyFocusSignature(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        selectDutyFocusSignature(targetSlot, null);
+        signaturePickerOpen.value = { ...signaturePickerOpen.value, [targetSlot]: true };
+        setSignaturePickerActive(targetSlot, 0);
       }
 
       async function saveSelection(options = {}) {
@@ -2731,6 +2928,9 @@ function mountHandoverStationHApp(Vue) {
         saving,
         signatureRefreshing,
         signatureSearch,
+        signaturePickerOpen,
+        signaturePickerActive,
+        availableDutyFocusSignaturePeople,
         printing,
         dutyFocusImageLoading,
         dutyFocusImageUrl,
@@ -2758,7 +2958,17 @@ function mountHandoverStationHApp(Vue) {
         hasName,
         togglePerson,
         filteredDutyFocusSignaturePeople,
+        signaturePersonMeta,
+        selectedDutyFocusSignaturePerson,
+        setSignaturePickerActive,
+        openSignaturePicker,
+        closeSignaturePicker,
+        closeSignaturePickerOnBlur,
+        onSignatureSearchInput,
+        moveSignaturePickerActive,
+        selectActiveDutyFocusSignature,
         selectDutyFocusSignature,
+        clearDutyFocusSignature,
       };
     },
     template: HANDOVER_REVIEW_STATION_H_TEMPLATE,
