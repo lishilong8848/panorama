@@ -23,6 +23,7 @@ class _FakeSheetsClient:
         self.target_sheet = dict(target_sheet) if target_sheet else {}
         self.value_batches = []
         self.style_batches = []
+        self.image_writes = []
 
     def query_sheets(self, _spreadsheet_token, *, sheet_cache=None, force_refresh=False):
         del sheet_cache, force_refresh
@@ -38,6 +39,17 @@ class _FakeSheetsClient:
 
     def batch_update_styles(self, _spreadsheet_token, style_ranges):
         self.style_batches.append(list(style_ranges))
+        return {}
+
+    def write_cell_image(self, spreadsheet_token, *, range_name, image_path, name=""):
+        self.image_writes.append(
+            {
+                "spreadsheet_token": spreadsheet_token,
+                "range_name": range_name,
+                "image_path": str(image_path),
+                "name": name,
+            }
+        )
         return {}
 
     def batch_unmerge_cells(self, *_args, **_kwargs):
@@ -150,3 +162,77 @@ def test_station_h_sync_rejects_sheet_without_template_merge_structure(tmp_path)
     assert "未检测到模板合并结构" in result["error"]
     assert client.value_batches == []
     assert client.style_batches == []
+
+
+def test_station_h_sync_writes_duty_focus_image_only_to_merged_j2(tmp_path):
+    target_sheet = {
+        "sheet_id": "h_sheet",
+        "title": "H楼",
+        "index": 5,
+        "row_count": 200,
+        "column_count": 20,
+        "merges": [
+            {
+                "start_row_index": 1,
+                "end_row_index": 20,
+                "start_column_index": 9,
+                "end_column_index": 16,
+            }
+        ],
+    }
+    image_path = tmp_path / "值班关注点.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    client = _FakeSheetsClient(target_sheet)
+    service = _service_with_client(tmp_path, client)
+
+    result = service.sync_station_h_sheet(
+        batch_meta={"batch_key": "2026-08-03|day", "spreadsheet_token": "sheet_token"},
+        cell_values={"B2": "2026-08-03"},
+        duty_focus_image_path=image_path,
+        emit_log=lambda _message: None,
+    )
+
+    assert result["status"] == "success"
+    assert result["duty_focus_image_synced"] is True
+    assert result["duty_focus_image_cell"] == "J2"
+    assert client.image_writes == [
+        {
+            "spreadsheet_token": "sheet_token",
+            "range_name": "h_sheet!J2:J2",
+            "image_path": str(image_path),
+            "name": image_path.name,
+        }
+    ]
+
+
+def test_station_h_sync_rejects_image_when_j2_is_not_merge_anchor(tmp_path):
+    target_sheet = {
+        "sheet_id": "h_sheet",
+        "title": "H楼",
+        "index": 5,
+        "row_count": 200,
+        "column_count": 20,
+        "merges": [
+            {
+                "start_row_index": 1,
+                "end_row_index": 20,
+                "start_column_index": 8,
+                "end_column_index": 16,
+            }
+        ],
+    }
+    image_path = tmp_path / "值班关注点.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    client = _FakeSheetsClient(target_sheet)
+    service = _service_with_client(tmp_path, client)
+
+    result = service.sync_station_h_sheet(
+        batch_meta={"batch_key": "2026-08-03|day", "spreadsheet_token": "sheet_token"},
+        cell_values={"B2": "2026-08-03"},
+        duty_focus_image_path=image_path,
+        emit_log=lambda _message: None,
+    )
+
+    assert result["status"] == "failed"
+    assert "J2 不是合并区域左上角" in result["error"]
+    assert client.image_writes == []

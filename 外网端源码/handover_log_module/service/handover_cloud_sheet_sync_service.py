@@ -19,6 +19,7 @@ from handover_log_module.repository.excel_reader import load_workbook_quietly
 class HandoverCloudSheetSyncService:
     MANAGED_BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
     STATION_H_DEFAULT_SHEET_TITLE = "H楼"
+    STATION_H_DUTY_FOCUS_IMAGE_CELL = "J2"
     ABCDEH_WORK_CONTENT_DEFAULT_SHEET_TITLE = "ABCDEH工作内容"
     STATION_110_DEFAULT_SHEET_TITLE = "110"
     STATION_H_TEMPLATE_FILE_NAME = "H楼交接班日志空模板.xlsx"
@@ -395,6 +396,7 @@ class HandoverCloudSheetSyncService:
         *,
         batch_meta: Dict[str, Any],
         cell_values: Dict[str, Any],
+        duty_focus_image_path: str | Path | None = None,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         sync_cfg = self._sync_cfg()
@@ -425,6 +427,7 @@ class HandoverCloudSheetSyncService:
             "style_ms": 0,
             "dimension_ms": 0,
             "merge_ms": 0,
+            "image_ms": 0,
         }
         started_at = time.perf_counter()
         if not template_path.exists():
@@ -482,6 +485,47 @@ class HandoverCloudSheetSyncService:
                 timings=timings,
             )
             self._add_elapsed_ms(timings, "snapshot_ms", snapshot_started)
+            image_synced = False
+            image_sha256 = ""
+            normalized_image_path = Path(duty_focus_image_path) if duty_focus_image_path else None
+            if normalized_image_path is not None:
+                image_cell = self.STATION_H_DUTY_FOCUS_IMAGE_CELL
+                image_row, image_column = coordinate_to_tuple(image_cell)
+                target_rows = int(applied.get("synced_row_count", 0) or 0)
+                target_columns = int(applied.get("synced_column_count", 0) or 0)
+                if target_rows < image_row or target_columns < image_column:
+                    raise RuntimeError(
+                        "H楼目标 sheet 缺少值班关注点图片单元格: "
+                        f"actual={target_rows}x{target_columns}, required={image_cell}"
+                    )
+                image_merge = next(
+                    (
+                        merge
+                        for merge in self._normalize_merge_ranges(applied.get("synced_merges", []))
+                        if int(merge.get("start_row_index", -1)) == image_row - 1
+                        and int(merge.get("start_column_index", -1)) == image_column - 1
+                        and int(merge.get("end_row_index", 0)) > image_row
+                        and int(merge.get("end_column_index", 0)) > image_column
+                    ),
+                    None,
+                )
+                if image_merge is None:
+                    raise RuntimeError("H楼目标 sheet 的 J2 不是合并区域左上角，已停止图片写入")
+                target_sheet_id = str(applied.get("sheet_id", "") or "").strip()
+                image_started = time.perf_counter()
+                client.write_cell_image(
+                    spreadsheet_token,
+                    range_name=f"{target_sheet_id}!{image_cell}:{image_cell}",
+                    image_path=normalized_image_path,
+                    name=normalized_image_path.name,
+                )
+                self._add_elapsed_ms(timings, "image_ms", image_started)
+                image_sha256 = hashlib.sha256(normalized_image_path.read_bytes()).hexdigest()
+                image_synced = True
+                emit_log(
+                    f"[交接班][H楼云表] 值班关注点成品图片已写入 cell={image_cell}, "
+                    f"file={normalized_image_path.name}"
+                )
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             emit_log(
                 f"[交接班][H楼云表] 完成 batch={normalized_batch.get('batch_key', '-')}, "
@@ -500,6 +544,9 @@ class HandoverCloudSheetSyncService:
                 "synced_merges": self._normalize_merge_ranges(applied.get("synced_merges", [])),
                 "dynamic_merge_signature": str(applied.get("dynamic_merge_signature", "")).strip(),
                 "rebuild_mode": str(applied.get("rebuild_mode", "")).strip(),
+                "duty_focus_image_synced": image_synced,
+                "duty_focus_image_cell": self.STATION_H_DUTY_FOCUS_IMAGE_CELL if image_synced else "",
+                "duty_focus_image_sha256": image_sha256,
                 "error": "",
             }
         except Exception as exc:  # noqa: BLE001

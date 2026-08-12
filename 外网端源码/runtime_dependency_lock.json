@@ -28,9 +28,19 @@
       "import_name": "PIL"
     },
     {
+      "package": "pypdfium2",
+      "version": "5.3.0",
+      "import_name": "pypdfium2"
+    },
+    {
       "package": "requests",
       "version": "2.32.3",
       "import_name": "requests"
+    },
+    {
+      "package": "cryptography",
+      "version": "45.0.3",
+      "import_name": "cryptography"
     },
     {
       "package": "pymysql",

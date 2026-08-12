@@ -3,6 +3,7 @@
 import time
 import urllib.parse
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -21,11 +22,13 @@ class FeishuSheetsClientRuntime:
     SHEETS_QUERY_URL = "https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
     SHEETS_BATCH_UPDATE_URL = "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/sheets_batch_update"
     VALUES_BATCH_UPDATE_URL = "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values_batch_update"
+    VALUES_IMAGE_URL = "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values_image"
     STYLE_UPDATE_URL = "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/style"
     STYLES_BATCH_UPDATE_URL = "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/styles_batch_update"
     DIMENSION_RANGE_URL = "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/dimension_range"
     MERGE_CELLS_URL = "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/merge_cells"
     UNMERGE_CELLS_URL = "https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/unmerge_cells"
+    SHEET_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
     def __init__(
         self,
@@ -803,6 +806,47 @@ class FeishuSheetsClientRuntime:
             "POST",
             self.VALUES_BATCH_UPDATE_URL.format(spreadsheet_token=spreadsheet_token),
             payload={"valueRanges": value_ranges},
+        )
+        return body.get("data") or {}
+
+    def write_cell_image(
+        self,
+        spreadsheet_token: str,
+        *,
+        range_name: str,
+        image_path: str | Path,
+        name: str = "",
+    ) -> Dict[str, Any]:
+        normalized_range = str(range_name or "").strip()
+        if "!" not in normalized_range:
+            raise ValueError("飞书表格图片 range 必须包含 sheet_id")
+        cell_range = normalized_range.split("!", 1)[1]
+        start_cell, separator, end_cell = cell_range.partition(":")
+        if not separator or not start_cell or start_cell != end_cell:
+            raise ValueError("飞书表格图片只能写入单个单元格范围")
+
+        path = Path(image_path)
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"待上传图片不存在: {path}")
+        image_bytes = path.read_bytes()
+        if not image_bytes:
+            raise RuntimeError(f"待上传图片为空: {path}")
+        if len(image_bytes) > self.SHEET_IMAGE_MAX_BYTES:
+            raise RuntimeError(
+                f"待上传图片超过{self.SHEET_IMAGE_MAX_BYTES // (1024 * 1024)}MB限制: {path.name}"
+            )
+        if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError(f"待上传图片不是有效 PNG: {path.name}")
+
+        body = self._request_json_with_auth_retry(
+            "POST",
+            self.VALUES_IMAGE_URL.format(spreadsheet_token=spreadsheet_token),
+            payload={
+                "range": normalized_range,
+                "image": list(image_bytes),
+                "name": str(name or path.name).strip()[:255] or path.name,
+            },
+            timeout=max(self.timeout, 60),
         )
         return body.get("data") or {}
 

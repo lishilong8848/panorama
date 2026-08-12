@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.modules.feishu.service.sheets_client_runtime import FeishuSheetsClientRuntime
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 
@@ -62,6 +64,48 @@ def test_batch_update_styles_uses_styles_batch_update_contract():
             {"data": style_ranges},
         )
     ]
+
+
+def test_write_cell_image_uses_values_image_contract(tmp_path):
+    client = object.__new__(FeishuSheetsClientRuntime)
+    client.timeout = 20
+    calls = []
+
+    def request(method, url, *, payload=None, **kwargs):
+        calls.append((method, url, payload, kwargs))
+        return {"code": 0, "data": {"updated": True}}
+
+    client._request_json_with_auth_retry = request
+    image_path = tmp_path / "focus.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+
+    result = client.write_cell_image(
+        "sheet_token",
+        range_name="sheet_1!J2:J2",
+        image_path=image_path,
+    )
+
+    assert result == {"updated": True}
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == client.VALUES_IMAGE_URL.format(spreadsheet_token="sheet_token")
+    assert calls[0][2]["range"] == "sheet_1!J2:J2"
+    assert calls[0][2]["name"] == "focus.png"
+    assert bytes(calls[0][2]["image"]) == image_path.read_bytes()
+    assert calls[0][3]["timeout"] == 60
+
+
+def test_write_cell_image_rejects_multi_cell_range(tmp_path):
+    client = object.__new__(FeishuSheetsClientRuntime)
+    client.timeout = 20
+    image_path = tmp_path / "focus.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+
+    with pytest.raises(ValueError, match="单个单元格"):
+        client.write_cell_image(
+            "sheet_token",
+            range_name="sheet_1!J2:K3",
+            image_path=image_path,
+        )
 
 
 def test_resize_rechecks_actual_sheet_size_after_stale_end_index_error():

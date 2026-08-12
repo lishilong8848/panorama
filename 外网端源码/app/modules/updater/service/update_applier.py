@@ -19,6 +19,10 @@ SOURCE_FRONTEND_DIST_PREFIXES = (
     "web/frontend/dist/",
     "web_frontend/dist/",
 )
+SOURCE_SNAPSHOT_ROOT_STATIC_FILES = {
+    "runtime_dependency_lock.json",
+    "值班关注点模板.xlsx",
+}
 SOURCE_SNAPSHOT_PROTECTED_DIRS = {
     ".git",
     ".runtime",
@@ -76,8 +80,9 @@ def _is_frontend_dist_static_relpath(rel: Path | str) -> bool:
 
 
 def _is_allowed_snapshot_member(rel: Path, *, scope: str) -> bool:
-    if scope == SOURCE_SNAPSHOT_SCOPE_CODE_FRONTEND_STATIC and _is_frontend_dist_static_relpath(rel):
-        return True
+    if scope == SOURCE_SNAPSHOT_SCOPE_CODE_FRONTEND_STATIC:
+        if _is_frontend_dist_static_relpath(rel) or _rel_text(rel) in SOURCE_SNAPSHOT_ROOT_STATIC_FILES:
+            return True
     if _is_source_snapshot_protected(rel):
         return False
     if scope in {SOURCE_SNAPSHOT_SCOPE_PY_ONLY, SOURCE_SNAPSHOT_SCOPE_CODE_FRONTEND_STATIC} and rel.suffix.lower() != ".py":

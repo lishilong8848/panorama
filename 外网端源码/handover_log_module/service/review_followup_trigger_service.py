@@ -38,6 +38,7 @@ from handover_log_module.service.station_h_review_selection_service import (
     station_h_long_day_text,
     station_h_normalize_duty_people,
 )
+from handover_log_module.service.station_h_duty_focus_service import StationHDutyFocusService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
 )
@@ -164,6 +165,10 @@ class ReviewFollowupTriggerService:
         self._review_document_state_service = ReviewDocumentStateService(self.config)
         self._summary_message_service = HandoverSummaryMessageService(self.config)
         self._station_h_review_selection_service = StationHReviewSelectionService(self.config)
+        self._station_h_duty_focus_service = StationHDutyFocusService(
+            self.config,
+            review_service=self._review_service,
+        )
 
     def evaluate(self, batch_status: Dict[str, Any] | None) -> Dict[str, Any]:
         payload = batch_status if isinstance(batch_status, dict) else {}
@@ -1792,7 +1797,7 @@ class ReviewFollowupTriggerService:
         }
         for cell in ("H40", "H41", "H42", "H45", "H46", "H47", "H48"):
             cells[cell] = next_first
-        return {"ok": True, "cells": cells}
+        return {"ok": True, "cells": cells, "selection": selection}
 
     def _persist_station_h_sync_result(self, *, batch_key: str, sync_result: Dict[str, Any]) -> None:
         payload = dict(sync_result) if isinstance(sync_result, dict) else {}
@@ -1847,17 +1852,59 @@ class ReviewFollowupTriggerService:
 
         try:
             latest_batch_meta = self._review_service.get_cloud_batch(batch_key) or batch_meta
+            duty_date, duty_shift = self._review_service.parse_batch_key(batch_key)
+            duty_focus_image: Dict[str, Any] = {}
+            duty_focus_image_error = ""
+            try:
+                duty_focus = self._station_h_duty_focus_service.build_status(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    selection=(
+                        cell_result.get("selection", {})
+                        if isinstance(cell_result.get("selection", {}), dict)
+                        else {}
+                    ),
+                )
+                duty_focus_image = self._station_h_duty_focus_service.build_image_document(
+                    duty_date=duty_date,
+                    duty_shift=duty_shift,
+                    focus=duty_focus,
+                    force=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                duty_focus_image_error = str(exc)
+                emit_log(
+                    f"[交接班][H楼云表] 值班关注点图片生成失败，H楼正文继续同步 "
+                    f"batch={batch_key}, error={exc}"
+                )
             station_result = self._cloud_sheet_sync_service.sync_station_h_sheet(
                 batch_meta=latest_batch_meta,
                 cell_values=cell_result.get("cells", {}),
+                duty_focus_image_path=duty_focus_image.get("path"),
                 emit_log=emit_log,
             )
+            if isinstance(station_result, dict):
+                cloud_status = str(station_result.get("status", "") or "").strip().lower()
+                if duty_focus_image_error:
+                    station_result["duty_focus_image_status"] = "failed"
+                    station_result["duty_focus_image_error"] = duty_focus_image_error
+                    if cloud_status == "success":
+                        station_result["status"] = "partial_failed"
+                        station_result["h_values_status"] = "success"
+                        station_result["error"] = f"值班关注点图片生成失败: {duty_focus_image_error}"
+                else:
+                    station_result["duty_focus_image_status"] = (
+                        "success" if bool(station_result.get("duty_focus_image_synced", False)) else "skipped"
+                    )
+                    station_result["duty_focus_image_generated_at"] = str(
+                        duty_focus_image.get("generated_at", "") or ""
+                    )
         except Exception as exc:  # noqa: BLE001
             station_result = {"status": "failed", "error": str(exc)}
             emit_log(f"[交接班][H楼云表] 同步异常 batch={batch_key}, error={exc}")
         result["station_h_sync"] = station_result
         status = str(station_result.get("status", "")).strip().lower()
-        if status in {"success", "failed"}:
+        if status in {"success", "partial_failed", "failed"}:
             self._persist_station_h_sync_result(batch_key=batch_key, sync_result=station_result)
         if status and status != "skipped":
             emit_log(f"[交接班][H楼云表] 跟随云文档上传完成 batch={batch_key}, status={status}")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
@@ -178,12 +179,20 @@ class StationHReviewSelectionService:
         current_people: Any,
         next_people: Any,
         long_day_people: Any,
+        duty_focus: Any = None,
         source: str = "manual",
     ) -> Dict[str, Any]:
         duty_date_text = str(duty_date or "").strip()
         duty_shift_text = _normalize_duty_shift(duty_shift)
         if not _parse_duty_date(duty_date_text) or not duty_shift_text:
             raise ValueError("H楼审核页日期或班次无效")
+        existing = self.get_selection(duty_date_text, duty_shift_text) or {}
+        if duty_focus is None:
+            normalized_duty_focus = deepcopy(existing.get("duty_focus", {}))
+        elif isinstance(duty_focus, dict):
+            normalized_duty_focus = deepcopy(duty_focus)
+        else:
+            raise ValueError("H楼值班关注点数据格式无效")
         payload = {
             "duty_date": duty_date_text,
             "duty_shift": duty_shift_text,
@@ -191,6 +200,7 @@ class StationHReviewSelectionService:
             "current_people": station_h_normalize_duty_people(current_people),
             "next_people": station_h_normalize_duty_people(next_people),
             "long_day_people": self._normalize_long_day_people(long_day_people),
+            "duty_focus": normalized_duty_focus,
             "source": str(source or "manual").strip() or "manual",
             "updated_at": _now_text(),
         }
@@ -250,6 +260,7 @@ class StationHReviewSelectionService:
             "current_people_text": join_station_h_people(current_people),
             "next_people_text": join_station_h_people(next_people),
             "long_day_people_text": join_station_h_people(long_day_people),
+            "duty_focus": deepcopy(raw.get("duty_focus", {})) if isinstance(raw.get("duty_focus", {}), dict) else {},
             "updated_at": str(raw.get("updated_at", "") or "").strip(),
             "source": str(raw.get("source", "") or "").strip(),
             "resolved_source": str(raw.get("resolved_source", "") or "").strip(),

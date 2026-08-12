@@ -3,7 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 from app.shared.utils.artifact_naming import handover_log_output_patterns
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
@@ -1501,18 +1501,32 @@ class ReviewSessionService:
         target_batch = str(batch_key or "").strip()
         if not target_batch:
             return []
+        return self.list_batch_sessions_many([target_batch]).get(target_batch, [])
+
+    def list_batch_sessions_many(self, batch_keys: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
+        if isinstance(batch_keys, str):
+            batch_keys = [batch_keys]
+        targets = {
+            str(batch_key or "").strip()
+            for batch_key in batch_keys
+            if str(batch_key or "").strip()
+        }
+        if not targets:
+            return {}
         state = self._load_state()
         sessions = state.get("review_sessions", {})
         if not isinstance(sessions, dict):
-            return []
-        output: List[Dict[str, Any]] = []
+            return {batch_key: [] for batch_key in targets}
+        output: Dict[str, List[Dict[str, Any]]] = {batch_key: [] for batch_key in targets}
         for raw in list(sessions.values()):
             if not isinstance(raw, dict):
                 continue
             session = self._normalize_session(raw)
-            if str(session.get("batch_key", "")).strip() == target_batch:
-                output.append(session)
-        output.sort(key=lambda item: str(item.get("building", "")))
+            session_batch = str(session.get("batch_key", "")).strip()
+            if session_batch in targets:
+                output[session_batch].append(session)
+        for rows in output.values():
+            rows.sort(key=lambda item: str(item.get("building", "")))
         return output
 
     def batch_generation_and_review_links_completed(

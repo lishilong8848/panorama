@@ -4,6 +4,8 @@ import {
   claimHandoverReview110kvLockApi,
   claimHandoverReviewLockApi,
   confirmHandoverReviewApi,
+  downloadHandoverReviewStationHDutyFocusImageApi,
+  downloadHandoverReviewStationHDutyFocusPrintApi,
   getHandoverEngineerDirectoryApi,
   getJobApi,
   getHandoverReviewApi,
@@ -21,6 +23,8 @@ import {
   releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
   refreshHandoverReviewEventSectionsApi,
+  refreshHandoverReviewStationHSignaturesApi,
+  regenerateHandoverReviewStationHDutyFocusImageApi,
   saveHandoverReview110StationParsedRowsApi,
   saveHandoverReviewApi,
   saveHandoverReview110kvApi,
@@ -68,6 +72,8 @@ const CAPACITY_SYNC_TRACKED_CELLS = [
   ...CAPACITY_ROOM_TRACKED_CELLS,
 ];
 const OUTDOOR_TEMPERATURE_CELLS = ["B7", "D7"];
+const STATION_H_DUTY_FOCUS_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
+const STATION_H_DUTY_FOCUS_MODES = ["制冷", "预冷", "板换", "△"];
 const SUBSTATION_110KV_ROWS = [
   { row_id: "incoming_akai", label: "阿开", group: "incoming" },
   { row_id: "incoming_ajia", label: "阿家", group: "incoming" },
@@ -620,9 +626,15 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           <p class="review-subtitle">{{ batchText }}</p>
         </div>
         <div class="review-header-actions">
-          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving" @click="refreshStatus">刷新</button>
-          <button class="btn btn-primary btn-mini" type="button" :disabled="loading || saving" @click="saveSelection">
-            {{ saving ? "保存中..." : "保存人员选择" }}
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing" @click="refreshStatus">刷新页面</button>
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing" @click="refreshSignatures">
+            {{ signatureRefreshing ? "刷新中..." : "刷新签名" }}
+          </button>
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || !canPrintDutyFocus" :title="dutyFocusPrintReason" @click="printDutyFocus">
+            {{ printing ? "生成中..." : "打印值班关注点" }}
+          </button>
+          <button class="btn btn-primary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing" @click="saveSelection">
+            {{ saving ? "保存中..." : "保存全部" }}
           </button>
         </div>
       </div>
@@ -630,6 +642,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
         <span>当前批次：{{ state.batch.batch_key || "-" }}</span>
         <span>保存状态：{{ state.saved ? "已保存" : "未保存" }}</span>
         <span v-if="state.selection.updated_at">更新时间：{{ state.selection.updated_at }}</span>
+        <span v-if="state.duty_focus.signature_directory.refreshed_at">签名刷新：{{ state.duty_focus.signature_directory.refreshed_at }}</span>
       </div>
       <div v-if="statusText" class="review-status-line review-status-info">{{ statusText }}</div>
       <div v-if="errorText" class="review-status-line review-status-danger">{{ errorText }}</div>
@@ -717,6 +730,107 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           >{{ item.name }}<span v-if="item.role"> · {{ item.role }}</span></button>
         </div>
         <small class="person-picker-hint">{{ state.rules.long_day_people || "默认复用上一班组保存的长白岗；不上班时清空后保存。" }}</small>
+      </article>
+    </section>
+
+    <section v-if="!loading" class="review-current-view-section station-h-duty-focus-section">
+      <article class="review-card station-h-duty-focus-card">
+        <div class="review-card-head station-h-duty-focus-head">
+          <div>
+            <h2>值班关注点</h2>
+            <p class="review-card-subtitle">制冷单元、巡检确认和签名将写入原始模板后打印。</p>
+          </div>
+          <span class="review-status-pill" :class="canPrintDutyFocus ? 'is-success' : 'is-warning'">
+            {{ canPrintDutyFocus ? "签名齐全" : dutyFocusPrintReason }}
+          </span>
+        </div>
+
+        <div class="station-h-focus-context">
+          <span>B3：{{ form.duty_focus.date_text || dutyDate || "-" }}</span>
+          <span>C3：{{ (form.duty_focus.shift || dutyShift) === "night" ? "夜班" : "白班" }}</span>
+          <span v-if="form.duty_focus.auto_source.previous_batch">对比班次：{{ form.duty_focus.auto_source.previous_batch }}</span>
+        </div>
+
+        <div class="review-table-wrap station-h-focus-table-wrap">
+          <table class="review-table station-h-focus-table">
+            <thead>
+              <tr>
+                <th>楼栋</th>
+                <th v-for="unit in 6" :key="'focus-unit-head-' + unit">{{ unit }}#制冷单元</th>
+                <th>切换说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in form.duty_focus.rows" :key="'focus-building-' + row.building">
+                <th>{{ row.building }}</th>
+                <td v-for="unit in 6" :key="row.building + '-focus-unit-' + unit">
+                  <select class="review-input review-compact-input station-h-mode-select" v-model="row.modes[String(unit)]" :disabled="saving || printing">
+                    <option v-for="mode in form.duty_focus.mode_options" :key="row.building + '-' + unit + '-' + mode" :value="mode">{{ mode }}</option>
+                  </select>
+                </td>
+                <td>
+                  <input class="review-input review-compact-input station-h-change-input" v-model="row.change_note" :disabled="saving || printing" placeholder="如 1#→2#" />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="station-h-signature-grid">
+          <label class="review-field">
+            <span class="review-field-label">交班确认人签名（E3）</span>
+            <select class="review-input" v-model="form.duty_focus.signatures.handover.selection_id" :disabled="saving || printing || signatureRefreshing" @change="selectDutyFocusSignature('handover')">
+              <option value="">请选择有签名的人员</option>
+              <option v-for="person in state.duty_focus.signature_directory.people" :key="'handover-signature-' + person.selection_id" :value="person.selection_id" :disabled="!person.available">
+                {{ person.name }} · {{ person.source_label }}{{ person.available ? "" : "（签名不可用）" }}
+              </option>
+            </select>
+          </label>
+          <label class="review-field">
+            <span class="review-field-label">接班确认人签名（H3）</span>
+            <select class="review-input" v-model="form.duty_focus.signatures.takeover.selection_id" :disabled="saving || printing || signatureRefreshing" @change="selectDutyFocusSignature('takeover')">
+              <option value="">请选择有签名的人员</option>
+              <option v-for="person in state.duty_focus.signature_directory.people" :key="'takeover-signature-' + person.selection_id" :value="person.selection_id" :disabled="!person.available">
+                {{ person.name }} · {{ person.source_label }}{{ person.available ? "" : "（签名不可用）" }}
+              </option>
+            </select>
+          </label>
+        </div>
+        <p v-if="state.duty_focus.signature_directory.error" class="review-inline-warning">{{ state.duty_focus.signature_directory.error }}</p>
+
+        <div class="station-h-check-grid">
+          <label v-for="item in form.duty_focus.check_items" :key="'focus-check-' + item.row" class="station-h-check-item">
+            <span><strong>{{ item.cell }}</strong>{{ item.label }}</span>
+            <input class="review-input review-compact-input" v-model="form.duty_focus.checks[String(item.row)]" :disabled="saving || printing" :placeholder="item.row === 19 ? '如 27.7℃/25.8℃' : '√'" />
+          </label>
+        </div>
+
+        <section class="station-h-focus-preview" aria-label="值班关注点成品图片">
+          <div class="station-h-focus-preview-head">
+            <div>
+              <h3>签名后表格图片</h3>
+              <p v-if="state.duty_focus.image_status.generated_at">生成时间：{{ state.duty_focus.image_status.generated_at }}</p>
+            </div>
+            <div class="station-h-focus-preview-actions">
+              <span class="review-status-pill" :class="dutyFocusImageNeedsRefresh ? 'is-warning' : 'is-success'">
+                {{ dutyFocusImageStatusText }}
+              </span>
+              <button
+                class="btn btn-secondary btn-mini"
+                type="button"
+                :disabled="saving || printing || dutyFocusImageLoading || !canPrintDutyFocus"
+                :title="canPrintDutyFocus ? '' : dutyFocusPrintReason"
+                @click="regenerateDutyFocusImage"
+              >{{ dutyFocusImageLoading ? "生成中..." : "重新生成图片" }}</button>
+            </div>
+          </div>
+          <div class="station-h-focus-preview-canvas">
+            <div v-if="dutyFocusImageLoading && !dutyFocusImageUrl" class="review-empty-card">正在生成签名后的表格图片...</div>
+            <img v-else-if="dutyFocusImageUrl" :src="dutyFocusImageUrl" alt="填入数据和签名后的值班关注点表格" />
+            <div v-else class="review-empty-card">暂无成品图片</div>
+          </div>
+          <p v-if="dutyFocusImageError" class="review-inline-warning">{{ dutyFocusImageError }}</p>
+        </section>
       </article>
     </section>
   </div>
@@ -1135,6 +1249,102 @@ function normalizeStation110State(raw = {}) {
   };
 }
 
+function normalizeStationHDutyFocusImageStatus(raw = {}) {
+  const status = String(raw?.status || "").trim().toLowerCase();
+  return {
+    status: ["current", "stale", "missing"].includes(status) ? status : "missing",
+    available: Boolean(raw?.available),
+    current: Boolean(raw?.current),
+    generated: Boolean(raw?.generated),
+    generated_at: String(raw?.generated_at || "").trim(),
+    content_hash: String(raw?.content_hash || "").trim(),
+    image_sha256: String(raw?.image_sha256 || "").trim(),
+  };
+}
+
+function normalizeStationHDutyFocus(raw = {}) {
+  const rawRows = Array.isArray(raw?.rows) ? raw.rows : [];
+  const rowByBuilding = new Map(rawRows.map((item) => [String(item?.building || "").trim(), item]));
+  const rows = STATION_H_DUTY_FOCUS_BUILDINGS.map((building) => {
+    const source = rowByBuilding.get(building) || {};
+    const sourceModes = source?.modes && typeof source.modes === "object" ? source.modes : {};
+    const modes = {};
+    for (let unit = 1; unit <= 6; unit += 1) {
+      const value = String(sourceModes[String(unit)] || "△").trim();
+      modes[String(unit)] = STATION_H_DUTY_FOCUS_MODES.includes(value) ? value : "△";
+    }
+    return {
+      building,
+      modes,
+      change_note: String(source?.change_note || "").trim(),
+    };
+  });
+  const rawChecks = raw?.checks && typeof raw.checks === "object" ? raw.checks : {};
+  const checks = {};
+  for (let row = 11; row <= 39; row += 1) checks[String(row)] = String(rawChecks[String(row)] ?? "");
+  const rawSignatures = raw?.signatures && typeof raw.signatures === "object" ? raw.signatures : {};
+  const normalizeSignature = (value = {}) => ({
+    selection_id: String(value?.selection_id || "").trim(),
+    table_id: String(value?.table_id || "").trim(),
+    record_id: String(value?.record_id || "").trim(),
+    name: String(value?.name || "").trim(),
+    signature_revision: String(value?.signature_revision || "").trim(),
+  });
+  const rawDirectory = raw?.signature_directory && typeof raw.signature_directory === "object"
+    ? raw.signature_directory
+    : {};
+  const signaturePeople = Array.isArray(rawDirectory.people)
+    ? rawDirectory.people.map((item) => ({
+      selection_id: String(item?.selection_id || "").trim(),
+      table_id: String(item?.table_id || "").trim(),
+      record_id: String(item?.record_id || "").trim(),
+      source_label: String(item?.source_label || "").trim(),
+      name: String(item?.name || "").trim(),
+      employee_no: String(item?.employee_no || "").trim(),
+      building: String(item?.building || "").trim(),
+      role: String(item?.role || "").trim(),
+      signature_revision: String(item?.signature_revision || "").trim(),
+      available: Boolean(item?.available),
+      availability: String(item?.availability || "").trim(),
+    })).filter((item) => item.selection_id && item.name)
+    : [];
+  return {
+    date_text: String(raw?.date_text || "").trim(),
+    shift: String(raw?.shift || "").trim().toLowerCase(),
+    rows,
+    checks,
+    check_items: Array.isArray(raw?.check_items)
+      ? raw.check_items.map((item) => ({
+        row: Number.parseInt(String(item?.row || 0), 10) || 0,
+        cell: String(item?.cell || "").trim(),
+        label: String(item?.label || "").trim(),
+      })).filter((item) => item.row >= 11 && item.row <= 39)
+      : [],
+    mode_options: Array.isArray(raw?.mode_options) && raw.mode_options.length
+      ? raw.mode_options.map((item) => String(item || "").trim()).filter(Boolean)
+      : [...STATION_H_DUTY_FOCUS_MODES],
+    signatures: {
+      handover: normalizeSignature(rawSignatures.handover),
+      takeover: normalizeSignature(rawSignatures.takeover),
+    },
+    signature_directory: {
+      people: signaturePeople,
+      refreshed_at: String(rawDirectory.refreshed_at || "").trim(),
+      error: String(rawDirectory.error || "").trim(),
+    },
+    print_ready: Boolean(raw?.print_ready),
+    print_block_reason: String(raw?.print_block_reason || "").trim(),
+    image_status: normalizeStationHDutyFocusImageStatus(raw?.image_status || {}),
+    source: String(raw?.source || "").trim(),
+    auto_source: raw?.auto_source && typeof raw.auto_source === "object" ? raw.auto_source : {},
+    error: String(raw?.error || "").trim(),
+  };
+}
+
+function cloneStationHDutyFocus(value = {}) {
+  return normalizeStationHDutyFocus(JSON.parse(JSON.stringify(value || {})));
+}
+
 function normalizeStationHState(raw = {}) {
   const batch = raw?.batch && typeof raw.batch === "object" ? raw.batch : {};
   const selection = raw?.selection && typeof raw.selection === "object" ? raw.selection : {};
@@ -1177,6 +1387,7 @@ function normalizeStationHState(raw = {}) {
     },
     rules: raw?.rules && typeof raw.rules === "object" ? raw.rules : {},
     candidate_source: raw?.candidate_source && typeof raw.candidate_source === "object" ? raw.candidate_source : {},
+    duty_focus: normalizeStationHDutyFocus(raw?.duty_focus || {}),
   };
 }
 
@@ -1984,6 +2195,11 @@ function mountHandoverStationHApp(Vue) {
       const routeHadExplicitDuty = Boolean(initialSelection.dutyDate && initialSelection.dutyShift);
       const loading = ref(true);
       const saving = ref(false);
+      const signatureRefreshing = ref(false);
+      const printing = ref(false);
+      const dutyFocusImageLoading = ref(false);
+      const dutyFocusImageUrl = ref("");
+      const dutyFocusImageError = ref("");
       const errorText = ref("");
       const statusText = ref("");
       const dutyDate = ref(String(initialSelection.dutyDate || "").trim());
@@ -1995,8 +2211,13 @@ function mountHandoverStationHApp(Vue) {
         current_people_text: "",
         next_people_text: "",
         long_day_people_text: "",
+        duty_focus: normalizeStationHDutyFocus({}),
       });
       const stationHRefreshTimers = new Set();
+      let stationHCandidateRetryCount = 0;
+      let stationHCandidateRefreshTimer = null;
+      let stationHCandidateBatchKey = "";
+      let dutyFocusImageAttemptedBatchKey = "";
 
       const batchText = computed(() => {
         const date = dutyDate.value || state.value.batch.duty_date || "-";
@@ -2007,10 +2228,52 @@ function mountHandoverStationHApp(Vue) {
         String(form.value.current_people_text || "").trim() !== String(state.value.selection.current_people_text || "").trim()
         || String(form.value.next_people_text || "").trim() !== String(state.value.selection.next_people_text || "").trim()
         || String(form.value.long_day_people_text || "").trim() !== String(state.value.selection.long_day_people_text || "").trim()
+        || JSON.stringify(buildDutyFocusPayload(form.value.duty_focus)) !== JSON.stringify(buildDutyFocusPayload(state.value.duty_focus))
       ));
+      const canPrintDutyFocus = computed(() => {
+        const people = Array.isArray(state.value.duty_focus?.signature_directory?.people)
+          ? state.value.duty_focus.signature_directory.people
+          : [];
+        const available = new Set(people.filter((item) => item.available).map((item) => String(item.selection_id || "")));
+        const signatures = form.value.duty_focus?.signatures || {};
+        return ["handover", "takeover"].every((slot) => available.has(String(signatures?.[slot]?.selection_id || "")));
+      });
+      const dutyFocusPrintReason = computed(() => {
+        if (canPrintDutyFocus.value) return "";
+        const signatures = form.value.duty_focus?.signatures || {};
+        const missing = [];
+        if (!String(signatures?.handover?.selection_id || "").trim()) missing.push("交班签名");
+        if (!String(signatures?.takeover?.selection_id || "").trim()) missing.push("接班签名");
+        return missing.length ? `${missing.join("、")}未选择` : "所选签名不可用，请刷新签名";
+      });
+      const dutyFocusImageNeedsRefresh = computed(() => (
+        hasUnsavedChanges.value
+        || !Boolean(state.value.duty_focus?.image_status?.current)
+        || !String(dutyFocusImageUrl.value || "").trim()
+      ));
+      const dutyFocusImageStatusText = computed(() => {
+        if (hasUnsavedChanges.value) return "页面已修改，图片待更新";
+        if (dutyFocusImageLoading.value) return "正在生成";
+        if (state.value.duty_focus?.image_status?.current && dutyFocusImageUrl.value) return "图片已更新";
+        if (state.value.duty_focus?.image_status?.available) return "图片已过期";
+        return "图片未生成";
+      });
 
       function applyState(raw) {
         const normalized = normalizeStationHState(raw || {});
+        const nextBatchKey = String(
+          normalized.batch.batch_key
+          || `${normalized.batch.duty_date || ""}|${normalized.batch.duty_shift || ""}`,
+        ).trim();
+        const currentBatchKey = String(
+          state.value.batch.batch_key
+          || `${state.value.batch.duty_date || ""}|${state.value.batch.duty_shift || ""}`,
+        ).trim();
+        if (currentBatchKey && nextBatchKey && currentBatchKey !== nextBatchKey) {
+          replaceDutyFocusImageUrl("");
+          dutyFocusImageError.value = "";
+          dutyFocusImageAttemptedBatchKey = "";
+        }
         state.value = normalized;
         if (normalized.batch.duty_date) dutyDate.value = normalized.batch.duty_date;
         if (["day", "night"].includes(normalized.batch.duty_shift)) dutyShift.value = normalized.batch.duty_shift;
@@ -2018,13 +2281,87 @@ function mountHandoverStationHApp(Vue) {
           current_people_text: normalized.selection.current_people_text,
           next_people_text: normalized.selection.next_people_text,
           long_day_people_text: normalized.selection.long_day_people_text,
+          duty_focus: cloneStationHDutyFocus(normalized.duty_focus),
         };
+        scheduleStationHCandidateRefresh(normalized);
+        scheduleDutyFocusImagePreview(normalized);
+      }
+
+      function replaceDutyFocusImageUrl(nextUrl) {
+        const previous = String(dutyFocusImageUrl.value || "").trim();
+        if (previous && previous !== nextUrl) URL.revokeObjectURL(previous);
+        dutyFocusImageUrl.value = String(nextUrl || "");
+      }
+
+      function scheduleDutyFocusImagePreview(normalized) {
+        const batch = normalized?.batch && typeof normalized.batch === "object" ? normalized.batch : {};
+        const batchKey = String(batch.batch_key || `${batch.duty_date || ""}|${batch.duty_shift || ""}`).trim();
+        const imageStatus = normalized?.duty_focus?.image_status || {};
+        const canLoadExisting = Boolean(imageStatus.current);
+        const canGenerate = Boolean(normalized?.duty_focus?.print_ready);
+        if (!batchKey || dutyFocusImageAttemptedBatchKey === batchKey || (!canLoadExisting && !canGenerate)) return;
+        dutyFocusImageAttemptedBatchKey = batchKey;
+        Promise.resolve().then(() => ensureDutyFocusImage({ force: false, silent: true }));
+      }
+
+      function scheduleStationHCandidateRefresh(normalized) {
+        const source = normalized?.candidate_source && typeof normalized.candidate_source === "object"
+          ? normalized.candidate_source
+          : {};
+        const batch = normalized?.batch && typeof normalized.batch === "object" ? normalized.batch : {};
+        const batchKey = String(batch.batch_key || `${batch.duty_date || ""}|${batch.duty_shift || ""}`);
+        if (stationHCandidateBatchKey !== batchKey) {
+          stationHCandidateBatchKey = batchKey;
+          stationHCandidateRetryCount = 0;
+          if (stationHCandidateRefreshTimer !== null) {
+            window.clearTimeout(stationHCandidateRefreshTimer);
+            stationHRefreshTimers.delete(stationHCandidateRefreshTimer);
+            stationHCandidateRefreshTimer = null;
+          }
+        }
+        if (!source.refresh_pending) {
+          stationHCandidateRetryCount = 0;
+          if (stationHCandidateRefreshTimer !== null) {
+            window.clearTimeout(stationHCandidateRefreshTimer);
+            stationHRefreshTimers.delete(stationHCandidateRefreshTimer);
+            stationHCandidateRefreshTimer = null;
+          }
+          return;
+        }
+        if (stationHCandidateRefreshTimer !== null || stationHCandidateRetryCount >= 30) return;
+        stationHCandidateRetryCount += 1;
+        const delay = Math.max(1000, Number.parseInt(String(source.retry_after_ms || 4000), 10) || 4000);
+        const timer = window.setTimeout(() => {
+          stationHRefreshTimers.delete(timer);
+          stationHCandidateRefreshTimer = null;
+          void refreshStatus({ background: true, forceCurrent: !routeHadExplicitDuty });
+        }, delay);
+        stationHCandidateRefreshTimer = timer;
+        stationHRefreshTimers.add(timer);
       }
 
       function buildContextPayload() {
         return {
           duty_date: dutyDate.value || state.value.batch.duty_date || "",
           duty_shift: dutyShift.value || state.value.batch.duty_shift || "",
+        };
+      }
+
+      function buildDutyFocusPayload(value = {}) {
+        const normalized = normalizeStationHDutyFocus(value || {});
+        return {
+          date_text: dutyDate.value || normalized.date_text || state.value.batch.duty_date || "",
+          shift: dutyShift.value || normalized.shift || state.value.batch.duty_shift || "",
+          rows: normalized.rows.map((row) => ({
+            building: row.building,
+            modes: { ...row.modes },
+            change_note: String(row.change_note || "").trim(),
+          })),
+          checks: { ...normalized.checks },
+          signatures: {
+            handover: { ...normalized.signatures.handover },
+            takeover: { ...normalized.signatures.takeover },
+          },
         };
       }
 
@@ -2039,6 +2376,7 @@ function mountHandoverStationHApp(Vue) {
             ...(routeHadExplicitDuty && !forceCurrent ? buildContextPayload() : {}),
             _t: Date.now(),
           });
+          if (background && (saving.value || hasUnsavedChanges.value)) return;
           applyState(response);
           if (!background) statusText.value = "H楼人员选择已刷新";
         } catch (error) {
@@ -2098,24 +2436,160 @@ function mountHandoverStationHApp(Vue) {
         form.value[key] = togglePersonNameValue(form.value[key], name);
       }
 
-      async function saveSelection() {
+      function selectDutyFocusSignature(slot) {
+        const targetSlot = String(slot || "").trim();
+        if (!["handover", "takeover"].includes(targetSlot)) return;
+        const signature = form.value.duty_focus.signatures[targetSlot];
+        const selectionId = String(signature?.selection_id || "").trim();
+        const people = Array.isArray(state.value.duty_focus?.signature_directory?.people)
+          ? state.value.duty_focus.signature_directory.people
+          : [];
+        const person = people.find((item) => String(item.selection_id || "") === selectionId);
+        form.value.duty_focus.signatures[targetSlot] = person
+          ? {
+            selection_id: String(person.selection_id || ""),
+            table_id: String(person.table_id || ""),
+            record_id: String(person.record_id || ""),
+            name: String(person.name || ""),
+            signature_revision: String(person.signature_revision || ""),
+          }
+          : { selection_id: "", table_id: "", record_id: "", name: "", signature_revision: "" };
+      }
+
+      async function saveSelection(options = {}) {
+        const silent = Boolean(options?.silent);
         saving.value = true;
         errorText.value = "";
-        statusText.value = "正在保存H楼人员选择...";
+        if (!silent) statusText.value = "正在保存H楼审核内容...";
         try {
           const response = await saveHandoverReviewStationHApi({
             ...buildContextPayload(),
             current_people_text: form.value.current_people_text,
             next_people_text: form.value.next_people_text,
             long_day_people_text: form.value.long_day_people_text,
+            duty_focus: buildDutyFocusPayload(form.value.duty_focus),
           });
           applyState(response);
-          statusText.value = "H楼人员选择已保存，后续H楼云文档将优先使用本次保存值。";
+          if (!silent) statusText.value = "H楼人员和值班关注点已保存。";
+          return true;
         } catch (error) {
           errorText.value = String(error?.message || error || "保存H楼人员选择失败");
           statusText.value = "";
+          return false;
         } finally {
           saving.value = false;
+        }
+      }
+
+      async function refreshSignatures() {
+        if (hasUnsavedChanges.value) {
+          const saved = await saveSelection({ silent: true });
+          if (!saved) return;
+        }
+        signatureRefreshing.value = true;
+        errorText.value = "";
+        statusText.value = "正在读取两张签名表...";
+        try {
+          const response = await refreshHandoverReviewStationHSignaturesApi(buildContextPayload());
+          applyState(response);
+          const count = Number.parseInt(String(response?.signature_refresh?.count || 0), 10) || 0;
+          statusText.value = `签名目录已刷新，共读取 ${count} 位人员。`;
+        } catch (error) {
+          errorText.value = String(error?.message || error || "刷新签名失败");
+          statusText.value = "";
+        } finally {
+          signatureRefreshing.value = false;
+        }
+      }
+
+      async function ensureDutyFocusImage({ force = false, silent = false } = {}) {
+        if (dutyFocusImageLoading.value) return false;
+        const hasCurrentImage = Boolean(state.value.duty_focus?.image_status?.current);
+        if ((force || !hasCurrentImage) && !canPrintDutyFocus.value) {
+          const message = dutyFocusPrintReason.value || "签名不完整，暂不能生成图片";
+          dutyFocusImageError.value = message;
+          if (!silent) errorText.value = message;
+          return false;
+        }
+        dutyFocusImageLoading.value = true;
+        dutyFocusImageError.value = "";
+        if (!silent) {
+          errorText.value = "";
+          statusText.value = "正在保存并生成签名后的表格图片...";
+        }
+        try {
+          if (force && hasUnsavedChanges.value) {
+            const saved = await saveSelection({ silent: true });
+            if (!saved) return false;
+          }
+          if (force || !Boolean(state.value.duty_focus?.image_status?.current)) {
+            const generated = await regenerateHandoverReviewStationHDutyFocusImageApi({
+              ...buildContextPayload(),
+              force,
+            });
+            state.value.duty_focus.image_status = normalizeStationHDutyFocusImageStatus(generated || {});
+          }
+          const imageBlob = await downloadHandoverReviewStationHDutyFocusImageApi({
+            ...buildContextPayload(),
+            _t: Date.now(),
+          });
+          replaceDutyFocusImageUrl(URL.createObjectURL(imageBlob));
+          if (!silent) statusText.value = "值班关注点成品图片已更新。";
+          return true;
+        } catch (error) {
+          const message = String(error?.message || error || "生成值班关注点图片失败");
+          dutyFocusImageError.value = message;
+          if (!silent) {
+            errorText.value = message;
+            statusText.value = "";
+          }
+          return false;
+        } finally {
+          dutyFocusImageLoading.value = false;
+        }
+      }
+
+      async function regenerateDutyFocusImage() {
+        return ensureDutyFocusImage({ force: true, silent: false });
+      }
+
+      async function printDutyFocus() {
+        if (!canPrintDutyFocus.value) {
+          errorText.value = dutyFocusPrintReason.value || "签名不完整，暂不能打印";
+          return;
+        }
+        const printWindow = window.open("about:blank", "_blank");
+        if (!printWindow) {
+          errorText.value = "浏览器阻止了打印窗口，请允许本站弹出窗口后重试";
+          return;
+        }
+        printWindow.document.title = "值班关注点打印文件生成中";
+        printWindow.document.body.innerHTML = "<p style='font-family:Microsoft Yahei;padding:24px'>正在生成签名后的打印文件，请稍候...</p>";
+        printing.value = true;
+        errorText.value = "";
+        statusText.value = "正在保存并生成原样打印文件...";
+        try {
+          if (hasUnsavedChanges.value) {
+            const saved = await saveSelection({ silent: true });
+            if (!saved) {
+              printWindow.close();
+              return;
+            }
+          }
+          const printBlob = await downloadHandoverReviewStationHDutyFocusPrintApi({
+            ...buildContextPayload(),
+            _t: Date.now(),
+          });
+          const printUrl = URL.createObjectURL(printBlob);
+          printWindow.location.replace(printUrl);
+          window.setTimeout(() => URL.revokeObjectURL(printUrl), 5 * 60 * 1000);
+          statusText.value = "打印文件正在新窗口生成，生成后可直接打印。";
+        } catch (error) {
+          printWindow.close();
+          errorText.value = String(error?.message || error || "生成打印文件失败");
+          statusText.value = "";
+        } finally {
+          printing.value = false;
         }
       }
 
@@ -2126,11 +2600,17 @@ function mountHandoverStationHApp(Vue) {
 
       onBeforeUnmount(() => {
         clearStationHRefreshTimers();
+        replaceDutyFocusImageUrl("");
       });
 
       return {
         loading,
         saving,
+        signatureRefreshing,
+        printing,
+        dutyFocusImageLoading,
+        dutyFocusImageUrl,
+        dutyFocusImageError,
         errorText,
         statusText,
         dutyDate,
@@ -2138,11 +2618,19 @@ function mountHandoverStationHApp(Vue) {
         state,
         form,
         batchText,
+        canPrintDutyFocus,
+        dutyFocusPrintReason,
+        dutyFocusImageNeedsRefresh,
+        dutyFocusImageStatusText,
         refreshStatus,
+        refreshSignatures,
+        regenerateDutyFocusImage,
+        printDutyFocus,
         saveSelection,
         onDutyChange,
         hasName,
         togglePerson,
+        selectDutyFocusSignature,
       };
     },
     template: HANDOVER_REVIEW_STATION_H_TEMPLATE,

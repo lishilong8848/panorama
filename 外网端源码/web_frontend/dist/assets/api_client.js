@@ -729,6 +729,86 @@ export async function saveHandoverReviewStationHApi(payload = {}) {
   }, 8000);
 }
 
+export async function refreshHandoverReviewStationHSignaturesApi(payload = {}) {
+  return apiJsonWithTimeout("/api/handover/review/station-h/signatures/refresh", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  }, 120000);
+}
+
+export function buildHandoverReviewStationHDutyFocusPrintUrl(params = {}) {
+  return appendQuery("/api/handover/review/station-h/duty-focus/print", params);
+}
+
+export async function downloadHandoverReviewStationHDutyFocusPrintApi(params = {}) {
+  const url = buildHandoverReviewStationHDutyFocusPrintUrl(params);
+  const timeout = buildTimeoutSignal(240000, url);
+  try {
+    const resp = await fetch(url, timeout.signal ? { signal: timeout.signal } : {});
+    if (!resp.ok) {
+      const text = await resp.text();
+      let detail = String(text || "").trim();
+      try {
+        const parsed = detail ? JSON.parse(detail) : {};
+        detail = String(parsed?.detail || parsed?.error || detail).trim();
+      } catch {
+        // Keep the plain response body.
+      }
+      throw new Error(detail || `打印文件生成失败（HTTP ${resp.status}）`);
+    }
+    const blob = await resp.blob();
+    if (!blob.size) throw new Error("打印文件生成后为空");
+    return blob;
+  } catch (error) {
+    if (timeout.didTimeout() || error?.name === "TimeoutError") {
+      throw new Error("值班关注点打印文件生成超时，请稍后重试");
+    }
+    throw error;
+  } finally {
+    timeout.dispose();
+  }
+}
+
+export async function regenerateHandoverReviewStationHDutyFocusImageApi(payload = {}) {
+  return apiJsonWithTimeout("/api/handover/review/station-h/duty-focus/image/regenerate", {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+  }, 240000);
+}
+
+export function buildHandoverReviewStationHDutyFocusImageUrl(params = {}) {
+  return appendQuery("/api/handover/review/station-h/duty-focus/image", params);
+}
+
+export async function downloadHandoverReviewStationHDutyFocusImageApi(params = {}) {
+  const url = buildHandoverReviewStationHDutyFocusImageUrl(params);
+  const timeout = buildTimeoutSignal(120000, url);
+  try {
+    const resp = await fetch(url, timeout.signal ? { signal: timeout.signal } : {});
+    if (!resp.ok) {
+      const text = await resp.text();
+      let detail = String(text || "").trim();
+      try {
+        const parsed = detail ? JSON.parse(detail) : {};
+        detail = String(parsed?.detail || parsed?.error || detail).trim();
+      } catch {
+        // Keep the plain response body.
+      }
+      throw new Error(detail || `值班关注点图片读取失败（HTTP ${resp.status}）`);
+    }
+    const blob = await resp.blob();
+    if (!blob.size) throw new Error("值班关注点图片为空");
+    return blob;
+  } catch (error) {
+    if (timeout.didTimeout() || error?.name === "TimeoutError") {
+      throw new Error("值班关注点图片读取超时，请稍后重试");
+    }
+    throw error;
+  } finally {
+    timeout.dispose();
+  }
+}
+
 export async function parseHandoverReview110StationFileApi(form) {
   const resp = await fetch("/api/handover/review/110-station/parse", {
     method: "POST",

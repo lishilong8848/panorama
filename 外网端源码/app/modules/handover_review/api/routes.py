@@ -19,6 +19,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
+from starlette.background import BackgroundTask
 
 from app.config.handover_segment_store import building_code_from_name, handover_building_segment_path
 from app.config.settings_loader import (
@@ -66,6 +67,13 @@ from handover_log_module.service.station_h_review_selection_service import (
     station_h_filter_duty_people,
     station_h_normalize_duty_people,
 )
+from handover_log_module.service.station_h_duty_focus_service import (
+    StationHDutyFocusError,
+    StationHDutyFocusService,
+)
+from handover_log_module.service.station_h_signature_service import (
+    StationHSignatureService,
+)
 
 
 router = APIRouter(tags=["handover_review"])
@@ -82,6 +90,11 @@ _REVIEW_HISTORY_CACHE_TTL_SEC = 15.0
 _REVIEW_DOCUMENT_CACHE_MAX_ENTRIES = 20
 _REVIEW_BOOTSTRAP_CACHE_MAX_ENTRIES = 20
 _REVIEW_HISTORY_CACHE_MAX_ENTRIES = 50
+_STATION_H_ROSTER_REFRESH_LOCK = threading.Lock()
+_STATION_H_ROSTER_REFRESH_INFLIGHT: set[str] = set()
+_STATION_H_ROSTER_REFRESH_LAST_STARTED: dict[str, float] = {}
+_STATION_H_ROSTER_REFRESH_ERRORS: dict[str, str] = {}
+_STATION_H_ROSTER_REFRESH_COOLDOWN_SEC = 30.0
 _STATION_110_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 _HEALTH_COMPONENT_CACHE_ATTR = "_health_component_cache"
@@ -175,6 +188,10 @@ _REVIEW_BOOTSTRAP_API_EXECUTOR = ThreadPoolExecutor(
     max_workers=8,
     thread_name_prefix="handover-review-bootstrap",
 )
+_STATION_H_ROSTER_REFRESH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="station-h-roster-refresh",
+)
 _REVIEW_SLOW_LOG_INTERVAL_SEC = 60.0
 _REVIEW_SLOW_LOG_LOCK = threading.Lock()
 _REVIEW_SLOW_LOG_STATE: dict[str, dict[str, Any]] = {}
@@ -183,6 +200,7 @@ _REVIEW_SLOW_LOG_STATE: dict[str, dict[str, Any]] = {}
 def shutdown_handover_review_api_executor() -> None:
     _REVIEW_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _REVIEW_BOOTSTRAP_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _STATION_H_ROSTER_REFRESH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 async def _run_review_api(func, *, executor):
@@ -1071,17 +1089,36 @@ def _build_station_110_upload_service(container) -> Handover110StationUploadServ
 
 
 def _build_station_h_review_selection_service(container) -> StationHReviewSelectionService:
-    app_dir = None
-    try:
-        config_path = Path(str(getattr(container, "config_path", "") or "")).resolve()
-        if str(config_path):
-            app_dir = config_path.parent
-    except Exception:
-        app_dir = None
     return StationHReviewSelectionService(
         _handover_cfg(container),
         app_state_repository=getattr(container, "app_state_repository", None),
-        app_dir=app_dir,
+        app_dir=_station_h_service_app_dir(container),
+    )
+
+
+def _station_h_service_app_dir(container) -> Path | None:
+    try:
+        config_path_text = str(getattr(container, "config_path", "") or "").strip()
+        return Path(config_path_text).resolve().parent if config_path_text else None
+    except Exception:
+        return None
+
+
+def _build_station_h_signature_service(container) -> StationHSignatureService:
+    return StationHSignatureService(
+        _handover_cfg(container),
+        app_state_repository=getattr(container, "app_state_repository", None),
+        app_dir=_station_h_service_app_dir(container),
+        emit_log=getattr(container, "add_system_log", None),
+    )
+
+
+def _build_station_h_duty_focus_service(container) -> StationHDutyFocusService:
+    return StationHDutyFocusService(
+        _handover_cfg(container),
+        review_service=_build_review_session_service(container),
+        signature_service=_build_station_h_signature_service(container),
+        emit_log=getattr(container, "add_system_log", None),
     )
 
 
@@ -3736,7 +3773,8 @@ def _station_h_roster_candidate_people(
     handover_cfg: Dict[str, Any],
     duty_date: str,
     duty_shift: str,
-) -> tuple[list[str], list[str], list[str], str]:
+    allow_remote: bool = True,
+) -> tuple[list[str], list[str], list[str], str, int]:
     roster_repo = ShiftRosterRepository(handover_cfg)
     emit_log = getattr(container, "add_system_log", print)
     try:
@@ -3745,9 +3783,10 @@ def _station_h_roster_candidate_people(
             duty_date=duty_date,
             duty_shift=duty_shift,
             emit_log=emit_log,
+            allow_remote=allow_remote,
         )
     except Exception as exc:  # noqa: BLE001
-        return [], [], [], f"排班候选读取失败: {exc}"
+        return [], [], [], f"排班候选读取失败: {exc}", 0
     current_raw = getattr(assignment, "current_people", "")
     long_day_raw = ""
     try:
@@ -3756,13 +3795,84 @@ def _station_h_roster_candidate_people(
             duty_date=duty_date,
             duty_shift=duty_shift,
             emit_log=emit_log,
+            allow_remote=allow_remote,
         )
     except Exception as exc:  # noqa: BLE001
         emit_log(f"[交接班][H楼审核页] H楼长白排班读取失败，将按空白长白岗继续: {exc}")
     current_candidates = station_h_filter_duty_people(current_raw)
     next_candidates = station_h_filter_duty_people(getattr(assignment, "next_people", ""))
     long_day_candidates = station_h_default_long_day_people_from_roster(long_day_raw)
-    return current_candidates, next_candidates, long_day_candidates, ""
+    source_records = int(getattr(assignment, "source_records", 0) or 0)
+    return current_candidates, next_candidates, long_day_candidates, "", source_records
+
+
+def _schedule_station_h_roster_refresh(
+    container,
+    *,
+    handover_cfg: Dict[str, Any],
+    duty_date: str,
+    duty_shift: str,
+) -> bool:
+    batch_key = station_h_build_batch_key(duty_date, duty_shift)
+    now = time.monotonic()
+    with _STATION_H_ROSTER_REFRESH_LOCK:
+        if batch_key in _STATION_H_ROSTER_REFRESH_INFLIGHT:
+            return True
+        last_started = float(_STATION_H_ROSTER_REFRESH_LAST_STARTED.get(batch_key, 0.0) or 0.0)
+        if last_started > 0 and now - last_started < _STATION_H_ROSTER_REFRESH_COOLDOWN_SEC:
+            return False
+        _STATION_H_ROSTER_REFRESH_INFLIGHT.add(batch_key)
+        _STATION_H_ROSTER_REFRESH_LAST_STARTED[batch_key] = now
+
+    def _runner() -> None:
+        error = ""
+        try:
+            current, next_people, long_day, query_error, source_records = _station_h_roster_candidate_people(
+                container,
+                handover_cfg=handover_cfg,
+                duty_date=duty_date,
+                duty_shift=duty_shift,
+                allow_remote=True,
+            )
+            error = query_error
+            if not error and source_records <= 0:
+                error = "未读取到排班记录"
+            emit_log = getattr(container, "add_system_log", None)
+            if callable(emit_log):
+                if error:
+                    emit_log(f"[交接班][H楼审核页] 排班后台刷新失败 batch={batch_key}, error={error}")
+                else:
+                    emit_log(
+                        "[交接班][H楼审核页] 排班后台刷新完成 "
+                        f"batch={batch_key}, current={len(current)}, next={len(next_people)}, long_day={len(long_day)}"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+            emit_log = getattr(container, "add_system_log", None)
+            if callable(emit_log):
+                emit_log(f"[交接班][H楼审核页] 排班后台刷新异常 batch={batch_key}, error={exc}")
+        finally:
+            with _STATION_H_ROSTER_REFRESH_LOCK:
+                _STATION_H_ROSTER_REFRESH_INFLIGHT.discard(batch_key)
+                if error:
+                    _STATION_H_ROSTER_REFRESH_ERRORS[batch_key] = error
+                else:
+                    _STATION_H_ROSTER_REFRESH_ERRORS.pop(batch_key, None)
+                while len(_STATION_H_ROSTER_REFRESH_LAST_STARTED) > 8:
+                    oldest = next(iter(_STATION_H_ROSTER_REFRESH_LAST_STARTED), None)
+                    if oldest is None:
+                        break
+                    _STATION_H_ROSTER_REFRESH_LAST_STARTED.pop(oldest, None)
+                    _STATION_H_ROSTER_REFRESH_ERRORS.pop(oldest, None)
+
+    try:
+        _STATION_H_ROSTER_REFRESH_EXECUTOR.submit(_runner)
+    except RuntimeError as exc:
+        with _STATION_H_ROSTER_REFRESH_LOCK:
+            _STATION_H_ROSTER_REFRESH_INFLIGHT.discard(batch_key)
+            _STATION_H_ROSTER_REFRESH_ERRORS[batch_key] = str(exc)
+        return False
+    return True
 
 
 def _station_h_status_payload(
@@ -3790,17 +3900,20 @@ def _station_h_status_payload(
     roster_next_candidates: list[str] = []
     roster_long_day_candidates: list[str] = []
     roster_candidate_error = ""
+    roster_source_records = 0
     if not selected_current_people or not selected_next_people or not bool(saved_selection):
         (
             roster_current_candidates,
             roster_next_candidates,
             roster_long_day_candidates,
             roster_candidate_error,
+            roster_source_records,
         ) = _station_h_roster_candidate_people(
             container,
             handover_cfg=handover_cfg,
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
+            allow_remote=False,
         )
         if not selected_current_people:
             selected_current = roster_current_candidates
@@ -3813,6 +3926,47 @@ def _station_h_status_payload(
         if not bool(saved_selection):
             selected_long_day = roster_long_day_candidates
     selected_long_day_people = split_station_h_people(selected_long_day)
+    needs_roster_defaults = not selected_current_people or not selected_next_people or not saved_selection
+    roster_refresh_pending = bool(roster_source_records <= 0 and needs_roster_defaults)
+    roster_refreshing = False
+    if roster_refresh_pending:
+        roster_refreshing = _schedule_station_h_roster_refresh(
+            container,
+            handover_cfg=handover_cfg,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+        )
+    with _STATION_H_ROSTER_REFRESH_LOCK:
+        roster_refresh_error = str(_STATION_H_ROSTER_REFRESH_ERRORS.get(batch_key, "") or "").strip()
+    focus_selection = {
+        **resolved_selection,
+        "current_people": selected_current_people,
+        "current_people_text": join_station_h_people(selected_current_people),
+        "next_people": selected_next_people,
+        "next_people_text": join_station_h_people(selected_next_people),
+        "long_day_people": selected_long_day_people,
+        "long_day_people_text": join_station_h_people(selected_long_day_people),
+    }
+    try:
+        duty_focus = _build_station_h_duty_focus_service(container).build_status(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            selection=focus_selection,
+        )
+    except Exception as exc:  # noqa: BLE001
+        duty_focus = {
+            "date_text": duty_date_text,
+            "shift": duty_shift_text,
+            "rows": [],
+            "checks": {},
+            "check_items": [],
+            "mode_options": ["制冷", "预冷", "板换", "△"],
+            "signatures": {"handover": {}, "takeover": {}},
+            "signature_directory": {"people": [], "refreshed_at": "", "error": ""},
+            "print_ready": False,
+            "print_block_reason": f"值班关注点加载失败: {exc}",
+            "error": str(exc),
+        }
     return {
         "ok": True,
         "building": "H楼",
@@ -3851,8 +4005,12 @@ def _station_h_status_payload(
         },
         "candidate_source": {
             "duty_people": "saved" if bool(saved_selection) else "roster_default",
-            "error": roster_candidate_error,
+            "error": roster_candidate_error or roster_refresh_error,
+            "refresh_pending": roster_refresh_pending,
+            "refreshing": roster_refreshing,
+            "retry_after_ms": 4000 if roster_refresh_pending else 0,
         },
+        "duty_focus": duty_focus,
     }
 
 
@@ -3907,6 +4065,19 @@ def handover_review_station_h_save(
     current_people = body.get("current_people", body.get("current_people_text", ""))
     next_people = body.get("next_people", body.get("next_people_text", ""))
     long_day_people = body.get("long_day_people", body.get("long_day_people_text", ""))
+    duty_focus = body.get("duty_focus") if "duty_focus" in body else None
+    if duty_focus is not None:
+        if not isinstance(duty_focus, dict):
+            raise HTTPException(status_code=400, detail="H楼值班关注点数据格式无效")
+        duty_focus = StationHDutyFocusService.normalize_submitted_focus(
+            duty_focus,
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            selection={
+                "current_people": current_people,
+                "next_people": next_people,
+            },
+        )
     selection_service = _build_station_h_review_selection_service(container)
     try:
         saved = selection_service.save_selection(
@@ -3915,6 +4086,7 @@ def handover_review_station_h_save(
             current_people=current_people,
             next_people=next_people,
             long_day_people=long_day_people,
+            duty_focus=duty_focus,
             source="manual",
         )
     except ValueError as exc:
@@ -3932,6 +4104,169 @@ def handover_review_station_h_save(
     status = _station_h_status_payload(container, duty_date=duty_date_text, duty_shift=duty_shift_text)
     status["saved_selection"] = saved
     return status
+
+
+@router.post("/api/handover/review/station-h/signatures/refresh")
+@_dedicated_review_endpoint
+def handover_review_station_h_refresh_signatures(
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
+    duty_date_text, duty_shift_text = _normalize_duty_context(
+        str(body.get("duty_date", "") or "").strip(),
+        str(body.get("duty_shift", "") or "").strip().lower(),
+    )
+    if not duty_date_text or not duty_shift_text:
+        duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
+    try:
+        directory = _build_station_h_signature_service(container).refresh_directory()
+        status = _station_h_status_payload(container, duty_date=duty_date_text, duty_shift=duty_shift_text)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"签名刷新失败: {exc}") from exc
+    status["signature_refresh"] = {
+        "refreshed_at": str(directory.get("refreshed_at", "") or ""),
+        "count": len(directory.get("people", [])) if isinstance(directory.get("people", []), list) else 0,
+    }
+    return status
+
+
+@router.get("/api/handover/review/station-h/duty-focus/print")
+@_dedicated_review_endpoint
+def handover_review_station_h_print_duty_focus(
+    request: Request,
+    duty_date: str = "",
+    duty_shift: str = "",
+) -> FileResponse:
+    container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
+    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
+    if not duty_date_text or not duty_shift_text:
+        duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
+    selection = _build_station_h_review_selection_service(container).resolve_selection(
+        duty_date=duty_date_text,
+        duty_shift=duty_shift_text,
+    )
+    service = _build_station_h_duty_focus_service(container)
+    try:
+        focus = service.build_status(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            selection=selection,
+        )
+        if not bool(focus.get("print_ready", False)):
+            raise StationHDutyFocusError(str(focus.get("print_block_reason", "") or "签名不完整，暂不能打印"))
+        pdf_path = service.build_print_document(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            focus=focus,
+        )
+    except StationHDutyFocusError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"值班关注点打印文件生成失败: {exc}") from exc
+    shift_label = _shift_label(duty_shift_text)
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=f"值班关注点_{duty_date_text}_{shift_label}.pdf",
+        content_disposition_type="inline",
+        background=BackgroundTask(Path(pdf_path).unlink, missing_ok=True),
+    )
+
+
+@router.post("/api/handover/review/station-h/duty-focus/image/regenerate")
+@_dedicated_review_endpoint
+def handover_review_station_h_regenerate_duty_focus_image(
+    request: Request,
+    payload: Dict[str, Any] = Body(default={}),
+) -> Dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
+    duty_date_text, duty_shift_text = _normalize_duty_context(
+        str(body.get("duty_date", "") or "").strip(),
+        str(body.get("duty_shift", "") or "").strip().lower(),
+    )
+    if not duty_date_text or not duty_shift_text:
+        duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
+    selection = _build_station_h_review_selection_service(container).resolve_selection(
+        duty_date=duty_date_text,
+        duty_shift=duty_shift_text,
+    )
+    service = _build_station_h_duty_focus_service(container)
+    try:
+        focus = service.build_status(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            selection=selection,
+        )
+        if not bool(focus.get("print_ready", False)):
+            raise StationHDutyFocusError(
+                str(focus.get("print_block_reason", "") or "签名不完整，暂不能生成图片")
+            )
+        generated = service.build_image_document(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            focus=focus,
+            force=bool(body.get("force", True)),
+        )
+    except StationHDutyFocusError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"值班关注点图片生成失败: {exc}") from exc
+    return {
+        "status": str(generated.get("status", "current") or "current"),
+        "available": bool(generated.get("available", False)),
+        "current": bool(generated.get("current", False)),
+        "generated": bool(generated.get("generated", False)),
+        "generated_at": str(generated.get("generated_at", "") or ""),
+        "content_hash": str(generated.get("content_hash", "") or ""),
+        "image_sha256": str(generated.get("image_sha256", "") or ""),
+    }
+
+
+@router.get("/api/handover/review/station-h/duty-focus/image")
+@_dedicated_review_endpoint
+def handover_review_station_h_duty_focus_image(
+    request: Request,
+    duty_date: str = "",
+    duty_shift: str = "",
+) -> FileResponse:
+    container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
+    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
+    if not duty_date_text or not duty_shift_text:
+        duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
+    selection = _build_station_h_review_selection_service(container).resolve_selection(
+        duty_date=duty_date_text,
+        duty_shift=duty_shift_text,
+    )
+    service = _build_station_h_duty_focus_service(container)
+    try:
+        focus = service.build_status(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            selection=selection,
+        )
+        image_path = service.current_image_path(
+            duty_date=duty_date_text,
+            duty_shift=duty_shift_text,
+            focus=focus,
+        )
+    except StationHDutyFocusError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"值班关注点图片读取失败: {exc}") from exc
+    shift_label = _shift_label(duty_shift_text)
+    return FileResponse(
+        image_path,
+        media_type="image/png",
+        filename=f"值班关注点_{duty_date_text}_{shift_label}.png",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @router.get("/api/handover/review/110-station/status")

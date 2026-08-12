@@ -54,6 +54,10 @@ _SOURCE_FRONTEND_DIST_PREFIXES = (
     "web/frontend/dist/",
     "web_frontend/dist/",
 )
+_SOURCE_SNAPSHOT_ROOT_STATIC_FILES = {
+    "runtime_dependency_lock.json",
+    "值班关注点模板.xlsx",
+}
 _SOURCE_GIT_HEAD_WATCH_INTERVAL_SEC = 10
 _SOURCE_SNAPSHOT_EXCLUDED_DIRS = {
     ".git",
@@ -179,7 +183,12 @@ def _is_frontend_dist_static_relpath(rel_path: Path | str) -> bool:
 
 
 def _is_source_snapshot_relpath(rel_path: Path | str) -> bool:
-    return _is_python_source_relpath(rel_path) or _is_frontend_dist_static_relpath(rel_path)
+    rel_text = _normalize_zip_relpath(rel_path)
+    return (
+        _is_python_source_relpath(rel_path)
+        or _is_frontend_dist_static_relpath(rel_path)
+        or rel_text in _SOURCE_SNAPSHOT_ROOT_STATIC_FILES
+    )
 
 
 def _default_node_id(role_mode: Any) -> str:
@@ -945,7 +954,13 @@ class UpdaterService:
     def _git_tracked_source_snapshot_files(self) -> List[Path]:
         if self.update_mode != "git_pull" or not self.git_available or not self.git_repo_detected:
             return []
-        ret = self._run_git("ls-files", "*.py", "web/frontend/dist", "web_frontend/dist")
+        ret = self._run_git(
+            "ls-files",
+            "*.py",
+            "web/frontend/dist",
+            "web_frontend/dist",
+            *sorted(_SOURCE_SNAPSHOT_ROOT_STATIC_FILES),
+        )
         if ret.returncode != 0:
             raise RuntimeError((ret.stderr or ret.stdout or "git ls-files 失败").strip())
         output: List[Path] = []

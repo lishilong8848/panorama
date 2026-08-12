@@ -558,6 +558,7 @@ class ShiftRosterRepository:
         source_cfg: Dict[str, Any],
         loader: Callable[[], List[Dict[str, Any]]],
         emit_log: Callable[[str], None],
+        allow_remote: bool = True,
     ) -> List[Dict[str, Any]]:
         app_token = str(source_cfg.get("app_token", "")).strip()
         table_id = str(source_cfg.get("table_id", "")).strip()
@@ -573,7 +574,8 @@ class ShiftRosterRepository:
             if memory_hit or cache_key in self._fetched_empty_cache_keys:
                 emit_log(f"[交接班][{namespace}] 命中内存缓存: marker={cache_scope}, records={len(memory_hit)}")
                 return [dict(x) for x in memory_hit if isinstance(x, dict)]
-            emit_log(f"[交接班][{namespace}] 内存缓存为空，回查飞书: marker={cache_scope}")
+            suffix = "，回查飞书" if allow_remote else ""
+            emit_log(f"[交接班][{namespace}] 内存缓存为空{suffix}: marker={cache_scope}")
 
         cached_records = cache_store.get_feishu_cached_records(namespace=namespace, cache_key=cache_key)
         if isinstance(cached_records, list):
@@ -581,7 +583,11 @@ class ShiftRosterRepository:
                 self._memory_records_cache[cache_key] = [dict(x) for x in cached_records if isinstance(x, dict)]
                 emit_log(f"[交接班][{namespace}] 命中文件缓存: marker={cache_scope}, records={len(cached_records)}")
                 return [dict(x) for x in cached_records if isinstance(x, dict)]
-            emit_log(f"[交接班][{namespace}] 文件缓存为空，回查飞书: marker={cache_scope}")
+            suffix = "，回查飞书" if allow_remote else ""
+            emit_log(f"[交接班][{namespace}] 文件缓存为空{suffix}: marker={cache_scope}")
+
+        if not allow_remote:
+            return []
 
         fresh = loader()
         normalized = [dict(x) for x in fresh if isinstance(x, dict)]
@@ -621,6 +627,7 @@ class ShiftRosterRepository:
         duty_date: str,
         duty_shift: str,
         emit_log: Callable[[str], None],
+        allow_remote: bool = True,
     ) -> List[Dict[str, Any]]:
         source = cfg.get("source", {})
         table_id = str(source.get("table_id", "")).strip()
@@ -646,6 +653,7 @@ class ShiftRosterRepository:
             source_cfg=source,
             loader=_loader,
             emit_log=emit_log,
+            allow_remote=allow_remote,
         )
 
     def _load_records_from_source(
@@ -765,6 +773,7 @@ class ShiftRosterRepository:
         duty_date: str,
         duty_shift: str,
         emit_log: Callable[[str], None] = print,
+        allow_remote: bool = True,
     ) -> ShiftRosterAssignment:
         cfg = self._normalize_cfg()
         if not bool(cfg.get("enabled", True)):
@@ -774,6 +783,7 @@ class ShiftRosterRepository:
             duty_date=duty_date,
             duty_shift=duty_shift,
             emit_log=emit_log,
+            allow_remote=allow_remote,
         )
         result = self._resolve_from_records(
             records=records,
@@ -795,6 +805,7 @@ class ShiftRosterRepository:
         duty_date: str,
         duty_shift: str,
         emit_log: Callable[[str], None] = print,
+        allow_remote: bool = True,
     ) -> str:
         cfg = self._normalize_cfg()
         if not bool(cfg.get("enabled", True)):
@@ -804,6 +815,7 @@ class ShiftRosterRepository:
             duty_date=duty_date,
             duty_shift=duty_shift,
             emit_log=emit_log,
+            allow_remote=allow_remote,
         )
         fields_cfg = cfg.get("fields", {})
         match_cfg = cfg.get("match", {})
