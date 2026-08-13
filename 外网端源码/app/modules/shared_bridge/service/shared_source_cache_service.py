@@ -5,6 +5,7 @@ import concurrent.futures
 import copy
 import hashlib
 import json
+import math
 import threading
 import time
 from datetime import datetime, time as dt_time, timedelta
@@ -4365,12 +4366,26 @@ class SharedSourceCacheService:
     def _normalize_alarm_cell_text(value: Any) -> str:
         if value is None:
             return ""
+        if isinstance(value, float) and not math.isfinite(value):
+            return ""
+        if isinstance(value, Decimal) and not value.is_finite():
+            return ""
         if isinstance(value, datetime):
             return value.strftime("%Y-%m-%d %H:%M:%S")
         if isinstance(value, dt_time):
             return value.strftime("%H:%M:%S")
         text = str(value).strip()
-        if text in {"--", "-"}:
+        if text in {"--", "-"} or text.lower() in {
+            "nan",
+            "+nan",
+            "-nan",
+            "inf",
+            "+inf",
+            "-inf",
+            "infinity",
+            "+infinity",
+            "-infinity",
+        }:
             return ""
         return text
 
@@ -4689,9 +4704,18 @@ class SharedSourceCacheService:
             number = Decimal(normalized)
         except (InvalidOperation, ValueError):
             return ""
+        if not number.is_finite():
+            return ""
         if number == number.to_integral():
             return int(number)
         return float(number)
+
+    @staticmethod
+    def _validate_alarm_upload_records_json(records: List[Dict[str, Any]]) -> None:
+        try:
+            json.dumps(records, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"告警上传数据包含非 JSON 安全值，未执行清表: {exc}") from exc
 
     @staticmethod
     def _map_alarm_upload_field_value(source_key: str, value: Any) -> Any:
@@ -5178,6 +5202,7 @@ class SharedSourceCacheService:
             }
 
         try:
+            self._validate_alarm_upload_records_json(aggregated_records)
             target = resolved_target or self._resolve_alarm_event_upload_target()
             client = self._build_alarm_event_bitable_client(target)
             table_id = str(target.get("table_id", "") or "").strip()

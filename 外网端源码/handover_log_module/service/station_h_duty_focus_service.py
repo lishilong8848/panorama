@@ -411,6 +411,8 @@ class StationHDutyFocusService:
             str(row): _bounded_text(raw_checks.get(str(row), base_checks.get(str(row), "")), 500)
             for row in STATION_H_DUTY_FOCUS_CHECK_ROWS
         }
+        if not checks["19"]:
+            checks["19"] = _bounded_text(base_checks.get("19"), 500)
         base_signatures = fallback.get("signatures", {}) if isinstance(fallback.get("signatures", {}), dict) else {}
         raw_signatures = payload.get("signatures", {}) if isinstance(payload.get("signatures", {}), dict) else {}
         base_auto_source = (

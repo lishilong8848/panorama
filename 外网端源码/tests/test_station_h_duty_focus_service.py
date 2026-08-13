@@ -176,6 +176,52 @@ def test_auto_focus_uses_same_zone_changes_and_shared_temperature(tmp_path):
     assert service.review_service.single_calls == 1
 
 
+def test_saved_empty_temperature_is_filled_from_shared_temperature(tmp_path):
+    service = _service(tmp_path)
+    saved = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={"current_people": ["张三"], "next_people": ["李四"]},
+    )
+    saved["checks"]["11"] = "人工确认"
+    saved["checks"]["19"] = ""
+
+    focus = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={
+            "current_people": ["张三"],
+            "next_people": ["李四"],
+            "duty_focus": saved,
+        },
+    )
+
+    assert focus["checks"]["11"] == "人工确认"
+    assert focus["checks"]["19"] == "27.7℃/25.8℃"
+
+
+def test_saved_nonempty_temperature_is_not_overwritten(tmp_path):
+    service = _service(tmp_path)
+    saved = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={"current_people": ["张三"], "next_people": ["李四"]},
+    )
+    saved["checks"]["19"] = "28.6℃/24.2℃"
+
+    focus = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={
+            "current_people": ["张三"],
+            "next_people": ["李四"],
+            "duty_focus": saved,
+        },
+    )
+
+    assert focus["checks"]["19"] == "28.6℃/24.2℃"
+
+
 def test_empty_signature_cache_refreshes_and_matches_current_people(tmp_path):
     class _RefreshingSignatureService(_SignatureService):
         def __init__(self):
