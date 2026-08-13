@@ -1589,6 +1589,22 @@ class SharedBridgeRuntimeService:
         item["file_verified_by"] = "external_explicit_path"
         return True
 
+    @classmethod
+    def _http_source_index_mirror_is_fresh(cls, item: Dict[str, Any], *, ttl_sec: float = 300.0) -> bool:
+        if str(item.get("mirror_source", "") or "").strip() != "external_app_state":
+            return True
+        metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+        for value in (
+            item.get("mirrored_at"),
+            metadata.get("mirrored_at"),
+            item.get("file_verified_at"),
+            metadata.get("file_verified_at"),
+        ):
+            verified_at = cls._parse_source_index_time(value)
+            if verified_at != datetime.min:
+                return (datetime.now() - verified_at).total_seconds() <= max(1.0, float(ttl_sec))
+        return False
+
     def _shared_relative_path_from_index_path(self, path_text: str, *, source_family: str = "") -> str:
         text = str(path_text or "").strip().replace("\\", "/")
         text = re.sub(r"/+", "/", text).strip("/")
@@ -1776,6 +1792,7 @@ class SharedBridgeRuntimeService:
         target_buildings: List[str],
         query_specs: List[Dict[str, str]],
         target_bucket: str,
+        duty_shift: str,
         status_text: str,
         limit_per_building: int,
     ) -> List[Dict[str, Any]]:
@@ -1788,6 +1805,12 @@ class SharedBridgeRuntimeService:
             for spec in query_specs if isinstance(spec, dict) and str(spec.get("bucket_or_date", "") or "").strip()
         ]
         status_filter_all = str(status_text or "").strip().lower() in {"all", "*"}
+        requested_shift = str(duty_shift or "").strip().lower()
+        requested_bucket_kinds = {
+            str(spec.get("bucket_kind", "") or "").strip().lower()
+            for spec in query_specs
+            if isinstance(spec, dict) and str(spec.get("bucket_kind", "") or "").strip()
+        }
         try:
             rows = reader(
                 source_family=str(source_family or "").strip().lower(),
@@ -1808,9 +1831,18 @@ class SharedBridgeRuntimeService:
             item_status = str(item.get("status", "") or "").strip().lower()
             if not status_filter_all and item_status != str(status_text or "").strip().lower():
                 continue
-            if item_status == "ready" and not self._ensure_http_source_index_entry_file_verified(item):
-                continue
+            if item_status == "ready":
+                if not self._http_source_index_mirror_is_fresh(item):
+                    continue
+                if not self._ensure_http_source_index_entry_file_verified(item):
+                    continue
             if str(item.get("source_family", "") or "").strip().lower() != str(source_family or "").strip().lower():
+                continue
+            item_shift = str(item.get("duty_shift", "") or "").strip().lower()
+            if requested_shift and item_shift != requested_shift:
+                continue
+            item_bucket_kind = str(item.get("bucket_kind", "") or "").strip().lower()
+            if requested_bucket_kinds and item_bucket_kind and item_bucket_kind not in requested_bucket_kinds:
                 continue
             building = str(item.get("building", "") or "").strip()
             if target_buildings and building not in target_buildings:
@@ -1864,6 +1896,7 @@ class SharedBridgeRuntimeService:
                 target_buildings=target_buildings,
                 query_specs=query_specs,
                 target_bucket=target_bucket,
+                duty_shift=duty_shift,
                 status_text=status_text,
                 limit_per_building=limit_per_building,
             )
@@ -1879,6 +1912,7 @@ class SharedBridgeRuntimeService:
                 target_buildings=target_buildings,
                 query_specs=query_specs,
                 target_bucket=target_bucket,
+                duty_shift=duty_shift,
                 status_text=status_text,
                 limit_per_building=limit_per_building,
             )
@@ -1922,6 +1956,7 @@ class SharedBridgeRuntimeService:
                         target_buildings=target_buildings,
                         query_specs=query_specs,
                         target_bucket=target_bucket,
+                        duty_shift=duty_shift,
                         status_text=status_text,
                         limit_per_building=limit_per_building,
                     )
@@ -2035,6 +2070,7 @@ class SharedBridgeRuntimeService:
                 target_buildings=target_buildings,
                 query_specs=query_specs,
                 target_bucket=target_bucket,
+                duty_shift=duty_shift,
                 status_text=status_text,
                 limit_per_building=limit_per_building,
             )

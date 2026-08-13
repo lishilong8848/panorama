@@ -247,26 +247,19 @@ class HandoverXlsxWriteQueueService:
 
     def _worker_loop(self, building: str) -> None:
         store = self._store(building)
-        empty_rounds = 0
         try:
             while True:
                 try:
                     job = store.claim_next_xlsx_write_job()
                 except Exception as exc:  # noqa: BLE001
-                    empty_rounds = 0
                     self.emit_log(
                         f"[交接班][xlsx队列] worker领取任务异常，稍后重试 building={building}, error={exc}"
                     )
                     time.sleep(1.0)
                     continue
                 if not job:
-                    empty_rounds += 1
-                    if empty_rounds >= 6:
-                        self.emit_log(f"[交接班][xlsx队列] worker已退出 building={building}")
-                        return
                     time.sleep(0.5)
                     continue
-                empty_rounds = 0
                 started = time.perf_counter()
                 success = True
                 error = ""

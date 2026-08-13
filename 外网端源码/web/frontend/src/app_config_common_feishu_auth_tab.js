@@ -23,7 +23,7 @@
     <div class="content-card config-panel-card">
       <div class="section-title">应用凭证</div>
       <div class="form-row"><label class="label">飞书应用编号</label><input type="text" v-model="config.feishu.app_id" /></div>
-      <div class="form-row"><label class="label">飞书应用密钥</label><input type="text" v-model="config.feishu.app_secret" /></div>
+      <div class="form-row"><label class="label">飞书应用密钥</label><input type="password" autocomplete="new-password" v-model="config.feishu.app_secret" /></div>
     </div>
 
     <div class="content-card config-panel-card">

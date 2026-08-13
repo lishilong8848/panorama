@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 
 from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+from app.modules.feishu.service.feishu_token_manager import feishu_token_manager
 
 
 class FeishuBitableClient:
@@ -133,27 +134,14 @@ class FeishuBitableClient:
             raise last_exc
         raise RuntimeError("飞书请求失败: 未知错误")
 
-    def refresh_token(self, force: bool = True) -> str:
-        if self._tenant_access_token and not force:
-            return self._tenant_access_token
-
-        try:
-            response = self._request_with_retry(
-                "POST",
-                self.AUTH_URL,
-                json={"app_id": self.app_id, "app_secret": self.app_secret},
-                headers={"Content-Type": "application/json; charset=utf-8", "Connection": "close"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"飞书获取token失败: {exc}") from exc
-
-        response.raise_for_status()
-        data = response.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"飞书获取token失败: {data}")
-        token = data["tenant_access_token"]
-        self._tenant_access_token = token
-        return token
+    def refresh_token(self, force: bool = False) -> str:
+        self._tenant_access_token = feishu_token_manager.get_token(
+            app_id=self.app_id,
+            app_secret=self.app_secret,
+            timeout=self.timeout,
+            force_refresh=force,
+        )
+        return self._tenant_access_token
 
     def _request_json_with_auth_retry(
         self,
@@ -172,8 +160,7 @@ class FeishuBitableClient:
         for api_attempt in range(1, api_attempts + 1):
             should_retry_api = False
             for auth_attempt in range(2):
-                if not self._tenant_access_token:
-                    self.refresh_token(force=False)
+                self.refresh_token(force=False)
 
                 headers: Dict[str, str] = {
                     "Authorization": f"Bearer {self._tenant_access_token}",

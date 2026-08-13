@@ -25,6 +25,7 @@ _RUNNER_ATTR = "_internal_bridge_http_runner"
 _SOURCE_INDEX_MAX_CONCURRENT_REQUESTS = 8
 _SOURCE_INDEX_REQUEST_SEMAPHORE = threading.BoundedSemaphore(_SOURCE_INDEX_MAX_CONCURRENT_REQUESTS)
 _SOURCE_INDEX_BUSY_RETRY_AFTER_SEC = 15
+_RUNNER_INIT_LOCK = threading.Lock()
 
 
 def _source_index_busy_payload(*, scope: str) -> Dict[str, Any]:
@@ -82,12 +83,16 @@ def _runner(request: Request) -> InternalBridgeHttpTaskRunner:
     existing = getattr(request.app.state, _RUNNER_ATTR, None)
     if isinstance(existing, InternalBridgeHttpTaskRunner):
         return existing
-    runner = InternalBridgeHttpTaskRunner(
-        runtime_service=service,
-        emit_log=lambda text: container.add_system_log(text, suppress_alert_upload=True),
-    )
-    setattr(request.app.state, _RUNNER_ATTR, runner)
-    return runner
+    with _RUNNER_INIT_LOCK:
+        existing = getattr(request.app.state, _RUNNER_ATTR, None)
+        if isinstance(existing, InternalBridgeHttpTaskRunner):
+            return existing
+        runner = InternalBridgeHttpTaskRunner(
+            runtime_service=service,
+            emit_log=lambda text: container.add_system_log(text, suppress_alert_upload=True),
+        )
+        setattr(request.app.state, _RUNNER_ATTR, runner)
+        return runner
 
 
 def _runtime_config(request: Request) -> Dict[str, Any]:

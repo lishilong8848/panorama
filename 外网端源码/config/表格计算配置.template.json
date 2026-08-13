@@ -55,12 +55,12 @@
       "on_wifi_failure": true,
       "on_upload_failure": true,
       "task_failure_webhook_enabled": true,
-      "task_failure_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499",
+      "task_failure_webhook_url": "",
       "task_failure_webhook_timeout": 15
     },
     "feishu_auth": {
       "app_id": "cli_a9d1c9fe9d381cee",
-      "app_secret": "PCZSOMI9ITqFWUkqT5TtQcVljP0Sx48y",
+      "app_secret": "",
       "request_retry_count": 3,
       "request_retry_interval_sec": 2,
       "timeout": 30
@@ -1238,7 +1238,7 @@
         "fixed_table": "event_2026_02",
         "port": 3306,
         "host": "127.0.0.1",
-        "password": "123456",
+        "password": "",
         "user": "root",
         "database": "e_event",
         "table_mode": "fixed"

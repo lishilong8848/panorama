@@ -648,7 +648,7 @@ class ApschedulerSchedulerFacade:
             self.state["last_error"] = "" if status in {"submitted", "skipped", "accepted", "success"} else detail
             self.state["last_source"] = self.source_name
             self.state["last_duration_ms"] = max(0, int(duration_ms or 0))
-            if status in {"submitted", "accepted", "success"}:
+            if status in {"success", "ok"}:
                 self.state["last_success_at"] = self.state["last_attempt_at"]
         else:
             period = self._period(now)
@@ -657,11 +657,12 @@ class ApschedulerSchedulerFacade:
                 and self.state.get("last_attempt_period", "") == period
                 and self.state.get("last_status", "") == "failed"
             )
-            self.state["last_attempt_period"] = period
+            if status != "submitted":
+                self.state["last_attempt_period"] = period
             self.state["last_run_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
             self.state["last_status"] = status
             self.state["last_error"] = "" if status in {"submitted", "skipped", "accepted", "success"} else detail
-            if status in {"submitted", "accepted", "success", "ok"}:
+            if status in {"success", "ok"}:
                 self.state["last_success_period"] = period
             if was_retry:
                 self.state["retry_done_period"] = period

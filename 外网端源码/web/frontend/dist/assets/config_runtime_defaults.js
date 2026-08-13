@@ -152,8 +152,7 @@ function ensureRoot(cfg) {
   }
   if (!String(cfg.notify.task_failure_webhook_url || "").trim()) {
     cfg.notify.task_failure_webhook_url =
-      String(cfg.notify.task_success_webhook_url || "").trim() ||
-      "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499";
+      String(cfg.notify.task_success_webhook_url || "").trim();
   }
   if (typeof cfg.notify.task_failure_webhook_timeout !== "number") {
     cfg.notify.task_failure_webhook_timeout =

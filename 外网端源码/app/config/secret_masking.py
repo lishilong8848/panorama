@@ -7,7 +7,14 @@ from typing import Any, Dict, List, Tuple
 from app.config.settings_loader import get_settings_path, load_settings
 
 
-SENSITIVE_KEYS = {"password", "app_secret", "feishu_webhook_url", "seniverse_private_key"}
+SENSITIVE_KEYS = {
+    "password",
+    "app_secret",
+    "feishu_webhook_url",
+    "task_failure_webhook_url",
+    "task_success_webhook_url",
+    "seniverse_private_key",
+}
 
 
 def _mask_string(text: str) -> str:

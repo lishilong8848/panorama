@@ -977,6 +977,8 @@ class InternalDownloadBrowserPool:
         await self._close_slot(building)
         recycled_at = _now_text()
         launch_kwargs = self._resolve_browser_options()
+        browser: Browser | None = None
+        context: BrowserContext | None = None
         try:
             browser = await asyncio.wait_for(
                 self._playwright.chromium.launch(**launch_kwargs),
@@ -996,19 +998,32 @@ class InternalDownloadBrowserPool:
                     ) from fallback_exc
             else:
                 raise RuntimeError(f"{building} 浏览器启动超时或失败: {exc}") from exc
-        context = await asyncio.wait_for(
-            browser.new_context(
-                accept_downloads=True,
-                viewport={"width": 1600, "height": 1000},
-                device_scale_factor=DEFAULT_REPORT_DEVICE_SCALE_FACTOR,
-            ),
-            timeout=self.BROWSER_CREATE_TIMEOUT_SEC,
-        )
-        page = await asyncio.wait_for(
-            context.new_page(),
-            timeout=self.BROWSER_CREATE_TIMEOUT_SEC,
-        )
-        await apply_report_page_view(page)
+        try:
+            context = await asyncio.wait_for(
+                browser.new_context(
+                    accept_downloads=True,
+                    viewport={"width": 1600, "height": 1000},
+                    device_scale_factor=DEFAULT_REPORT_DEVICE_SCALE_FACTOR,
+                ),
+                timeout=self.BROWSER_CREATE_TIMEOUT_SEC,
+            )
+            page = await asyncio.wait_for(
+                context.new_page(),
+                timeout=self.BROWSER_CREATE_TIMEOUT_SEC,
+            )
+            await apply_report_page_view(page)
+        except BaseException:
+            if context is not None:
+                try:
+                    await context.close()
+                except BaseException:
+                    pass
+            if browser is not None:
+                try:
+                    await browser.close()
+                except BaseException:
+                    pass
+            raise
         self._browser_slots[building] = {
             "browser": browser,
             "context": context,
@@ -1125,14 +1140,14 @@ class InternalDownloadBrowserPool:
             self._health_probe_task.cancel()
             try:
                 await self._health_probe_task
-            except Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
             self._health_probe_task = None
         if self._recovery_probe_task is not None:
             self._recovery_probe_task.cancel()
             try:
                 await self._recovery_probe_task
-            except Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
             self._recovery_probe_task = None
         self._health_probe_failures.clear()

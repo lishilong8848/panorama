@@ -69,7 +69,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "on_wifi_failure": True,
             "on_upload_failure": True,
             "task_failure_webhook_enabled": True,
-            "task_failure_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/16cb9857-afe7-4f0b-967b-db65e5264499",
+            "task_failure_webhook_url": "",
             "task_failure_webhook_timeout": 15,
         },
         "feishu_auth": {

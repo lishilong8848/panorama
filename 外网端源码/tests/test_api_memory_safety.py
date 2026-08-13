@@ -149,6 +149,20 @@ def test_task_database_list_can_skip_result_json(tmp_path):
         database.close()
 
 
+def test_task_database_cleanup_records_completion_time(tmp_path):
+    database = TaskEngineDatabase(
+        runtime_config={"paths": {"runtime_state_root": str(tmp_path)}},
+        app_dir=tmp_path,
+    )
+    try:
+        database.upsert_job(_job_payload(result={}))
+
+        assert database.cleanup_terminal_jobs(retention_days=1) == 1
+        assert database.runtime_snapshot()["last_cleanup_at"]
+    finally:
+        database.close()
+
+
 def test_review_cache_pruning_removes_expired_and_oldest_entries():
     cache = {
         "expired": {"updated_at": 1.0},
@@ -194,3 +208,16 @@ def test_job_service_prunes_only_old_terminal_jobs_from_memory():
     assert "active" in service._jobs
     assert "job-0" not in service._jobs
     assert "job-39" in service._jobs
+
+
+def test_thread_job_preserves_failed_result_status():
+    service = JobService()
+    job = service.start_job(
+        name="failed-result",
+        feature="test",
+        run_func=lambda _emit: {"ok": False, "status": "failed", "error": "expected failure"},
+    )
+
+    assert job.done_event.wait(5)
+    assert job.status == "failed"
+    assert job.error == "expected failure"

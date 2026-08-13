@@ -21,6 +21,9 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+_BRIDGE_SOURCE_KEY_SEPARATOR = "\x1f"
+
+
 class AppStateRepository:
     """Local SQLite foundation for runtime state that must not live on UNC paths."""
 
@@ -312,10 +315,17 @@ class AppStateRepository:
                 continue
             payload = dict(entry)
             payload.setdefault("mirrored_at", now)
+            bucket_kind = str(entry.get("bucket_kind", "") or "").strip().lower()
+            duty_shift = str(entry.get("duty_shift", "") or "").strip().lower()
+            storage_bucket_key = (
+                _BRIDGE_SOURCE_KEY_SEPARATOR.join((bucket_key, bucket_kind, duty_shift))
+                if bucket_kind or duty_shift
+                else bucket_key
+            )
             rows.append(
                 (
                     source_family,
-                    bucket_key,
+                    storage_bucket_key,
                     building,
                     str(entry.get("status", "") or "").strip(),
                     str(entry.get("file_path", "") or "").strip(),
@@ -362,8 +372,13 @@ class AppStateRepository:
             clauses.append("building IN (" + ",".join("?" for _ in building_values) + ")")
             params.extend(building_values)
         if bucket_values:
-            clauses.append("bucket_key IN (" + ",".join("?" for _ in bucket_values) + ")")
-            params.extend(bucket_values)
+            clauses.append(
+                "("
+                + " OR ".join("(bucket_key=? OR bucket_key LIKE ?)" for _ in bucket_values)
+                + ")"
+            )
+            for bucket_value in bucket_values:
+                params.extend((bucket_value, f"{bucket_value}{_BRIDGE_SOURCE_KEY_SEPARATOR}%"))
         if status_text and status_text not in {"all", "*"}:
             clauses.append("LOWER(status)=?")
             params.append(status_text)

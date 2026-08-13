@@ -229,7 +229,6 @@ async function loadTasks() {
     state.lastLoadedAt.tasks = nowMs();
     clearModuleError("tasks");
   } catch (_) {
-    state.tasks = [];
     setModuleError("tasks", "读取共享任务失败");
   }
 }
@@ -932,6 +931,7 @@ async function handleAction(event) {
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
+  let busyKey = "";
   if (action === "nav") {
     state.view = target.dataset.view || "status";
     history.replaceState(null, "", state.view === "config" ? "/internal/config" : "/internal/status");
@@ -964,7 +964,7 @@ async function handleAction(event) {
       await refreshAll({ silent: true });
     } else if (action === "run-alarm-rule-export") {
       const building = target.dataset.building || "";
-      const busyKey = `alarm_rule_export_family:${building}`;
+      busyKey = `alarm_rule_export_family:${building}`;
       state.busy.add(busyKey);
       render();
       const payload = await api("/api/alarm-rule-export/run", {
@@ -981,7 +981,7 @@ async function handleAction(event) {
     } else if (action === "refresh-building") {
       const family = target.dataset.family || "";
       const building = target.dataset.building || "";
-      const busyKey = `${family}:${building}`;
+      busyKey = `${family}:${building}`;
       state.busy.add(busyKey);
       render();
       const payload = await api(query("/api/bridge/source-cache/refresh-building-latest", { source_family: family, building }), {
@@ -999,7 +999,7 @@ async function handleAction(event) {
       await refreshAll({ silent: true });
     }
   } catch (error) {
-    state.busy.clear();
+    if (busyKey) state.busy.delete(busyKey);
     setMessage(error.message, true);
   }
 }

@@ -455,6 +455,16 @@ class InternalBridgeHttpTaskRunner:
                     if status_filter == "ready":
                         continue
             output.append(item)
+        self._start_source_index_recovery_if_needed(
+            output,
+            source_family=source_family,
+            building=building,
+            bucket_kind=kind_text,
+            bucket_key=bucket_key,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            limit=limit,
+        )
         return output
 
     def _start_source_index_recovery_if_needed(

@@ -4,11 +4,16 @@ import json
 import queue
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
+
+
+def _now_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _json_ready(value: Any) -> Any:

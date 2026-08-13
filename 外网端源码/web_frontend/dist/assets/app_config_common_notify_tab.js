@@ -31,7 +31,7 @@
     <div class="content-card config-panel-card">
       <div class="section-title">通知开关</div>
       <div class="form-row"><label><input type="checkbox" v-model="config.notify.enable_webhook" /> 启用飞书机器人告警</label></div>
-      <div class="form-row"><label class="label">飞书机器人回调地址</label><input type="text" v-model="config.notify.feishu_webhook_url" /></div>
+      <div class="form-row"><label class="label">飞书机器人回调地址</label><input type="password" autocomplete="new-password" v-model="config.notify.feishu_webhook_url" /></div>
     </div>
 
     <div class="content-card config-panel-card">
@@ -43,7 +43,7 @@
     <div class="content-card config-panel-card">
       <div class="section-title">任务失败通知</div>
       <div class="form-row"><label><input type="checkbox" v-model="config.notify.task_failure_webhook_enabled" /> 任务未成功时发送飞书群通知</label></div>
-      <div class="form-row"><label class="label">任务失败机器人地址</label><input type="text" v-model="config.notify.task_failure_webhook_url" /></div>
+      <div class="form-row"><label class="label">任务失败机器人地址</label><input type="password" autocomplete="new-password" v-model="config.notify.task_failure_webhook_url" /></div>
       <div class="form-row"><label class="label">任务通知超时（秒）</label><input type="number" v-model.number="config.notify.task_failure_webhook_timeout" /></div>
       <div class="hint">为空时不会发送任务失败通知。旧的任务完成通知配置仅用于兼容迁移。</div>
     </div>

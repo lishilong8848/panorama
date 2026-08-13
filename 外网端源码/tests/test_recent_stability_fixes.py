@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import datetime
 
+from app.core.app_state import AppStateRepository
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
 from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
 from handover_log_module.repository.event_sections_repository import EventSectionQueryResult
@@ -395,6 +396,7 @@ def test_http_source_index_queue_busy_uses_mirror_without_global_cooldown():
                     "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.xlsx",
                     "status": "ready",
                     "file_verified": True,
+                    "mirrored_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
             ]
 
@@ -409,3 +411,106 @@ def test_http_source_index_queue_busy_uses_mirror_without_global_cooldown():
 
     assert rows and rows[0]["entry_id"] == "mirror-1"
     assert service._http_bridge_unavailable_until_monotonic == 0.0
+
+
+def test_http_source_index_rejects_stale_verified_mirror():
+    service = SharedBridgeRuntimeService(
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"enabled": True, "root_dir": r"\\server\share"},
+            "internal_bridge_http": {"enabled": False},
+        },
+        app_version="test",
+        emit_log=lambda _text: None,
+    )
+
+    class Repo:
+        def list_bridge_source_index_entries(self, **_kwargs):
+            return [{
+                "source_family": "branch_power_family",
+                "building": "A楼",
+                "bucket_kind": "daily",
+                "bucket_key": "2026-06-09",
+                "relative_path": "stale.xlsx",
+                "status": "ready",
+                "file_verified": True,
+                "mirrored_at": "2026-01-01 00:00:00",
+                "mirror_source": "external_app_state",
+            }]
+
+    service._app_state_repository = Repo()
+
+    rows = service._load_http_source_index_mirror(
+        source_family="branch_power_family",
+        target_buildings=["A楼"],
+        query_specs=[{"bucket_or_date": "2026-06-09", "bucket_kind": "daily"}],
+        target_bucket="2026-06-09",
+        duty_shift="",
+        status_text="ready",
+        limit_per_building=20,
+    )
+
+    assert rows == []
+
+
+def test_source_index_mirror_keeps_day_and_night_entries_separate(tmp_path):
+    repository = AppStateRepository(
+        runtime_config={"paths": {"runtime_state_root": str(tmp_path)}},
+        app_dir=tmp_path,
+    )
+    repository.upsert_bridge_source_index_entries([
+        {
+            "source_family": "handover_log_family",
+            "bucket_kind": "shift",
+            "bucket_key": "2026-08-13",
+            "duty_shift": "day",
+            "building": "A楼",
+            "status": "ready",
+            "relative_path": "day.xlsx",
+            "file_path": r"\\server\share\day.xlsx",
+            "file_verified": True,
+        },
+        {
+            "source_family": "handover_log_family",
+            "bucket_kind": "shift",
+            "bucket_key": "2026-08-13",
+            "duty_shift": "night",
+            "building": "A楼",
+            "status": "ready",
+            "relative_path": "night.xlsx",
+            "file_path": r"\\server\share\night.xlsx",
+            "file_verified": True,
+        },
+    ])
+    service = SharedBridgeRuntimeService(
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"enabled": True, "root_dir": r"\\server\share"},
+            "internal_bridge_http": {"enabled": False},
+        },
+        app_version="test",
+        emit_log=lambda _text: None,
+    )
+    service._app_state_repository = repository
+
+    day_rows = service._load_http_source_index_mirror(
+        source_family="handover_log_family",
+        target_buildings=["A楼"],
+        query_specs=[{"bucket_or_date": "2026-08-13", "bucket_kind": "shift"}],
+        target_bucket="2026-08-13",
+        duty_shift="day",
+        status_text="ready",
+        limit_per_building=20,
+    )
+    night_rows = service._load_http_source_index_mirror(
+        source_family="handover_log_family",
+        target_buildings=["A楼"],
+        query_specs=[{"bucket_or_date": "2026-08-13", "bucket_kind": "shift"}],
+        target_bucket="2026-08-13",
+        duty_shift="night",
+        status_text="ready",
+        limit_per_building=20,
+    )
+
+    assert [row["relative_path"] for row in day_rows] == ["day.xlsx"]
+    assert [row["relative_path"] for row in night_rows] == ["night.xlsx"]

@@ -4335,7 +4335,8 @@ async def handover_review_110_station_parse(
     container = request.app.state.container
     service = _build_station_110_upload_service(container)
     try:
-        return service.parse(
+        return await asyncio.to_thread(
+            service.parse,
             duty_date=duty_date,
             duty_shift=duty_shift,
             filename=str(file.filename or "").strip(),
@@ -4362,7 +4363,8 @@ async def handover_review_110_station_upload(
     container = request.app.state.container
     service = _build_station_110_upload_service(container)
     try:
-        return service.upload(
+        return await asyncio.to_thread(
+            service.upload,
             duty_date=duty_date,
             duty_shift=duty_shift,
             filename=str(file.filename or "").strip(),

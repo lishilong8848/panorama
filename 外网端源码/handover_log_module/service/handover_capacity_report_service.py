@@ -2660,7 +2660,12 @@ class HandoverCapacityReportService:
                 input_signature=input_signature,
             )
         valid, error = self._validate_capacity_overlay_inputs(handover_cells)
-        load_rate_blocking_error = ""
+        if not valid:
+            return self._build_capacity_sync_payload(
+                status="pending_input",
+                error=error,
+                input_signature=input_signature,
+            )
 
         try:
             workbook = load_workbook_quietly(capacity_output_path)
@@ -2707,7 +2712,12 @@ class HandoverCapacityReportService:
                         f"building={building}, warning={load_rate_warning}"
                     )
                     if self._is_current_load_rate_warning(load_rate_warning):
-                        load_rate_blocking_error = load_rate_warning
+                        return self._build_capacity_sync_payload(
+                            status="failed",
+                            error=load_rate_warning,
+                            input_signature=input_signature,
+                            capacity_load_rates=load_rate_payload,
+                        )
                 self._apply_capacity_cell_adjustments(overlay_values, building=building, emit_log=emit_log)
                 self._inject_capacity_water_reserve_value(
                     overlay_values,
@@ -2755,22 +2765,6 @@ class HandoverCapacityReportService:
             emit_log(
                 "[交接班][容量报表][补写] 签名计算失败 "
                 f"building={building}, duty={duty_date}/{duty_shift}, error={exc}"
-            )
-        if not valid:
-            return self._build_capacity_sync_payload(
-                status="pending_input",
-                error=error,
-                input_signature=input_signature,
-                overlay_signature=overlay_signature,
-                capacity_load_rates=load_rate_payload,
-            )
-        if load_rate_blocking_error:
-            return self._build_capacity_sync_payload(
-                status="failed",
-                error=load_rate_blocking_error,
-                input_signature=input_signature,
-                overlay_signature=overlay_signature,
-                capacity_load_rates=load_rate_payload,
             )
         return self._build_capacity_sync_payload(
             status="ready",

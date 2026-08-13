@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import io
 import json
 import os
 import signal
@@ -167,41 +166,6 @@ class StageState:
             "worker_status": self.worker_status,
             "last_heartbeat_at": self.last_heartbeat_at,
         }
-
-
-class _LineEmitter:
-    def __init__(self, emit_line: Callable[[str], None]) -> None:
-        self.emit_line = emit_line
-        self._buffer = ""
-
-    def write(self, text: str) -> int:
-        if not text:
-            return 0
-        self._buffer += text.replace("\r\n", "\n").replace("\r", "\n")
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            line = line.strip()
-            if line:
-                self.emit_line(line)
-        return len(text)
-
-    def flush(self) -> None:
-        line = self._buffer.strip()
-        if line:
-            self.emit_line(line)
-        self._buffer = ""
-
-
-class _StreamProxy(io.TextIOBase):
-    def __init__(self, emitter: _LineEmitter) -> None:
-        super().__init__()
-        self._emitter = emitter
-
-    def write(self, s: str) -> int:  # type: ignore[override]
-        return self._emitter.write(s)
-
-    def flush(self) -> None:  # type: ignore[override]
-        self._emitter.flush()
 
 
 class JobService:
@@ -1198,7 +1162,7 @@ class JobService:
                                 stage.status = "cancelled"
                                 stage.summary = summary
                                 stage.finished_at = job.finished_at
-                            elif return_code != 0 or not worker_result:
+                            elif return_code != 0 or not worker_result or not bool(worker_result.get("ok", False)):
                                 detail = (
                                     str(worker_result.get("error", "") or "").strip()
                                     or str(worker_result.get("message", "") or "").strip()
@@ -1224,6 +1188,24 @@ class JobService:
                                 stage.summary = "ok"
                                 stage.result = result_payload
                                 stage.finished_at = job.finished_at
+                                result_status = str(
+                                    result_payload.get("status", "") if isinstance(result_payload, dict) else ""
+                                ).strip().lower()
+                                if isinstance(result_payload, dict) and (
+                                    result_payload.get("ok") is False
+                                    or result_status in {"failed", "partial_failed", "blocked", "interrupted"}
+                                ):
+                                    detail = str(
+                                        result_payload.get("error", "")
+                                        or result_payload.get("message", "")
+                                        or result_status
+                                    ).strip()
+                                    job.status = result_status if result_status in {"partial_failed", "blocked", "interrupted"} else "failed"
+                                    job.error = detail
+                                    job.summary = detail
+                                    stage.status = job.status
+                                    stage.error = detail
+                                    stage.summary = detail
                             self._persist_job_snapshot(job)
                         self._persist_worker_snapshot(
                             job,
@@ -2081,16 +2063,13 @@ class JobService:
 
         def _run() -> None:
             unhandled_error_detail = ""
-            emitter = _LineEmitter(lambda line: self.log(job.job_id, line))
-            stream = _StreamProxy(emitter)
             stage = self._get_primary_stage(job)
             try:
                 self._acquire_job_resources(job)
                 with self._lock:
                     if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
                         return
-                with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-                    result = run_func(lambda line: self.log(job.job_id, line))
+                result = run_func(lambda line: self.log(job.job_id, line))
                 with self._lock:
                     job.status = "success"
                     job.summary = "ok"
@@ -2100,6 +2079,18 @@ class JobService:
                     stage.summary = "ok"
                     stage.result = result
                     stage.finished_at = job.finished_at
+                    result_status = str(result.get("status", "") if isinstance(result, dict) else "").strip().lower()
+                    if isinstance(result, dict) and (
+                        result.get("ok") is False
+                        or result_status in {"failed", "partial_failed", "blocked", "interrupted"}
+                    ):
+                        detail = str(result.get("error", "") or result.get("message", "") or result_status).strip()
+                        job.status = result_status if result_status in {"partial_failed", "blocked", "interrupted"} else "failed"
+                        job.error = detail
+                        job.summary = detail
+                        stage.status = job.status
+                        stage.error = detail
+                        stage.summary = detail
                     self._persist_job_snapshot(job)
             except Exception as exc:  # noqa: BLE001
                 detail = str(exc)
@@ -2115,7 +2106,6 @@ class JobService:
                     stage.finished_at = job.finished_at
                     self._persist_job_snapshot(job)
             finally:
-                emitter.flush()
                 with self._lock:
                     if job.status == "failed":
                         has_failure_line = any("[文件流程失败]" in line for line in job.logs)
