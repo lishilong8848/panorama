@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import handover_log_module.service.review_followup_trigger_service as followup_module
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 
 
@@ -112,3 +113,60 @@ def test_station_h_success_persists_only_after_image_is_synced(tmp_path):
     assert station_result["duty_focus_image_status"] == "success"
     assert station_result["duty_focus_image_generated_at"] == "2026-08-12 10:30:00"
     assert service._review_service.persisted[-1]["value"]["status"] == "success"
+
+
+def test_station_h_roster_fallback_is_forwarded_to_duty_focus(monkeypatch):
+    class _SelectionService:
+        @staticmethod
+        def resolve_selection(**_kwargs):
+            return {
+                "current_people": [],
+                "next_people": [],
+                "long_day_people": [],
+                "resolved_source": "fallback",
+            }
+
+    class _RosterRepository:
+        @staticmethod
+        def query_assignment(**_kwargs):
+            return type(
+                "Assignment",
+                (),
+                {
+                    "current_people": "张三、王五",
+                    "next_people": "李四、赵六",
+                },
+            )()
+
+        @staticmethod
+        def query_long_day_people_from_roster_source(**_kwargs):
+            return ""
+
+    class _CellReviewService:
+        @staticmethod
+        def parse_batch_key(_batch_key):
+            return "2026-08-13", "night"
+
+        @staticmethod
+        def get_outdoor_temperature_state(*, batch_key):
+            assert batch_key == "2026-08-13|night"
+            return {"shared_blocks": {"outdoor_temperature": {"cells": {"B7": "28", "D7": "25"}}}}
+
+    service = object.__new__(ReviewFollowupTriggerService)
+    service.config = {}
+    service._review_service = _CellReviewService()
+    service._station_h_review_selection_service = _SelectionService()
+    service._station_h_cabinet_totals = lambda _sessions: {
+        "ok": True,
+        "totals": {"B12": 1, "D12": 2, "F12": 3, "H12": 4},
+    }
+    monkeypatch.setattr(followup_module, "ShiftRosterRepository", lambda _config: _RosterRepository())
+
+    result = service._build_station_h_cell_values(
+        batch_key="2026-08-13|night",
+        sessions=[],
+        emit_log=lambda _line: None,
+    )
+
+    assert result["selection"]["current_people"] == ["张三", "王五"]
+    assert result["selection"]["next_people"] == ["李四", "赵六"]

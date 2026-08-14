@@ -255,6 +255,23 @@ def test_empty_signature_cache_refreshes_and_matches_current_people(tmp_path):
     assert focus["print_ready"] is True
 
 
+def test_auto_signature_uses_next_signed_person_in_shift_order(tmp_path):
+    service = _service(tmp_path)
+
+    focus = service.build_status(
+        duty_date="2026-08-12",
+        duty_shift="day",
+        selection={
+            "current_people": ["无签名人员", "张三"],
+            "next_people": ["另一无签名人员", "李四"],
+        },
+    )
+
+    assert focus["signatures"]["handover"]["name"] == "张三"
+    assert focus["signatures"]["takeover"]["name"] == "李四"
+    assert focus["print_ready"] is True
+
+
 def test_stale_nonempty_signature_cache_refreshes_for_current_people(tmp_path):
     class _StaleSignatureService(_SignatureService):
         def __init__(self):

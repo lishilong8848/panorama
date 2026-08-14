@@ -1759,6 +1759,12 @@ class ReviewFollowupTriggerService:
                 long_day_people = station_h_default_long_day_people_from_roster(long_day_raw)
         current_names = station_h_normalize_duty_people(current_names)
         next_names = station_h_normalize_duty_people(next_names)
+        selection = {
+            **selection,
+            "current_people": list(current_names),
+            "next_people": list(next_names),
+            "long_day_people": list(long_day_people),
+        }
         current_first = current_names[0] if current_names else ""
         current_second = current_names[1] if len(current_names) >= 2 else ""
         next_first = next_names[0] if next_names else ""

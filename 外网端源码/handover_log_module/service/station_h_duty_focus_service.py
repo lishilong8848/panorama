@@ -492,10 +492,16 @@ class StationHDutyFocusService:
         focus["auto_source"] = dict(fallback.get("auto_source", {}))
         current_people = split_station_h_people(selection.get("current_people", selection.get("current_people_text", "")))
         next_people = split_station_h_people(selection.get("next_people", selection.get("next_people_text", "")))
+        candidate_names = {
+            "handover": current_people,
+            "takeover": next_people,
+        }
         expected_names = {
             "handover": current_people[0] if current_people else "",
             "takeover": next_people[0] if next_people else "",
         }
+        directory = self.signature_service.cached_directory()
+        cached_people = directory.get("people", []) if isinstance(directory.get("people", []), list) else []
         required_names: List[str] = []
         required_selection_ids: List[str] = []
         for slot in ("handover", "takeover"):
@@ -503,9 +509,11 @@ class StationHDutyFocusService:
             selection_id = _text(selected.get("selection_id"))
             if _text(selected.get("match_source")).lower() == "manual" and selection_id:
                 required_selection_ids.append(selection_id)
-            elif expected_names[slot]:
+            elif expected_names[slot] and not any(
+                self.signature_service.match_person(cached_people, name)
+                for name in candidate_names[slot]
+            ):
                 required_names.append(expected_names[slot])
-        directory = self.signature_service.cached_directory()
         try:
             ensure_directory = getattr(self.signature_service, "ensure_directory", None)
             directory = (
@@ -537,7 +545,14 @@ class StationHDutyFocusService:
             )
             matched = None
             if auto_match:
-                matched = self.signature_service.match_person(people, expected_name)
+                matched = next(
+                    (
+                        person
+                        for name in candidate_names[slot]
+                        if (person := self.signature_service.match_person(people, name)) is not None
+                    ),
+                    None,
+                )
             elif selection_id:
                 matched = available_by_id.get(selection_id)
             if matched:
