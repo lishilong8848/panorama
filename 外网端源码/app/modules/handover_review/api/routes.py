@@ -4185,17 +4185,13 @@ def handover_review_station_h_print_duty_focus(
     duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
     if not duty_date_text or not duty_shift_text:
         duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
-    selection = _build_station_h_review_selection_service(container).resolve_selection(
-        duty_date=duty_date_text,
-        duty_shift=duty_shift_text,
-    )
     service = _build_station_h_duty_focus_service(container)
     try:
-        focus = service.build_status(
+        focus = _station_h_status_payload(
+            container,
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
-            selection=selection,
-        )
+        )["duty_focus"]
         if not bool(focus.get("print_ready", False)):
             raise StationHDutyFocusError(str(focus.get("print_block_reason", "") or "签名不完整，暂不能打印"))
         pdf_path = service.build_print_document(
@@ -4232,17 +4228,13 @@ def handover_review_station_h_regenerate_duty_focus_image(
     )
     if not duty_date_text or not duty_shift_text:
         duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
-    selection = _build_station_h_review_selection_service(container).resolve_selection(
-        duty_date=duty_date_text,
-        duty_shift=duty_shift_text,
-    )
     service = _build_station_h_duty_focus_service(container)
     try:
-        focus = service.build_status(
+        focus = _station_h_status_payload(
+            container,
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
-            selection=selection,
-        )
+        )["duty_focus"]
         if not bool(focus.get("print_ready", False)):
             raise StationHDutyFocusError(
                 str(focus.get("print_block_reason", "") or "签名不完整，暂不能生成图片")
@@ -4280,17 +4272,13 @@ def handover_review_station_h_duty_focus_image(
     duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
     if not duty_date_text or not duty_shift_text:
         duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
-    selection = _build_station_h_review_selection_service(container).resolve_selection(
-        duty_date=duty_date_text,
-        duty_shift=duty_shift_text,
-    )
     service = _build_station_h_duty_focus_service(container)
     try:
-        focus = service.build_status(
+        focus = _station_h_status_payload(
+            container,
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
-            selection=selection,
-        )
+        )["duty_focus"]
         image_path = service.current_image_path(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,

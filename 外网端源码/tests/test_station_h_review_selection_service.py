@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from app.core.app_state import AppStateRepository
 from app.modules.handover_review.api import routes as review_routes
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
@@ -208,3 +210,47 @@ def test_station_h_roster_background_refresh_is_deduplicated(monkeypatch):
         review_routes._STATION_H_ROSTER_REFRESH_INFLIGHT.clear()
         review_routes._STATION_H_ROSTER_REFRESH_LAST_STARTED.clear()
         review_routes._STATION_H_ROSTER_REFRESH_ERRORS.clear()
+
+
+def test_station_h_image_regenerate_reuses_status_focus(monkeypatch):
+    resolved_focus = {
+        "print_ready": True,
+        "signatures": {
+            "handover": {"selection_id": "table:handover"},
+            "takeover": {"selection_id": "table:takeover"},
+        },
+    }
+    observed = {}
+
+    class _DutyFocusService:
+        @staticmethod
+        def build_image_document(**kwargs):
+            observed.update(kwargs)
+            return {
+                "status": "current",
+                "available": True,
+                "current": True,
+                "generated": True,
+            }
+
+    container = object()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+    monkeypatch.setattr(review_routes, "_handover_cfg", lambda _container: {})
+    monkeypatch.setattr(
+        review_routes,
+        "_station_h_status_payload",
+        lambda _container, **_kwargs: {"duty_focus": resolved_focus},
+    )
+    monkeypatch.setattr(
+        review_routes,
+        "_build_station_h_duty_focus_service",
+        lambda _container: _DutyFocusService(),
+    )
+
+    result = review_routes.handover_review_station_h_regenerate_duty_focus_image.__wrapped__(
+        request,
+        {"duty_date": "2026-08-15", "duty_shift": "day", "force": True},
+    )
+
+    assert observed["focus"] is resolved_focus
+    assert result["status"] == "current"
