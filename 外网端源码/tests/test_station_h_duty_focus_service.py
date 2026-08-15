@@ -469,6 +469,22 @@ def test_build_print_document_removes_intermediate_workbook(tmp_path, monkeypatc
     assert not observed["workbook_path"].exists()
 
 
+def test_duty_focus_png_is_rendered_at_print_quality(tmp_path):
+    import pypdfium2
+
+    pdf_path = tmp_path / "a4.pdf"
+    document = pypdfium2.PdfDocument.new()
+    page = document.new_page(595, 842)
+    page.close()
+    document.save(pdf_path)
+    document.close()
+
+    content = StationHDutyFocusService._render_pdf_to_png_bytes(pdf_path)
+    with Image.open(BytesIO(content)) as image:
+        assert image.width >= 2300
+        assert image.height >= 3300
+
+
 def test_build_image_document_caches_current_image_and_marks_changed_focus_stale(tmp_path, monkeypatch):
     service = _service(tmp_path)
     focus = service.build_status(

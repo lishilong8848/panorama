@@ -52,8 +52,9 @@ STATION_H_DUTY_FOCUS_CHECK_ROWS = tuple(range(11, 40))
 _SIGNATURE_MERGED_RANGES = {"handover": "E3:F3", "takeover": "H3:I3"}
 _PDF_CONVERT_LOCK = threading.Lock()
 _PRINT_DOCUMENT_LOCK = threading.Lock()
-_DUTY_FOCUS_IMAGE_MAX_WIDTH = 2000
-_DUTY_FOCUS_IMAGE_MAX_HEIGHT = 3200
+_DUTY_FOCUS_IMAGE_RENDER_SCALE = 4.0
+_DUTY_FOCUS_IMAGE_MAX_WIDTH = 2400
+_DUTY_FOCUS_IMAGE_MAX_HEIGHT = 3400
 
 
 class StationHDutyFocusError(RuntimeError):
@@ -625,6 +626,7 @@ class StationHDutyFocusService:
         payload = {
             "date_text": duty_date,
             "shift": duty_shift,
+            "image_render_scale": _DUTY_FOCUS_IMAGE_RENDER_SCALE,
             "rows": normalized.get("rows", []),
             "checks": normalized.get("checks", {}),
             "signatures": {
@@ -934,7 +936,7 @@ class StationHDutyFocusService:
             for index in range(page_count):
                 page = document[index]
                 try:
-                    bitmap = page.render(scale=2.0)
+                    bitmap = page.render(scale=_DUTY_FOCUS_IMAGE_RENDER_SCALE)
                     pages.append(bitmap.to_pil().convert("RGB"))
                 finally:
                     try:
