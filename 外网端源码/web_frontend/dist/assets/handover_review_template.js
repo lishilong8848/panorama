@@ -494,7 +494,12 @@
       </section>
 
       <section class="review-fixed-grid">
-        <article v-for="(block, blockIndex) in document.fixed_blocks" :key="block.id || blockIndex" class="review-card">
+        <article
+          v-for="(block, blockIndex) in document.fixed_blocks"
+          :key="block.id || blockIndex"
+          class="review-card"
+          :class="{ 'review-fixed-card-summary': block.id === 'metrics_summary' }"
+        >
           <div class="review-card-head">
             <h2>{{ block.title }}</h2>
           </div>
