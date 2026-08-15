@@ -3429,7 +3429,8 @@ export function mountHandoverReviewApp(Vue) {
 
       function isEventRefreshSection(section) {
         const name = normalizeHeaderLabel(section?.name);
-        return name.includes("新事件处理") || name.includes("历史事件跟进");
+        return ["新事件处理", "历史事件跟进", "维护管理", "变更管理"]
+          .some((target) => name.includes(target));
       }
 
       function isSectionPersonColumn(section, column) {
@@ -3540,7 +3541,7 @@ export function mountHandoverReviewApp(Vue) {
         const targetName = String(sectionName || "").trim();
         if (!session.value?.session_id || !targetName) return;
         if (dirtyRegions.value.sections && typeof window !== "undefined") {
-          const confirmed = window.confirm("刷新会覆盖该事件分类当前未保存内容，是否继续？");
+          const confirmed = window.confirm("刷新会覆盖该分类当前未保存内容，是否继续？");
           if (!confirmed) return;
         }
         const locked = await ensureEditingLock();
@@ -3569,8 +3570,8 @@ export function mountHandoverReviewApp(Vue) {
             ? `${targetName}已从多维刷新并保存`
             : `${targetName}已刷新，但保存未完成，请处理提示后手动保存`;
         } catch (error) {
-          errorText.value = String(error?.message || error || "刷新事件分类失败");
-          statusText.value = "刷新事件分类失败";
+          errorText.value = String(error?.message || error || "刷新分类数据失败");
+          statusText.value = "刷新分类数据失败";
         } finally {
           eventSectionsRefreshing.value = false;
         }

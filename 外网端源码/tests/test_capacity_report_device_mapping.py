@@ -85,6 +85,30 @@ class CapacityReportDeviceMappingTests(unittest.TestCase):
         finally:
             workbook.close()
 
+    def test_b417_transformer_temperature_uses_101_102_source_numbering(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet["B127"] = "-417-TR201"
+        sheet["B132"] = "-417-TR202"
+        snapshot = build_capacity_template_snapshot(sheet, "B楼")
+        try:
+            values = build_capacity_cells_with_config(
+                {
+                    "building": "B楼",
+                    "capacity_rows": [
+                        _raw_row(row=1, c_text="B-417-TR-101_变压器温控仪", d_name="B_温度_℃", value="67.80"),
+                        _raw_row(row=2, c_text="B-417-TR-102_变压器温控仪", d_name="B_温度_℃", value="66.80"),
+                    ],
+                    "template_snapshot": snapshot,
+                    "running_units": {},
+                }
+            )
+
+            self.assertEqual(values["D127"], "67.80")
+            self.assertEqual(values["D132"], "66.80")
+        finally:
+            workbook.close()
+
 
 if __name__ == "__main__":
     unittest.main()

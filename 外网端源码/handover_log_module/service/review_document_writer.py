@@ -148,7 +148,7 @@ class ReviewDocumentWriter:
                     source_cols = column.get("source_cols", [])
                     if not key or not isinstance(source_cols, list) or not source_cols:
                         continue
-                    value = str(source_cells.get(key, "") or "")
+                    value = str(source_cells.get(key, "") or "").strip()
                     lead_col = str(source_cols[0] or "").strip().upper()
                     if lead_col in normalized_cells:
                         normalized_cells[lead_col] = value

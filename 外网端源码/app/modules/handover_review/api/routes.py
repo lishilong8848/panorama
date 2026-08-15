@@ -43,7 +43,9 @@ from handover_log_module.service.capacity_report_image_delivery_service import C
 from handover_log_module.service.chiller_mode_focus_state_service import ChillerModeFocusStateService
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
 from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
+from handover_log_module.service.change_management_payload_builder import ChangeManagementPayloadBuilder
 from handover_log_module.service.event_category_payload_builder import EventCategoryPayloadBuilder
+from handover_log_module.service.maintenance_management_payload_builder import MaintenanceManagementPayloadBuilder
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateConflictError,
@@ -4829,36 +4831,84 @@ def handover_review_refresh_event_sections(
     duty_date_text = str(session.get("duty_date", "") or "").strip()
     duty_shift_text = str(session.get("duty_shift", "") or "").strip().lower()
     if not duty_date_text or duty_shift_text not in {"day", "night"}:
-        raise HTTPException(status_code=400, detail="当前审核记录缺少日期或班次，无法刷新事件分类")
+        raise HTTPException(status_code=400, detail="当前审核记录缺少日期或班次，无法刷新分类数据")
 
-    follower_text = _fixed_cell_value_from_review_document(document, "C3")
-    builder = EventCategoryPayloadBuilder(handover_cfg)
+    requested_section = str(payload.get("section_name", "") or "").strip()
+    if not requested_section:
+        raise HTTPException(status_code=400, detail="section_name 不能为空")
+
+    event_cfg = (
+        handover_cfg.get("event_sections", {})
+        if isinstance(handover_cfg.get("event_sections", {}), dict)
+        else {}
+    )
+    event_names_cfg = event_cfg.get("sections", {}) if isinstance(event_cfg.get("sections", {}), dict) else {}
+    event_names = {
+        str(event_names_cfg.get("new_event", "新事件处理")).strip() or "新事件处理",
+        str(event_names_cfg.get("history_followup", "历史事件跟进")).strip() or "历史事件跟进",
+    }
+    change_cfg = (
+        handover_cfg.get("change_management_section", {})
+        if isinstance(handover_cfg.get("change_management_section", {}), dict)
+        else {}
+    )
+    change_sections = change_cfg.get("sections", {}) if isinstance(change_cfg.get("sections", {}), dict) else {}
+    change_name = str(change_sections.get("change_management", "变更管理")).strip() or "变更管理"
+    maintenance_cfg = (
+        handover_cfg.get("maintenance_management_section", {})
+        if isinstance(handover_cfg.get("maintenance_management_section", {}), dict)
+        else {}
+    )
+    maintenance_sections = maintenance_cfg.get("sections", {}) if isinstance(maintenance_cfg.get("sections", {}), dict) else {}
+    maintenance_name = str(maintenance_sections.get("maintenance_management", "维护管理")).strip() or "维护管理"
+
     started = time.perf_counter()
     try:
-        sections = builder.build(
-            building=building,
-            duty_date=duty_date_text,
-            duty_shift=duty_shift_text,
-            follower_text=follower_text,
-            is_current_duty_context=_is_current_handover_duty_context(
+        if requested_section in event_names:
+            sections = EventCategoryPayloadBuilder(handover_cfg).build(
+                building=building,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
-            ),
-            emit_log=container.add_system_log,
-        )
+                follower_text=_fixed_cell_value_from_review_document(document, "C3"),
+                is_current_duty_context=_is_current_handover_duty_context(
+                    duty_date=duty_date_text,
+                    duty_shift=duty_shift_text,
+                ),
+                emit_log=container.add_system_log,
+            )
+        elif requested_section == change_name:
+            sections = ChangeManagementPayloadBuilder(handover_cfg).build(
+                building=building,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                emit_log=container.add_system_log,
+            )
+        elif requested_section == maintenance_name:
+            sections = MaintenanceManagementPayloadBuilder(handover_cfg).build(
+                building=building,
+                duty_date=duty_date_text,
+                duty_shift=duty_shift_text,
+                emit_log=container.add_system_log,
+            )
+        else:
+            raise ValueError(f"当前分类不支持刷新: {requested_section}")
     except Exception as exc:  # noqa: BLE001
         container.add_system_log(
-            f"[交接班][审核页事件刷新] 失败 building={building}, session={session_id}, error={exc}"
+            f"[交接班][审核页分类刷新] 失败 building={building}, session={session_id}, "
+            f"section={requested_section}, error={exc}"
         )
-        raise HTTPException(status_code=400, detail=f"刷新事件分类失败: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"刷新分类数据失败: {exc}") from exc
     elapsed_ms = int((time.perf_counter() - started) * 1000)
-    event_sections = sections if isinstance(sections, dict) else {}
+    all_sections = sections if isinstance(sections, dict) else {}
+    if requested_section not in all_sections:
+        raise HTTPException(status_code=502, detail=f"{requested_section}数据源读取失败，已保留当前内容")
+    event_sections = {requested_section: all_sections.get(requested_section, [])}
     row_counts = {
         str(name): len(rows) if isinstance(rows, list) else 0
         for name, rows in event_sections.items()
     }
     container.add_system_log(
-        f"[交接班][审核页事件刷新] 完成 building={building}, session={session_id}, "
+        f"[交接班][审核页分类刷新] 完成 building={building}, session={session_id}, "
         f"sections={row_counts}, elapsed_ms={elapsed_ms}"
     )
     return {

@@ -120,6 +120,24 @@ def test_writer_syncs_fixed_cells_when_dirty_region_was_lost(tmp_path: Path) -> 
         reloaded.close()
 
 
+def test_writer_trims_section_cell_boundary_whitespace() -> None:
+    writer = ReviewDocumentWriter({})
+
+    payloads = writer._category_payloads_from_document(  # noqa: SLF001
+        {
+            "sections": [
+                {
+                    "name": "新事件处理",
+                    "columns": [{"key": "C", "source_cols": ["C"]}],
+                    "rows": [{"cells": {"C": "2026-08-15 08:00:00   \n"}}],
+                }
+            ]
+        }
+    )
+
+    assert payloads["新事件处理"][0]["cells"]["C"] == "2026-08-15 08:00:00"
+
+
 def test_download_full_sync_overrides_pending_incremental_sync(tmp_path: Path) -> None:
     config = {"_global_paths": {"runtime_state_root": str(tmp_path / "runtime")}}
     queue = HandoverXlsxWriteQueueService(config)

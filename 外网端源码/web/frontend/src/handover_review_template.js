@@ -535,7 +535,7 @@
                 @click="refreshEventSectionFromBitable(section.name)"
                 :disabled="eventSectionsRefreshing || saving || regenerating || syncingRemoteRevision"
               >
-                {{ eventSectionsRefreshing ? "刷新中..." : "刷新多维" }}
+                {{ eventSectionsRefreshing ? "刷新中..." : "刷新数据" }}
               </button>
               <details v-if="findSectionPersonColumn(section)" class="person-fill-toolbar" @toggle="ensureEngineerDirectoryLoaded">
                 <summary>批量填人</summary>
@@ -599,7 +599,7 @@
                       :value="row.cells[column.key] || ''"
                       :disabled="regenerating"
                       @input="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value)"
-                      @change="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value)"
+                      @change="updateSectionCell(sectionIndex, rowIndex, column.key, $event.target.value.trim())"
                     ></textarea>
                     <details v-if="isSectionPersonColumn(section, column) && sectionPersonOptions.length" class="person-picker-details" @toggle="ensureEngineerDirectoryLoaded">
                       <summary>选择人名</summary>

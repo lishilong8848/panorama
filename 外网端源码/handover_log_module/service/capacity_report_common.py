@@ -710,6 +710,15 @@ def _tr_replacement_search_tokens(identifier: str) -> List[str]:
     return deduped
 
 
+def _tr_temperature_fallback_search_tokens(identifier: str) -> List[str]:
+    text = _text(identifier).upper()
+    match = re.search(r"^(.*-TR)-?(201|202)$", text)
+    if not match:
+        return []
+    suffix = "101" if match.group(2) == "201" else "102"
+    return [f"{match.group(1)}{suffix}", f"{match.group(1)}-{suffix}"]
+
+
 def _hvdc_search_tokens(identifier: str, *, template_family: str) -> List[str]:
     text = _text(identifier).upper()
     if not text:
@@ -1234,6 +1243,11 @@ def _build_tr_values(query: CapacitySourceQuery, snapshot: Dict[str, Any]) -> Di
         if row_idx > 0 and identifier:
             values[f"B{row_idx}"] = identifier
         matched_row = query.first_row_by_identifier(identifier_tokens=tokens, search_column="c")
+        if matched_row is None:
+            matched_row = query.first_row_by_identifier(
+                identifier_tokens=_tr_temperature_fallback_search_tokens(identifier),
+                search_column="c",
+            )
         if row_idx > 0 and matched_row is not None:
             values[f"D{row_idx}"] = _text(getattr(matched_row, "e_raw", None))
         replacement_tokens = _tr_replacement_search_tokens(identifier)
