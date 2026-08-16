@@ -2316,7 +2316,7 @@ function mountHandoverStationHApp(Vue) {
   createApp({
     setup() {
       const initialSelection = resolveReviewSelection();
-      const routeHadExplicitDuty = Boolean(initialSelection.dutyDate && initialSelection.dutyShift);
+      let routeHadExplicitDuty = Boolean(initialSelection.dutyDate && initialSelection.dutyShift);
       const loading = ref(true);
       const saving = ref(false);
       const signatureRefreshing = ref(false);
@@ -2575,7 +2575,7 @@ function mountHandoverStationHApp(Vue) {
         };
       }
 
-      async function refreshStatus({ background = false, forceCurrent = false } = {}) {
+      async function refreshStatus({ background = false, forceCurrent = false, includeSelectedDuty = false } = {}) {
         if (background && (saving.value || hasUnsavedChanges.value)) return;
         if (!background) {
           loading.value = true;
@@ -2583,7 +2583,7 @@ function mountHandoverStationHApp(Vue) {
         }
         try {
           const response = await getHandoverReviewStationHStatusApi({
-            ...(routeHadExplicitDuty && !forceCurrent ? buildContextPayload() : {}),
+            ...((routeHadExplicitDuty || includeSelectedDuty) && !forceCurrent ? buildContextPayload() : {}),
             _t: Date.now(),
           });
           if (background && (saving.value || hasUnsavedChanges.value)) return;
@@ -2600,7 +2600,9 @@ function mountHandoverStationHApp(Vue) {
       }
 
       function onDutyChange() {
-        void refreshStatus({ forceCurrent: false });
+        routeHadExplicitDuty = true;
+        syncReviewSelectionToUrl({ dutyDate: dutyDate.value, dutyShift: dutyShift.value });
+        void refreshStatus({ forceCurrent: false, includeSelectedDuty: true });
       }
 
       function clearStationHRefreshTimers() {
@@ -2625,9 +2627,11 @@ function mountHandoverStationHApp(Vue) {
         const delay = millisecondsUntilNextHandoverBoundary();
         const timer = window.setTimeout(() => {
           stationHRefreshTimers.delete(timer);
+          if (routeHadExplicitDuty) return;
           void refreshStatus({ background: true, forceCurrent: true });
           const recheckTimer = window.setTimeout(() => {
             stationHRefreshTimers.delete(recheckTimer);
+            if (routeHadExplicitDuty) return;
             void refreshStatus({ background: true, forceCurrent: true });
             scheduleStationHBoundaryRefresh();
           }, 5 * 60 * 1000);
