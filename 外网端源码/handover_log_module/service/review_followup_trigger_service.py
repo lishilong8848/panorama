@@ -151,6 +151,7 @@ def _followup_reason_text(value: Any) -> str:
 
 class ReviewFollowupTriggerService:
     STATIC_SKIP_REASONS = {"disabled", "missing_duty_context", "night_shift_disabled"}
+    CLOUD_UPLOAD_STALE_AFTER = timedelta(minutes=15)
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config if isinstance(config, dict) else {}
@@ -185,6 +186,55 @@ class ReviewFollowupTriggerService:
     def _ensure_external_network(self, emit_log: Callable[[str], None]) -> bool:
         emit_log("[交接班][确认后上传] 网络切换功能已移除，按当前网络继续执行")
         return False
+
+    @classmethod
+    def _is_stale_cloud_upload(cls, cloud_state: Dict[str, Any]) -> bool:
+        if str(cloud_state.get("status", "")).strip().lower() not in {"uploading", "syncing"}:
+            return False
+        updated_at = str(cloud_state.get("updated_at", "")).strip()
+        try:
+            return datetime.now() - datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S") >= cls.CLOUD_UPLOAD_STALE_AFTER
+        except ValueError:
+            return False
+
+    def _recover_stale_cloud_uploads(
+        self,
+        *,
+        batch_key: str,
+        sessions: List[Dict[str, Any]],
+        emit_log: Callable[[str], None],
+    ) -> List[Dict[str, Any]]:
+        recovered: List[str] = []
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            cloud_state = _normalize_cloud_sync_state(session.get("cloud_sheet_sync", {}))
+            if not self._is_stale_cloud_upload(cloud_state):
+                continue
+            building = str(session.get("building", "")).strip() or "-"
+            session_id = str(session.get("session_id", "")).strip()
+            cloud_state.update(
+                {
+                    "success": False,
+                    "status": "pending_upload",
+                    "updated_at": self._now_text(),
+                    "error": "云文档上传状态超时未完成，已恢复待上传重试",
+                }
+            )
+            if self._update_cloud_sheet_sync_resilient(
+                batch_key=batch_key,
+                building=building,
+                session_id=session_id,
+                cloud_sheet_sync=cloud_state,
+                emit_log=emit_log,
+            ):
+                recovered.append(building)
+        if recovered:
+            emit_log(
+                f"[交接班][云文档补上传] 已恢复超时上传状态 batch={batch_key}, buildings={','.join(recovered)}"
+            )
+            return self._review_service.list_batch_sessions(batch_key)
+        return sessions
 
     @staticmethod
     def _is_export_complete_for_revision(
@@ -702,6 +752,12 @@ class ReviewFollowupTriggerService:
             )
             sessions = self._review_service.list_batch_sessions(target_batch)
 
+        sessions = self._recover_stale_cloud_uploads(
+            batch_key=target_batch,
+            sessions=sessions,
+            emit_log=emit_log,
+        )
+
         pending_sessions: List[Dict[str, Any]] = []
         skipped_buildings: List[Dict[str, str]] = []
         pending_keys: set[tuple[str, str]] = set()
@@ -738,7 +794,24 @@ class ReviewFollowupTriggerService:
                 cloud_summary.get("failed_buildings", []) or []
             )
             cloud_summary = self._refresh_cloud_result_status(cloud_summary)
+            cabinet_shift_record_export = self._existing_cabinet_shift_record_export(sessions)
+            daily_report_record_export = self._existing_daily_report_record_export(sessions)
             if self._all_sessions_cloud_synced_current_revision(sessions):
+                cabinet_shift_record_export = self._run_cabinet_shift_record_export(
+                    batch_key=target_batch,
+                    sessions=sessions,
+                    cloud_result=cloud_summary,
+                    emit_log=emit_log,
+                )
+                sessions = self._review_service.list_batch_sessions(target_batch)
+                if str(daily_report_record_export.get("status", "")).strip().lower() != "success":
+                    daily_report_record_export = self._run_daily_report_record_export(
+                        batch_key=target_batch,
+                        sessions=sessions,
+                        cloud_result=cloud_summary,
+                        emit_log=emit_log,
+                    )
+                    sessions = self._review_service.list_batch_sessions(target_batch)
                 cloud_summary = self._attach_extra_cloud_sheet_sync_results(
                     batch_key=target_batch,
                     sessions=sessions,
@@ -749,8 +822,8 @@ class ReviewFollowupTriggerService:
                 batch_key=target_batch,
                 export_result=self._empty_export_result(),
                 cloud_result=cloud_summary,
-                daily_report_record_export=self._existing_daily_report_record_export(sessions),
-                cabinet_shift_record_export=self._existing_cabinet_shift_record_export(sessions),
+                daily_report_record_export=daily_report_record_export,
+                cabinet_shift_record_export=cabinet_shift_record_export,
                 sessions=sessions,
             )
 
