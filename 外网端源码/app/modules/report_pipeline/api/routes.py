@@ -4865,6 +4865,32 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/api/jobs/monthly-mysql-initial-backup/run")
+def job_monthly_mysql_initial_backup_run(request: Request) -> Dict[str, Any]:
+    container = request.app.state.container
+    if _deployment_role_mode(container) == "internal":
+        raise HTTPException(status_code=409, detail="当前为内网端角色，首次备份只能在外网端执行")
+    try:
+        job = _start_background_job(
+            container,
+            name="首次备份多维记录",
+            run_func=lambda _emit_log: {},
+            worker_handler="monthly_mysql_initial_backup",
+            worker_payload={},
+            resource_keys=_job_resource_keys("monthly_mysql_initial_backup:global"),
+            priority="manual",
+            feature="monthly_mysql_initial_backup",
+            dedupe_key=_job_dedupe_key("monthly_mysql_initial_backup"),
+            submitted_by="manual",
+        )
+        container.add_system_log(f"[任务] 已提交: 首次备份多维记录 ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/api/jobs/chiller-mode-upload/run")
 def job_chiller_mode_upload_run(request: Request) -> Dict[str, Any]:
     container = request.app.state.container

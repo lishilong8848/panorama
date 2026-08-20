@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, Callable, Dict, List
 
 def validate_runtime_config(
@@ -62,6 +63,30 @@ def validate_runtime_config(
         "notify",
     )
     _require_keys(feishu_cfg, ["enable_upload"], "feishu")
+
+    local_mysql_cfg = feishu_cfg.get("local_mysql", {})
+    if not isinstance(local_mysql_cfg, dict):
+        raise ValueError("配置错误: feishu.local_mysql 必须是对象")
+    if bool(local_mysql_cfg.get("enabled", False)):
+        _require_keys(
+            local_mysql_cfg,
+            ["host", "port", "user", "password", "database", "table", "charset"],
+            "feishu.local_mysql",
+        )
+        for key in ("host", "user", "database", "table", "charset"):
+            if not str(local_mysql_cfg.get(key, "") or "").strip():
+                raise ValueError(f"配置错误: feishu.local_mysql.{key} 不能为空")
+        for key in ("database", "table"):
+            if not re.fullmatch(r"[A-Za-z0-9_]+", str(local_mysql_cfg.get(key, "") or "")):
+                raise ValueError(f"配置错误: feishu.local_mysql.{key} 不是合法标识符")
+        for key, default in (
+            ("port", 3306),
+            ("connect_timeout_sec", 5),
+            ("read_timeout_sec", 20),
+            ("write_timeout_sec", 30),
+        ):
+            if int(local_mysql_cfg.get(key, default)) <= 0:
+                raise ValueError(f"配置错误: feishu.local_mysql.{key} 必须大于0")
 
     if not isinstance(paths_cfg, dict):
         raise ValueError("配置错误: paths 必须是对象")

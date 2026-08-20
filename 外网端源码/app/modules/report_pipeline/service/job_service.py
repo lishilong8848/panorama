@@ -101,6 +101,7 @@ class JobState:
     summary: str = ""
     error: str = ""
     result: Any = None
+    progress: Dict[str, Any] = field(default_factory=dict)
     logs: List[str] = field(default_factory=list)
     done_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
@@ -131,6 +132,7 @@ class JobState:
             "summary": self.summary,
             "error": self.error,
             "result": self.result if include_results else None,
+            "progress": dict(self.progress),
             "log_count": len(self.logs),
             "priority": self.priority,
             "resource_keys": list(self.resource_keys),
@@ -1253,6 +1255,7 @@ class JobService:
             summary=str(snapshot.get("summary", "") or "").strip(),
             error=str(snapshot.get("error", "") or "").strip(),
             result=self._json_ready(snapshot.get("result")),
+            progress=self._json_ready(snapshot.get("progress")) if isinstance(snapshot.get("progress"), dict) else {},
             priority=str(snapshot.get("priority", "manual") or "manual").strip() or "manual",
             resource_keys=self._normalize_resource_keys(snapshot.get("resource_keys") or []),
             wait_reason=str(snapshot.get("wait_reason", "") or "").strip(),
@@ -1342,6 +1345,7 @@ class JobService:
         job.summary = summary
         job.error = ""
         job.result = None
+        job.progress = {}
         job.wait_reason = ""
         job.cancel_requested = False
         job.wait_started_monotonic = 0.0
@@ -2311,7 +2315,11 @@ class JobService:
                 "message": str(event.get("message", "") or "").strip(),
                 "timestamp": timestamp,
             }
+            for key in ("phase", "fetched_records", "total_records", "written_records", "status"):
+                if key in event:
+                    payload[key] = self._json_ready(event.get(key))
             with self._lock:
+                job.progress = dict(payload)
                 self._record_job_event(job, stage_id=stage_id, stream="stdout", event_type="progress", level="info", payload=payload)
                 self._persist_job_snapshot(job)
             return

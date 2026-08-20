@@ -112,6 +112,7 @@ class TaskEngineDatabase:
                     FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_job_events_job_event_id ON job_events(job_id, event_id);
+                CREATE INDEX IF NOT EXISTS idx_job_events_job_type_event_id ON job_events(job_id, event_type, event_id);
                 CREATE TABLE IF NOT EXISTS resource_leases (
                     resource_key TEXT PRIMARY KEY,
                     holder_job_id TEXT NOT NULL DEFAULT '',
@@ -542,6 +543,7 @@ class TaskEngineDatabase:
         last_event_id: int,
         *,
         include_results: bool = True,
+        progress: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "job_id": str(row["job_id"] or ""),
@@ -556,6 +558,7 @@ class TaskEngineDatabase:
             "summary": str(row["summary"] or ""),
             "error": str(row["error"] or ""),
             "result": self._loads(row["result_json"], None) if include_results else None,
+            "progress": dict(progress or {}),
             "log_count": 0,
             "priority": str(row["priority"] or "manual"),
             "resource_keys": self._loads(row["resource_keys_json"], []),
@@ -599,6 +602,15 @@ class TaskEngineDatabase:
             last_event_id = int(
                 conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM job_events WHERE job_id = ?", (str(job_id or "").strip(),)).fetchone()[0] or 0
             )
+            progress_row = conn.execute(
+                """
+                SELECT payload_json FROM job_events
+                WHERE job_id = ? AND event_type = 'progress'
+                ORDER BY event_id DESC LIMIT 1
+                """,
+                (str(job_id or "").strip(),),
+            ).fetchone()
+            progress = self._loads(progress_row["payload_json"], {}) if progress_row is not None else {}
             stages: list[dict[str, Any]] = []
             for item in stage_rows:
                 worker = worker_rows.get((str(item["job_id"]), str(item["stage_id"])))
@@ -627,6 +639,7 @@ class TaskEngineDatabase:
                 stages,
                 last_event_id,
                 include_results=include_results,
+                progress=progress if isinstance(progress, dict) else {},
             )
         finally:
             conn.close()

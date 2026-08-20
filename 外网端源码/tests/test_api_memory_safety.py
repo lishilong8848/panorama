@@ -163,6 +163,34 @@ def test_task_database_cleanup_records_completion_time(tmp_path):
         database.close()
 
 
+def test_task_database_restores_latest_job_progress(tmp_path):
+    database = TaskEngineDatabase(
+        runtime_config={"paths": {"runtime_state_root": str(tmp_path)}},
+        app_dir=tmp_path,
+    )
+    try:
+        database.upsert_job(_job_payload(result={}))
+        database.append_job_event(
+            job_id="job-1",
+            stage_id="main",
+            event_type="progress",
+            payload={"progress": 40, "fetched_records": 200, "total_records": 500},
+        )
+        database.append_job_event(
+            job_id="job-1",
+            stage_id="main",
+            event_type="progress",
+            payload={"progress": 80, "fetched_records": 500, "total_records": 500},
+        )
+
+        detail = database.get_job("job-1")
+
+        assert detail is not None
+        assert detail["progress"] == {"progress": 80, "fetched_records": 500, "total_records": 500}
+    finally:
+        database.close()
+
+
 def test_review_cache_pruning_removes_expired_and_oldest_entries():
     cache = {
         "expired": {"updated_at": 1.0},

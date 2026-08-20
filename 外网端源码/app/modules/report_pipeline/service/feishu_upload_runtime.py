@@ -1,7 +1,23 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+import re
 from typing import Any, Callable, Dict, List, Optional
+
+
+_MYSQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_MYSQL_REQUIRED_COLUMNS = {
+    "building",
+    "type",
+    "sort",
+    "item",
+    "data_time",
+    "com_mode",
+    "ele_con",
+    "create_time",
+    "update_time",
+}
 
 
 def _text(value: Any) -> str:
@@ -63,6 +79,114 @@ def _build_attachment_record_filter_formula(
         f'CurrentValue.[楼栋]={_formula_literal(building)}, '
         f'CurrentValue.[日期]={_formula_literal(target_value or date_text)})'
     )
+
+
+def _mysql_identifier(value: Any, field_name: str) -> str:
+    text = _text(value)
+    if not text or not _MYSQL_IDENTIFIER_RE.fullmatch(text):
+        raise ValueError(f"配置错误: feishu.local_mysql.{field_name} 不是合法标识符")
+    return text
+
+
+def _mysql_field_text(value: Any) -> str:
+    if isinstance(value, list):
+        return ",".join(filter(None, (_mysql_field_text(item) for item in value)))
+    if isinstance(value, dict):
+        for key in ("text", "name", "value"):
+            if key in value:
+                return _mysql_field_text(value.get(key))
+    return _text(value)
+
+
+def _mysql_data_time(date_value: Any) -> datetime:
+    if isinstance(date_value, (int, float)) and not isinstance(date_value, bool):
+        timestamp = float(date_value)
+        if abs(timestamp) >= 10_000_000_000:
+            timestamp /= 1000.0
+        return datetime.fromtimestamp(timestamp)
+    text = _text(date_value)
+    if text.replace(".", "", 1).lstrip("-").isdigit():
+        timestamp = float(text)
+        if abs(timestamp) >= 10_000_000_000:
+            timestamp /= 1000.0
+        return datetime.fromtimestamp(timestamp)
+    for fmt, length in (("%Y-%m-%d", 10), ("%Y-%m", 7)):
+        try:
+            return datetime.strptime(text[:length], fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"本地MySQL写入日期格式错误: {date_value}")
+
+
+def insert_calc_fields_to_local_mysql(
+    *,
+    mysql_cfg: Dict[str, Any],
+    fields_list: List[Dict[str, Any]],
+    default_building: str = "",
+    default_date: Any = None,
+    require_building: bool = True,
+) -> int:
+    if not bool(mysql_cfg.get("enabled", False)):
+        return 0
+
+    import pymysql
+
+    database = _mysql_identifier(mysql_cfg.get("database"), "database")
+    table = _mysql_identifier(mysql_cfg.get("table"), "table")
+    rows = []
+    for index, fields in enumerate(fields_list, start=1):
+        building_text = _mysql_field_text(fields.get("楼栋")) or _text(default_building)
+        if not building_text and require_building:
+            raise ValueError(f"本地MySQL写入失败: 第{index}条记录楼栋为空")
+        date_value = fields.get("日期") if fields.get("日期") not in (None, "") else default_date
+        rows.append(
+            (
+                building_text,
+                _mysql_field_text(fields.get("类型")),
+                _mysql_field_text(fields.get("分类")),
+                _mysql_field_text(fields.get("项目")),
+                _mysql_data_time(date_value),
+                _mysql_field_text(fields.get("计算方式")),
+                fields.get("用电量"),
+            )
+        )
+    conn = pymysql.connect(
+        host=_text(mysql_cfg.get("host")),
+        port=int(mysql_cfg.get("port", 3306)),
+        user=_text(mysql_cfg.get("user")),
+        password=str(mysql_cfg.get("password", "") or ""),
+        database=database,
+        charset=_text(mysql_cfg.get("charset")) or "utf8mb4",
+        connect_timeout=int(mysql_cfg.get("connect_timeout_sec", 5)),
+        read_timeout=int(mysql_cfg.get("read_timeout_sec", 20)),
+        write_timeout=int(mysql_cfg.get("write_timeout_sec", 30)),
+        autocommit=False,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(f"SHOW COLUMNS FROM `{table}`")
+            columns = {_text(item.get("Field")) for item in cursor.fetchall()}
+            missing = sorted(_MYSQL_REQUIRED_COLUMNS - columns)
+            if missing:
+                raise RuntimeError(f"本地MySQL表缺少字段: {','.join(missing)}")
+
+            if rows:
+                cursor.executemany(
+                    f"""
+                    INSERT INTO `{table}`
+                        (`building`, `type`, `sort`, `item`, `data_time`, `com_mode`, `ele_con`, `create_time`, `update_time`)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    rows,
+                )
+        conn.commit()
+        return len(rows)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _collect_calc_record_ids_for_replace(
@@ -204,6 +328,9 @@ def upload_results_to_feishu(
 
     report_type = feishu_cfg["report_type"]
     skip_zero_records = bool(feishu_cfg["skip_zero_records"])
+    local_mysql_cfg = feishu_cfg.get("local_mysql", {})
+    if not isinstance(local_mysql_cfg, dict):
+        raise ValueError("配置错误: feishu.local_mysql 必须是对象")
     date_override = resolve_upload_date_from_runtime(config)
 
     normalized_source_dates: Dict[str, str] = {}
@@ -283,14 +410,33 @@ def upload_results_to_feishu(
             raise
 
         try:
-            client.upload_calc_records(
+            calc_fields = client.build_calc_record_fields(
                 result.records,
                 skip_zero_records=skip_zero_records,
                 date_override=upload_date_text,
             )
+            client.batch_create_records(calc_table_id, calc_fields)
         except Exception as exc:  # noqa: BLE001
             emit_log(
                 f"[文件流程失败] 功能={log_feature} 阶段=飞书计算记录上传 楼栋={building_text} "
+                f"文件={file_text} 日期={date_text} 错误={exc}"
+            )
+            raise
+
+        try:
+            persisted_count = insert_calc_fields_to_local_mysql(
+                mysql_cfg=local_mysql_cfg,
+                fields_list=calc_fields,
+                default_building=result.building,
+                default_date=upload_date_text,
+            )
+            if bool(local_mysql_cfg.get("enabled", False)):
+                emit_log(
+                    f"[本地MySQL] 批量持久化完成: 楼栋={building_text}, 日期={date_text}, count={persisted_count}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            emit_log(
+                f"[文件流程失败] 功能={log_feature} 阶段=本地MySQL计算记录持久化 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
             )
             raise

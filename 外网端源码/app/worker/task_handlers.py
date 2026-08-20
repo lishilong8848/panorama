@@ -22,6 +22,9 @@ from app.modules.temperature_humidity_upload.service.temperature_humidity_upload
 )
 from app.modules.report_pipeline.service.calculation_service import CalculationService
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
+from app.modules.report_pipeline.service.monthly_mysql_initial_backup_service import (
+    MonthlyMysqlInitialBackupService,
+)
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.sheet_import.service.sheet_import_service import SheetImportService
 from app.modules.shared_bridge.service import shared_bridge_runtime_service as shared_bridge_runtime_module
@@ -725,6 +728,32 @@ def handle_temperature_humidity_upload(
         raise
 
 
+def handle_monthly_mysql_initial_backup(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],  # noqa: ARG001
+    emit_log: Callable[[str], None],
+    runtime: Any = None,  # noqa: ANN401
+) -> Dict[str, Any]:
+    service = MonthlyMysqlInitialBackupService(config)
+
+    def _progress(item: Dict[str, Any]) -> None:
+        if runtime is None:
+            return
+        runtime.emit_event(
+            {
+                "type": "progress",
+                "stage_id": runtime.stage_id,
+                **item,
+            }
+        )
+
+    return service.run(
+        emit_log=emit_log,
+        progress_callback=_progress,
+        cancel_check=runtime.raise_if_cancelled if runtime is not None else None,
+    )
+
+
 def handle_system_screenshot_demand_upload(
     config: Dict[str, Any],
     payload: Dict[str, Any],
@@ -1312,6 +1341,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "alarm_rule_export_upload": handle_alarm_rule_export_upload,
     "system_screenshot_upload": handle_system_screenshot_upload,
     "temperature_humidity_upload": handle_temperature_humidity_upload,
+    "monthly_mysql_initial_backup": handle_monthly_mysql_initial_backup,
     "system_screenshot_demand_upload": handle_system_screenshot_demand_upload,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,

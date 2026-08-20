@@ -415,6 +415,7 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "calc_table_id",
         "attachment_table_id",
         "report_type",
+        "local_mysql",
     ):
         if key in legacy_feishu:
             monthly_upload[key] = copy.deepcopy(legacy_feishu[key])
@@ -680,6 +681,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "calc_table_id": monthly_upload.get("calc_table_id"),
         "attachment_table_id": monthly_upload.get("attachment_table_id"),
         "report_type": monthly_upload.get("report_type"),
+        "local_mysql": copy.deepcopy(_dict(monthly_upload.get("local_mysql"))),
     }
 
     legacy_output = _dict(monthly.get("_legacy_output"))
@@ -854,6 +856,11 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         if key in runtime_feishu:
             feishu_auth[key] = runtime_feishu.get(key)
     common["feishu_auth"] = feishu_auth
+    if "local_mysql" in runtime_feishu:
+        monthly_upload = _dict(monthly.get("upload"))
+        monthly_upload["local_mysql"] = copy.deepcopy(_dict(runtime_feishu.get("local_mysql")))
+        monthly["upload"] = monthly_upload
+        features["monthly_report"] = monthly
 
     handover = _dict(features.get("handover_log"))
     day_metric_upload = sanitize_day_metric_upload_config(

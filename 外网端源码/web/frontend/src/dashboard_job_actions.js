@@ -29,6 +29,7 @@ const ACTION_KEYS = {
   autoOnce: "job:auto_once",
   multiDate: "job:multi_date",
   manualUpload: "job:manual_upload",
+  monthlyMysqlInitialBackup: "job:monthly_mysql_initial_backup",
   sheetImport: "job:sheet_import",
   handoverFromFile: "job:handover_from_file",
   handoverFromDownload: "job:handover_from_download",
@@ -357,6 +358,15 @@ if (!canRun.value) return;
     if (isWaitingSharedBridge) {
       message.value = `${title} 已进入等待采集端补采，共享文件到位后会自动继续`;
     }
+  }
+
+  async function runMonthlyMysqlInitialBackup() {
+    await startJobByJson(
+      "/api/jobs/monthly-mysql-initial-backup/run",
+      {},
+      "首次备份多维记录",
+      ACTION_KEYS.monthlyMysqlInitialBackup,
+    );
   }
 
   async function retryCurrentJob() {
@@ -1233,6 +1243,7 @@ if (!canRun.value) return;
     runAutoOnce,
     runMultiDate,
     runManualUpload,
+    runMonthlyMysqlInitialBackup,
     runSheetImport,
     fetchJob,
     runHandoverFromFile,

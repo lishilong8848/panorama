@@ -1457,6 +1457,7 @@ createApp({
       sendMonthlyReportTest,
       runMultiDate,
       runManualUpload,
+      runMonthlyMysqlInitialBackup,
       runSheetImport,
       startScheduler,
       saveSchedulerQuickConfig: saveSchedulerQuickConfigImmediate,
@@ -1583,6 +1584,13 @@ createApp({
       onJobReconnect: async (jobId) => {
         await fetchJob(jobId);
         scheduleExternalDashboardRefresh("job_reconnect");
+      },
+      onJobProgress: (jobId, payload) => {
+        if (String(currentJob.value?.job_id || "").trim() !== String(jobId || "").trim()) return;
+        currentJob.value = {
+          ...currentJob.value,
+          progress: { ...(currentJob.value?.progress || {}), ...(payload || {}) },
+        };
       },
     });
     Object.assign(streamController, realStreamController);
@@ -2027,6 +2035,7 @@ createApp({
       formatResumeDateSummary,
       formatResumeDateFull,
       runManualUpload,
+      runMonthlyMysqlInitialBackup,
       runSheetImport,
       runHandoverFromFile,
       runHandoverFromDownload,

@@ -5,6 +5,7 @@
   setSystemOffset,
   onJobDone,
   onJobReconnect,
+  onJobProgress,
   canAttachSystemStream,
   systemReconnectDelayMs = 1200,
   jobReconnectDelayMs = 1200,
@@ -121,7 +122,11 @@
         jobLastEventIds.set(normalizedJobId, nextId);
       }
       try {
-        JSON.parse(e.data);
+        const payload = JSON.parse(e.data);
+        if (e.type === "progress") {
+          const progressPayload = payload?.payload && typeof payload.payload === "object" ? payload.payload : payload;
+          onJobProgress?.(normalizedJobId, progressPayload);
+        }
       } catch (err) {
         setMessage?.(`日志解析失败: ${err}`);
       }

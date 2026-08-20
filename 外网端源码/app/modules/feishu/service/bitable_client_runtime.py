@@ -413,6 +413,7 @@ class FeishuBitableClient:
         view_id: str = "",
         filter_formula: str = "",
         field_names: Optional[List[str]] = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> List[Dict[str, Any]]:
         if page_size <= 0:
             raise ValueError("page_size 必须大于0")
@@ -442,12 +443,17 @@ class FeishuBitableClient:
             data = self._get_json(url, params=params)
             payload = data.get("data") if isinstance(data, dict) else {}
             items = payload.get("items") if isinstance(payload, dict) else []
+            total = int(payload.get("total", 0) or 0) if isinstance(payload, dict) else 0
             if isinstance(items, list):
                 for item in items:
                     if isinstance(item, dict):
                         records.append(item)
                         if max_count > 0 and len(records) >= max_count:
+                            if callable(progress_callback):
+                                progress_callback(max_count, total or max_count)
                             return records[:max_count]
+            if callable(progress_callback):
+                progress_callback(len(records), total)
 
             has_more = bool(payload.get("has_more")) if isinstance(payload, dict) else False
             if not has_more:
@@ -659,7 +665,7 @@ class FeishuBitableClient:
         )
         return result["data"]["file_token"]
 
-    def upload_calc_records(
+    def build_calc_record_fields(
         self,
         records: List[Any],
         skip_zero_records: bool = False,
@@ -684,6 +690,19 @@ class FeishuBitableClient:
                     item_name=item_name,
                 )
             )
+        return fields_list
+
+    def upload_calc_records(
+        self,
+        records: List[Any],
+        skip_zero_records: bool = False,
+        date_override: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        fields_list = self.build_calc_record_fields(
+            records,
+            skip_zero_records=skip_zero_records,
+            date_override=date_override,
+        )
         return self.batch_create_records(self.calc_table_id, fields_list)
 
     def upload_attachment_record(
