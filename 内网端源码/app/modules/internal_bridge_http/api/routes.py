@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import functools
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Dict
 
@@ -24,6 +27,10 @@ router = APIRouter(prefix="/api/internal-bridge", tags=["internal-bridge"])
 _RUNNER_ATTR = "_internal_bridge_http_runner"
 _SOURCE_INDEX_MAX_CONCURRENT_REQUESTS = 8
 _SOURCE_INDEX_REQUEST_SEMAPHORE = threading.BoundedSemaphore(_SOURCE_INDEX_MAX_CONCURRENT_REQUESTS)
+_SOURCE_INDEX_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_SOURCE_INDEX_MAX_CONCURRENT_REQUESTS,
+    thread_name_prefix="internal-source-index-http",
+)
 _SOURCE_INDEX_BUSY_RETRY_AFTER_SEC = 15
 _RUNNER_INIT_LOCK = threading.Lock()
 
@@ -208,7 +215,7 @@ def cancel_internal_bridge_task(
 
 
 @router.get("/source-index")
-def query_internal_source_index(
+async def query_internal_source_index(
     request: Request,
     source_family: str = "",
     bucket_or_date: str = "",
@@ -223,16 +230,21 @@ def query_internal_source_index(
     if not acquired:
         return _source_index_busy_payload(scope="source-index")
     try:
-        entries = _runner(request).list_source_index(
-            source_family=source_family,
-            bucket_or_date=bucket_or_date,
-            building=building,
-            bucket_kind=bucket_kind,
-            duty_shift=duty_shift,
-            status=status,
-            limit=limit,
+        runner = _runner(request)
+        entries = await asyncio.get_running_loop().run_in_executor(
+            _SOURCE_INDEX_EXECUTOR,
+            functools.partial(
+                runner.list_source_index,
+                source_family=source_family,
+                bucket_or_date=bucket_or_date,
+                building=building,
+                bucket_kind=bucket_kind,
+                duty_shift=duty_shift,
+                status=status,
+                limit=limit,
+            ),
         )
-        recovering = _runner(request).source_index_recovery_active(
+        recovering = runner.source_index_recovery_active(
             source_family=source_family,
             bucket_or_date=bucket_or_date,
             building=building,
@@ -431,7 +443,7 @@ def run_internal_system_screenshot_capture(
 
 
 @router.post("/source-index/batch")
-def query_internal_source_index_batch(
+async def query_internal_source_index_batch(
     request: Request,
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -442,9 +454,14 @@ def query_internal_source_index_batch(
     try:
         queries = payload.get("queries", []) if isinstance(payload, dict) else []
         default_limit = int(payload.get("default_limit", 50) or 50) if isinstance(payload, dict) else 50
-        results = _runner(request).list_source_index_batch(
-            queries if isinstance(queries, list) else [],
-            default_limit=default_limit,
+        runner = _runner(request)
+        results = await asyncio.get_running_loop().run_in_executor(
+            _SOURCE_INDEX_EXECUTOR,
+            functools.partial(
+                runner.list_source_index_batch,
+                queries if isinstance(queries, list) else [],
+                default_limit=default_limit,
+            ),
         )
         return {"ok": True, "results": results}
     finally:

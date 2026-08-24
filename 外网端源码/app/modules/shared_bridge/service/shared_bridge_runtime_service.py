@@ -132,6 +132,7 @@ class SharedBridgeRuntimeService:
     STORE_ERROR_LOG_INTERVAL_SEC = 60
     HTTP_BRIDGE_FAILURE_LOG_INTERVAL_SEC = 300
     HTTP_BRIDGE_COOLDOWN_SEC = 60
+    HTTP_SOURCE_INDEX_COOLDOWN_SEC = 15
     HTTP_SOURCE_INDEX_CACHE_TTL_SEC = 60
     BACKGROUND_TASK_BUSY_RETRY_SEC = 30
 
@@ -1443,9 +1444,14 @@ class SharedBridgeRuntimeService:
         is_transient = self._http_bridge_error_is_transient(exc)
         is_queue_busy = self._http_bridge_error_is_queue_busy(exc)
         if is_transient and not is_queue_busy:
+            cooldown_sec = (
+                self.HTTP_SOURCE_INDEX_COOLDOWN_SEC
+                if scope == "读取源文件索引"
+                else self.HTTP_BRIDGE_COOLDOWN_SEC
+            )
             self._http_bridge_unavailable_until_monotonic = max(
                 float(self._http_bridge_unavailable_until_monotonic or 0.0),
-                time.monotonic() + self.HTTP_BRIDGE_COOLDOWN_SEC,
+                time.monotonic() + cooldown_sec,
             )
             self._http_bridge_last_error = error_text
         elif is_transient:
@@ -1985,7 +1991,10 @@ class SharedBridgeRuntimeService:
                     break
                 except Exception as exc:  # noqa: BLE001
                     is_queue_busy = self._http_bridge_error_is_queue_busy(exc)
-                    attempt_limit = max_attempts if is_queue_busy else 2
+                    # The HTTP client already retries transport failures. Only
+                    # retry quick busy responses here to avoid multiplying a
+                    # 15-second timeout into a minute-long scheduler stall.
+                    attempt_limit = max_attempts if is_queue_busy else 1
                     if attempt >= attempt_limit or not self._http_bridge_error_is_transient(exc):
                         raise
                     delay_sec = self._http_bridge_retry_after_sec(
@@ -2082,7 +2091,7 @@ class SharedBridgeRuntimeService:
                     if not self._http_bridge_error_is_queue_busy(exc):
                         self._http_bridge_unavailable_until_monotonic = max(
                             float(self._http_bridge_unavailable_until_monotonic or 0.0),
-                            time.monotonic() + self.HTTP_BRIDGE_COOLDOWN_SEC,
+                            time.monotonic() + self.HTTP_SOURCE_INDEX_COOLDOWN_SEC,
                         )
                     self._http_bridge_last_error = error_text
                 return mirror_entries

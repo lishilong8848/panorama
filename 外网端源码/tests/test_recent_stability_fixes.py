@@ -413,6 +413,42 @@ def test_http_source_index_queue_busy_uses_mirror_without_global_cooldown():
     assert service._http_bridge_unavailable_until_monotonic == 0.0
 
 
+def test_http_source_index_transport_timeout_is_not_retried_twice_by_runtime():
+    service = SharedBridgeRuntimeService(
+        runtime_config={
+            "deployment": {"role_mode": "external"},
+            "shared_bridge": {"enabled": True, "root_dir": r"\\172.16.1.2\share"},
+            "internal_bridge_http": {"enabled": True, "base_url": "http://internal", "read_timeout_sec": 1},
+        },
+        app_version="test",
+        emit_log=lambda _text: None,
+    )
+
+    class Client:
+        read_timeout_sec = 1
+
+        def __init__(self):
+            self.calls = 0
+
+        def source_index_batch(self, queries, *, default_limit=50):  # noqa: ARG002
+            self.calls += 1
+            raise RuntimeError("内网端 HTTP 请求失败: timed out")
+
+    client = Client()
+    service._internal_bridge_http_client = client  # type: ignore[assignment]
+
+    rows = service._http_source_index_entries(
+        source_family="branch_power_family",
+        buildings=["A楼"],
+        bucket_key="2026-06-09",
+    )
+
+    assert rows == []
+    assert client.calls == 1
+    cooldown = service._http_bridge_unavailable_until_monotonic - time.monotonic()
+    assert 0 < cooldown <= service.HTTP_SOURCE_INDEX_COOLDOWN_SEC
+
+
 def test_http_source_index_rejects_stale_verified_mirror():
     service = SharedBridgeRuntimeService(
         runtime_config={
