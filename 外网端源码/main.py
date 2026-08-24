@@ -21,7 +21,6 @@ warnings.filterwarnings(
     module=r"openpyxl\.styles\.stylesheet",
 )
 
-
 from app.modules.updater.service.runtime_dependency_sync_service import (  # noqa: E402
     RuntimeDependencySyncService,
 )
