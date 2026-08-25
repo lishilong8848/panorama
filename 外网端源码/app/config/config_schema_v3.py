@@ -53,8 +53,8 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
         "internal_source_sites": [],
         "scheduler": {
             "enabled": True,
-            "auto_start_in_gui": False,
-            "run_time": "00:10:00",
+            "auto_start_in_gui": True,
+            "run_time": "02:30:00",
             "check_interval_sec": 30,
             "catch_up_if_missed": False,
             "retry_failed_in_same_period": True,
@@ -1255,10 +1255,10 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
         },
         "branch_power_upload": {
             "scheduler": {
-                "enabled": False,
-                "auto_start_in_gui": False,
+                "enabled": True,
+                "auto_start_in_gui": True,
                 "interval_minutes": 1440,
-                "minute_offset": 30,
+                "minute_offset": 240,
                 "check_interval_sec": 30,
                 "retry_failed_on_next_tick": True,
                 "state_file": "branch_power_upload_scheduler_state.json",

@@ -51,7 +51,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "history_fill_timeout_sec": 1800,
             "monthly_report_download": {
                 "enabled": True,
-                "run_time": "01:00:00",
+                "run_time": "01:30:00",
                 "retry_interval_sec": 300,
             },
             "top5_monthly_report_download": {
@@ -60,16 +60,20 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 "run_time": "02:00:00",
                 "retry_interval_sec": 300,
             },
-            "daily_source_download": {
+            "temperature_humidity_download": {
                 "enabled": True,
                 "run_time": "00:30:00",
+                "retry_interval_sec": 300,
+            },
+            "daily_source_download": {
+                "enabled": True,
+                "run_time": "03:00:00",
                 "retry_interval_sec": 300,
                 "families": [
                     "branch_power_family",
                     "branch_current_family",
                     "branch_switch_family",
                     "building_full_cabinet_power_family",
-                    "air_conditioner_temperature_humidity_family",
                 ],
             },
         },

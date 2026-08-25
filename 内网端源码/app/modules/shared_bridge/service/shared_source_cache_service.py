@@ -94,7 +94,6 @@ DAILY_AUTO_SOURCE_FAMILIES = (
     FAMILY_BRANCH_CURRENT,
     FAMILY_BRANCH_SWITCH,
     FAMILY_BUILDING_FULL_CABINET_POWER,
-    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
 )
 
 ALARM_EVENT_BITABLE_TARGET_FIELDS = {
@@ -342,6 +341,9 @@ class SharedSourceCacheService:
         self._last_monthly_source_run_monotonic = 0.0
         self._last_top5_monthly_source_run_monotonic = 0.0
         self._last_daily_source_run_monotonic = 0.0
+        self._last_temperature_humidity_run_monotonic = 0.0
+        self._temperature_humidity_last_attempt_bucket = ""
+        self._temperature_humidity_last_success_bucket = ""
         self._last_scheduler_log_signature = ""
         self._last_chiller_mode_switch_run_monotonic = 0.0
         self._chiller_mode_switch_interval_sec = 600
@@ -356,6 +358,9 @@ class SharedSourceCacheService:
         self._daily_source_download_time = dt_time(hour=0, minute=30)
         self._daily_source_retry_interval_sec = 300
         self._daily_source_families: tuple[str, ...] = DAILY_AUTO_SOURCE_FAMILIES
+        self._temperature_humidity_download_enabled = True
+        self._temperature_humidity_download_time = dt_time(hour=0, minute=30)
+        self._temperature_humidity_retry_interval_sec = 300
         self._alarm_external_upload_state: Dict[str, Any] = {
             "running": False,
             "started_at": "",
@@ -1481,6 +1486,11 @@ class SharedSourceCacheService:
             if isinstance(source_cache.get("daily_source_download", {}), dict)
             else {}
         )
+        temperature_humidity_cfg = (
+            source_cache.get("temperature_humidity_download", {})
+            if isinstance(source_cache.get("temperature_humidity_download", {}), dict)
+            else {}
+        )
         monthly_source_cfg = (
             source_cache.get("monthly_report_download", {})
             if isinstance(source_cache.get("monthly_report_download", {}), dict)
@@ -1503,8 +1513,8 @@ class SharedSourceCacheService:
         self.history_fill_timeout_sec = max(60, int(source_cache.get("history_fill_timeout_sec", 1800) or 1800))
         self._monthly_source_download_enabled = bool(monthly_source_cfg.get("enabled", True))
         self._monthly_source_download_time = self._parse_time_text(
-            monthly_source_cfg.get("run_time", "01:00:00"),
-            default=dt_time(hour=1, minute=0),
+            monthly_source_cfg.get("run_time", "01:30:00"),
+            default=dt_time(hour=1, minute=30),
         )
         self._monthly_source_retry_interval_sec = max(
             60,
@@ -1525,8 +1535,8 @@ class SharedSourceCacheService:
         )
         self._daily_source_download_enabled = bool(daily_source_cfg.get("enabled", True))
         self._daily_source_download_time = self._parse_time_text(
-            daily_source_cfg.get("run_time", "00:30:00"),
-            default=dt_time(hour=0, minute=30),
+            daily_source_cfg.get("run_time", "03:00:00"),
+            default=dt_time(hour=3, minute=0),
         )
         self._daily_source_retry_interval_sec = max(
             60,
@@ -1541,15 +1551,16 @@ class SharedSourceCacheService:
                     normalized_daily_families.append(family)
         if not normalized_daily_families:
             normalized_daily_families = list(DAILY_AUTO_SOURCE_FAMILIES)
-        # 旧配置中的 families 列表不包含新增报表；升级后按业务要求自动纳入每日下载。
-        elif (
-            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
-            not in normalized_daily_families
-        ):
-            normalized_daily_families.append(
-                FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
-            )
         self._daily_source_families = tuple(normalized_daily_families)
+        self._temperature_humidity_download_enabled = bool(temperature_humidity_cfg.get("enabled", True))
+        self._temperature_humidity_download_time = self._parse_time_text(
+            temperature_humidity_cfg.get("run_time", "00:30:00"),
+            default=dt_time(hour=0, minute=30),
+        )
+        self._temperature_humidity_retry_interval_sec = max(
+            60,
+            int(temperature_humidity_cfg.get("retry_interval_sec", 300) or 300),
+        )
         chiller_mode_switch_cfg = (
             self.runtime_config.get("handover_log", {}).get("chiller_mode_switch", {})
             if isinstance(self.runtime_config.get("handover_log", {}), dict)
@@ -4016,7 +4027,7 @@ class SharedSourceCacheService:
     def _building_full_cabinet_power_day_query_window(self, business_date: str) -> tuple[str, str, List[str]]:
         day_dt = self._parse_branch_business_date(business_date)
         start_dt = day_dt - timedelta(minutes=10)
-        end_dt = day_dt + timedelta(days=1, minutes=10)
+        end_dt = day_dt + timedelta(days=1, hours=2, minutes=20)
         bucket_keys = [day_dt.replace(hour=hour).strftime("%Y-%m-%d %H") for hour in range(24)]
         return start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S"), bucket_keys
 
@@ -4105,7 +4116,7 @@ class SharedSourceCacheService:
     def _branch_day_query_window(self, business_date: str) -> tuple[str, str, List[str]]:
         day_dt = self._parse_branch_business_date(business_date)
         start_dt = day_dt - timedelta(minutes=10)
-        end_dt = day_dt + timedelta(hours=23, minutes=50)
+        end_dt = day_dt + timedelta(days=1, hours=2, minutes=20)
         bucket_keys = [day_dt.replace(hour=hour).strftime("%Y-%m-%d %H") for hour in range(24)]
         return start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S"), bucket_keys
 
@@ -7040,35 +7051,61 @@ class SharedSourceCacheService:
         self,
         *,
         business_date: str,
-        run_at: datetime | None = None,
     ) -> List[tuple[str, str, Callable[..., Any]]]:
         fill_funcs: Dict[str, Callable[..., Any]] = {
             FAMILY_BRANCH_POWER: self.fill_branch_power_day_latest,
             FAMILY_BRANCH_CURRENT: self.fill_branch_current_day_latest,
             FAMILY_BRANCH_SWITCH: self.fill_branch_switch_day_latest,
             FAMILY_BUILDING_FULL_CABINET_POWER: self.fill_building_full_cabinet_power_day_latest,
-            FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY: (
-                self.fill_air_conditioner_temperature_humidity_day_latest
-            ),
         }
         steps: List[tuple[str, str, Callable[..., Any]]] = []
         for source_family in self._daily_source_families:
             normalized_family = self._normalize_source_family(source_family)
             fill_func = fill_funcs.get(normalized_family)
             if fill_func is not None:
-                target_bucket = (
-                    self.air_conditioner_temperature_humidity_day_bucket(run_at)
-                    if normalized_family
-                    == FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY
-                    else business_date
-                )
-                steps.append((normalized_family, target_bucket, fill_func))
+                steps.append((normalized_family, business_date, fill_func))
         return steps
 
     def _mark_daily_source_refresh(self, **fields: Any) -> None:
         with self._lock:
             self._daily_source_refresh.update(fields)
             self._external_full_snapshot_dirty = True
+
+    def _run_temperature_humidity_file_if_due(self, when: datetime | None = None) -> None:
+        if not self._temperature_humidity_download_enabled:
+            return
+        now_dt = when or datetime.now()
+        if now_dt.time() < self._temperature_humidity_download_time:
+            return
+        bucket_key = self.air_conditioner_temperature_humidity_day_bucket(now_dt)
+        now_mono = time.monotonic()
+        with self._lock:
+            if self._temperature_humidity_last_success_bucket == bucket_key:
+                return
+            if (
+                self._temperature_humidity_last_attempt_bucket == bucket_key
+                and self._last_temperature_humidity_run_monotonic > 0
+                and now_mono - self._last_temperature_humidity_run_monotonic
+                < self._temperature_humidity_retry_interval_sec
+            ):
+                return
+            self._temperature_humidity_last_attempt_bucket = bucket_key
+            self._last_temperature_humidity_run_monotonic = now_mono
+        result = self._run_latest_source_steps_by_building(
+            steps=[
+                (
+                    FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
+                    bucket_key,
+                    self.fill_air_conditioner_temperature_humidity_day_latest,
+                )
+            ],
+            force_retry_failed=True,
+            force_refresh_existing=False,
+        )
+        has_problem = any(result.get(key) for key in ("failed_units", "blocked_units", "running_units"))
+        if not has_problem:
+            with self._lock:
+                self._temperature_humidity_last_success_bucket = bucket_key
 
     def _run_daily_source_files_if_due(self, when: datetime | None = None, *, force: bool = False) -> None:
         if not self._daily_source_download_enabled:
@@ -7091,10 +7128,7 @@ class SharedSourceCacheService:
             ):
                 return
             self._last_daily_source_run_monotonic = now_mono
-        steps = self._daily_source_steps(
-            business_date=business_date,
-            run_at=now_dt,
-        )
+        steps = self._daily_source_steps(business_date=business_date)
         if not steps:
             return
         self._ensure_dirs()
@@ -8094,6 +8128,7 @@ class SharedSourceCacheService:
                     self._run_top5_monthly_report_file_if_due()
                     self._run_alarm_bucket_if_due()
                     self._run_chiller_mode_switch_if_due(force=True)
+                    self._run_temperature_humidity_file_if_due()
                     self._run_daily_source_files_if_due()
                     startup_done = True
                 else:
@@ -8104,6 +8139,7 @@ class SharedSourceCacheService:
                     self._run_top5_monthly_report_file_if_due()
                     self._run_alarm_bucket_if_due()
                     self._run_chiller_mode_switch_if_due()
+                    self._run_temperature_humidity_file_if_due()
                     self._run_daily_source_files_if_due()
                 if startup_done:
                     handover_status = self._family_status.get(FAMILY_HANDOVER_LOG, {})

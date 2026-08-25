@@ -258,7 +258,7 @@ def check_apscheduler_facade() -> None:
     _assert(result.get("running") is True, "branch scheduler did not start")
     snapshot = container.branch_power_upload_scheduler_status()
     _assert(snapshot.get("running") is True, "branch scheduler status is not running")
-    _assert(str(snapshot.get("next_run_time", "")).endswith("00:30:00"), "branch scheduler next_run_time is not 00:30")
+    _assert(str(snapshot.get("next_run_time", "")).endswith("04:00:00"), "branch scheduler next_run_time is not 04:00")
     engine_snapshot = container.scheduler_engine_snapshot()
     _assert(engine_snapshot.get("engine") == "APScheduler", "scheduler engine is not APScheduler")
     _assert(engine_snapshot.get("ready") is True, "scheduler engine snapshot is not ready")
@@ -319,7 +319,7 @@ def check_daily_scheduler_failed_run_schedules_retry() -> None:
         feature="baseline",
         scheduler_cfg={
             "enabled": True,
-            "run_time": "00:10:00",
+            "run_time": "02:30:00",
             "check_interval_sec": 30,
             "retry_failed_in_same_period": True,
             "state_file": f".runtime/architecture_baseline_check/baseline_daily_retry_state_{time.time_ns()}.json",

@@ -355,7 +355,7 @@ export function createAppState(vueApi) {
           last_trigger_at: "",
           last_trigger_result: "",
           interval_minutes: 60,
-          minute_offset: 30,
+          minute_offset: 240,
           state_path: "",
         state_exists: false,
         executor_bound: false,
@@ -1700,10 +1700,11 @@ export function createAppState(vueApi) {
   const branchPowerUploadScheduleText = computed(() => {
     const scheduler = config.value?.branch_power_upload?.scheduler || {};
     const healthScheduler = health.branch_power_upload?.scheduler || {};
-    const minute = Number.parseInt(String(scheduler.minute_offset ?? healthScheduler.minute_offset ?? 30), 10);
-    const safeMinute = Number.isInteger(minute) && minute >= 0 ? minute % 60 : 30;
-    const minuteText = String(safeMinute).padStart(2, "0");
-    return `每天 00:${minuteText} 左右`;
+    const minute = Number.parseInt(String(scheduler.minute_offset ?? healthScheduler.minute_offset ?? 240), 10);
+    const safeMinute = Number.isInteger(minute) && minute >= 0 ? Math.min(1439, minute) : 240;
+    const hourText = String(Math.floor(safeMinute / 60)).padStart(2, "0");
+    const minuteText = String(safeMinute % 60).padStart(2, "0");
+    return `每天 ${hourText}:${minuteText} 左右`;
   });
   const alarmEventUploadSchedulerDecisionText = computed(() =>
     readSchedulerDisplayText(health.alarm_event_upload?.scheduler, "decision_text", "暂无记录"),

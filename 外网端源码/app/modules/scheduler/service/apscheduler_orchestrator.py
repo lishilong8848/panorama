@@ -343,11 +343,16 @@ class ApschedulerSchedulerFacade:
             }
         interval_minutes = max(1, int(raw.get("interval_minutes", 60) or 60))
         minute_offset = int(raw.get("minute_offset", raw.get("start_minute", raw.get("run_minute", 0))) or 0)
+        normalized_offset = (
+            min(1439, max(0, minute_offset))
+            if interval_minutes >= 1440
+            else max(0, minute_offset) % interval_minutes
+        )
         return {
             "enabled": bool(raw.get("enabled", True)),
             "auto_start_in_gui": bool(raw.get("auto_start_in_gui", False)),
             "interval_minutes": interval_minutes,
-            "minute_offset": max(0, minute_offset) % max(1, min(interval_minutes, 1440)),
+            "minute_offset": normalized_offset,
             "check_interval_sec": max(1, int(raw.get("check_interval_sec", 30) or 30)),
             "retry_failed_on_next_tick": bool(raw.get("retry_failed_on_next_tick", True)),
             "align_to_wall_clock": bool(raw.get("align_to_wall_clock", True)),
@@ -458,7 +463,7 @@ class ApschedulerSchedulerFacade:
             return current + timedelta(minutes=interval)
         day_start = current.replace(hour=0, minute=0, second=0)
         if interval >= 1440:
-            anchor = day_start + timedelta(minutes=offset % 1440)
+            anchor = day_start + timedelta(minutes=min(1439, offset))
             return anchor if current < anchor else anchor + timedelta(days=1)
         anchor = day_start + timedelta(minutes=offset % interval)
         if current < anchor:
@@ -508,7 +513,13 @@ class ApschedulerSchedulerFacade:
         offset = max(0, int(self.cfg.get("minute_offset", 0) or 0))
         if bool(self.cfg.get("align_to_wall_clock", True)):
             if interval >= 1440:
-                return CronTrigger(hour=0, minute=offset % 60, second=0, timezone=self.orchestrator.timezone)
+                day_offset = min(1439, offset)
+                return CronTrigger(
+                    hour=day_offset // 60,
+                    minute=day_offset % 60,
+                    second=0,
+                    timezone=self.orchestrator.timezone,
+                )
             if interval == 60:
                 return CronTrigger(minute=offset % 60, second=0, timezone=self.orchestrator.timezone)
             if interval < 60 and 60 % interval == 0:

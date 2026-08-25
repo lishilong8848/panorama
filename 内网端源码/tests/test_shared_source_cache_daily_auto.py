@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import runpy
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,18 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (  # n
 )
 from app.shared.utils.artifact_naming import build_source_artifact_path  # noqa: E402
 from handover_log_module.service.handover_download_service import HandoverDownloadService  # noqa: E402
+
+
+def test_monthly_report_download_uses_padded_business_day_window():
+    runtime = runpy.run_path(str(ROOT / "下载动环表格.py"))
+
+    window = runtime["_monthly_business_day_window"]("2026-08-24")
+
+    assert window == {
+        "date": "2026-08-24",
+        "start_time": "2026-08-23 23:50:00",
+        "end_time": "2026-08-25 01:20:00",
+    }
 
 
 def _build_service(tmp_path: Path) -> SharedSourceCacheService:
@@ -117,6 +130,26 @@ def test_daily_source_download_retries_failed_business_date_after_cooldown(tmp_p
     assert len(calls) == 2
 
 
+def test_temperature_humidity_keeps_0030_schedule_separate_from_daily_sources(tmp_path, monkeypatch):
+    service = _build_service(tmp_path)
+    calls = []
+
+    def fake_run_latest_source_steps_by_building(*, steps, force_retry_failed, force_refresh_existing):
+        calls.append([(source_family, bucket_key) for source_family, bucket_key, _fill_func in steps])
+        return {"failed_units": [], "blocked_units": [], "running_units": [], "completed_units": []}
+
+    monkeypatch.setattr(service, "_run_latest_source_steps_by_building", fake_run_latest_source_steps_by_building)
+
+    service._run_temperature_humidity_file_if_due(datetime(2026, 6, 29, 0, 29, 59))
+    assert calls == []
+
+    service._run_temperature_humidity_file_if_due(datetime(2026, 6, 29, 0, 30, 0))
+    assert calls == [[(FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY, "2026-06-29")]]
+
+    service._run_temperature_humidity_file_if_due(datetime(2026, 6, 29, 3, 0, 0))
+    assert len(calls) == 1
+
+
 def test_daily_source_query_windows_follow_each_report_rule(tmp_path):
     service = _build_service(tmp_path)
 
@@ -129,9 +162,9 @@ def test_daily_source_query_windows_follow_each_report_rule(tmp_path):
     )
 
     assert branch_start == "2026-06-27 23:50:00"
-    assert branch_end == "2026-06-28 23:50:00"
+    assert branch_end == "2026-06-29 02:20:00"
     assert full_start == "2026-06-27 23:50:00"
-    assert full_end == "2026-06-29 00:10:00"
+    assert full_end == "2026-06-29 02:20:00"
     assert temperature_start == "2026-06-28 23:50:30"
     assert temperature_end == "2026-06-29 00:10:30"
     assert branch_buckets == [f"2026-06-28 {hour:02d}" for hour in range(24)]

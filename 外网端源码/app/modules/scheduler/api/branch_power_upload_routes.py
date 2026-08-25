@@ -117,9 +117,8 @@ def branch_power_upload_scheduler_config(payload: Dict[str, Any], request: Reque
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=400, detail=f"{key} 必须是整数") from exc
             if key == "minute_offset":
-                if number < 0:
-                    raise HTTPException(status_code=400, detail="minute_offset 必须大于等于0")
-                number = number % 60
+                if number < 0 or number > 1439:
+                    raise HTTPException(status_code=400, detail="minute_offset 必须在0到1439之间")
             elif number < 1:
                 raise HTTPException(status_code=400, detail=f"{key} 必须大于等于1")
             scheduler_cfg[key] = number

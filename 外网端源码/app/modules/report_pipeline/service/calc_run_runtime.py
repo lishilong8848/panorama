@@ -104,6 +104,8 @@ def run_with_explicit_file_items(
             "building": building,
             "file_path": str(path_obj),
         }
+        if upload_date:
+            normalized_item["upload_date"] = upload_date
         normalized_items.append(normalized_item)
 
         if upload_date:

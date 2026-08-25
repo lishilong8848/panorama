@@ -1326,9 +1326,9 @@ function applyBranchPowerUploadDefaults(cfg) {
   const upload = cfg.branch_power_upload;
   const scheduler = upload.scheduler;
   setBooleanDefault(scheduler, "enabled", true);
-  setBooleanDefault(scheduler, "auto_start_in_gui", false);
+  setBooleanDefault(scheduler, "auto_start_in_gui", true);
   scheduler.interval_minutes = 1440;
-  setNumberDefault(scheduler, "minute_offset", 30);
+  setNumberDefault(scheduler, "minute_offset", 240);
   setNumberDefault(scheduler, "check_interval_sec", 30);
   setBooleanDefault(scheduler, "retry_failed_on_next_tick", true);
   setStringDefault(scheduler, "state_file", "branch_power_upload_scheduler_state.json");
@@ -1336,8 +1336,8 @@ function applyBranchPowerUploadDefaults(cfg) {
 
 function applySchedulerDefaults(cfg) {
   setBooleanDefault(cfg.scheduler, "enabled", true);
-  setBooleanDefault(cfg.scheduler, "auto_start_in_gui", false);
-  setStringDefault(cfg.scheduler, "run_time", "00:10:00");
+  setBooleanDefault(cfg.scheduler, "auto_start_in_gui", true);
+  setStringDefault(cfg.scheduler, "run_time", "02:30:00");
   setNumberDefault(cfg.scheduler, "check_interval_sec", 30);
   setBooleanDefault(cfg.scheduler, "catch_up_if_missed", false);
   setBooleanDefault(cfg.scheduler, "retry_failed_in_same_period", true);

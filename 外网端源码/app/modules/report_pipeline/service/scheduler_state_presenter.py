@@ -75,7 +75,7 @@ def _interval_run_text(value: Any) -> str:
     return f"每 {minutes} 分钟" if minutes > 0 else "未设置"
 
 
-def _daily_minute_run_text(snapshot: Any, config: Any, *, default_minute: int = 30) -> str:
+def _daily_minute_run_text(snapshot: Any, config: Any, *, default_minute: int = 240) -> str:
     snapshot_payload = _dict(snapshot)
     config_payload = _dict(config)
     minute = _int(snapshot_payload.get("minute_offset"))
@@ -83,8 +83,8 @@ def _daily_minute_run_text(snapshot: Any, config: Any, *, default_minute: int = 
         minute = _int(config_payload.get("minute_offset"))
     if minute <= 0 and str(config_payload.get("minute_offset", "")).strip() not in {"0", "00"}:
         minute = default_minute
-    minute = max(0, minute) % 60
-    return f"每天 00:{minute:02d} 左右"
+    minute = min(1439, max(0, minute))
+    return f"每天 {minute // 60:02d}:{minute % 60:02d} 左右"
 
 
 def _monthly_run_text(day_of_month: Any, run_time: Any) -> str:

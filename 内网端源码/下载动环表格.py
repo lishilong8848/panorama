@@ -483,6 +483,15 @@ def _get_multi_date_max(download_cfg: Dict[str, Any]) -> int:
     return get_multi_date_max_runtime(download_cfg, default_value=31)
 
 
+def _monthly_business_day_window(day_text: str) -> Dict[str, str]:
+    business_day = datetime.strptime(str(day_text or "").strip(), "%Y-%m-%d")
+    return {
+        "date": business_day.strftime("%Y-%m-%d"),
+        "start_time": (business_day - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S"),
+        "end_time": (business_day + timedelta(days=1, hours=1, minutes=20)).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def _is_retryable_download_timeout(error_text: str) -> bool:
     return is_retryable_download_timeout_runtime(error_text)
 
@@ -711,15 +720,7 @@ def run_with_selected_dates(config: Dict[str, Any], selected_dates: List[str]) -
     normalized_dates = _normalize_selected_dates(selected_dates, max_dates_per_run=max_dates_per_run)
     windows: List[Dict[str, str]] = []
     for day_text in normalized_dates:
-        start = datetime.strptime(day_text, "%Y-%m-%d")
-        end = start + timedelta(days=1)
-        windows.append(
-            {
-                "date": day_text,
-                "start_time": start.strftime("%Y-%m-%d %H:%M:%S"),
-                "end_time": end.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+        windows.append(_monthly_business_day_window(day_text))
     print(f"[多日期] 已选择 {len(windows)} 天: {', '.join(normalized_dates)}")
     return _run_pipeline_with_time_windows(
         cfg,
@@ -737,18 +738,11 @@ def run_download_only_auto_once(
     cfg = copy.deepcopy(config)
     cfg = _normalize_runtime_config(cfg)
     _validate_runtime_config(cfg)
-    download_cfg = cfg["download"]
-    start_time, end_time = _build_time_range(download_cfg)
-    date_text = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d")
+    business_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    window = _monthly_business_day_window(business_date)
     return _run_download_only_with_time_windows(
         cfg,
-        [
-            {
-                "date": date_text,
-                "start_time": start_time,
-                "end_time": end_time,
-            }
-        ],
+        [window],
         source_name=source_name,
     )
 
@@ -768,15 +762,7 @@ def run_download_only_with_selected_dates(
     normalized_dates = _normalize_selected_dates(selected_dates, max_dates_per_run=max_dates_per_run)
     windows: List[Dict[str, str]] = []
     for day_text in normalized_dates:
-        start = datetime.strptime(day_text, "%Y-%m-%d")
-        end = start + timedelta(days=1)
-        windows.append(
-            {
-                "date": day_text,
-                "start_time": start.strftime("%Y-%m-%d %H:%M:%S"),
-                "end_time": end.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+        windows.append(_monthly_business_day_window(day_text))
     print(f"[共享桥接-多日期] 已选择 {len(windows)} 天: {', '.join(normalized_dates)}")
     return _run_download_only_with_time_windows(
         cfg,
@@ -790,18 +776,11 @@ def main() -> None:
     config = load_pipeline_config()
     config = _normalize_runtime_config(config)
     _validate_runtime_config(config)
-    download_cfg = config["download"]
-    start_time, end_time = _build_time_range(download_cfg)
-    date_text = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d")
+    business_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    window = _monthly_business_day_window(business_date)
     _run_pipeline_with_time_windows(
         config,
-        [
-            {
-                "date": date_text,
-                "start_time": start_time,
-                "end_time": end_time,
-            }
-        ],
+        [window],
         source_name="自动流程",
     )
 

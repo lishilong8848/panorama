@@ -146,7 +146,7 @@ export function createDashboardSchedulerActions(ctx) {
   async function saveSchedulerQuickConfig() {
     if (!config.value) return;
     const scheduler = config.value.scheduler || {};
-    const runTime = normalizeRunTimeText(scheduler.run_time) || "00:10:00";
+    const runTime = normalizeRunTimeText(scheduler.run_time) || "02:30:00";
     const payload = {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
@@ -354,8 +354,8 @@ export function createDashboardSchedulerActions(ctx) {
         ? toPositiveInt(data.interval_minutes, toPositiveInt(targetScheduler.interval_minutes, 60))
         : toPositiveInt(targetScheduler.interval_minutes, 60),
       minute_offset: Object.prototype.hasOwnProperty.call(data, "minute_offset")
-        ? toNonNegativeInt(data.minute_offset, toNonNegativeInt(targetScheduler.minute_offset, 30))
-        : toNonNegativeInt(targetScheduler.minute_offset, 30),
+        ? toNonNegativeInt(data.minute_offset, toNonNegativeInt(targetScheduler.minute_offset, 240))
+        : toNonNegativeInt(targetScheduler.minute_offset, 240),
       last_check_at: Object.prototype.hasOwnProperty.call(data, "last_check_at")
         ? String(data.last_check_at || "")
         : String(targetScheduler.last_check_at || ""),
@@ -555,12 +555,12 @@ export function createDashboardSchedulerActions(ctx) {
       enabled: true,
       auto_start_in_gui: Boolean(scheduler.auto_start_in_gui),
       interval_minutes: 1440,
-      minute_offset: toNonNegativeInt(scheduler.minute_offset, 30),
+      minute_offset: toNonNegativeInt(scheduler.minute_offset, 240),
       check_interval_sec: toPositiveInt(scheduler.check_interval_sec, 30),
       retry_failed_on_next_tick: false,
       state_file: String(scheduler.state_file || "branch_power_upload_scheduler_state.json").trim(),
     };
-    payload.minute_offset = payload.minute_offset % 60;
+    payload.minute_offset = Math.min(1439, payload.minute_offset);
     if (!payload.state_file) {
       message.value = "自动上传支路功率调度状态文件不能为空";
       return;

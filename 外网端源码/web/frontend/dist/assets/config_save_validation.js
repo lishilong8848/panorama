@@ -1709,7 +1709,7 @@ export function prepareConfigPayloadForSave({
   payload.download.save_dir = businessRoot;
 
   payload.scheduler = payload.scheduler || {};
-  payload.scheduler.run_time = normalizeRunTimeText(payload.scheduler.run_time) || "00:10:00";
+  payload.scheduler.run_time = normalizeRunTimeText(payload.scheduler.run_time) || "02:30:00";
   payload.scheduler.enabled = true;
   payload.scheduler.auto_start_in_gui = Boolean(payload.scheduler.auto_start_in_gui);
   payload.scheduler.check_interval_sec = Number.parseInt(payload.scheduler.check_interval_sec ?? 30, 10);

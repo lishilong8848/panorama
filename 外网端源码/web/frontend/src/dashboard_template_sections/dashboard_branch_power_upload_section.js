@@ -28,7 +28,7 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   <strong class="status-metric-value">{{ branchPowerUploadScheduleText || '-' }}</strong>
                 </div>
               </div>
-              <div class="hint">每天 00:30 左右处理前一业务日，内网端按整日窗口下载支路功率、支路电流、支路开关和楼栋全机柜功率；外网端先写主表与单支路表，再用楼栋全机柜功率写三张汇总表。</div>
+              <div class="hint">内网端每天 03:00 下载前一业务日四类整日源文件，外网端每天 04:00 上传；外网端先写主表与单支路表，再用楼栋全机柜功率写三张汇总表。</div>
               <div class="task-grid two-col">
                 <div class="form-row">
                   <label class="label">调度口径</label>
@@ -73,7 +73,7 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   </div>
                   <div class="status-metric">
                     <div class="status-metric-label">查询窗口</div>
-                    <strong class="status-metric-value">前日 23:50 至当日 23:50</strong>
+                    <strong class="status-metric-value">前日 23:50 至次日 02:20</strong>
                   </div>
                   <div class="status-metric">
                     <div class="status-metric-label">目标字段</div>
@@ -94,7 +94,7 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                     <label class="label">结束业务日期</label>
                     <input class="input" type="date" v-model="branchPowerBusinessDateEnd" />
                   </div>
-                  <div class="hint" style="grid-column:1 / -1;">手动执行可处理单日或连续多日，一次最多31天；调度仍在每天 00:30 左右处理前一业务日。</div>
+                  <div class="hint" style="grid-column:1 / -1;">手动执行可处理单日或连续多日，一次最多31天；自动调度每天 04:00 处理前一业务日。</div>
                 </div>
                 <div class="form-row" style="margin-top:10px;">
                   <label class="label">指定日期列表（可选）</label>

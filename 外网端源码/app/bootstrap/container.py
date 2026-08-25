@@ -616,12 +616,12 @@ class AppContainer:
         scheduler_cfg["interval_minutes"] = 1440
         scheduler_cfg["retry_failed_on_next_tick"] = False
         if "minute_offset" not in scheduler_cfg and "start_minute" not in scheduler_cfg and "run_minute" not in scheduler_cfg:
-            scheduler_cfg["minute_offset"] = 30
+            scheduler_cfg["minute_offset"] = 240
         try:
-            raw_minute = int(scheduler_cfg.get("minute_offset", scheduler_cfg.get("start_minute", scheduler_cfg.get("run_minute", 30))) or 0)
+            raw_minute = int(scheduler_cfg.get("minute_offset", scheduler_cfg.get("start_minute", scheduler_cfg.get("run_minute", 240))) or 0)
         except Exception:  # noqa: BLE001
-            raw_minute = 30
-        scheduler_cfg["minute_offset"] = max(0, raw_minute) % 60
+            raw_minute = 240
+        scheduler_cfg["minute_offset"] = min(1439, max(0, raw_minute))
         return ApschedulerSchedulerFacade(
             scheduler_key="branch_power_upload",
             feature="branch_power_upload",

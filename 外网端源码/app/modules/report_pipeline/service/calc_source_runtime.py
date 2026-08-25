@@ -28,13 +28,31 @@ def _parse_header_datetime(value: Any) -> datetime | None:
     return None
 
 
-def _business_day_data_columns(ws: Worksheet, *, header_row: int, data_start_col: int, data_end_col: int) -> List[int]:
+def _business_day_data_columns(
+    ws: Worksheet,
+    *,
+    header_row: int,
+    data_start_col: int,
+    data_end_col: int,
+    business_date: str | None = None,
+) -> List[int]:
     columns = list(range(data_start_col, data_end_col + 1))
     parsed_by_col: Dict[int, datetime] = {}
     for col in columns:
         parsed = _parse_header_datetime(ws.cell(header_row, col).value)
         if parsed is not None:
             parsed_by_col[col] = parsed
+    business_date_text = str(business_date or "").strip()
+    if business_date_text:
+        try:
+            start_dt = datetime.strptime(business_date_text, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError(f"业务日期格式错误，必须为YYYY-MM-DD: {business_date_text}") from exc
+        boundary_dt = start_dt + timedelta(days=1)
+        filtered = [col for col, parsed in parsed_by_col.items() if start_dt <= parsed <= boundary_dt]
+        if not filtered:
+            raise ValueError(f"源文件未找到业务日时间列: {business_date_text} 00:00~次日00:00")
+        return filtered
     if len(parsed_by_col) < 2:
         return columns
     first_col = min(parsed_by_col)
@@ -136,6 +154,7 @@ def extract_row_sources(
     to_float: Callable[[Any], float | None],
     canonical_metric_name: Callable[[Any], str],
     row_source_factory: Callable[..., Any],
+    business_date: str | None = None,
 ) -> Tuple[Dict[str, Any], str, str]:
     data_end_col = stat_cols["max"] - 1
     if data_end_col < data_start_col:
@@ -150,6 +169,7 @@ def extract_row_sources(
         header_row=2,
         data_start_col=data_start_col,
         data_end_col=data_end_col,
+        business_date=business_date,
     )
     has_excluded_boundary_columns = len(data_columns) < (data_end_col - data_start_col + 1)
 

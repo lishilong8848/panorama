@@ -74,7 +74,7 @@ def build_results_from_mapping(
 def build_results_from_file_items(
     file_items: List[Dict[str, str]],
     *,
-    calculate_monthly_report: Callable[[str, str | None], Any],
+    calculate_monthly_report: Callable[[str, str | None, str | None], Any],
     emit_log: Callable[[str], None] = print,
 ) -> List[Any]:
     results: List[Any] = []
@@ -83,6 +83,7 @@ def build_results_from_file_items(
             raise ValueError(f"file_items 第{idx}项必须是对象")
         building = str(item.get("building", "")).strip()
         file_path = str(item.get("file_path", "")).strip()
+        business_date = str(item.get("upload_date", "")).strip() or None
         if not building:
             raise ValueError(f"file_items 第{idx}项 building 不能为空")
         if not file_path:
@@ -94,7 +95,7 @@ def build_results_from_file_items(
             raise ValueError(f"file_items 第{idx}项仅支持 xlsx 文件: {file_path}")
 
         emit_log(f"[{building}] 读取文件: {file_path}")
-        result = calculate_monthly_report(str(path_obj), building)
+        result = calculate_monthly_report(str(path_obj), building, business_date)
         results.append(result)
         emit_log(f"[{building}] 计算完成，缺失指标按0处理: {len(result.missing_metrics)}项")
     return results

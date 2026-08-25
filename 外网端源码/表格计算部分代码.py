@@ -244,6 +244,7 @@ def _extract_building(file_path: str) -> str:
 def _extract_row_sources(
     ws: openpyxl.worksheet.worksheet.Worksheet,
     stat_cols: Dict[str, int],
+    business_date: str | None = None,
 ) -> Tuple[Dict[str, RowSource], str, str]:
     return extract_row_sources_runtime(
         ws,
@@ -256,6 +257,7 @@ def _extract_row_sources(
         to_float=_to_float,
         canonical_metric_name=canonical_metric_name,
         row_source_factory=RowSource,
+        business_date=business_date,
     )
 
 
@@ -357,7 +359,11 @@ def _pick_context(
     return default_type, default_category
 
 
-def calculate_monthly_report(file_path: str, building_override: Optional[str] = None) -> CalculationResult:
+def calculate_monthly_report(
+    file_path: str,
+    building_override: Optional[str] = None,
+    business_date: str | None = None,
+) -> CalculationResult:
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -369,10 +375,20 @@ def calculate_monthly_report(file_path: str, building_override: Optional[str] = 
     ws = wb.active
 
     stat_cols = _locate_stat_columns(ws)
-    month = _extract_month(ws, stat_cols["max"])
+    business_date_text = str(business_date or "").strip()
+    if business_date_text:
+        try:
+            datetime.strptime(business_date_text, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError(f"业务日期格式错误，必须为YYYY-MM-DD: {business_date_text}") from exc
+    month = business_date_text[:7] if business_date_text else _extract_month(ws, stat_cols["max"])
     building = building_override or _extract_building(file_path)
 
-    source_map, default_type, default_category = _extract_row_sources(ws, stat_cols)
+    source_map, default_type, default_category = _extract_row_sources(
+        ws,
+        stat_cols,
+        business_date=business_date_text or None,
+    )
     source_map = apply_building_source_overrides_runtime(
         building=building,
         source_map=source_map,
@@ -720,9 +736,10 @@ def _build_results_from_file_items(
 ) -> List[CalculationResult]:
     return build_results_from_file_items_runtime(
         file_items,
-        calculate_monthly_report=lambda file_path, building: calculate_monthly_report(
+        calculate_monthly_report=lambda file_path, building, business_date: calculate_monthly_report(
             file_path,
             building_override=building,
+            business_date=business_date,
         ),
         emit_log=emit_log,
     )
