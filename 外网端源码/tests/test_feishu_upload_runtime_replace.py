@@ -1,6 +1,25 @@
 from types import SimpleNamespace
 
-from app.modules.report_pipeline.service.feishu_upload_runtime import upload_results_to_feishu
+from app.modules.report_pipeline.service.feishu_upload_runtime import (
+    _build_calc_record_filter_formula,
+    _date_field_matches,
+    upload_results_to_feishu,
+)
+
+
+def test_daily_electricity_date_match_ignores_time_of_day():
+    assert _date_field_matches(
+        1787536800000,
+        date_text="2026-08-24",
+        target_value=1787500800000,
+    )
+    formula = _build_calc_record_filter_formula(
+        building="A楼",
+        date_text="2026-08-24",
+        target_value=1787500800000,
+    )
+    assert '>=TODATE("2026-08-24")' in formula
+    assert '<TODATE("2026-08-25")' in formula
 
 
 def test_daily_electricity_replaces_all_matching_business_keys_after_create():

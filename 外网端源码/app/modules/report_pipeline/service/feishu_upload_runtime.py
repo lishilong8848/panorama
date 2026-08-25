@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -37,8 +38,16 @@ def _date_field_matches(value: Any, *, date_text: str, target_value: Any) -> boo
         return True
     if value_text and value_text == _text(date_text):
         return True
-    if isinstance(value, (int, float)) and isinstance(target_value, (int, float)):
-        return int(value) == int(target_value)
+    target_day = _text(date_text)[:10]
+    if isinstance(value, (int, float)) or value_text.isdigit():
+        try:
+            value_day = datetime.fromtimestamp(
+                float(value) / 1000,
+                tz=timezone(timedelta(hours=8)),
+            ).strftime("%Y-%m-%d")
+            return value_day == target_day
+        except (OSError, OverflowError, ValueError):
+            pass
     # 日期字符串容错: 允许 "YYYY-MM-DD HH:MM:SS" 或 ISO 字符串前缀匹配
     if len(value_text) >= 10 and value_text[:10] == _text(date_text):
         return True
@@ -55,9 +64,12 @@ def _formula_literal(value: Any) -> str:
 
 
 def _build_calc_record_filter_formula(*, building: str, date_text: str, target_value: Any) -> str:
+    start_date = datetime.strptime(_text(date_text)[:10], "%Y-%m-%d")
+    end_date_text = (start_date + timedelta(days=1)).strftime("%Y-%m-%d")
     return (
         f'AND(CurrentValue.[楼栋]={_formula_literal(building)}, '
-        f'CurrentValue.[日期]={_formula_literal(target_value or date_text)})'
+        f'CurrentValue.[日期]>=TODATE({_formula_literal(start_date.strftime("%Y-%m-%d"))}), '
+        f'CurrentValue.[日期]<TODATE({_formula_literal(end_date_text)}))'
     )
 
 
