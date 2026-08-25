@@ -1160,6 +1160,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 selection = bridge_service.get_latest_source_cache_selection(
                     source_family="monthly_report_family",
                     buildings=target_buildings,
+                    max_selection_age_hours=36.0,
                 )
                 cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
                 if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):

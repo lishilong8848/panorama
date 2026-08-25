@@ -46,7 +46,7 @@ def _build_service(tmp_path: Path) -> SharedSourceCacheService:
                 "enabled": True,
                 "daily_source_download": {
                     "enabled": True,
-                    "run_time": "00:30:00",
+                    "run_time": "03:00:00",
                     "retry_interval_sec": 300,
                 },
             },
@@ -78,10 +78,10 @@ def test_daily_source_download_runs_after_configured_time_once_per_business_date
     monkeypatch.setattr(service, "_run_latest_source_steps_by_building", fake_run_latest_source_steps_by_building)
     monkeypatch.setattr(service, "_ensure_dirs", lambda: None)
 
-    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 0, 29, 59))
+    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 2, 59, 59))
     assert calls == []
 
-    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 0, 30, 0))
+    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 3, 0, 0))
 
     assert len(calls) == 1
     assert calls[0]["force_retry_failed"] is True
@@ -118,15 +118,15 @@ def test_daily_source_download_retries_failed_business_date_after_cooldown(tmp_p
     monkeypatch.setattr(service, "_run_latest_source_steps_by_building", fake_run_latest_source_steps_by_building)
     monkeypatch.setattr(service, "_ensure_dirs", lambda: None)
 
-    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 0, 30, 0))
+    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 3, 0, 0))
     assert len(calls) == 1
     assert service._daily_source_refresh["last_success_business_date"] == ""
 
-    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 0, 31, 0))
+    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 3, 1, 0))
     assert len(calls) == 1
 
     service._last_daily_source_run_monotonic -= 301
-    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 0, 36, 1))
+    service._run_daily_source_files_if_due(datetime(2026, 6, 29, 3, 6, 1))
     assert len(calls) == 2
 
 
@@ -148,6 +148,24 @@ def test_temperature_humidity_keeps_0030_schedule_separate_from_daily_sources(tm
 
     service._run_temperature_humidity_file_if_due(datetime(2026, 6, 29, 3, 0, 0))
     assert len(calls) == 1
+
+
+def test_legacy_download_schedule_defaults_are_migrated(tmp_path):
+    service = SharedSourceCacheService(
+        runtime_config={
+            "deployment": {"role_mode": "internal"},
+            "shared_bridge": {"enabled": True, "root_dir": str(tmp_path)},
+            "internal_source_cache": {
+                "monthly_report_download": {"run_time": "01:00:00"},
+                "daily_source_download": {"run_time": "00:30:00"},
+            },
+        },
+        store=None,
+        emit_log=lambda _line: None,
+    )
+
+    assert service._monthly_source_download_time.strftime("%H:%M:%S") == "01:30:00"
+    assert service._daily_source_download_time.strftime("%H:%M:%S") == "03:00:00"
 
 
 def test_daily_source_query_windows_follow_each_report_rule(tmp_path):

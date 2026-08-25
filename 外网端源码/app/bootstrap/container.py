@@ -520,6 +520,9 @@ class AppContainer:
         scheduler_cfg = self.runtime_config.get("scheduler", {})
         if not isinstance(scheduler_cfg, dict):
             scheduler_cfg = {}
+        scheduler_cfg = dict(scheduler_cfg)
+        if str(scheduler_cfg.get("run_time", "") or "").strip() in {"00:10", "00:10:00"}:
+            scheduler_cfg["run_time"] = "02:30:00"
         return ApschedulerSchedulerFacade(
             scheduler_key="auto_flow",
             feature="auto_flow",
@@ -620,6 +623,8 @@ class AppContainer:
         try:
             raw_minute = int(scheduler_cfg.get("minute_offset", scheduler_cfg.get("start_minute", scheduler_cfg.get("run_minute", 240))) or 0)
         except Exception:  # noqa: BLE001
+            raw_minute = 240
+        if raw_minute == 30:
             raw_minute = 240
         scheduler_cfg["minute_offset"] = min(1439, max(0, raw_minute))
         return ApschedulerSchedulerFacade(

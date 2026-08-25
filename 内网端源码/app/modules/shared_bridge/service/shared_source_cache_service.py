@@ -1512,8 +1512,11 @@ class SharedSourceCacheService:
         self.latest_required = bool(source_cache.get("latest_required", True))
         self.history_fill_timeout_sec = max(60, int(source_cache.get("history_fill_timeout_sec", 1800) or 1800))
         self._monthly_source_download_enabled = bool(monthly_source_cfg.get("enabled", True))
+        monthly_run_time = str(monthly_source_cfg.get("run_time", "01:30:00") or "").strip()
+        if monthly_run_time in {"01:00", "01:00:00"}:
+            monthly_run_time = "01:30:00"
         self._monthly_source_download_time = self._parse_time_text(
-            monthly_source_cfg.get("run_time", "01:30:00"),
+            monthly_run_time,
             default=dt_time(hour=1, minute=30),
         )
         self._monthly_source_retry_interval_sec = max(
@@ -1534,8 +1537,11 @@ class SharedSourceCacheService:
             int(top5_monthly_source_cfg.get("retry_interval_sec", 300) or 300),
         )
         self._daily_source_download_enabled = bool(daily_source_cfg.get("enabled", True))
+        daily_run_time = str(daily_source_cfg.get("run_time", "03:00:00") or "").strip()
+        if daily_run_time in {"00:30", "00:30:00"}:
+            daily_run_time = "03:00:00"
         self._daily_source_download_time = self._parse_time_text(
-            daily_source_cfg.get("run_time", "03:00:00"),
+            daily_run_time,
             default=dt_time(hour=3, minute=0),
         )
         self._daily_source_retry_interval_sec = max(
@@ -7091,6 +7097,7 @@ class SharedSourceCacheService:
                 return
             self._temperature_humidity_last_attempt_bucket = bucket_key
             self._last_temperature_humidity_run_monotonic = now_mono
+        self._ensure_dirs()
         result = self._run_latest_source_steps_by_building(
             steps=[
                 (

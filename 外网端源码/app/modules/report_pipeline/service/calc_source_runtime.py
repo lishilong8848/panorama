@@ -49,6 +49,14 @@ def _business_day_data_columns(
         except ValueError as exc:
             raise ValueError(f"业务日期格式错误，必须为YYYY-MM-DD: {business_date_text}") from exc
         boundary_dt = start_dt + timedelta(days=1)
+        available_datetimes = set(parsed_by_col.values())
+        missing_boundaries = [
+            label
+            for value, label in ((start_dt, "业务日00:00"), (boundary_dt, "次日00:00"))
+            if value not in available_datetimes
+        ]
+        if missing_boundaries:
+            raise ValueError(f"源文件业务日边界不完整: {business_date_text} 缺少{','.join(missing_boundaries)}")
         filtered = [col for col, parsed in parsed_by_col.items() if start_dt <= parsed <= boundary_dt]
         if not filtered:
             raise ValueError(f"源文件未找到业务日时间列: {business_date_text} 00:00~次日00:00")
