@@ -218,7 +218,7 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                     :disabled="!canRun || isActionLocked(actionKeyMonthlyPowerAlertReportRun)"
                     @click="runMonthlyPowerAlertReport"
                   >
-                    {{ isActionLocked(actionKeyMonthlyPowerAlertReportRun) ? '提交中...' : '生成统计表' }}
+                    {{ isActionLocked(actionKeyMonthlyPowerAlertReportRun) ? '提交中...' : '生成并上传统计表' }}
                   </button>
                   <button
                     class="btn btn-success"
@@ -316,6 +316,7 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                 <div class="hint">单支路：{{ (getMonthlyPowerAlertReportResult().row_counts || {}).branch || 0 }} 条</div>
                 <div class="hint">输出文件：{{ getMonthlyPowerAlertReportResult().file_name || '-' }}</div>
                 <div class="hint">输出目录：{{ getMonthlyPowerAlertReportResult().output_dir || '-' }}</div>
+                <div class="hint">多维上传：{{ getMonthlyPowerAlertReportResult().bitable_upload ? ((getMonthlyPowerAlertReportResult().bitable_upload.year || '-') + '-' + (getMonthlyPowerAlertReportResult().bitable_upload.month || '-') + ' / ' + (getMonthlyPowerAlertReportResult().bitable_upload.record_id || '-')) : '-' }}</div>
                 <div class="hint">当前任务：{{ currentJob && currentJob.feature === 'monthly_power_alert_report' ? (currentJob.job_id || '-') : '-' }}</div>
               </article>
             </div>

@@ -5111,17 +5111,17 @@ def job_monthly_power_alert_report_run(payload: Dict[str, Any], request: Request
     try:
         job = _start_background_job(
             container,
-            name=f"月度超功率统计表生成 {year}-{month:02d}",
+            name=f"月度超功率统计表生成并上传 {year}-{month:02d}",
             run_func=None,
             worker_handler="monthly_power_alert_report",
-            worker_payload={"year": year, "month": month},
+            worker_payload={"year": year, "month": month, "upload_to_bitable": True},
             resource_keys=_job_resource_keys(f"monthly_power_alert_report:{year}-{month:02d}"),
             priority="manual",
             feature="monthly_power_alert_report",
             dedupe_key=_job_dedupe_key("monthly_power_alert_report", year=year, month=f"{month:02d}"),
             submitted_by="manual",
         )
-        container.add_system_log(f"[任务] 已提交: 月度超功率统计表生成 {year}-{month:02d} ({job.job_id})")
+        container.add_system_log(f"[任务] 已提交: 月度超功率统计表生成并上传 {year}-{month:02d} ({job.job_id})")
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from app.bootstrap import app_factory
+from app.modules.report_pipeline.api import routes
 from app.worker import task_handlers
 
 
@@ -75,6 +76,35 @@ def _mock_report_worker(monkeypatch, result):
     return generator, factory, uploader, notify
 
 
+@pytest.mark.parametrize("year, month", [("2026", 8), ("2025", 12)])
+def test_manual_button_submits_upload_and_keeps_selected_month(monkeypatch, year, month):
+    container = SimpleNamespace(add_system_log=Mock())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+    job = SimpleNamespace(job_id="manual-stats", to_dict=lambda: {"job_id": "manual-stats"})
+    start = Mock(return_value=job)
+    monkeypatch.setattr(routes, "_deployment_role_mode", lambda _container: "external")
+    monkeypatch.setattr(routes, "_start_background_job", start)
+    _, _, uploader, _ = _mock_report_worker(monkeypatch, {
+        "status": "ok", "output_file": "stats.xlsx",
+    })
+
+    response = routes.job_monthly_power_alert_report_run({"year": year, "month": month}, request)
+
+    submitted = start.call_args.kwargs
+    assert response == {"job_id": "manual-stats"}
+    assert submitted["worker_handler"] == "monthly_power_alert_report"
+    assert submitted["worker_payload"] == {"year": year, "month": month, "upload_to_bitable": True}
+    assert submitted["resource_keys"] == [f"monthly_power_alert_report:{year}-{month:02d}"]
+    assert submitted["submitted_by"] == "manual"
+    result = task_handlers.handle_monthly_power_alert_report(
+        {}, submitted["worker_payload"], lambda _line: None,
+    )
+    uploaded = uploader.upload_report.call_args.kwargs
+    assert (uploaded["year"], uploaded["month"]) == (year, month)
+    assert uploaded["sub_category"] == "机柜超功耗"
+    assert result["bitable_upload"]["record_id"] == "stats-record"
+
+
 def test_scheduled_worker_uploads_generated_file_and_requested_month(monkeypatch):
     generator, _, uploader, notify = _mock_report_worker(monkeypatch, {
         "status": "ok", "output_file": "stats.xlsx", "year": "2025", "month": "12",
@@ -98,7 +128,7 @@ def test_scheduled_worker_uploads_generated_file_and_requested_month(monkeypatch
     ({"year": "2026", "month": 8}, {"status": "ok", "output_file": "stats.xlsx"}),
     ({"year": "2026", "month": 8, "upload_to_bitable": True}, {"status": "skipped"}),
 ])
-def test_manual_generation_and_disabled_report_do_not_upload(monkeypatch, payload, generated):
+def test_generation_only_payload_and_disabled_report_do_not_upload(monkeypatch, payload, generated):
     _, factory, _, _ = _mock_report_worker(monkeypatch, generated)
 
     task_handlers.handle_monthly_power_alert_report({}, payload, lambda _line: None)

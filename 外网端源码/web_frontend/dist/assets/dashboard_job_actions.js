@@ -989,11 +989,11 @@ if (!canRun.value) return;
       ACTION_KEYS.monthlyPowerAlertReport,
       async () => {
         try {
-          message.value = `月度超功率统计表生成任务已提交: ${yearText}-${String(monthNumber).padStart(2, "0")}`;
+          message.value = `月度超功率统计表生成并上传任务已提交: ${yearText}-${String(monthNumber).padStart(2, "0")}`;
           const response = await submitMonthlyPowerAlertReportJob({ year: yearText, month: monthNumber });
-          await applyAcceptedExecutionResponse(response, "月度超功率统计表生成");
+          await applyAcceptedExecutionResponse(response, "月度超功率统计表生成并上传");
         } catch (err) {
-          message.value = `月度超功率统计表生成提交失败: ${err}`;
+          message.value = `月度超功率统计表生成并上传提交失败: ${err}`;
         }
       },
       { cooldownMs: 0 },
