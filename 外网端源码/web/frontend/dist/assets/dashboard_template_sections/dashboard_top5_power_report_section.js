@@ -10,7 +10,7 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                 <div class="task-block-head">
                   <div>
                     <div class="task-block-kicker">调度卡</div>
-                    <h3 class="card-title">TOP5 月度生成调度</h3>
+                    <h3 class="card-title">TOP5 / 超功耗月度生成调度</h3>
                   </div>
                   <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('top5_power_report')">
                     {{ getSchedulerStatusText('top5_power_report') || '-' }}
@@ -31,8 +31,8 @@ export const DASHBOARD_TOP5_POWER_REPORT_SECTION = `        <section class="cont
                   </div>
                 </div>
                 <div class="ops-focus-card">
-                  <div class="ops-focus-card-label">执行规则</div>
-                  <div class="ops-focus-card-title">仅在设定的月度时间点生成并通知</div>
+                  <div class="ops-focus-card-label">调度范围</div>
+                  <div class="ops-focus-card-title">上月 TOP5、月度超功率统计表生成并上传</div>
                   <div class="ops-focus-card-meta">启动项目只恢复调度，不补跑已错过的时间点。触发结果：{{ top5PowerReportSchedulerTriggerText || '-' }}</div>
                 </div>
                 <div class="task-grid two-col">

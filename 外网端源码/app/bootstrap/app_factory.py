@@ -99,6 +99,39 @@ def _previous_calendar_year_month(now_dt: datetime | None = None) -> tuple[str, 
     return str(previous_month.year), int(previous_month.month)
 
 
+def _submit_top5_monthly_report_jobs(container: Any, *, year: str, month: int) -> tuple[bool, str]:
+    submitted: list[str] = []
+    errors: list[str] = []
+    for handler, name, resource_key in (
+        ("top5_power_report", "TOP5功率文件生成", "top5_power_report:global"),
+        ("monthly_power_alert_report", "月度超功率统计表生成并上传", f"monthly_power_alert_report:{year}-{month:02d}"),
+    ):
+        try:
+            payload = {"year": year, "month": month}
+            if handler == "top5_power_report":
+                payload["buildings"] = Top5PowerReportService(container.runtime_config).all_buildings()
+            else:
+                payload["upload_to_bitable"] = True
+            job = container.job_service.start_worker_job(
+                name=f"{name} {year}-{month:02d}",
+                worker_handler=handler,
+                worker_payload=payload,
+                resource_keys=[resource_key],
+                priority="scheduler",
+                feature=handler,
+                dedupe_key=f"{handler}:scheduler:{year}:{month:02d}",
+                submitted_by="scheduler",
+            )
+            submitted.append(f"{name} job_id={job.job_id}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
+    detail = f"target={year}-{month:02d}; 已提交: {'；'.join(submitted) or '无'}"
+    if errors:
+        detail += f"; 提交失败: {'；'.join(errors)}"
+    container.add_system_log(f"[TOP5月度报表调度] {detail}")
+    return not errors, detail
+
+
 _ROLE_SELECTION_ALLOWED_EXACT = {
     "/",
     "/index.html",
@@ -2554,26 +2587,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log("[TOP5功率文件生成调度] 当前为内网端，调度跳过；请在外网端启用该调度")
             return True, "internal_role_skip"
         year, month = _previous_calendar_year_month()
-        try:
-            service = Top5PowerReportService(container.runtime_config)
-            buildings = service.all_buildings()
-            job = container.job_service.start_worker_job(
-                name=f"TOP5功率文件生成 {year}-{month:02d}",
-                worker_handler="top5_power_report",
-                worker_payload={"buildings": buildings, "year": year, "month": month},
-                resource_keys=["top5_power_report:global"],
-                priority="scheduler",
-                feature="top5_power_report",
-                dedupe_key=f"top5_power_report:scheduler:{year}:{month:02d}",
-                submitted_by="scheduler",
-            )
-            detail = f"已提交TOP5功率文件生成任务 job_id={job.job_id}, target={year}-{month:02d}"
-            container.add_system_log(f"[TOP5功率文件生成调度] {detail}")
-            return True, detail
-        except Exception as exc:  # noqa: BLE001
-            error_text = str(exc)
-            container.add_system_log(f"[TOP5功率文件生成调度] 提交失败：{error_text}")
-            return False, error_text
+        return _submit_top5_monthly_report_jobs(container, year=year, month=month)
 
     def monthly_event_report_scheduler_callback(source: str) -> tuple[bool, str]:
         role_mode = _deployment_role_mode()

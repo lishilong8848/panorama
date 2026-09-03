@@ -219,6 +219,47 @@ class _UploadServiceForTest(Top5PowerReportBitableUploadService):
 
 
 class Top5PowerReportBitableUploadServiceTest(unittest.TestCase):
+    def test_monthly_statistics_upload_replaces_only_matching_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "stats.xlsx"
+            workbook = openpyxl.Workbook()
+            workbook.save(path)
+            workbook.close()
+            client = _FakeBitableClient()
+            service = _UploadServiceForTest(
+                {"handover_log": {"top5_power_report": {"report_upload": {"sub_category": "高功率TOP5"}}}},
+                client,
+            )
+
+            result = service.upload_report(
+                file_path=path, year="2026", month=4,
+                sub_category="机柜超功耗", report_name="月度超功率统计表", emit_log=lambda _: None,
+            )
+
+            self.assertEqual(result["app_token"], "MliKbC3fXa8PXrsndKscmxjdn1g")
+            self.assertEqual(result["table_id"], "tblkh6YCMYtS8nHa")
+            self.assertEqual(client.deleted_ids, ["other_category"])
+            self.assertEqual(client.created_fields[0]["子分类"], "机柜超功耗")
+            self.assertEqual(client.created_fields[0]["年度"], "2026")
+            self.assertEqual(client.created_fields[0]["月份"], "04")
+            self.assertEqual(client.created_fields[0]["上传文件"], [{"file_token": "file_token_1"}])
+            self.assertEqual(client.updated[0][1]["链接"], result["link"])
+            self.assertEqual(service._normalize_cfg()["sub_category"], "高功率TOP5")
+
+    def test_monthly_statistics_create_failure_preserves_existing_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "stats.xlsx"
+            path.touch()
+            client = _FakeBitableClient()
+            service = _UploadServiceForTest({}, client)
+            with patch.object(client, "batch_create_records", side_effect=RuntimeError("create failed")):
+                with self.assertRaisesRegex(RuntimeError, "create failed"):
+                    service.upload_report(
+                        file_path=path, year="2026", month=4,
+                        sub_category="机柜超功耗", report_name="月度超功率统计表", emit_log=lambda _: None,
+                    )
+            self.assertEqual(client.deleted_ids, [])
+
     def test_upload_report_replaces_same_month_top5_record_and_keeps_other_category(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "top5.xlsx"

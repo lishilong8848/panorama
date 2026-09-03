@@ -725,7 +725,8 @@ class AppContainer:
             runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.top5_power_report_scheduler_callback or self._top5_power_report_scheduler_run_callback,
-            is_busy=self._job_busy_for_feature_prefixes("top5_power_report"),
+            # Each report has its own job resource lock; TOP5 must not block its companion report.
+            is_busy=lambda: False,
             orchestrator=self.ensure_scheduler_orchestrator(),
             schedule_kind="monthly",
             source_name="TOP5功率文件生成",

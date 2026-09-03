@@ -914,14 +914,18 @@ class Top5PowerReportBitableUploadService:
         file_path: str | Path,
         year: Any,
         month: Any,
+        sub_category: str | None = None,
+        report_name: str = "TOP5功率文件生成",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
+        if sub_category is not None:
+            cfg["sub_category"] = str(sub_category).strip()
         if not cfg["enabled"]:
             return {"status": "skipped", "reason": "disabled"}
         missing = [key for key in ("app_token", "table_id", "sub_category") if not str(cfg.get(key, "") or "").strip()]
         if missing:
-            raise RuntimeError(f"TOP5上传多维配置缺失: {', '.join(missing)}")
+            raise RuntimeError(f"{report_name}上传多维配置缺失: {', '.join(missing)}")
 
         output_path = Path(file_path)
         if not output_path.exists() or not output_path.is_file():
@@ -935,7 +939,7 @@ class Top5PowerReportBitableUploadService:
         sub_category = str(cfg["sub_category"])
 
         emit_log(
-            "[TOP5功率文件生成] 开始上传多维附件: "
+            f"[{report_name}] 开始上传多维附件: "
             f"target={target_year}-{target_month}, file={output_path.name}"
         )
         existing_records = client.list_records(
@@ -982,7 +986,7 @@ class Top5PowerReportBitableUploadService:
                     )
                     shared_url = str((records[0] if records else {}).get("shared_url", "") or "").strip()
                 except Exception as exc:  # noqa: BLE001
-                    emit_log(f"[TOP5功率文件生成] 记录分享链接读取失败，改用多维表入口: {exc}")
+                    emit_log(f"[{report_name}] 记录分享链接读取失败，改用多维表入口: {exc}")
                 user_link = shared_url or build_bitable_url(str(cfg["app_token"]), table_id)
             if attachment_ready and fields.get("link"):
                 try:
@@ -999,13 +1003,13 @@ class Top5PowerReportBitableUploadService:
                     client.batch_delete_records(table_id=table_id, record_ids=[record_id], batch_size=1)
                 except Exception:  # noqa: BLE001
                     pass
-            raise RuntimeError("TOP5多维附件已创建，但未读取到附件链接，未更新“链接”字段")
+            raise RuntimeError(f"{report_name}多维附件已创建，但未读取到附件链接，未更新“链接”字段")
         deleted = 0
         if delete_ids:
             deleted = client.batch_delete_records(table_id=table_id, record_ids=delete_ids, batch_size=200)
-            emit_log(f"[TOP5功率文件生成] 已删除旧多维记录: year={target_year}, month={target_month}, count={deleted}")
+            emit_log(f"[{report_name}] 已删除旧多维记录: year={target_year}, month={target_month}, count={deleted}")
         emit_log(
-            "[TOP5功率文件生成] 多维附件上传完成: "
+            f"[{report_name}] 多维附件上传完成: "
             f"target={target_year}-{target_month}, record_id={record_id or '-'}, shared_url={'yes' if shared_url else 'fallback'}"
         )
         table_url = build_bitable_url(str(cfg["app_token"]), table_id)

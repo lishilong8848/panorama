@@ -649,6 +649,20 @@ def handle_monthly_power_alert_report(
         result = service.run(year=year, month=month, emit_log=emit_log)
         if runtime is not None:
             runtime.raise_if_cancelled()
+        if payload.get("upload_to_bitable") is True and result.get("status") != "skipped":
+            if result.get("status") not in {"ok", "success"}:
+                raise RuntimeError("月度超功率统计表生成未成功，未上传多维")
+            upload_result = Top5PowerReportBitableUploadService(config).upload_report(
+                file_path=str(result.get("output_file", "") or ""),
+                year=year,
+                month=month,
+                sub_category="机柜超功耗",
+                report_name="月度超功率统计表",
+                emit_log=emit_log,
+            )
+            if upload_result.get("status") not in {"ok", "success"}:
+                raise RuntimeError(f"月度超功率统计表未上传多维: {upload_result.get('reason') or upload_result}")
+            result["bitable_upload"] = upload_result
         return result
     except Exception as exc:  # noqa: BLE001
         notify.send_failure(stage="月度超功率统计表生成", detail=str(exc), emit_log=emit_log)
