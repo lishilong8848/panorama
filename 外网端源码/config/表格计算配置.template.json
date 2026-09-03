@@ -154,7 +154,20 @@
         "app_token": "ASLxbfESPahdTKs0A9NccgbrnXc",
         "calc_table_id": "tblf1YG2l2BDqcjV",
         "attachment_table_id": "tblA9tahsVnfvO31",
-        "report_type": "全景平台月报"
+        "report_type": "全景平台月报",
+        "local_mysql": {
+          "enabled": true,
+          "host": "127.0.0.1",
+          "port": 3306,
+          "user": "root",
+          "password": "123456",
+          "database": "feishu_copy",
+          "table": "electricity_consumption_details",
+          "charset": "utf8mb4",
+          "connect_timeout_sec": 5,
+          "read_timeout_sec": 20,
+          "write_timeout_sec": 30
+        }
       }
     },
     "sheet_import": {

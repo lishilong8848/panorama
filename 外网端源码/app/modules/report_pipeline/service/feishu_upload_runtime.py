@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from app.modules.report_pipeline.service.local_mysql_persistence import LocalMysqlCalculationWriter
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
@@ -257,6 +259,7 @@ def upload_results_to_feishu(
         request_retry_count=request_retry_count,
         request_retry_interval_sec=request_retry_interval_sec,
     )
+    mysql_writer = LocalMysqlCalculationWriter(feishu_cfg.get("local_mysql", {}))
 
     report_type = feishu_cfg["report_type"]
     skip_zero_records = bool(feishu_cfg["skip_zero_records"])
@@ -299,6 +302,7 @@ def upload_results_to_feishu(
                 f"日期={date_text}, keys={len(replacement_keys)}, count={len(calc_delete_ids)}"
             )
         except Exception as exc:  # noqa: BLE001
+            mysql_writer.close()
             emit_log(
                 f"[文件流程失败] 功能={log_feature} 阶段=飞书旧计算记录覆盖删除 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
@@ -326,6 +330,7 @@ def upload_results_to_feishu(
                     f"[飞书上传][覆盖] 已删除旧附件记录: 楼栋={building_text}, 日期={date_text}, count={int(deleted_attachment or 0)}"
                 )
         except Exception as exc:  # noqa: BLE001
+            mysql_writer.close()
             emit_log(
                 f"[文件流程失败] 功能={log_feature} 阶段=飞书旧附件记录覆盖删除 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
@@ -350,6 +355,7 @@ def upload_results_to_feishu(
                 f"楼栋={building_text}, 日期={date_text}, count={int(deleted_calc or 0)}"
             )
         except Exception as exc:  # noqa: BLE001
+            mysql_writer.close()
             emit_log(
                 f"[文件流程失败] 功能={log_feature} 阶段=飞书计算记录上传 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
@@ -357,8 +363,28 @@ def upload_results_to_feishu(
             raise
 
         try:
+            persisted_count = mysql_writer.persist(
+                result,
+                client,
+                date_text=upload_date_text,
+                skip_zero_records=skip_zero_records,
+            )
+            if mysql_writer.enabled:
+                emit_log(
+                    f"[本地MySQL] 批量写入完成: 楼栋={building_text}, 日期={date_text}, count={persisted_count}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            mysql_writer.close()
+            emit_log(
+                f"[文件流程失败] 功能={log_feature} 阶段=本地MySQL持久化 楼栋={building_text} "
+                f"文件={file_text} 日期={date_text} 错误={exc}"
+            )
+            raise
+
+        try:
             file_token = client.upload_attachment(result.source_file)
         except Exception as exc:  # noqa: BLE001
+            mysql_writer.close()
             emit_log(
                 f"[文件流程失败] 功能={log_feature} 阶段=飞书附件上传 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
@@ -373,6 +399,7 @@ def upload_results_to_feishu(
                 attachment_tokens=[file_token],
             )
         except Exception as exc:  # noqa: BLE001
+            mysql_writer.close()
             emit_log(
                 f"[文件流程失败] 功能={log_feature} 阶段=飞书附件记录写入 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
@@ -383,3 +410,4 @@ def upload_results_to_feishu(
             f"[文件上传成功] 功能={log_feature} 阶段=飞书上传完成 楼栋={building_text} "
             f"文件={file_text} 日期={date_text} 详情=已按覆盖策略写入新记录"
         )
+    mysql_writer.close()
