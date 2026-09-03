@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 
 from app.config.handover_segment_store import building_code_from_name, handover_building_segment_path
@@ -35,6 +35,7 @@ from handover_log_module.repository.review_building_document_store import Review
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
+from handover_log_module.service.handover_environment_service import HandoverEnvironmentService
 from handover_log_module.service.handover_xlsx_write_queue_service import (
     HandoverXlsxWriteQueueService,
     HandoverXlsxWriteQueueTimeoutError,
@@ -4023,6 +4024,30 @@ def _station_h_status_payload(
         },
         "duty_focus": duty_focus,
     }
+
+
+@router.get("/api/handover/review/environment", summary="查询班次天气及室外干湿球温度、相对湿度")
+@_dedicated_review_endpoint
+def handover_environment(
+    request: Request,
+    duty_date: str = "",
+    duty_shift: str = "",
+) -> JSONResponse:
+    duty_date, duty_shift = duty_date.strip(), duty_shift.strip().lower()
+    if not duty_date and not duty_shift:
+        duty_date, duty_shift = _current_handover_duty_context()
+    elif not duty_date or duty_shift not in {"day", "night"}:
+        raise HTTPException(status_code=400, detail="请同时提供 duty_date 和 duty_shift，班次仅支持 day/night")
+    try:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", duty_date):
+            raise ValueError(duty_date)
+        datetime.strptime(duty_date, "%Y-%m-%d") + timedelta(days=1)
+    except (ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=400, detail="duty_date 必须为有效日期，格式 YYYY-MM-DD") from exc
+    result = HandoverEnvironmentService(_handover_cfg(request.app.state.container)).read(
+        duty_date=duty_date, duty_shift=duty_shift,
+    )
+    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/handover/review/{building_code}")
