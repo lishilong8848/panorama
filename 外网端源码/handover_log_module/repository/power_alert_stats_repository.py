@@ -105,13 +105,15 @@ class PowerAlertStatsRepository:
         with self._connect(read_only=True) as conn:
             row = conn.execute(
                 """
-                SELECT end_over
+                SELECT end_over, source_hash
                 FROM power_alert_daily_stats
                 WHERE table_key=? AND business_date=? AND object_key=?
                 """,
                 (str(table_key or ""), str(business_date or ""), str(object_key or "")),
             ).fetchone()
         if row is None:
+            return None
+        if not str(row["source_hash"] or "").startswith("gte:"):
             return None
         return bool(int(row["end_over"] or 0))
 

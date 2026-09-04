@@ -257,6 +257,48 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
             self.assertEqual(stats["runs"], 1)
             self.assertNotIn(24, stats["over_hours"])
 
+    def test_threshold_stats_include_values_equal_to_all_four_thresholds(self) -> None:
+        service = FullCabinetPowerStatsSyncService({})
+
+        for threshold in (6.25, 18, 107.5, 215):
+            stats = service._threshold_stats(
+                [threshold - 0.001, threshold, threshold + 0.001],
+                threshold,
+                previous_end_over=False,
+            )
+
+            self.assertEqual(stats["over_count"], 2)
+            self.assertEqual(stats["over_hours"], [1, 2])
+            self.assertEqual(stats["runs"], 1)
+
+    def test_equal_threshold_requires_previous_day_state(self) -> None:
+        service = FullCabinetPowerStatsSyncService({})
+        service._lookup_previous_end_over = lambda **kwargs: None
+
+        for table_key, threshold in (("cabinet", 18), ("line_head", 107.5), ("row_line", 215)):
+            row = type("MetricRow", (), {"powers": [threshold]})()
+            self.assertTrue(service._needs_previous_state(
+                table_key=table_key,
+                report_date="2026/09/04",
+                rows=[row],
+                threshold=threshold,
+                object_key_fn=lambda _row: "object",
+                emit_log=lambda _text: None,
+            ))
+
+    def test_legacy_strict_threshold_state_is_not_used_for_cross_day_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
+            service._stats_repository.upsert_stat(
+                table_key="line_head", business_date="2026-09-03", object_key="object",
+                threshold=107.5, over_mask=1 << 23, duration_hours=1, run_count=1,
+                max_hour=23, max_value=107.5, end_over=True, source_hash="legacy-strict-hash",
+            )
+
+            self.assertIsNone(service._lookup_previous_end_over(
+                table_key="line_head", object_key="object", report_date="2026/09/04",
+            ))
+
     def test_branch_rows_write_fixed_data_center_name_to_machine_room(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})

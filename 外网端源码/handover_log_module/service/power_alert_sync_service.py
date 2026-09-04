@@ -514,7 +514,7 @@ class PowerAlertSyncService:
     def _stats_source_hash(values: List[float], threshold: float, *, source_hint: str = "") -> str:
         hour_values = list(values or [])[:24]
         text = "|".join([str(float(threshold or 0)), str(source_hint or ""), *[f"{float(value or 0):.6f}" for value in hour_values]])
-        return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+        return f"gte:{hashlib.sha256(text.encode('utf-8', errors='ignore')).hexdigest()}"
 
     def _lookup_previous_end_over(
         self,
@@ -598,7 +598,7 @@ class PowerAlertSyncService:
         over_mask = 0
         over_hours: List[int] = []
         for hour, value in enumerate(hour_values):
-            over = value > threshold
+            over = value >= threshold
             if over:
                 over_count += 1
                 over_mask |= 1 << hour

@@ -301,7 +301,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
     ) -> bool:
         for row in rows:
             powers = getattr(row, "powers", [])
-            if not powers or not self._number_or_zero(powers[0]) > threshold:
+            if not powers or self._number_or_zero(powers[0]) < threshold:
                 continue
             previous = self._lookup_previous_end_over(
                 table_key=table_key,
