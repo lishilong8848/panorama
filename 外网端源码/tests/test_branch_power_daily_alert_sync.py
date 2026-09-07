@@ -168,7 +168,7 @@ class BranchPowerDailyAlertSyncTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
 
     def test_manual_statistics_rerun_uses_the_same_local_record_path(self) -> None:
-        result, main_client, branch_sync, _full_sync = self._run_daily_upload(
+        result, main_client, branch_sync, full_sync = self._run_daily_upload(
             _branch_success(),
             upload_main_table=False,
         )
@@ -180,6 +180,8 @@ class BranchPowerDailyAlertSyncTests(unittest.TestCase):
         self.assertEqual(len(call["source_records"]), 1)
         self.assertEqual(call["source_records"][0]["功率-23:00"], 7.2)
         self.assertEqual(main_client.created, [])
+        full_sync.sync_from_source_units.assert_called_once()
+        self.assertEqual(full_sync.sync_from_source_units.call_args.kwargs["report_date"], "2026-08-03")
         self.assertFalse(result["upload_main_table"])
 
     def test_branch_alert_failure_propagates_after_main_upload(self) -> None:

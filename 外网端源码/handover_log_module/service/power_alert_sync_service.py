@@ -522,6 +522,7 @@ class PowerAlertSyncService:
         table_key: str,
         object_key: str,
         report_date: str,
+        threshold: float | None = None,
         emit_log: Callable[[str], None] | None = None,
     ) -> bool | None:
         try:
@@ -529,6 +530,7 @@ class PowerAlertSyncService:
                 table_key=table_key,
                 business_date=self._stats_previous_date_key(report_date),
                 object_key=object_key,
+                threshold=threshold,
             )
         except Exception as exc:  # noqa: BLE001
             if not self._stats_repository_error_logged:
@@ -615,6 +617,7 @@ class PowerAlertSyncService:
                 table_key=table_key,
                 object_key=object_key,
                 report_date=report_date,
+                threshold=threshold,
                 emit_log=emit_log,
             )
         if bool(previous_end_over) and bool(hour_values) and bool(over_mask & 1) and runs > 0:

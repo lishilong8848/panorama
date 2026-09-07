@@ -100,12 +100,19 @@ class PowerAlertStatsRepository:
             """
         )
 
-    def get_end_over(self, *, table_key: str, business_date: str, object_key: str) -> bool | None:
+    def get_end_over(
+        self,
+        *,
+        table_key: str,
+        business_date: str,
+        object_key: str,
+        threshold: float | None = None,
+    ) -> bool | None:
         self.ensure_ready()
         with self._connect(read_only=True) as conn:
             row = conn.execute(
                 """
-                SELECT end_over, source_hash
+                SELECT end_over, source_hash, threshold
                 FROM power_alert_daily_stats
                 WHERE table_key=? AND business_date=? AND object_key=?
                 """,
@@ -114,6 +121,8 @@ class PowerAlertStatsRepository:
         if row is None:
             return None
         if not str(row["source_hash"] or "").startswith("gte:"):
+            return None
+        if threshold is not None and abs(float(row["threshold"] or 0) - float(threshold)) > 1e-9:
             return None
         return bool(int(row["end_over"] or 0))
 

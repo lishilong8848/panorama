@@ -10,6 +10,8 @@ import openpyxl
 from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService, _MetricRow
 from handover_log_module.service.full_cabinet_power_stats_sync_service import (
     FullCabinetPowerStatsSyncService,
+    _LineHeadMetricRow,
+    _RowLineMetricRow,
 )
 from handover_log_module.service.power_alert_sync_service import _PowerAlertTable, _SourceRow
 
@@ -286,6 +288,63 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
                 emit_log=lambda _text: None,
             ))
 
+    def test_e_building_row_line_uses_235_without_changing_other_buildings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
+
+            def row(building: str, value: float, column: str) -> _RowLineMetricRow:
+                return _RowLineMetricRow(
+                    building=building, room_code=f"{building[0]}-202", room_short=f"{building[0]}-202",
+                    row_col=column, powers=[value] + [0.0] * 23,
+                )
+
+            generated = service._generate_row_line_rows(
+                [
+                    row("A楼", 215, "A"),
+                    row("D楼", 215, "D"),
+                    row("E楼", 215, "A"),
+                    row("E楼", 234.999, "B"),
+                    row("E楼", 235, "C"),
+                ],
+                threshold=215,
+                report_date="2026/09/04",
+                data_center_name="EA118",
+            )
+
+            self.assertEqual(
+                {(item["楼栋"], item["机列"]) for item in generated},
+                {("A楼", "A列"), ("D楼", "D列"), ("E楼", "C列")},
+            )
+
+    def test_e_building_line_head_uses_117_5_without_changing_other_buildings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
+
+            def row(building: str, value: float, line_no: str) -> _LineHeadMetricRow:
+                line_raw = f"{building[0]}-202-A列A路-DC{line_no}"
+                return _LineHeadMetricRow(
+                    building=building, room_code=f"{building[0]}-202", room_short=f"{building[0]}-202",
+                    line_raw=line_raw, line=service._parse_line(line_raw), powers=[value] + [0.0] * 23,
+                )
+
+            generated = service._generate_line_head_rows(
+                [
+                    row("A楼", 107.5, "001"),
+                    row("D楼", 107.5, "002"),
+                    row("E楼", 107.5, "003"),
+                    row("E楼", 117.499, "004"),
+                    row("E楼", 117.5, "005"),
+                ],
+                threshold=107.5,
+                report_date="2026/09/04",
+                data_center_name="EA118",
+            )
+
+            self.assertEqual(
+                {(item["楼栋"], item["机列"]) for item in generated},
+                {("A楼", "A列A路-DC001"), ("D楼", "A列A路-DC002"), ("E楼", "A列A路-DC005")},
+            )
+
     def test_legacy_strict_threshold_state_is_not_used_for_cross_day_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             service = FullCabinetPowerStatsSyncService({"paths": {"runtime_state_root": temp_dir}})
@@ -296,7 +355,16 @@ class FullCabinetPowerStatsSyncServiceTests(unittest.TestCase):
             )
 
             self.assertIsNone(service._lookup_previous_end_over(
-                table_key="line_head", object_key="object", report_date="2026/09/04",
+                table_key="line_head", object_key="object", report_date="2026/09/04", threshold=107.5,
+            ))
+
+            service._stats_repository.upsert_stat(
+                table_key="row_line", business_date="2026-09-03", object_key="e-object",
+                threshold=215, over_mask=1 << 23, duration_hours=1, run_count=1,
+                max_hour=23, max_value=215, end_over=True, source_hash="gte:old-threshold",
+            )
+            self.assertIsNone(service._lookup_previous_end_over(
+                table_key="row_line", object_key="e-object", report_date="2026/09/04", threshold=235,
             ))
 
     def test_branch_rows_write_fixed_data_center_name_to_machine_room(self) -> None:

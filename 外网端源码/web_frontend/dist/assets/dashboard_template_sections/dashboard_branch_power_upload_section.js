@@ -134,7 +134,7 @@ export const DASHBOARD_BRANCH_POWER_UPLOAD_SECTION = `        <section class="co
                   <span class="status-badge status-badge-soft tone-neutral">共享文件</span>
                 </div>
                 <div class="hint">采集端每天分别下载“支路功率 / 支路电流 / 支路开关 / 楼栋全机柜功率”四类整日源文件，每楼每天一份。</div>
-                <div class="hint">外网端仍按旧三源生成主表和单支路表；机柜超18KW、列头柜超107.5KW、机列超215KW 改由楼栋全机柜功率判定，其中机柜表的 PDU 与电流仍回查旧三源补齐。</div>
+                <div class="hint">外网端仍按旧三源生成主表和单支路表；机柜≥18KW、列头柜（A-D楼≥107.5KW、E楼≥117.5KW）、机列（A-D楼≥215KW、E楼≥235KW）改由楼栋全机柜功率判定，其中机柜表的 PDU 与电流仍回查旧三源补齐。</div>
                 <div class="hint">主表目标多维表固定为 ASLxbfESPahdTKs0A9NccgbrnXc / tblT5KbsxGCK1SwA；统计表会按业务日删除旧记录后重建。</div>
               </article>
             </div>

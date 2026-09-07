@@ -47,6 +47,8 @@ class _RowLineMetricRow:
 class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
     HEADER_SCAN_ROWS = 4
     HOURS = list(range(24))
+    E_BUILDING_LINE_HEAD_THRESHOLD = 117.5
+    E_BUILDING_ROW_LINE_THRESHOLD = 235.0
 
     def _iter_target_tables(self, cfg: Dict[str, Any]) -> tuple[List[_PowerAlertTable], List[str]]:
         target_tables, missing = self._resolve_target_tables(cfg)
@@ -289,6 +291,14 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
     def _row_line_object_key(self, row: _RowLineMetricRow) -> str:
         return self._power_alert_object_key(row.building, row.room_short, row.row_col)
 
+    @classmethod
+    def _line_head_threshold(cls, building: str, default_threshold: float) -> float:
+        return cls.E_BUILDING_LINE_HEAD_THRESHOLD if str(building or "").strip() == "E楼" else default_threshold
+
+    @classmethod
+    def _row_line_threshold(cls, building: str, default_threshold: float) -> float:
+        return cls.E_BUILDING_ROW_LINE_THRESHOLD if str(building or "").strip() == "E楼" else default_threshold
+
     def _needs_previous_state(
         self,
         *,
@@ -298,15 +308,18 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         threshold: float,
         object_key_fn: Callable[[Any], str],
         emit_log: Callable[[str], None],
+        threshold_fn: Callable[[Any, float], float] | None = None,
     ) -> bool:
         for row in rows:
             powers = getattr(row, "powers", [])
-            if not powers or self._number_or_zero(powers[0]) < threshold:
+            row_threshold = threshold_fn(row, threshold) if threshold_fn else threshold
+            if not powers or self._number_or_zero(powers[0]) < row_threshold:
                 continue
             previous = self._lookup_previous_end_over(
                 table_key=table_key,
                 object_key=object_key_fn(row),
                 report_date=report_date,
+                threshold=row_threshold,
                 emit_log=emit_log,
             )
             if previous is None:
@@ -342,6 +355,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                     rows=current_rows.get("line_head", []),
                     threshold=thresholds.get("line_head", 107.5),
                     object_key_fn=self._line_head_object_key,
+                    threshold_fn=lambda row, default: self._line_head_threshold(row.building, default),
                     emit_log=emit_log,
                 ),
                 self._needs_previous_state(
@@ -350,6 +364,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                     rows=current_rows.get("row_line", []),
                     threshold=thresholds.get("row_line", 215.0),
                     object_key_fn=self._row_line_object_key,
+                    threshold_fn=lambda row, default: self._row_line_threshold(row.building, default),
                     emit_log=emit_log,
                 ),
             )
@@ -500,9 +515,10 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         output: List[Dict[str, Any]] = []
         for row in rows:
             object_key = self._line_head_object_key(row)
+            row_threshold = self._line_head_threshold(row.building, threshold)
             stats = self._threshold_stats(
                 row.powers,
-                threshold,
+                row_threshold,
                 table_key="line_head",
                 object_key=object_key,
                 report_date=report_date,
@@ -546,9 +562,10 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         output: List[Dict[str, Any]] = []
         for row in rows:
             object_key = self._row_line_object_key(row)
+            row_threshold = self._row_line_threshold(row.building, threshold)
             stats = self._threshold_stats(
                 row.powers,
-                threshold,
+                row_threshold,
                 table_key="row_line",
                 object_key=object_key,
                 report_date=report_date,
