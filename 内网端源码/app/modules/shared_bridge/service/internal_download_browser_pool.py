@@ -5,6 +5,7 @@ import concurrent.futures
 import copy
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict
 
@@ -83,6 +84,7 @@ class InternalDownloadBrowserPool:
         self._recovery_probe_task: asyncio.Task[Any] | None = None
         self._health_probe_task: asyncio.Task[Any] | None = None
         self._prelogin_tasks: set[asyncio.Task[Any]] = set()
+        self._job_tasks: set[asyncio.Task[Any]] = set()
         self._health_probe_failures: Dict[str, int] = {}
         self._state_lock = threading.Lock()
         self._stopping = False
@@ -1125,7 +1127,8 @@ class InternalDownloadBrowserPool:
         return request_context, base_url
 
     async def _async_start(self) -> None:
-        self._stopping = False
+        if self._stopping:
+            return
         configure_playwright_environment(self.runtime_config)
         self._playwright = await async_playwright().start()
         self._locks = {building: asyncio.Lock() for building in self.BUILDINGS}
@@ -1136,6 +1139,11 @@ class InternalDownloadBrowserPool:
 
     async def _async_stop(self) -> None:
         self._stopping = True
+        jobs = list(self._job_tasks)
+        for task in jobs:
+            task.cancel()
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
         if self._health_probe_task is not None:
             self._health_probe_task.cancel()
             try:
@@ -1174,8 +1182,9 @@ class InternalDownloadBrowserPool:
         loop = asyncio.new_event_loop()
         self._loop = loop
         asyncio.set_event_loop(loop)
+        startup_task = loop.create_task(self._async_start())
         try:
-            loop.run_until_complete(self._async_start())
+            loop.run_until_complete(startup_task)
             self._log("[共享桥接] 内网下载浏览器池已启动：5 个楼栋浏览器实例已就绪")
         except Exception as exc:
             self._startup_error = str(exc)
@@ -1183,6 +1192,9 @@ class InternalDownloadBrowserPool:
             self._ready_event.set()
             self._initial_prelogin_done_event.set()
             try:
+                if not startup_task.done():
+                    startup_task.cancel()
+                    loop.run_until_complete(asyncio.gather(startup_task, return_exceptions=True))
                 loop.run_until_complete(self._async_stop())
             except Exception:
                 pass
@@ -1190,9 +1202,11 @@ class InternalDownloadBrowserPool:
             self._loop = None
             return
         self._ready_event.set()
-        self._track_async_task(loop.create_task(self._async_initial_prelogin_all()))
+        if not self._stopping:
+            self._track_async_task(loop.create_task(self._async_initial_prelogin_all()))
         try:
-            loop.run_forever()
+            if not self._stopping:
+                loop.run_forever()
         finally:
             try:
                 loop.run_until_complete(self._async_stop())
@@ -1202,8 +1216,9 @@ class InternalDownloadBrowserPool:
             self._loop = None
 
     def start(self, *, wait_ready: bool = True, ready_timeout_sec: float = 30.0) -> Dict[str, Any]:
-        if self.is_running():
-            return {"started": False, "running": True, "reason": "already_running"}
+        if self._thread and self._thread.is_alive():
+            return {"started": False, "running": True, "reason": "stopping" if self._stopping else "already_running"}
+        self._stopping = False
         self._startup_error = ""
         self._ready_event.clear()
         self._initial_prelogin_done_event.clear()
@@ -1229,6 +1244,8 @@ class InternalDownloadBrowserPool:
         wait_seconds = max(0.0, float(timeout_sec or 0.0))
         started = time.monotonic()
         self._ready_event.wait(timeout=wait_seconds)
+        if self._stopping:
+            return {"ready": False, "running": self.is_running(), "reason": "stopping"}
         if self._startup_error:
             return {
                 "ready": False,
@@ -1259,11 +1276,23 @@ class InternalDownloadBrowserPool:
     def stop(self) -> Dict[str, Any]:
         loop = self._loop
         thread = self._thread
-        if loop is None or thread is None:
+        if thread is None or not thread.is_alive():
+            if thread is not None and not thread.is_alive():
+                self._thread = None
             return {"stopped": False, "running": False, "reason": "not_running"}
-        self._stopping = True
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=10)
+        with self._state_lock:
+            request_stop = not self._stopping
+            self._stopping = True
+        self._ready_event.set()
+        self._initial_prelogin_done_event.set()
+        try:
+            if request_stop and loop is not None:
+                loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:
+            pass
+        thread.join(timeout=30)
+        if thread.is_alive():
+            return {"stopped": False, "running": True, "reason": "cleanup_timeout"}
         self._thread = None
         self._loop = None
         return {"stopped": True, "running": False, "reason": "stopped"}
@@ -1279,6 +1308,8 @@ class InternalDownloadBrowserPool:
         return future
 
     def _ensure_ready_for_submit(self) -> str:
+        if self._stopping:
+            return "内网下载浏览器池正在关闭"
         if self._thread is None and self._loop is None:
             return "内网下载浏览器池未启动"
         if self._ready_event.is_set():
@@ -1292,6 +1323,29 @@ class InternalDownloadBrowserPool:
             or "内网下载浏览器池启动仍在进行"
         ).strip()
 
+    @asynccontextmanager
+    async def _building_job_lock(self, building: str, owner: str):
+        task = asyncio.current_task()
+        self._job_tasks.add(task)
+        acquired = False
+        try:
+            deadline = time.monotonic() + self.BUILDING_RESOURCE_LOCK_TIMEOUT_SEC
+            while not acquired:
+                if self._stopping:
+                    raise asyncio.CancelledError()
+                # Nonblocking acquisition avoids a cancelled thread acquiring a lock later.
+                acquired = acquire_building_browser_lock(building, owner=owner, timeout_sec=0)
+                if not acquired:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(f"{building} 浏览器资源正在被其他任务占用，等待超时")
+                    await asyncio.sleep(0.1)
+            async with self._locks[building]:
+                yield
+        finally:
+            if acquired:
+                release_building_browser_lock(building)
+            self._job_tasks.discard(task)
+
     async def _run_building_job(
         self,
         building: str,
@@ -1302,15 +1356,7 @@ class InternalDownloadBrowserPool:
         lock = self._locks.get(building)
         if lock is None:
             raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
-        resource_acquired = await asyncio.to_thread(
-            acquire_building_browser_lock,
-            building,
-            owner="source_file_download",
-            timeout_sec=self.BUILDING_RESOURCE_LOCK_TIMEOUT_SEC,
-        )
-        if not resource_acquired:
-            raise RuntimeError(f"{building} 浏览器资源正在被其他任务占用，等待超时")
-        async with lock:
+        async with self._building_job_lock(building, "source_file_download"):
             try:
                 self._mark_slot_recycle_pending_if_needed(building)
                 await self._recycle_slot_if_needed(building)
@@ -1453,7 +1499,6 @@ class InternalDownloadBrowserPool:
                 raise RuntimeError(f"{building} 下载未能开始")
             finally:
                 self._update_slot(building, in_use=False, current_task="")
-                await asyncio.to_thread(release_building_browser_lock, building)
 
     async def _run_building_alarm_job(
         self,
@@ -1465,15 +1510,7 @@ class InternalDownloadBrowserPool:
         lock = self._locks.get(building)
         if lock is None:
             raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
-        resource_acquired = await asyncio.to_thread(
-            acquire_building_browser_lock,
-            building,
-            owner="alarm_event_export",
-            timeout_sec=self.BUILDING_RESOURCE_LOCK_TIMEOUT_SEC,
-        )
-        if not resource_acquired:
-            raise RuntimeError(f"{building} 浏览器资源正在被其他任务占用，等待超时")
-        async with lock:
+        async with self._building_job_lock(building, "alarm_event_export"):
             try:
                 self._mark_slot_recycle_pending_if_needed(building)
                 await self._recycle_slot_if_needed(building)
@@ -1583,7 +1620,6 @@ class InternalDownloadBrowserPool:
                 raise RuntimeError(f"{building} 告警信息导出未能开始")
             finally:
                 self._update_slot(building, in_use=False, current_task="")
-                await asyncio.to_thread(release_building_browser_lock, building)
 
     def submit_building_job(
         self,

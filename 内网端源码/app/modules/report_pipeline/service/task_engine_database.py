@@ -38,7 +38,6 @@ class TaskEngineDatabase:
         self.db_path = self.root / "task_engine.db"
         self._writes: queue.Queue[Any] = queue.Queue(maxsize=self.WRITE_QUEUE_MAXSIZE)
         self._closed = False
-        self._close_sentinel = object()
         self._last_cleanup_at = ""
         self._last_writer_error = ""
         self._writer_lock = threading.Lock()
@@ -230,15 +229,18 @@ class TaskEngineDatabase:
             self._start_writer_locked()
 
     def _writer_loop(self) -> None:
-        while not self._closed:
+        while not self._closed or not self._writes.empty():
             conn: sqlite3.Connection | None = None
             try:
                 conn = self._connect()
                 self._last_writer_error = ""
-                while not self._closed:
-                    item = self._writes.get()
-                    if item is self._close_sentinel:
-                        return
+                while True:
+                    try:
+                        item = self._writes.get(timeout=0.1)
+                    except queue.Empty:
+                        if self._closed:
+                            return
+                        continue
                     callback, done, holder = item
                     reconnect_requested = False
                     try:
@@ -254,6 +256,8 @@ class TaskEngineDatabase:
                         break
             except Exception as exc:  # noqa: BLE001
                 self._last_writer_error = f"{type(exc).__name__}: {exc}"
+                if self._closed:
+                    self._fail_pending_writes(exc)
             finally:
                 if conn is not None:
                     conn.close()
@@ -267,7 +271,10 @@ class TaskEngineDatabase:
         done = threading.Event()
         holder: dict[str, Any] = {}
         try:
-            self._writes.put((callback, done, holder), timeout=self.WRITE_PUT_TIMEOUT_SEC)
+            with self._writer_lock:
+                if self._closed:
+                    raise RuntimeError("TaskEngineDatabase 已关闭")
+                self._writes.put((callback, done, holder), timeout=self.WRITE_PUT_TIMEOUT_SEC)
         except queue.Full as exc:
             raise RuntimeError(
                 f"任务引擎 SQLite 写队列已满，当前长度={self._writes.qsize()}，请检查长时间写入堆积"
@@ -782,14 +789,19 @@ class TaskEngineDatabase:
             "last_writer_error": str(self._last_writer_error or "").strip(),
         }
 
+    def _fail_pending_writes(self, error: Exception) -> None:
+        while True:
+            try:
+                _callback, done, holder = self._writes.get_nowait()
+            except queue.Empty:
+                return
+            holder["error"] = error
+            done.set()
+
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._writes.put(self._close_sentinel, timeout=self.WRITE_PUT_TIMEOUT_SEC)
-        except queue.Full:
-            pass
+        with self._writer_lock:
+            self._closed = True
         writer = getattr(self, "_writer", None)
         if writer and writer.is_alive():
             writer.join(timeout=5)
+        self._fail_pending_writes(RuntimeError("任务引擎关闭，排队写入未执行"))

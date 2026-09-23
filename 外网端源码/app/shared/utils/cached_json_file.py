@@ -5,14 +5,16 @@ import json
 import os
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any
 
 
 _CACHE_LOCK = threading.RLock()
 _CACHE: dict[str, tuple[int | None, Any]] = {}
+_CACHE_MAX_ENTRIES = 512
 _PATH_LOCKS_GUARD = threading.Lock()
-_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
 
 
 def _cache_key(path: str | Path) -> str:
@@ -37,10 +39,13 @@ def _mtime_ns(path: Path) -> int | None:
 
 
 def _set_cache(path: Path, payload: Any, mtime_ns: int | None = None) -> tuple[int | None, Any] | None:
+    key = _cache_key(path)
     entry = (mtime_ns if mtime_ns is not None else _mtime_ns(path), copy.deepcopy(payload))
     with _CACHE_LOCK:
-        previous = _CACHE.get(_cache_key(path))
-        _CACHE[_cache_key(path)] = entry
+        previous = _CACHE.pop(key, None)
+        _CACHE[key] = entry
+        while len(_CACHE) > _CACHE_MAX_ENTRIES:
+            _CACHE.pop(next(iter(_CACHE)))
         return previous
 
 
@@ -61,6 +66,8 @@ def load_cached_json(path: str | Path, default: Any = None, *, encoding: str = "
         with _CACHE_LOCK:
             cached = _CACHE.get(key)
             if cached is not None and (cached[0] is None or cached[0] == mtime_ns):
+                _CACHE.pop(key, None)
+                _CACHE[key] = cached
                 return copy.deepcopy(cached[1])
         if not target.exists():
             return copy.deepcopy(default)

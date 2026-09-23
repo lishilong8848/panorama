@@ -238,11 +238,15 @@ class AppContainer:
         runtime_role_mode = self._shared_bridge_runtime_role_mode()
         if runtime_role_mode == configured_role_mode:
             return
-        try:
-            self.shared_bridge_service.stop()
-        except Exception:  # noqa: BLE001
-            pass
+        self._stop_shared_bridge_for_rebuild()
         self.shared_bridge_service = self._build_shared_bridge_service()
+
+    def _stop_shared_bridge_for_rebuild(self) -> None:
+        if self.shared_bridge_service is None:
+            return
+        result = self.shared_bridge_service.stop()
+        if not isinstance(result, dict) or result.get("running", False):
+            raise RuntimeError("旧共享桥接仍在关闭，暂不能重建；请稍后重新加载配置")
 
     def _ensure_runtime_dependencies_initialized(self) -> None:
         progress_callback = getattr(self, "runtime_activation_progress_callback", None)
@@ -3634,6 +3638,7 @@ class AppContainer:
             if self.shared_bridge_service
             else ""
         )
+        self._stop_shared_bridge_for_rebuild()
         if self.scheduler:
             self.scheduler.stop()
         if self.handover_scheduler_manager:
@@ -3662,8 +3667,6 @@ class AppContainer:
             self.updater_service.stop()
         if self.alert_log_uploader:
             self.alert_log_uploader.stop()
-        if self.shared_bridge_service:
-            self.shared_bridge_service.stop()
         self.scheduler = self._build_scheduler()
         self.handover_scheduler_manager = self._build_handover_scheduler_manager()
         self.wet_bulb_collection_scheduler = self._build_wet_bulb_collection_scheduler()

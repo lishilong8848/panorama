@@ -569,6 +569,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_temperature_humidity_upload_scheduler(source="关闭自动")
             if getattr(container, "top5_power_report_scheduler", None):
                 container.stop_top5_power_report_scheduler(source="关闭自动")
+            if getattr(container, "system_screenshot_demand_poller", None):
+                container.stop_system_screenshot_demand_poller(source="关闭自动")
             if container.monthly_change_report_scheduler:
                 container.stop_monthly_change_report_scheduler(source="关闭自动")
             if container.monthly_event_report_scheduler:

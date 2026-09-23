@@ -77,6 +77,8 @@ class InternalBridgeHttpTaskRunner:
         self._stop_event = threading.Event()
         self._started_at = time.time()
         self._max_source_index_recovery_threads = 2
+        self._missing_entries: Dict[str, tuple[Dict[str, Any], str, str]] = {}
+        self._missing_entries_lock = threading.Lock()
 
     def _emit(self, text: str) -> None:
         line = str(text or "").strip()
@@ -292,6 +294,7 @@ class InternalBridgeHttpTaskRunner:
             try:
                 runtime = self._ensure_runtime()
                 store = self._get_store()
+                self._flush_missing_source_entries()
                 counts = store.get_task_counts()
                 pending = int(counts.get("pending_internal", 0) or 0)
                 if pending <= 0:
@@ -616,16 +619,36 @@ class InternalBridgeHttpTaskRunner:
             return False
 
     def _mark_source_index_entry_missing(self, entry: Dict[str, Any], *, reason: str, detail: str) -> None:
-        store = self._store
-        if store is None:
-            return
         entry_id = str((entry or {}).get("entry_id", "") or "").strip()
         if not entry_id:
             return
+        with self._missing_entries_lock:
+            if entry_id in self._missing_entries or len(self._missing_entries) < 512:
+                self._missing_entries[entry_id] = (dict(entry), reason, detail)
+        self._worker_wake.set()
+
+    def _flush_missing_source_entries(self) -> None:
+        for _ in range(8):
+            with self._missing_entries_lock:
+                if not self._missing_entries:
+                    return
+                _key, (entry, reason, detail) = self._missing_entries.popitem()
+            if self._source_index_file_accessible(str(entry.get("file_path", "") or "")):
+                continue
+            stores = [self._store, getattr(self._main_service, "_store", None)]
+            for store in stores:
+                if store is not None:
+                    self._persist_missing_source_entry(store, entry, reason=reason, detail=detail)
+
+    def _persist_missing_source_entry(self, store, entry: Dict[str, Any], *, reason: str, detail: str) -> None:
+        entry_id = str(entry.get("entry_id", "") or "")
         try:
             store.update_source_cache_entry_status(
                 entry_id,
                 status="missing",
+                expected_updated_at=str(entry.get("updated_at", "") or ""),
+                expected_relative_path=str(entry.get("relative_path", "") or ""),
+                expected_file_hash=str(entry.get("file_hash", "") or ""),
                 metadata_update={
                     "missing_reason": str(reason or "").strip() or "missing",
                     "missing_detail": str(detail or "").strip(),

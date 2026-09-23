@@ -320,19 +320,10 @@ def upload_results_to_feishu(
             emit_log(
                 f"[飞书上传][覆盖] 已读取旧附件记录: 楼栋={building_text}, 日期={date_text}, count={len(attachment_delete_ids)}"
             )
-            if attachment_delete_ids:
-                deleted_attachment = client.batch_delete_records(
-                    table_id=attachment_table_id,
-                    record_ids=attachment_delete_ids,
-                    batch_size=500,
-                )
-                emit_log(
-                    f"[飞书上传][覆盖] 已删除旧附件记录: 楼栋={building_text}, 日期={date_text}, count={int(deleted_attachment or 0)}"
-                )
         except Exception as exc:  # noqa: BLE001
             mysql_writer.close()
             emit_log(
-                f"[文件流程失败] 功能={log_feature} 阶段=飞书旧附件记录覆盖删除 楼栋={building_text} "
+                f"[文件流程失败] 功能={log_feature} 阶段=飞书旧附件记录读取 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
             )
             raise
@@ -402,6 +393,24 @@ def upload_results_to_feishu(
             mysql_writer.close()
             emit_log(
                 f"[文件流程失败] 功能={log_feature} 阶段=飞书附件记录写入 楼栋={building_text} "
+                f"文件={file_text} 日期={date_text} 错误={exc}"
+            )
+            raise
+
+        try:
+            if attachment_delete_ids:
+                deleted_attachment = client.batch_delete_records(
+                    table_id=attachment_table_id,
+                    record_ids=attachment_delete_ids,
+                    batch_size=500,
+                )
+                emit_log(
+                    f"[飞书上传][覆盖] 新附件记录写入后已删除旧附件记录: 楼栋={building_text}, 日期={date_text}, count={int(deleted_attachment or 0)}"
+                )
+        except Exception as exc:
+            mysql_writer.close()
+            emit_log(
+                f"[文件流程失败] 功能={log_feature} 阶段=飞书旧附件记录清理 楼栋={building_text} "
                 f"文件={file_text} 日期={date_text} 错误={exc}"
             )
             raise

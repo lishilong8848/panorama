@@ -1395,10 +1395,31 @@ class SharedBridgeRuntimeService:
             return False
         return bool(health.get("startup_ready") or health.get("browser_ready", False)) if isinstance(health, dict) else False
 
+    def _stop_internal_download_pool(self) -> bool:
+        pool = self._internal_download_pool
+        if pool is None:
+            return True
+        result = pool.stop()
+        if result.get("running", False):
+            self._last_error = "内网下载浏览器池仍在关闭，暂不创建新实例"
+            return False
+        clear_internal_download_browser_pool(pool)
+        self._internal_download_pool = None
+        return True
+
     def start(self) -> Dict[str, Any]:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return {"started": False, "running": True, "reason": "already_running"}
+            if self._stop_event.is_set():
+                if (
+                    any(t.is_alive() for t in self._background_task_threads.values() if t)
+                    or (self._source_cache_start_thread and self._source_cache_start_thread.is_alive())
+                ):
+                    return {"started": False, "running": True, "reason": "stopping"}
+                if not self._stop_internal_download_pool():
+                    return {"started": False, "running": True, "reason": "stopping"}
+            self._stop_event.clear()
             self._background_task_threads = {}
             self._background_task_state = self._build_initial_background_task_state()
             self._active_bridge_task_count = 0
@@ -1416,10 +1437,8 @@ class SharedBridgeRuntimeService:
                 self._source_cache_start_thread = None
                 if self._source_cache_service is not None:
                     self._source_cache_service.stop()
-                if self._internal_download_pool is not None:
-                    clear_internal_download_browser_pool(self._internal_download_pool)
-                    self._internal_download_pool.stop()
-                    self._internal_download_pool = None
+                if not self._stop_internal_download_pool():
+                    return {"started": False, "running": True, "reason": "stopping"}
                 return {"started": False, "running": False, "reason": "disabled_or_unselected"}
             self._db_status = "starting"
             if self.role_mode == "internal":
@@ -1433,6 +1452,8 @@ class SharedBridgeRuntimeService:
                     pool_result = self._internal_download_pool.start(wait_ready=False)
                 except TypeError:
                     pool_result = self._internal_download_pool.start()
+                if pool_result.get("reason") == "stopping":
+                    return {"started": False, "running": True, "reason": "stopping"}
                 if not bool(pool_result.get("running", False)):
                     error_text = str(pool_result.get("error", "") or "内网下载浏览器池启动失败").strip()
                     self._last_error = error_text
@@ -1448,10 +1469,8 @@ class SharedBridgeRuntimeService:
                     self._start_source_cache_after_internal_pool_ready()
             else:
                 self._source_cache_start_thread = None
-                if self._internal_download_pool is not None:
-                    clear_internal_download_browser_pool(self._internal_download_pool)
-                    self._internal_download_pool.stop()
-                    self._internal_download_pool = None
+                if not self._stop_internal_download_pool():
+                    return {"started": False, "running": True, "reason": "stopping"}
                 if self._source_cache_service is not None:
                     self._source_cache_service.update_download_browser_pool(None)
                     self._source_cache_service.stop()
@@ -1464,30 +1483,11 @@ class SharedBridgeRuntimeService:
         with self._lock:
             thread = self._thread
             background_threads = [item for item in self._background_task_threads.values() if item]
-            self._background_task_threads = {}
-            if not thread:
-                self._source_cache_start_thread = None
-                if self._source_cache_service is not None:
-                    self._source_cache_service.stop()
-                if self._internal_download_pool is not None:
-                    clear_internal_download_browser_pool(self._internal_download_pool)
-                    self._internal_download_pool.stop()
-                    self._internal_download_pool = None
-                self._startup_logged = False
-                self._background_task_state = self._build_initial_background_task_state()
-                self._active_bridge_task_count = 0
-                self._db_status = "disabled" if not self._should_run() else "stopped"
-                self._counts = {"pending_internal": 0, "pending_external": 0, "problematic": 0, "total_count": 0, "node_count": 0}
-                for background_thread in background_threads:
-                    try:
-                        background_thread.join(timeout=1)
-                    except Exception:
-                        pass
-                return {"stopped": False, "running": False, "reason": "not_running"}
+            if self._source_cache_start_thread is not None:
+                background_threads.append(self._source_cache_start_thread)
             self._stop_event.set()
-            self._thread = None
-            self._source_cache_start_thread = None
-        thread.join(timeout=5)
+        if thread is not None:
+            thread.join(timeout=5)
         for background_thread in background_threads:
             try:
                 background_thread.join(timeout=1)
@@ -1495,10 +1495,12 @@ class SharedBridgeRuntimeService:
                 pass
         if self._source_cache_service is not None:
             self._source_cache_service.stop()
-        if self._internal_download_pool is not None:
-            clear_internal_download_browser_pool(self._internal_download_pool)
-            self._internal_download_pool.stop()
-            self._internal_download_pool = None
+        pool_stopped = self._stop_internal_download_pool()
+        if not pool_stopped or (thread and thread.is_alive()) or any(t.is_alive() for t in background_threads):
+            return {"stopped": False, "running": True, "reason": "cleanup_timeout"}
+        self._thread = None
+        self._source_cache_start_thread = None
+        self._background_task_threads = {}
         self._startup_logged = False
         self._background_task_state = self._build_initial_background_task_state()
         self._active_bridge_task_count = 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections import deque
 import json
 import os
 import signal
@@ -55,6 +56,17 @@ def _is_recoverable_task_engine_error(exc: Exception) -> bool:
 
 _INCOMPLETE_JOB_STATUSES = {"queued", "waiting_resource", "running"}
 _RUNNING_JOB_STATUSES = {"running"}
+_TERMINAL_JOB_STATUSES = {
+    "success",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "partial_failed",
+    "blocked_precondition",
+    "blocked",
+    "stale",
+    "expired",
+}
 _RESOURCE_CAPACITY_OVERRIDES = {
     "network:external": 3,
     "network:internal": 2,
@@ -170,6 +182,7 @@ class StageState:
 
 class JobService:
     TASK_ENGINE_CLEANUP_INTERVAL_SEC = 600.0
+    MAX_TERMINAL_JOBS_IN_MEMORY = 32
 
     def __init__(self, log_buffer_size: int = 5000) -> None:
         self.log_buffer_size = max(200, int(log_buffer_size))
@@ -221,6 +234,8 @@ class JobService:
         self._worker_python_fallback_logged: set[str] = set()
         self._task_engine_recovery_completed = False
         self._task_engine_last_cleanup_monotonic = 0.0
+        self._shutting_down = False
+        self._shutdown_job_states: Dict[str, tuple[str, str]] = {}
 
     def update_log_buffer_size(self, value: int) -> None:
         self.log_buffer_size = max(200, int(value))
@@ -237,12 +252,31 @@ class JobService:
         worker_app_dir: Path | None = None,
         current_ssid_getter: Callable[[], str | None] | None = None,
     ) -> None:
-        previous_db = self._task_engine_db
-        if previous_db is not None:
-            previous_db.close()
+        with self._lock:
+            reopening = self._shutting_down
+            if reopening and (
+                self._task_engine_db is not None
+                or any(process.poll() is None for process in self._worker_processes.values())
+                or any(job.thread and job.thread.is_alive() for job in self._jobs.values())
+            ):
+                self._check_accepting_jobs()
+            store = TaskEngineStore(runtime_config=runtime_config, app_dir=app_dir)
+            if self._task_engine_db is not None:
+                if self._task_engine_store.root.resolve() != store.root.resolve():
+                    raise RuntimeError("任务状态目录变更需要重启程序，运行中不能切换数据库")
+            else:
+                self._task_engine_store = store
+                self._task_engine_db = TaskEngineDatabase(runtime_config=runtime_config, app_dir=app_dir)
+            if reopening:
+                self._shutting_down = False
+                self._shutdown_job_states.clear()
+                self._jobs.clear()
+                self._resource_holders.clear()
+                self._worker_processes.clear()
+                self._worker_control_ports.clear()
+                self._worker_force_killed.clear()
+                self._task_engine_recovery_completed = False
         self._runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
-        self._task_engine_store = TaskEngineStore(runtime_config=runtime_config, app_dir=app_dir)
-        self._task_engine_db = TaskEngineDatabase(runtime_config=runtime_config, app_dir=app_dir)
         self._config_snapshot_getter = config_snapshot_getter
         self._current_ssid_getter = current_ssid_getter
         self._worker_app_dir = Path(worker_app_dir or app_dir or Path.cwd()).resolve()
@@ -287,15 +321,121 @@ class JobService:
         self._restore_incomplete_jobs()
 
     def shutdown_task_engine(self) -> None:
-        db = self._task_engine_db
-        self._task_engine_db = None
-        if db is not None:
-            db.close()
+        self._shutdown_active_workers()
+        self._close_task_engine_if_idle()
+
+    def _check_accepting_jobs(self) -> None:
+        if self._shutting_down:
+            raise RuntimeError("任务服务正在关闭，停止接收新任务")
+
+    def _close_task_engine_if_idle(self) -> None:
+        with self._lock:
+            if not self._shutting_down:
+                return
+            if any(j.thread and j.thread.is_alive() and not j.done_event.is_set() for j in self._jobs.values()):
+                return
+            db = self._task_engine_db
+            if db is not None:
+                db.close()
+            self._task_engine_db = None
+
+    def _preserve_shutdown_job_locked(self, job: JobState) -> None:
+        previous = self._shutdown_job_states.get(job.job_id)
+        if previous is None or job.cancel_requested or job.status == "success":
+            return
+        stage = self._get_primary_stage(job)
+        if stage.cancel_requested:
+            return
+        old_status, old_wait_reason = previous
+        if stage.worker_handler and old_status in {"queued", "waiting_resource"}:
+            status, wait_reason = old_status, old_wait_reason
+        elif stage.worker_handler and stage.resume_policy == "requeue":
+            status, wait_reason = "queued", ""
+        else:
+            status, wait_reason = "interrupted", ""
+        job.status = stage.status = status
+        job.wait_reason = wait_reason
+        job.summary = stage.summary = "程序关闭，等待重启恢复" if status != "interrupted" else "程序关闭，需要手动续跑"
+        job.error = stage.error = ""
+        job.result = stage.result = None
+        job.finished_at = stage.finished_at = "" if status != "interrupted" else self._now_text()
+        stage.worker_pid = 0
+        stage.worker_status = "stopped"
+
+    def _shutdown_active_workers(self) -> None:
+        with self._lock:
+            self._shutting_down = True
+            for job in self._jobs.values():
+                if job.status not in _INCOMPLETE_JOB_STATUSES:
+                    continue
+                self._shutdown_job_states[job.job_id] = (job.status, job.wait_reason)
+                if job.thread is None or not job.thread.is_alive():
+                    self._preserve_shutdown_job_locked(job)
+                    self._persist_job_snapshot(job)
+                    job.done_event.set()
+            workers = list(self._worker_processes.items())
+            worker_threads = [
+                job.thread
+                for job in self._jobs.values()
+                if job.thread is not None and job.thread.is_alive()
+            ]
+            self._condition.notify_all()
+
+        for (job_id, stage_id), _process in workers:
+            self._send_worker_command(
+                job_id=job_id,
+                stage_id=stage_id,
+                payload={"type": "cancel", "reason": "application_shutdown"},
+            )
+
+        deadline = time.monotonic() + min(10.0, max(1.0, self._worker_cancel_timeout_sec))
+        while time.monotonic() < deadline and any(process.poll() is None for _key, process in workers):
+            time.sleep(0.05)
+
+        for key, process in workers:
+            if process.poll() is not None:
+                continue
+            if not self._terminate_orphan_worker(int(process.pid or 0), job_id=key[0], stage_id=key[1]):
+                try:
+                    process.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        reap_deadline = time.monotonic() + 2.0
+        for _key, process in workers:
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except Exception:  # noqa: BLE001
+                pass
+        join_deadline = time.monotonic() + 2.0
+        for thread in worker_threads:
+            thread.join(timeout=max(0.0, join_deadline - time.monotonic()))
 
     def cleanup_terminal_jobs(self, *, retention_days: int = 14) -> int:
         if not self._task_engine_db:
             return 0
-        return int(self._task_engine_db.cleanup_terminal_jobs(retention_days=retention_days) or 0)
+        deleted = int(self._task_engine_db.cleanup_terminal_jobs(retention_days=retention_days) or 0)
+        with self._lock:
+            self._prune_terminal_jobs_in_memory_locked()
+        return deleted
+
+    def _prune_terminal_jobs_in_memory_locked(self) -> int:
+        if not self._task_engine_db:
+            return 0
+        terminal_jobs = [
+            job
+            for job in self._ordered_jobs()
+            if str(job.status or "").strip().lower() in _TERMINAL_JOB_STATUSES
+            and job.done_event.is_set()
+        ]
+        remove_count = max(0, len(terminal_jobs) - self.MAX_TERMINAL_JOBS_IN_MEMORY)
+        for job in terminal_jobs[:remove_count]:
+            self._jobs.pop(job.job_id, None)
+        return remove_count
+
+    def _prune_terminal_jobs_in_memory(self) -> int:
+        with self._lock:
+            return self._prune_terminal_jobs_in_memory_locked()
 
     def _maybe_cleanup_task_engine(self) -> None:
         if not self._task_engine_db:
@@ -308,6 +448,8 @@ class JobService:
             self._task_engine_db.cleanup_terminal_jobs(retention_days=14)
         except Exception:  # noqa: BLE001
             pass
+        with self._lock:
+            self._prune_terminal_jobs_in_memory_locked()
 
     def task_engine_runtime_snapshot(self) -> Dict[str, Any]:
         self._maybe_cleanup_task_engine()
@@ -861,17 +1003,48 @@ class JobService:
                     encoding="utf-8",
                     errors="replace",
                     check=False,
+                    timeout=5,
                 )
-                return str(target_pid) in str(result.stdout or "")
+                return result.returncode != 0 or str(target_pid) in str(result.stdout or "")
             os.kill(target_pid, 0)
             return True
+        except ProcessLookupError:
+            return False
         except Exception:  # noqa: BLE001
+            # A failed lookup is not evidence that an old worker has exited.
+            return True
+
+    def _worker_identity_matches(self, pid: int, job_id: str, stage_id: str) -> bool:
+        if pid <= 0 or not job_id or not stage_id or self._task_engine_store is None:
+            return False
+        try:
+            if os.name == "nt":
+                command = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                     "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+                     f"(Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}').CommandLine | ConvertTo-Json -Compress"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    check=True, timeout=5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                cmdline = json.loads(command.stdout.strip().lstrip("\ufeff"))
+            else:
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode().replace("\0", " ")
+            normalized = str(cmdline or "").replace('"', "").replace("\\", "/").casefold()
+            bootstrap = str(self._worker_app_dir / "worker_bootstrap.py").replace("\\", "/").casefold()
+            job_dir = str(self._task_engine_store.jobs_root / job_id).replace("\\", "/").casefold()
+            padded = normalized + " "
+            return (
+                bootstrap + " " in padded
+                and f"--job-dir {job_dir} " in padded
+                and f"--stage-id {stage_id} ".casefold() in padded
+            )
+        except Exception:
             return False
 
-    @staticmethod
-    def _terminate_orphan_worker(pid: int) -> bool:
+    def _terminate_orphan_worker(self, pid: int, *, job_id: str = "", stage_id: str = "") -> bool:
         target_pid = int(pid or 0)
-        if target_pid <= 0:
+        if not self._worker_identity_matches(target_pid, job_id, stage_id):
             return False
         try:
             if os.name == "nt":
@@ -882,8 +1055,9 @@ class JobService:
                     encoding="utf-8",
                     errors="replace",
                     check=False,
+                    timeout=5,
                 )
-                return int(result.returncode or 1) == 0
+                return result.returncode == 0
             os.kill(target_pid, signal.SIGKILL)
             return True
         except Exception:  # noqa: BLE001
@@ -982,6 +1156,7 @@ class JobService:
             payload={"action": status, "summary": summary, "timestamp": now_text},
         )
         job.done_event.set()
+        self._prune_terminal_jobs_in_memory()
 
     def _prepare_job_for_restart(self, job: JobState, stage: StageState, *, summary: str) -> None:
         job.status = "queued"
@@ -1043,17 +1218,17 @@ class JobService:
                 process: subprocess.Popen[str] | None = None
                 unhandled_error_detail = ""
                 worker_result: Dict[str, Any] = {}
-                worker_stderr_lines: List[str] = []
+                worker_stderr_lines = deque(maxlen=200)
                 control_port = 0
                 retry_after_repair = False
                 try:
                     python_executable = self._ensure_worker_runtime_ready(job, stage)
                     with self._lock:
-                        if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                        if self._shutting_down or job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
                             return
                     self._acquire_job_resources(job)
                     with self._lock:
-                        if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                        if self._shutting_down or job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
                             return
                     control_port = self._allocate_worker_control_port()
                     command = self._build_worker_command(
@@ -1076,8 +1251,10 @@ class JobService:
                     }
                     if os.name == "nt":
                         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    process = subprocess.Popen(command, **popen_kwargs)
                     with self._lock:
+                        if self._shutting_down or job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                            return
+                        process = subprocess.Popen(command, **popen_kwargs)
                         stage.worker_pid = int(process.pid or 0)
                         stage.worker_status = "running"
                         self._worker_processes[(job.job_id, stage.stage_id)] = process
@@ -1109,7 +1286,7 @@ class JobService:
                         if process is None or process.stderr is None:
                             return
                         for raw_line in process.stderr:
-                            worker_stderr_lines.append(str(raw_line or "").strip())
+                            worker_stderr_lines.append(str(raw_line or "").strip()[-4096:])
                             self._record_worker_text_line(job, stage, raw_line, stream="stderr")
 
                     stdout_thread = threading.Thread(target=_consume_stdout, daemon=True, name=f"worker-stdout-{job.job_id[:8]}")
@@ -1123,6 +1300,7 @@ class JobService:
                     repairable_crash = (
                         (return_code != 0 or not worker_result)
                         and not repair_retry_used
+                        and not self._shutting_down
                         and self._is_worker_runtime_repairable_detail(stderr_detail)
                     )
                     if repairable_crash:
@@ -1221,7 +1399,7 @@ class JobService:
                 except Exception as exc:  # noqa: BLE001
                     detail = str(exc)
                     unhandled_error_detail = detail
-                    if self._is_worker_runtime_repairable_detail(detail) and not repair_retry_used:
+                    if self._is_worker_runtime_repairable_detail(detail) and not repair_retry_used and not self._shutting_down:
                         repair_retry_used = True
                         try:
                             python_executable = self._resolve_worker_python_executable()
@@ -1270,6 +1448,7 @@ class JobService:
                         self._worker_processes.pop((job.job_id, stage.stage_id), None)
                         self._worker_control_ports.pop((job.job_id, stage.stage_id), None)
                     with self._lock:
+                        self._preserve_shutdown_job_locked(job)
                         if job.status == "failed":
                             has_failure_line = any("[文件流程失败]" in line for line in job.logs)
                             if not has_failure_line:
@@ -1284,13 +1463,21 @@ class JobService:
                     job.acquired_resources = []
                     if not retry_after_repair:
                         job.done_event.set()
+                        self._prune_terminal_jobs_in_memory()
+                        self._close_task_engine_if_idle()
                 if retry_after_repair:
                     continue
                 break
 
-        thread = threading.Thread(target=_run, daemon=True, name=f"worker-job-{job.job_id[:8]}")
-        job.thread = thread
-        thread.start()
+        with self._lock:
+            if self._shutting_down:
+                self._preserve_shutdown_job_locked(job)
+                self._persist_job_snapshot(job)
+                job.done_event.set()
+                return
+            thread = threading.Thread(target=_run, daemon=True, name=f"worker-job-{job.job_id[:8]}")
+            job.thread = thread
+            thread.start()
 
     def _job_network_side(self, job: JobState) -> str:
         for resource_key in job.resource_keys:
@@ -1672,12 +1859,16 @@ class JobService:
 
     def _acquire_job_resources(self, job: JobState) -> None:
         stage = self._get_primary_stage(job)
+        if self._shutting_down:
+            return
         if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
             with self._lock:
                 self._mark_cancelled_before_run_locked(job, stage)
             return
         if not job.resource_keys:
             with self._lock:
+                if self._shutting_down:
+                    return
                 if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
                     self._mark_cancelled_before_run_locked(job, stage)
                     return
@@ -1694,6 +1885,8 @@ class JobService:
         wait_started_at = datetime.now()
         while True:
             with self._condition:
+                if self._shutting_down:
+                    return
                 if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
                     self._mark_cancelled_before_run_locked(job, stage)
                     self._condition.notify_all()
@@ -2020,6 +2213,7 @@ class JobService:
         dedupe_key: str = "",
         submitted_by: str = "",
     ) -> JobState:
+        self._check_accepting_jobs()
         normalized_resources = self._normalize_resource_keys(resource_keys)
         normalized_priority = str(priority or "manual").strip().lower() or "manual"
         normalized_submitted_by = str(submitted_by or normalized_priority).strip().lower() or "manual"
@@ -2032,6 +2226,7 @@ class JobService:
             if isinstance(snapshot, dict):
                 return self._job_from_snapshot(snapshot)
         with self._lock:
+            self._check_accepting_jobs()
             existing = self._find_active_job_by_dedupe_key_locked(normalized_dedupe_key)
             if existing is not None:
                 return existing
@@ -2067,7 +2262,7 @@ class JobService:
             try:
                 self._acquire_job_resources(job)
                 with self._lock:
-                    if job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                    if self._shutting_down or job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
                         return
                 result = run_func(lambda line: self.log(job.job_id, line))
                 with self._lock:
@@ -2107,6 +2302,7 @@ class JobService:
                     self._persist_job_snapshot(job)
             finally:
                 with self._lock:
+                    self._preserve_shutdown_job_locked(job)
                     if job.status == "failed":
                         has_failure_line = any("[文件流程失败]" in line for line in job.logs)
                         if not has_failure_line:
@@ -2120,10 +2316,18 @@ class JobService:
                 self._release_resources(job.job_id, list(job.acquired_resources))
                 job.acquired_resources = []
                 job.done_event.set()
+                self._prune_terminal_jobs_in_memory()
+                self._close_task_engine_if_idle()
 
-        thread = threading.Thread(target=_run, daemon=True, name=f"job-{job_id[:8]}")
-        job.thread = thread
-        thread.start()
+        with self._lock:
+            if self._shutting_down:
+                self._preserve_shutdown_job_locked(job)
+                self._persist_job_snapshot(job)
+                job.done_event.set()
+                return job
+            thread = threading.Thread(target=_run, daemon=True, name=f"job-{job_id[:8]}")
+            job.thread = thread
+            thread.start()
         return job
 
     def _restore_incomplete_jobs(self) -> None:
@@ -2200,7 +2404,17 @@ class JobService:
                 orphan_pid = int(stage.worker_pid or 0)
                 orphan_terminated = False
                 if self._pid_exists(orphan_pid):
-                    orphan_terminated = self._terminate_orphan_worker(orphan_pid)
+                    orphan_terminated = self._terminate_orphan_worker(
+                        orphan_pid, job_id=job.job_id, stage_id=stage.stage_id
+                    )
+                    if not orphan_terminated and self._pid_exists(orphan_pid):
+                        self._mark_restored_job_terminal(
+                            job, stage, status="interrupted",
+                            summary="旧 worker 状态待核实，未自动重跑",
+                            error=f"无法确认旧 worker 已退出: pid={orphan_pid}，请核实后手动续跑",
+                            worker_status="interrupted",
+                        )
+                        continue
                 if str(stage.resume_policy or "manual_resume").strip().lower() == "requeue":
                     self._prepare_job_for_restart(job, stage, summary="restart_requeued")
                     self._record_job_event(
@@ -2323,6 +2537,7 @@ class JobService:
         initial_summary: str = "",
         bridge_task_id: str = "",
     ) -> JobState:
+        self._check_accepting_jobs()
         if not self._task_engine_store:
             raise RuntimeError("task engine not configured")
         normalized_resources = self._normalize_resource_keys(resource_keys)
@@ -2340,6 +2555,7 @@ class JobService:
             if isinstance(snapshot, dict):
                 return self._job_from_snapshot(snapshot)
         with self._lock:
+            self._check_accepting_jobs()
             existing = self._find_active_job_by_dedupe_key_locked(normalized_dedupe_key)
             if existing is not None:
                 return existing
@@ -2424,6 +2640,7 @@ class JobService:
         if not self._task_engine_store:
             raise RuntimeError("task engine not configured")
         with self._lock:
+            self._check_accepting_jobs()
             normalized_job_id = str(job_id or "").strip()
             job = self._jobs.get(normalized_job_id)
             if job is None:
@@ -2498,6 +2715,7 @@ class JobService:
                 payload={"error": detail, "bridge_task_id": job.bridge_task_id, "timestamp": now_text},
             )
             job.done_event.set()
+            self._prune_terminal_jobs_in_memory_locked()
             self._persist_resource_snapshot()
             return job
 
@@ -2540,6 +2758,7 @@ class JobService:
                     payload={"reason": "user_requested", "timestamp": now_text},
                 )
                 job.done_event.set()
+                self._prune_terminal_jobs_in_memory_locked()
                 self._condition.notify_all()
                 result = job.to_dict()
                 self._persist_resource_snapshot()

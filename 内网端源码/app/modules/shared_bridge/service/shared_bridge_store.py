@@ -2867,6 +2867,9 @@ class SharedBridgeStore:
         *,
         status: str,
         metadata_update: Dict[str, Any] | None = None,
+        expected_updated_at: str | None = None,
+        expected_relative_path: str | None = None,
+        expected_file_hash: str | None = None,
     ) -> Dict[str, Any] | None:
         entry_text = str(entry_id or "").strip()
         status_text = str(status or "").strip()
@@ -2890,21 +2893,31 @@ class SharedBridgeStore:
             if isinstance(metadata_update, dict):
                 metadata.update(metadata_update)
             updated_at = _now_text()
-            conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE source_cache_entries
                 SET status=?,
                     metadata_json=?,
                     updated_at=?
-                WHERE entry_id=?
+                WHERE entry_id=? AND (? IS NULL OR updated_at=?)
+                  AND (? IS NULL OR relative_path=?)
+                  AND (? IS NULL OR file_hash=?)
                 """,
                 (
                     status_text,
                     json.dumps(metadata, ensure_ascii=False),
                     updated_at,
                     entry_text,
+                    expected_updated_at,
+                    expected_updated_at,
+                    expected_relative_path,
+                    expected_relative_path,
+                    expected_file_hash,
+                    expected_file_hash,
                 ),
             )
+            if updated.rowcount == 0:
+                return None
             updated_row = conn.execute(
                 """
                 SELECT entry_id, source_family, building, bucket_kind, bucket_key, duty_date, duty_shift,

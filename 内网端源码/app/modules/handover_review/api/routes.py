@@ -75,7 +75,27 @@ _REVIEW_DOCUMENT_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_DOCUMENT_WARMUPS_INFLIGHT: set[str] = set()
 _REVIEW_BOOTSTRAP_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE: dict[str, dict[str, Any]] = {}
+_REVIEW_DOCUMENT_CACHE_TTL_SEC = 30 * 60.0
+_REVIEW_BOOTSTRAP_CACHE_TTL_SEC = 10 * 60.0
 _REVIEW_HISTORY_CACHE_TTL_SEC = 15.0
+_REVIEW_DOCUMENT_CACHE_MAX_ENTRIES = 20
+_REVIEW_BOOTSTRAP_CACHE_MAX_ENTRIES = 20
+_REVIEW_HISTORY_CACHE_MAX_ENTRIES = 50
+
+
+def _prune_review_cache_locked(
+    cache: dict[str, dict[str, Any]],
+    *,
+    now: float,
+    ttl_sec: float,
+    max_entries: int,
+) -> None:
+    for key, entry in list(cache.items()):
+        updated_at = float(entry.get("updated_at", 0.0) or 0.0) if isinstance(entry, dict) else 0.0
+        if updated_at <= 0 or now - updated_at > ttl_sec:
+            cache.pop(key, None)
+    while len(cache) > max(1, int(max_entries or 1)):
+        cache.pop(next(iter(cache)))
 
 
 def _raise_review_store_http_error(
@@ -200,6 +220,12 @@ def _review_document_cache_put(
     }
     with _REVIEW_DOCUMENT_CACHE_GUARD:
         _REVIEW_DOCUMENT_CACHE[key] = payload
+        _prune_review_cache_locked(
+            _REVIEW_DOCUMENT_CACHE,
+            now=time.time(),
+            ttl_sec=_REVIEW_DOCUMENT_CACHE_TTL_SEC,
+            max_entries=_REVIEW_DOCUMENT_CACHE_MAX_ENTRIES,
+        )
 
 
 def _review_bootstrap_signature(
@@ -248,6 +274,12 @@ def _review_bootstrap_cache_put(
             "payload": copy.deepcopy(payload if isinstance(payload, dict) else {}),
             "updated_at": time.time(),
         }
+        _prune_review_cache_locked(
+            _REVIEW_BOOTSTRAP_CACHE,
+            now=time.time(),
+            ttl_sec=_REVIEW_BOOTSTRAP_CACHE_TTL_SEC,
+            max_entries=_REVIEW_BOOTSTRAP_CACHE_MAX_ENTRIES,
+        )
 
 
 def _review_history_cache_key(*, building: str, selected_session_id: str) -> str:
@@ -284,6 +316,12 @@ def _review_history_cache_put(
             "payload": copy.deepcopy(payload if isinstance(payload, dict) else {}),
             "updated_at": time.time(),
         }
+        _prune_review_cache_locked(
+            _REVIEW_HISTORY_CACHE,
+            now=time.time(),
+            ttl_sec=_REVIEW_HISTORY_CACHE_TTL_SEC,
+            max_entries=_REVIEW_HISTORY_CACHE_MAX_ENTRIES,
+        )
 
 
 def _review_history_cache_invalidate(*, building: str) -> None:

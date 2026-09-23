@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -33,6 +32,20 @@ _SOURCE_INDEX_EXECUTOR = ThreadPoolExecutor(
 )
 _SOURCE_INDEX_BUSY_RETRY_AFTER_SEC = 15
 _RUNNER_INIT_LOCK = threading.Lock()
+
+
+async def _run_source_index_query(scope: str, callback):
+    if not _SOURCE_INDEX_REQUEST_SEMAPHORE.acquire(blocking=False):
+        return _source_index_busy_payload(scope=scope)
+    semaphore = _SOURCE_INDEX_REQUEST_SEMAPHORE
+    try:
+        future = _SOURCE_INDEX_EXECUTOR.submit(callback)
+    except BaseException:
+        semaphore.release()
+        raise
+    # Request cancellation must not admit another query while this thread is busy.
+    future.add_done_callback(lambda _future: semaphore.release())
+    return await asyncio.wrap_future(future)
 
 
 def _source_index_busy_payload(*, scope: str) -> Dict[str, Any]:
@@ -226,23 +239,17 @@ async def query_internal_source_index(
     limit: int = 50,
 ) -> Dict[str, Any]:
     _require_enabled_and_authorized(request)
-    acquired = _SOURCE_INDEX_REQUEST_SEMAPHORE.acquire(blocking=False)
-    if not acquired:
-        return _source_index_busy_payload(scope="source-index")
-    try:
+
+    def query():
         runner = _runner(request)
-        entries = await asyncio.get_running_loop().run_in_executor(
-            _SOURCE_INDEX_EXECUTOR,
-            functools.partial(
-                runner.list_source_index,
-                source_family=source_family,
-                bucket_or_date=bucket_or_date,
-                building=building,
-                bucket_kind=bucket_kind,
-                duty_shift=duty_shift,
-                status=status,
-                limit=limit,
-            ),
+        entries = runner.list_source_index(
+            source_family=source_family,
+            bucket_or_date=bucket_or_date,
+            building=building,
+            bucket_kind=bucket_kind,
+            duty_shift=duty_shift,
+            status=status,
+            limit=limit,
         )
         recovering = runner.source_index_recovery_active(
             source_family=source_family,
@@ -252,8 +259,8 @@ async def query_internal_source_index(
             duty_shift=duty_shift,
         )
         return {"ok": True, "entries": entries, "recovering": recovering}
-    finally:
-        _SOURCE_INDEX_REQUEST_SEMAPHORE.release()
+
+    return await _run_source_index_query("source-index", query)
 
 
 @router.get("/alarm-rule-export/files")
@@ -448,24 +455,18 @@ async def query_internal_source_index_batch(
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     _require_enabled_and_authorized(request)
-    acquired = _SOURCE_INDEX_REQUEST_SEMAPHORE.acquire(blocking=False)
-    if not acquired:
-        return _source_index_busy_payload(scope="source-index/batch")
-    try:
+
+    def query():
         queries = payload.get("queries", []) if isinstance(payload, dict) else []
         default_limit = int(payload.get("default_limit", 50) or 50) if isinstance(payload, dict) else 50
         runner = _runner(request)
-        results = await asyncio.get_running_loop().run_in_executor(
-            _SOURCE_INDEX_EXECUTOR,
-            functools.partial(
-                runner.list_source_index_batch,
-                queries if isinstance(queries, list) else [],
-                default_limit=default_limit,
-            ),
+        results = runner.list_source_index_batch(
+            queries if isinstance(queries, list) else [],
+            default_limit=default_limit,
         )
         return {"ok": True, "results": results}
-    finally:
-        _SOURCE_INDEX_REQUEST_SEMAPHORE.release()
+
+    return await _run_source_index_query("source-index/batch", query)
 
 
 @router.post("/source-cache/refresh-latest")

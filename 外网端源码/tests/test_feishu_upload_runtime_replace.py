@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import pytest
 
 from app.modules.report_pipeline.service.feishu_upload_runtime import (
     _build_calc_record_filter_formula,
@@ -111,3 +112,50 @@ def test_daily_electricity_replaces_all_matching_business_keys_after_create():
     )
 
     assert events == ["create-calc", ("delete", "calc", ["old-1"])]
+
+
+@pytest.mark.parametrize("failure", ["calc", "attachment", "record", "delete", ""])
+def test_old_attachment_retained_until_replacement_record_exists(failure):
+    events = []
+    class Client:
+        _canonical_metric_name_fn = staticmethod(str)
+        _dimension_mapping = {}
+        def list_records(self, table_id, **kwargs):
+            return ([{"record_id": "old", "fields": {
+                "类型": "全景平台月报", "楼栋": "A楼", "日期": "2026-09-22",
+            }}] if table_id == "attachment" else [])
+        def step(self, name):
+            events.append(name)
+            if name == failure:
+                raise RuntimeError("injected " + name)
+        def upload_calc_records(self, *args, **kwargs):
+            self.step("calc")
+        def upload_attachment(self, path):
+            self.step("attachment")
+            return "token"
+        def upload_attachment_record(self, **kwargs):
+            self.step("record")
+        def batch_delete_records(self, table_id, record_ids, **kwargs):
+            assert table_id == "attachment" and record_ids == ["old"]
+            self.step("delete")
+            return 1
+    result = SimpleNamespace(building="A楼", source_file="test.xlsx", month="2026-09-22", records=[], values={})
+    config = {"feishu": {
+        "enable_upload": True, "app_id": "test", "app_secret": "test", "app_token": "test",
+        "calc_table_id": "calc", "attachment_table_id": "attachment", "date_field_mode": "text",
+        "date_field_day": 1, "date_tz_offset_hours": 8, "timeout": 1,
+        "report_type": "全景平台月报", "skip_zero_records": False,
+    }}
+    def run():
+        upload_results_to_feishu([result], config,
+            resolve_upload_date_from_runtime=lambda cfg: "2026-09-22",
+            client_factory=lambda **kwargs: Client(), emit_log=lambda text: None)
+    if failure:
+        with pytest.raises(RuntimeError, match="injected"):
+            run()
+    else:
+        run()
+    if failure in {"calc", "attachment", "record"}:
+        assert "delete" not in events
+    else:
+        assert events == ["calc", "attachment", "record", "delete"]

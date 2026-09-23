@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sys
 import asyncio
+import copy
 import json
 import time
 import urllib.request
+from tempfile import TemporaryDirectory
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +20,7 @@ if str(PROJECT_DIR) not in sys.path:
 from app.core.app_state import AppStateRepository  # noqa: E402
 from app.bootstrap.app_factory import create_app  # noqa: E402
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3  # noqa: E402
+from app.config.config_adapter import adapt_runtime_config  # noqa: E402
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient  # noqa: E402
 from app.modules.feishu.service.feishu_token_manager import feishu_token_manager  # noqa: E402
 from app.modules.feishu.service.im_file_message_client import FeishuImFileMessageClient  # noqa: E402
@@ -247,26 +250,41 @@ def check_alarm_upload_missing_source_returns_waiting_job() -> None:
 
 
 def check_apscheduler_facade() -> None:
-    app = create_app(enable_lifespan=False)
-    container = app.state.container
-    container._ensure_runtime_dependencies_initialized()
-    _assert(
-        isinstance(container.ensure_scheduler_orchestrator(), ApschedulerOrchestrator),
-        "container did not create APScheduler orchestrator",
-    )
-    result = container.start_branch_power_upload_scheduler(source="baseline_check")
-    _assert(result.get("running") is True, "branch scheduler did not start")
-    snapshot = container.branch_power_upload_scheduler_status()
-    _assert(snapshot.get("running") is True, "branch scheduler status is not running")
-    _assert(str(snapshot.get("next_run_time", "")).endswith("04:00:00"), "branch scheduler next_run_time is not 04:00")
-    engine_snapshot = container.scheduler_engine_snapshot()
-    _assert(engine_snapshot.get("engine") == "APScheduler", "scheduler engine is not APScheduler")
-    _assert(engine_snapshot.get("ready") is True, "scheduler engine snapshot is not ready")
-    _assert(engine_snapshot.get("jobstore") == "sqlalchemy_sqlite", "scheduler jobstore is not persistent SQLite")
-    _assert(str(engine_snapshot.get("jobstore_path", "") or "").endswith("apscheduler_jobs.sqlite3"), "scheduler jobstore path is unexpected")
-    _assert(int(engine_snapshot.get("job_count", 0) or 0) >= 1, "scheduler engine has no registered jobs")
-    container.stop_branch_power_upload_scheduler(source="baseline_check")
-    container.shutdown_scheduler_orchestrator(source="baseline_check")
+    with TemporaryDirectory(prefix="panorama-baseline-") as folder:
+        app = create_app(enable_lifespan=False)
+        container = app.state.container
+        container.config = copy.deepcopy(DEFAULT_CONFIG_V3)
+        container.config["common"]["paths"] = {
+            "runtime_state_root": folder,
+            "business_root_dir": str(Path(folder) / "business"),
+        }
+        container.config["common"]["deployment"]["role_mode"] = "external"
+        container.runtime_config = adapt_runtime_config(container.config)
+        container.branch_power_upload_scheduler_callback = lambda source: (True, "baseline only")
+        jobstores = []
+        try:
+            container._ensure_runtime_dependencies_initialized()
+            orchestrator = container.ensure_scheduler_orchestrator()
+            _assert(isinstance(orchestrator, ApschedulerOrchestrator), "container did not create APScheduler orchestrator")
+            orchestrator._jobstore_path = Path(folder) / "apscheduler_jobs.sqlite3"
+            result = container.start_branch_power_upload_scheduler(source="baseline_check")
+            jobstores = list(orchestrator._scheduler._jobstores.values())
+            _assert(result.get("running") is True, "branch scheduler did not start")
+            snapshot = container.branch_power_upload_scheduler_status()
+            _assert(snapshot.get("running") is True, "branch scheduler status is not running")
+            _assert(str(snapshot.get("next_run_time", "")).endswith("04:00:00"), "branch scheduler next_run_time is not 04:00")
+            engine_snapshot = container.scheduler_engine_snapshot()
+            _assert(engine_snapshot.get("engine") == "APScheduler", "scheduler engine is not APScheduler")
+            _assert(engine_snapshot.get("ready") is True, "scheduler engine snapshot is not ready")
+            _assert(engine_snapshot.get("jobstore") == "sqlalchemy_sqlite", "scheduler jobstore is not persistent SQLite")
+            _assert(Path(engine_snapshot["jobstore_path"]).parent == Path(folder), "baseline must use an isolated jobstore")
+            _assert(int(engine_snapshot.get("job_count", 0) or 0) >= 1, "scheduler engine has no registered jobs")
+        finally:
+            container.stop_branch_power_upload_scheduler(source="baseline_check")
+            container.shutdown_scheduler_orchestrator(source="baseline_check")
+            for jobstore in jobstores:
+                jobstore.shutdown()
+            container.job_service.shutdown_task_engine()
     print("[OK] apscheduler_facade")
 
 

@@ -4,6 +4,7 @@ import json
 import threading
 from types import SimpleNamespace
 
+from app.shared.utils import cached_json_file
 from app.bootstrap.app_factory import _exception_contains_memory_error
 from app.modules.handover_review.api.routes import _prune_review_cache_locked
 from app.modules.report_pipeline.service.job_panel_presenter import (
@@ -208,6 +209,58 @@ def test_job_service_prunes_only_old_terminal_jobs_from_memory():
     assert "active" in service._jobs
     assert "job-0" not in service._jobs
     assert "job-39" in service._jobs
+
+
+def test_job_service_stops_workers_before_closing_task_database():
+    events = []
+
+    class _Process:
+        pid = 123
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            events.append("worker_waited")
+            return int(self.returncode or 0)
+
+    class _Database:
+        def close(self):
+            events.append("database_closed")
+
+    process = _Process()
+    service = JobService()
+    service._worker_processes[("job-1", "main")] = process  # type: ignore[assignment]
+    service._task_engine_db = _Database()  # type: ignore[assignment]
+
+    def _cancel(**_kwargs):
+        events.append("cancel_sent")
+        process.returncode = 0
+        return True
+
+    service._send_worker_command = _cancel  # type: ignore[method-assign]
+    service.shutdown_task_engine()
+
+    assert events == ["cancel_sent", "worker_waited", "database_closed"]
+
+
+def test_cached_json_file_keeps_only_recent_entries(tmp_path):
+    previous_cache = dict(cached_json_file._CACHE)
+    previous_limit = cached_json_file._CACHE_MAX_ENTRIES
+    try:
+        cached_json_file._CACHE.clear()
+        cached_json_file._CACHE_MAX_ENTRIES = 3
+        for index in range(5):
+            cached_json_file.save_cached_json(tmp_path / f"{index}.json", {"index": index})
+
+        assert len(cached_json_file._CACHE) == 3
+        assert not any(key.endswith("0.json") for key in cached_json_file._CACHE)
+        assert any(key.endswith("4.json") for key in cached_json_file._CACHE)
+    finally:
+        cached_json_file._CACHE.clear()
+        cached_json_file._CACHE.update(previous_cache)
+        cached_json_file._CACHE_MAX_ENTRIES = previous_limit
 
 
 def test_thread_job_preserves_failed_result_status():

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -208,6 +210,13 @@ class FeishuBitableClient:
         timeout: Optional[int] = None,
         content_type_json: bool = False,
     ) -> Dict[str, Any]:
+        path = urlsplit(url).path.rstrip("/")
+        if method.upper() == "POST" and "/bitable/v1/apps/" in path and (
+            path.endswith("/records") or path.endswith("/records/batch_create")
+        ):
+            # One key per logical create, retained across transport and auth retries.
+            params = dict(params or {})
+            params.setdefault("client_token", str(uuid.uuid4()))
         api_attempts = self._api_retry_attempts()
         last_error: Optional[str] = None
         for api_attempt in range(1, api_attempts + 1):
