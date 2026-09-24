@@ -590,6 +590,21 @@ export async function saveTop5PowerReportSchedulerConfigApi(payload) {
   });
 }
 
+export async function startAlarmRuleExportUploadSchedulerApi() {
+  return apiJson("/api/scheduler/alarm-rule-export-upload/start", { method: "POST", body: "{}" });
+}
+
+export async function stopAlarmRuleExportUploadSchedulerApi() {
+  return apiJson("/api/scheduler/alarm-rule-export-upload/stop", { method: "POST", body: "{}" });
+}
+
+export async function saveAlarmRuleExportUploadSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/alarm-rule-export-upload/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getHandoverEngineerDirectoryApi() {
   return apiJson("/api/handover/engineer-directory");
 }

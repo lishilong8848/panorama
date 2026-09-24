@@ -423,6 +423,25 @@ export function createAppState(vueApi) {
         callback_name: "-",
       },
     },
+    alarm_rule_export_upload: {
+      enabled: true,
+      scheduler: {
+        running: false,
+        remembered_enabled: false,
+        effective_auto_start_in_gui: false,
+        memory_source: "",
+        status: "-",
+        next_run_time: "",
+        last_check_at: "",
+        last_decision: "",
+        last_trigger_at: "",
+        last_trigger_result: "",
+        state_path: "",
+        state_exists: false,
+        executor_bound: false,
+        callback_name: "-",
+      },
+    },
     monthly_event_report: {
       enabled: false,
       scheduler: {
@@ -811,6 +830,7 @@ export function createAppState(vueApi) {
   const systemScreenshotUploadSchedulerQuickSaving = ref(false);
   const temperatureHumidityUploadSchedulerQuickSaving = ref(false);
   const top5PowerReportSchedulerQuickSaving = ref(false);
+  const alarmRuleExportUploadSchedulerQuickSaving = ref(false);
   const monthlyEventReportSchedulerQuickSaving = ref(false);
   const monthlyChangeReportSchedulerQuickSaving = ref(false);
   const schedulerToggleState = reactive({
@@ -824,6 +844,7 @@ export function createAppState(vueApi) {
     system_screenshot_upload: { mode: "idle", rememberedOverride: null },
     temperature_humidity_upload: { mode: "idle", rememberedOverride: null },
     top5_power_report: { mode: "idle", rememberedOverride: null },
+    alarm_rule_export_upload: { mode: "idle", rememberedOverride: null },
     monthly_event_report: { mode: "idle", rememberedOverride: null },
     monthly_change_report: { mode: "idle", rememberedOverride: null },
   });
@@ -2101,6 +2122,7 @@ export function createAppState(vueApi) {
     systemScreenshotUploadSchedulerQuickSaving,
     temperatureHumidityUploadSchedulerQuickSaving,
     top5PowerReportSchedulerQuickSaving,
+    alarmRuleExportUploadSchedulerQuickSaving,
     monthlyEventReportSchedulerQuickSaving,
     monthlyChangeReportSchedulerQuickSaving,
     schedulerToggleState,

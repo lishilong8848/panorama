@@ -3516,6 +3516,9 @@ def health(
         "temperature_humidity_upload_scheduler_status"
     )
     top5_power_report_scheduler_snapshot = _safe_scheduler_snapshot("top5_power_report_scheduler_status")
+    alarm_rule_export_upload_scheduler_snapshot = _safe_scheduler_snapshot(
+        "alarm_rule_export_upload_scheduler_status"
+    )
     monthly_report_delivery_service = MonthlyReportDeliveryService(runtime_cfg)
     include_monthly_delivery = role_mode != "internal" and not is_lite_mode
 
@@ -4100,6 +4103,20 @@ def health(
                 },
                 "target_preview": alarm_event_target_preview,
                 "target_display": feature_target_displays.get("alarm_event_upload", {}),
+            },
+            "alarm_rule_export_upload": {
+                "enabled": bool(runtime_cfg.get("alarm_rule_export_upload", {}).get("enabled", True))
+                if isinstance(runtime_cfg.get("alarm_rule_export_upload", {}), dict)
+                else True,
+                "scheduler": {
+                    **alarm_rule_export_upload_scheduler_snapshot,
+                    "executor_bound": _safe_bool_method(
+                        "is_alarm_rule_export_upload_scheduler_executor_bound"
+                    ),
+                    "callback_name": _safe_text_method(
+                        "alarm_rule_export_upload_scheduler_executor_name"
+                    ),
+                },
             },
             "system_screenshot_upload": {
                 "enabled": bool(runtime_cfg.get("system_screenshot_upload", {}).get("enabled", True))
@@ -5191,7 +5208,7 @@ def job_alarm_rule_export_upload_run(
             resource_keys=_job_resource_keys(f"alarm_rule_export_upload:{period}"),
             priority="manual",
             feature="alarm_rule_export_upload",
-            dedupe_key=_job_dedupe_key("alarm_rule_export_upload", period=period),
+            dedupe_key=f"alarm_rule_export_upload:{period}",
             submitted_by="manual",
         )
         container.add_system_log(f"[任务] 已提交: 告警规则导出附件上传 {period} ({job.job_id})")
@@ -7195,6 +7212,9 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
             "temperature_humidity_upload_scheduler_status"
         ),
         "top5_power_report_scheduler": _safe_scheduler("top5_power_report_scheduler_status"),
+        "alarm_rule_export_upload_scheduler": _safe_scheduler(
+            "alarm_rule_export_upload_scheduler_status"
+        ),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
     }
@@ -7902,6 +7922,9 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
             "temperature_humidity_upload_scheduler_status"
         ),
         "top5_power_report_scheduler": _safe_scheduler("top5_power_report_scheduler_status"),
+        "alarm_rule_export_upload_scheduler": _safe_scheduler(
+            "alarm_rule_export_upload_scheduler_status"
+        ),
         "monthly_event_report_scheduler": _safe_scheduler("monthly_event_report_scheduler_status"),
         "monthly_change_report_scheduler": _safe_scheduler("monthly_change_report_scheduler_status"),
     }

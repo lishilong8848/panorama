@@ -44,6 +44,9 @@ from app.modules.scheduler.api.day_metric_upload_routes import router as day_met
 from app.modules.scheduler.api.branch_power_upload_routes import router as branch_power_upload_scheduler_router
 from app.modules.scheduler.api.chiller_mode_upload_routes import router as chiller_mode_upload_scheduler_router
 from app.modules.scheduler.api.alarm_event_upload_routes import router as alarm_event_upload_scheduler_router
+from app.modules.scheduler.api.alarm_rule_export_upload_routes import (
+    router as alarm_rule_export_upload_scheduler_router,
+)
 from app.modules.scheduler.api.monthly_change_report_routes import router as monthly_change_report_scheduler_router
 from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
 from app.modules.scheduler.api.routes import router as scheduler_router
@@ -288,6 +291,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(branch_power_upload_scheduler_router)
     app.include_router(chiller_mode_upload_scheduler_router)
     app.include_router(alarm_event_upload_scheduler_router)
+    app.include_router(alarm_rule_export_upload_scheduler_router)
     app.include_router(system_screenshot_upload_scheduler_router)
     app.include_router(temperature_humidity_upload_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
@@ -569,6 +573,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_temperature_humidity_upload_scheduler(source="关闭自动")
             if getattr(container, "top5_power_report_scheduler", None):
                 container.stop_top5_power_report_scheduler(source="关闭自动")
+            if getattr(container, "alarm_rule_export_upload_scheduler", None):
+                container.stop_alarm_rule_export_upload_scheduler(source="关闭自动")
             if getattr(container, "system_screenshot_demand_poller", None):
                 container.stop_system_screenshot_demand_poller(source="关闭自动")
             if container.monthly_change_report_scheduler:
@@ -2591,6 +2597,35 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         year, month = _previous_calendar_year_month()
         return _submit_top5_monthly_report_jobs(container, year=year, month=month)
 
+    def alarm_rule_export_upload_scheduler_callback(source: str) -> tuple[bool, str]:
+        role_mode = _deployment_role_mode()
+        if role_mode == "internal":
+            container.add_system_log("[告警规则附件上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+            return True, "internal_role_skip"
+        if role_mode != "external":
+            detail = "当前未确认有效角色，无法执行告警规则附件上传调度"
+            container.add_system_log(f"[告警规则附件上传调度] {detail}")
+            return False, detail
+        period = datetime.now().strftime("%Y-%m")
+        try:
+            job = container.job_service.start_worker_job(
+                name=f"告警规则导出附件上传 {period}",
+                worker_handler="alarm_rule_export_upload",
+                worker_payload={"period": period},
+                resource_keys=[f"alarm_rule_export_upload:{period}"],
+                priority="scheduler",
+                feature="alarm_rule_export_upload",
+                dedupe_key=f"alarm_rule_export_upload:{period}",
+                submitted_by="scheduler",
+            )
+            detail = f"已提交告警规则附件上传任务 job_id={job.job_id}, period={period}"
+            container.add_system_log(f"[告警规则附件上传调度] {detail}")
+            return True, detail
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc)
+            container.add_system_log(f"[告警规则附件上传调度] 提交失败：{detail}")
+            return False, detail
+
     def monthly_event_report_scheduler_callback(source: str) -> tuple[bool, str]:
         role_mode = _deployment_role_mode()
         if role_mode == "internal":
@@ -2795,6 +2830,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
     setter = getattr(container, "set_top5_power_report_scheduler_callback", None)
     if callable(setter):
         setter(top5_power_report_scheduler_callback)
+    setter = getattr(container, "set_alarm_rule_export_upload_scheduler_callback", None)
+    if callable(setter):
+        setter(alarm_rule_export_upload_scheduler_callback)
     setter = getattr(container, "set_monthly_change_report_scheduler_callback", None)
     if callable(setter):
         setter(monthly_change_report_scheduler_callback)

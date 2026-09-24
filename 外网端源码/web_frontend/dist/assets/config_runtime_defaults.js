@@ -142,6 +142,8 @@ function ensureRoot(cfg) {
   cfg.chiller_mode_upload = cfg.chiller_mode_upload || {};
   cfg.system_screenshot_upload = cfg.system_screenshot_upload || {};
   cfg.temperature_humidity_upload = cfg.temperature_humidity_upload || {};
+  cfg.alarm_rule_export_upload = cfg.alarm_rule_export_upload || {};
+  cfg.alarm_rule_export_upload.scheduler = cfg.alarm_rule_export_upload.scheduler || {};
   cfg.handover_log.template = cfg.handover_log.template || {};
   cfg.handover_log.review_ui = cfg.handover_log.review_ui || {};
   cfg.web = cfg.web || {};
@@ -1334,6 +1336,19 @@ function applyBranchPowerUploadDefaults(cfg) {
   setStringDefault(scheduler, "state_file", "branch_power_upload_scheduler_state.json");
 }
 
+function applyAlarmRuleExportUploadDefaults(cfg) {
+  const scheduler = cfg.alarm_rule_export_upload.scheduler;
+  setBooleanDefault(cfg.alarm_rule_export_upload, "enabled", true);
+  setBooleanDefault(scheduler, "enabled", true);
+  setBooleanDefault(scheduler, "auto_start_in_gui", true);
+  setNumberDefault(scheduler, "day_of_month", 3);
+  setStringDefault(scheduler, "run_time", "09:00:00");
+  setNumberDefault(scheduler, "check_interval_sec", 30);
+  scheduler.catch_up_if_missed = false;
+  setBooleanDefault(scheduler, "retry_failed_in_same_period", true);
+  setStringDefault(scheduler, "state_file", "alarm_rule_export_upload_scheduler_state.json");
+}
+
 function applySchedulerDefaults(cfg) {
   setBooleanDefault(cfg.scheduler, "enabled", true);
   setBooleanDefault(cfg.scheduler, "auto_start_in_gui", true);
@@ -1378,6 +1393,7 @@ export function ensureConfigShape(raw) {
   applyChillerModeUploadDefaults(cfg);
   applyDayMetricUploadDefaults(cfg);
   applyBranchPowerUploadDefaults(cfg);
+  applyAlarmRuleExportUploadDefaults(cfg);
   setBooleanDefault(cfg.manual_upload_gui, "enabled", true);
   applySchedulerDefaults(cfg);
   applyUpdaterDefaults(cfg);

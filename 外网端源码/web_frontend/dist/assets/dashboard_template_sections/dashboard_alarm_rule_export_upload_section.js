@@ -6,6 +6,57 @@ export const DASHBOARD_ALARM_RULE_EXPORT_UPLOAD_SECTION = `        <section clas
             </div>
 
             <div class="day-metric-top-grid dashboard-module-primary-grid">
+              <article class="task-block dashboard-module-scheduler-card">
+                <div class="task-block-head">
+                  <div>
+                    <div class="task-block-kicker">调度卡</div>
+                    <h3 class="card-title">月度自动上传</h3>
+                  </div>
+                  <span class="status-badge status-badge-soft" :class="'tone-' + getSchedulerStatusTone('alarm_rule_export_upload')">
+                    {{ getSchedulerStatusText('alarm_rule_export_upload') }}
+                  </span>
+                </div>
+                <div class="status-metric-grid status-metric-grid-compact">
+                  <div class="status-metric">
+                    <div class="status-metric-label">下次执行</div>
+                    <strong class="status-metric-value">{{ getSchedulerDisplayText('alarm_rule_export_upload', 'next_run_text', '-') }}</strong>
+                  </div>
+                  <div class="status-metric">
+                    <div class="status-metric-label">最近触发</div>
+                    <strong class="status-metric-value">{{ getSchedulerDisplayText('alarm_rule_export_upload', 'last_trigger_text', '-') }}</strong>
+                  </div>
+                </div>
+                <div class="task-grid two-col">
+                  <div class="form-row">
+                    <label class="label">每月几号</label>
+                    <input type="number" min="1" max="31"
+                      :value="config.alarm_rule_export_upload.scheduler.day_of_month"
+                      :disabled="alarmRuleExportUploadSchedulerQuickSaving"
+                      @change="saveAlarmRuleExportUploadSchedulerQuickConfig({ day_of_month: $event.target.value })" />
+                  </div>
+                  <div class="form-row">
+                    <label class="label">执行时间</label>
+                    <input type="time" step="1"
+                      :value="config.alarm_rule_export_upload.scheduler.run_time"
+                      :disabled="alarmRuleExportUploadSchedulerQuickSaving"
+                      @change="saveAlarmRuleExportUploadSchedulerQuickConfig({ run_time: $event.target.value })" />
+                  </div>
+                </div>
+                <div class="btn-line">
+                  <button class="btn btn-success"
+                    :disabled="alarmRuleExportUploadSchedulerQuickSaving || isSchedulerStartDisabled('alarm_rule_export_upload', actionKeyAlarmRuleExportUploadSchedulerStart, actionKeyAlarmRuleExportUploadSchedulerStop)"
+                    @click="startAlarmRuleExportUploadScheduler">
+                    {{ getSchedulerStartButtonText('alarm_rule_export_upload') }}
+                  </button>
+                  <button class="btn btn-danger"
+                    :disabled="alarmRuleExportUploadSchedulerQuickSaving || isSchedulerStopDisabled('alarm_rule_export_upload', actionKeyAlarmRuleExportUploadSchedulerStart, actionKeyAlarmRuleExportUploadSchedulerStop)"
+                    @click="stopAlarmRuleExportUploadScheduler">
+                    {{ getSchedulerStopButtonText('alarm_rule_export_upload') }}
+                  </button>
+                </div>
+                <div class="hint">默认每月3日09:00上传当月A-E楼附件；修改日期或时间后立即生效。</div>
+              </article>
+
               <article class="task-block task-block-accent">
                 <div class="task-block-head">
                   <div>

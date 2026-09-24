@@ -9,6 +9,7 @@ const SCHEDULER_REMEMBERED_PATHS = [
   ["system_screenshot_upload", () => "system_screenshot_upload"],
   ["temperature_humidity_upload", () => "temperature_humidity_upload"],
   ["top5_power_report", () => "top5_power_report"],
+  ["alarm_rule_export_upload", () => "alarm_rule_export_upload"],
   ["monthly_event_report", () => "monthly_event_report"],
   ["monthly_change_report", () => "monthly_change_report"],
 ];

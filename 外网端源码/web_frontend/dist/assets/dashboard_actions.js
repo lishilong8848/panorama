@@ -4,6 +4,7 @@ import { createDashboardMonthlyEventReportActions } from "./dashboard_monthly_ev
 import { createDashboardSchedulerActions } from "./dashboard_scheduler_actions.js";
 import { createDashboardSharedBridgeActions } from "./dashboard_shared_bridge_actions.js";
 import { createDashboardTop5PowerReportActions } from "./dashboard_top5_power_report_actions.js";
+import { createDashboardAlarmRuleExportUploadActions } from "./dashboard_alarm_rule_export_upload_actions.js";
 import { createDashboardWetBulbCollectionActions } from "./dashboard_wet_bulb_collection_actions.js";
 
 export function createDashboardActions(ctx) {
@@ -14,6 +15,7 @@ export function createDashboardActions(ctx) {
   const chillerModeUploadActions = createDashboardChillerModeUploadActions(ctx);
   const monthlyEventReportActions = createDashboardMonthlyEventReportActions(ctx);
   const top5PowerReportActions = createDashboardTop5PowerReportActions(ctx);
+  const alarmRuleExportUploadActions = createDashboardAlarmRuleExportUploadActions(ctx);
   return {
     ...jobActions,
     ...schedulerActions,
@@ -22,5 +24,6 @@ export function createDashboardActions(ctx) {
     ...chillerModeUploadActions,
     ...monthlyEventReportActions,
     ...top5PowerReportActions,
+    ...alarmRuleExportUploadActions,
   };
 }

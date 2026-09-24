@@ -67,6 +67,7 @@ _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...
     ("top5_power_report", "TOP5功率文件生成", ("features", "handover_log", "top5_power_report", "scheduler")),
     ("monthly_change_report", "月度变更统计表", ("features", "handover_log", "monthly_change_report", "scheduler")),
     ("monthly_event_report", "月度事件统计表", ("features", "handover_log", "monthly_event_report", "scheduler")),
+    ("alarm_rule_export_upload", "告警规则附件上传", ("features", "alarm_rule_export_upload", "scheduler")),
 )
 _EXTERNAL_SCHEDULER_AUTOSTART_PATHS = {
     key: path for key, _label, path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS
@@ -84,6 +85,7 @@ _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
     "top5_power_report": "top5_power_report_scheduler",
     "monthly_change_report": "monthly_change_report_scheduler",
     "monthly_event_report": "monthly_event_report_scheduler",
+    "alarm_rule_export_upload": "alarm_rule_export_upload_scheduler",
 }
 _EXTERNAL_SCHEDULER_LEGACY_EXIT_SOURCE_HINTS = (
     "退出快照",
@@ -170,6 +172,8 @@ class AppContainer:
     temperature_humidity_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     top5_power_report_scheduler: ApschedulerSchedulerFacade | None = None
     top5_power_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
+    alarm_rule_export_upload_scheduler: ApschedulerSchedulerFacade | None = None
+    alarm_rule_export_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_change_report_scheduler: ApschedulerSchedulerFacade | None = None
     monthly_change_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     monthly_event_report_scheduler: ApschedulerSchedulerFacade | None = None
@@ -321,6 +325,9 @@ class AppContainer:
         if not self.top5_power_report_scheduler:
             _report_progress("building_top5_power_report_scheduler")
             self.top5_power_report_scheduler = self._build_top5_power_report_scheduler()
+        if not self.alarm_rule_export_upload_scheduler:
+            _report_progress("building_alarm_rule_export_upload_scheduler")
+            self.alarm_rule_export_upload_scheduler = self._build_alarm_rule_export_upload_scheduler()
         if not self.monthly_change_report_scheduler:
             _report_progress("building_monthly_change_scheduler")
             self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
@@ -384,6 +391,9 @@ class AppContainer:
         if self.top5_power_report_scheduler_callback and self.top5_power_report_scheduler:
             _report_progress("binding_top5_power_report_scheduler_callback")
             self.top5_power_report_scheduler.run_callback = self.top5_power_report_scheduler_callback
+        if self.alarm_rule_export_upload_scheduler_callback and self.alarm_rule_export_upload_scheduler:
+            _report_progress("binding_alarm_rule_export_upload_scheduler_callback")
+            self.alarm_rule_export_upload_scheduler.run_callback = self.alarm_rule_export_upload_scheduler_callback
         if self.monthly_change_report_scheduler_callback and self.monthly_change_report_scheduler:
             _report_progress("binding_monthly_change_scheduler_callback")
             self.monthly_change_report_scheduler.run_callback = self.monthly_change_report_scheduler_callback
@@ -736,6 +746,27 @@ class AppContainer:
             source_name="TOP5功率文件生成",
         )
 
+    def _build_alarm_rule_export_upload_scheduler(self) -> ApschedulerSchedulerFacade:
+        upload_cfg = self.runtime_config.get("alarm_rule_export_upload", {})
+        if not isinstance(upload_cfg, dict):
+            upload_cfg = {}
+        scheduler_cfg = upload_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        return ApschedulerSchedulerFacade(
+            scheduler_key="alarm_rule_export_upload",
+            feature="alarm_rule_export_upload",
+            scheduler_cfg=scheduler_cfg,
+            runtime_state_root=self._runtime_state_root_text(),
+            emit_log=self.add_system_log,
+            run_callback=self.alarm_rule_export_upload_scheduler_callback
+            or self._alarm_rule_export_upload_scheduler_run_callback,
+            is_busy=self._job_busy_for_feature_prefixes("alarm_rule_export_upload"),
+            orchestrator=self.ensure_scheduler_orchestrator(),
+            schedule_kind="monthly",
+            source_name="告警规则附件上传",
+        )
+
     def _build_monthly_change_report_scheduler(self) -> ApschedulerSchedulerFacade:
         handover_cfg = self.runtime_config.get("handover_log", {})
         if not isinstance(handover_cfg, dict):
@@ -834,6 +865,9 @@ class AppContainer:
 
     def _top5_power_report_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"TOP5功率文件生成调度回调尚未绑定执行器(source={source})"
+
+    def _alarm_rule_export_upload_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
+        return False, f"告警规则附件上传调度回调尚未绑定执行器(source={source})"
 
     def _monthly_change_report_scheduler_run_callback(self, source: str) -> tuple[bool, str]:
         return False, f"月度变更统计表调度回调尚未绑定执行器(source={source})"
@@ -1050,6 +1084,25 @@ class AppContainer:
             name = getattr(getattr(callback, "__func__", None), "__name__", "")
         return str(name or "-")
 
+    def is_alarm_rule_export_upload_scheduler_executor_bound(self) -> bool:
+        callback = None
+        if self.alarm_rule_export_upload_scheduler:
+            callback = getattr(self.alarm_rule_export_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.alarm_rule_export_upload_scheduler_callback
+        return not self._is_placeholder_callback(callback, self._alarm_rule_export_upload_scheduler_run_callback)
+
+    def alarm_rule_export_upload_scheduler_executor_name(self) -> str:
+        callback = None
+        if self.alarm_rule_export_upload_scheduler:
+            callback = getattr(self.alarm_rule_export_upload_scheduler, "run_callback", None)
+        if callback is None:
+            callback = self.alarm_rule_export_upload_scheduler_callback
+        if callback is None:
+            callback = self._alarm_rule_export_upload_scheduler_run_callback
+        name = getattr(callback, "__name__", "") or getattr(getattr(callback, "__func__", None), "__name__", "")
+        return str(name or "-")
+
     def is_monthly_change_report_scheduler_executor_bound(self) -> bool:
         callback = self.monthly_change_report_scheduler_callback
         return callable(callback)
@@ -1149,6 +1202,11 @@ class AppContainer:
         self.top5_power_report_scheduler_callback = callback
         if self.top5_power_report_scheduler:
             self.top5_power_report_scheduler.run_callback = callback
+
+    def set_alarm_rule_export_upload_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
+        self.alarm_rule_export_upload_scheduler_callback = callback
+        if self.alarm_rule_export_upload_scheduler:
+            self.alarm_rule_export_upload_scheduler.run_callback = callback
 
     def set_monthly_change_report_scheduler_callback(self, callback: Callable[[str], tuple[bool, str]]) -> None:
         self.monthly_change_report_scheduler_callback = callback
@@ -1989,6 +2047,23 @@ class AppContainer:
             self.add_system_log("[TOP5功率文件生成调度] 已禁用")
 
         self.add_system_log(
+            "[告警规则附件上传调度] 启动阶段执行器状态: "
+            f"executor_bound={self.is_alarm_rule_export_upload_scheduler_executor_bound()}, "
+            f"callback={self.alarm_rule_export_upload_scheduler_executor_name()}"
+        )
+        alarm_rule_status = self.alarm_rule_export_upload_scheduler_status()
+        if role_mode == "internal":
+            self.add_system_log("[告警规则附件上传调度] 当前为内网端，启动时不自动开启")
+        elif bool(alarm_rule_status.get("enabled", False)):
+            if bool(getattr(self.alarm_rule_export_upload_scheduler, "auto_start_in_gui", False)):
+                _report_progress("starting_alarm_rule_export_upload_scheduler")
+                self.start_alarm_rule_export_upload_scheduler(source=source)
+            else:
+                self.add_system_log("[告警规则附件上传调度] 启动时未自动开启")
+        else:
+            self.add_system_log("[告警规则附件上传调度] 已禁用")
+
+        self.add_system_log(
             f"[月度变更统计表调度] 启动阶段执行器状态: executor_bound={self.is_monthly_change_report_scheduler_executor_bound()}, "
             f"callback={self.monthly_change_report_scheduler_executor_name()}"
         )
@@ -2124,6 +2199,14 @@ class AppContainer:
                 self.temperature_humidity_upload_scheduler,
             ),
             (
+                "告警规则附件上传调度",
+                ("features", "alarm_rule_export_upload", "scheduler"),
+                bool(self.alarm_rule_export_upload_scheduler.is_running())
+                if self.alarm_rule_export_upload_scheduler
+                else False,
+                self.alarm_rule_export_upload_scheduler,
+            ),
+            (
                 "月度变更统计表调度",
                 ("features", "handover_log", "monthly_change_report", "scheduler"),
                 bool(self.monthly_change_report_scheduler.is_running()) if self.monthly_change_report_scheduler else False,
@@ -2239,6 +2322,7 @@ class AppContainer:
                 self.stop_temperature_humidity_upload_scheduler,
             ),
             ("top5_power_report_scheduler", self.stop_top5_power_report_scheduler),
+            ("alarm_rule_export_upload_scheduler", self.stop_alarm_rule_export_upload_scheduler),
             ("monthly_change_report_scheduler", self.stop_monthly_change_report_scheduler),
             ("monthly_event_report_scheduler", self.stop_monthly_event_report_scheduler),
             ("scheduler_orchestrator", self.shutdown_scheduler_orchestrator),
@@ -2607,6 +2691,31 @@ class AppContainer:
             result = {"stopped": False, "running": False, "reason": "not_initialized"}
         self.add_system_log(
             f"[TOP5功率文件生成调度] {source}停止请求: 原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}"
+        )
+        return result
+
+    def start_alarm_rule_export_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if not self.alarm_rule_export_upload_scheduler:
+            self.alarm_rule_export_upload_scheduler = self._build_alarm_rule_export_upload_scheduler()
+        result = self.alarm_rule_export_upload_scheduler.start()
+        self.add_system_log(
+            f"[告警规则附件上传调度] {source}启动请求: "
+            f"原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
+            f"running={bool(result.get('running', False))}, "
+            f"executor_bound={self.is_alarm_rule_export_upload_scheduler_executor_bound()}, "
+            f"callback={self.alarm_rule_export_upload_scheduler_executor_name()}"
+        )
+        return result
+
+    def stop_alarm_rule_export_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self.alarm_rule_export_upload_scheduler:
+            result = self.alarm_rule_export_upload_scheduler.stop()
+        else:
+            result = {"stopped": False, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[告警规则附件上传调度] {source}停止请求: "
+            f"原因={self._runtime_action_reason_text(result.get('reason', '-'))}, "
             f"running={bool(result.get('running', False))}"
         )
         return result
@@ -3349,6 +3458,34 @@ class AppContainer:
         }
         return self._record_scheduler_runtime_snapshot("top5_power_report", "top5_power_report", payload)
 
+    def alarm_rule_export_upload_scheduler_status(self) -> Dict[str, Any]:
+        memory_fields = self.external_scheduler_runtime_memory_fields("alarm_rule_export_upload")
+        if not self.alarm_rule_export_upload_scheduler:
+            payload = {
+                "enabled": False,
+                "running": False,
+                "status": "未初始化",
+                "next_run_time": "",
+                "last_check_at": "",
+                "last_decision": "",
+                "last_trigger_at": "",
+                "last_trigger_result": "",
+                "state_path": "",
+                "state_exists": False,
+                **memory_fields,
+            }
+            return self._record_scheduler_runtime_snapshot(
+                "alarm_rule_export_upload", "alarm_rule_export_upload", payload
+            )
+        payload = {
+            "enabled": bool(self.alarm_rule_export_upload_scheduler.enabled),
+            **self.alarm_rule_export_upload_scheduler.get_runtime_snapshot(),
+            **memory_fields,
+        }
+        return self._record_scheduler_runtime_snapshot(
+            "alarm_rule_export_upload", "alarm_rule_export_upload", payload
+        )
+
     def monthly_event_report_scheduler_status(self) -> Dict[str, Any]:
         memory_fields = self.external_scheduler_runtime_memory_fields("monthly_event_report")
         if not self.monthly_event_report_scheduler:
@@ -3625,6 +3762,11 @@ class AppContainer:
         was_top5_power_report_running = (
             self.top5_power_report_scheduler.is_running() if self.top5_power_report_scheduler else False
         )
+        was_alarm_rule_export_upload_running = (
+            self.alarm_rule_export_upload_scheduler.is_running()
+            if self.alarm_rule_export_upload_scheduler
+            else False
+        )
         was_monthly_change_report_running = (
             self.monthly_change_report_scheduler.is_running() if self.monthly_change_report_scheduler else False
         )
@@ -3659,6 +3801,8 @@ class AppContainer:
             self.temperature_humidity_upload_scheduler.stop()
         if self.top5_power_report_scheduler:
             self.top5_power_report_scheduler.stop()
+        if self.alarm_rule_export_upload_scheduler:
+            self.alarm_rule_export_upload_scheduler.stop()
         if self.monthly_change_report_scheduler:
             self.monthly_change_report_scheduler.stop()
         if self.monthly_event_report_scheduler:
@@ -3677,6 +3821,7 @@ class AppContainer:
         self.system_screenshot_upload_scheduler = self._build_system_screenshot_upload_scheduler()
         self.temperature_humidity_upload_scheduler = self._build_temperature_humidity_upload_scheduler()
         self.top5_power_report_scheduler = self._build_top5_power_report_scheduler()
+        self.alarm_rule_export_upload_scheduler = self._build_alarm_rule_export_upload_scheduler()
         self.monthly_change_report_scheduler = self._build_monthly_change_report_scheduler()
         self.monthly_event_report_scheduler = self._build_monthly_event_report_scheduler()
         self.updater_service = self._build_updater_service()
@@ -3716,6 +3861,8 @@ class AppContainer:
             )
         if self.top5_power_report_scheduler_callback:
             self.top5_power_report_scheduler.run_callback = self.top5_power_report_scheduler_callback
+        if self.alarm_rule_export_upload_scheduler_callback:
+            self.alarm_rule_export_upload_scheduler.run_callback = self.alarm_rule_export_upload_scheduler_callback
         if self.monthly_change_report_scheduler_callback:
             self.monthly_change_report_scheduler.run_callback = self.monthly_change_report_scheduler_callback
         if self.monthly_event_report_scheduler_callback:
@@ -3833,6 +3980,13 @@ class AppContainer:
         top5_auto_start = bool(getattr(self.top5_power_report_scheduler, "auto_start_in_gui", False))
         if was_top5_power_report_running or (self.runtime_services_armed and top5_auto_start):
             self.top5_power_report_scheduler.start()
+        alarm_rule_auto_start = bool(
+            getattr(self.alarm_rule_export_upload_scheduler, "auto_start_in_gui", False)
+        )
+        if was_alarm_rule_export_upload_running or (
+            self.runtime_services_armed and alarm_rule_auto_start
+        ):
+            self.alarm_rule_export_upload_scheduler.start()
         if was_monthly_change_report_running or (self.runtime_services_armed and monthly_change_auto_start):
             self.monthly_change_report_scheduler.start()
         if was_monthly_event_report_running or (self.runtime_services_armed and monthly_event_auto_start):
