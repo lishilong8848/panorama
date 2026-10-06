@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import pytest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, AsyncMock
 from app.shared.runtime.building_browser_locks import acquire_building_browser_lock, release_building_browser_lock
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
 
@@ -80,6 +80,27 @@ def test_cancel_waiter_does_not_leak_or_release_another_owner(wait_on_local):
     asyncio.run(run())
 
 
+def test_screenshot_selector_failure_does_not_rebuild_download_browser(monkeypatch):
+    async def run():
+        pool = InternalDownloadBrowserPool({})
+        pool._locks["A楼"] = asyncio.Lock()
+        monkeypatch.setattr(pool, "_mark_slot_recycle_pending_if_needed", Mock())
+        monkeypatch.setattr(pool, "_recycle_slot_if_needed", AsyncMock())
+        monkeypatch.setattr(pool, "_ensure_page", AsyncMock(return_value=object()))
+        monkeypatch.setattr(pool, "_fail_if_login_not_ready", AsyncMock())
+        monkeypatch.setattr(pool, "_ensure_logged_in", AsyncMock())
+        rebuild = AsyncMock()
+        monkeypatch.setattr(pool, "_rebuild_slot_after_job_failure", rebuild)
+        async def fail(page):
+            raise RuntimeError("未找到系统入口")
+        with pytest.raises(RuntimeError, match="未找到系统入口"):
+            await pool._run_building_job("A楼", fail, owner="system_screenshot_capture")
+        rebuild.assert_not_called()
+        assert not pool._job_tasks
+        assert not pool._slot_snapshot("A楼")["in_use"]
+    asyncio.run(run())
+
+
 def test_pool_shutdown_cancels_jobs_and_releases_resource():
     async def run():
         pool = InternalDownloadBrowserPool({})
@@ -123,3 +144,23 @@ def test_repeated_stop_does_not_interrupt_async_cleanup():
     assert pool.stop()["reason"] == "cleanup_timeout"
     assert pool.stop()["reason"] == "cleanup_timeout"
     assert len(calls) == 1
+
+
+def test_source_download_overtakes_waiting_screenshot():
+    async def run():
+        pool = InternalDownloadBrowserPool({})
+        pool._locks["A楼"] = asyncio.Lock()
+        assert acquire_building_browser_lock("A楼", owner="busy", timeout_sec=0)
+        order = []
+        async def work(owner):
+            async with pool._building_job_lock("A楼", owner):
+                order.append(owner)
+        screenshot = asyncio.create_task(work("system_screenshot_capture"))
+        download = asyncio.create_task(work("source_file_download"))
+        await asyncio.sleep(0)
+        release_building_browser_lock("A楼")
+        await asyncio.wait_for(asyncio.gather(screenshot, download), timeout=2)
+        assert order == ["source_file_download", "system_screenshot_capture"]
+        assert not pool._source_job_waiters
+        assert not pool._job_tasks
+    asyncio.run(run())

@@ -163,6 +163,33 @@
       </article>
     </section>
 
+    <section class="review-current-view-section" v-if="showRegenerateAction">
+      <article class="review-card">
+        <div class="review-card-head"><h2>上传源文件生成</h2></div>
+        <div class="review-fixed-fields">
+          <label class="review-field">
+            <span class="review-field-label">交接班日志（李世龙）源文件</span>
+            <input class="review-input" type="file" accept=".xlsx,.xlsm"
+              :disabled="loading || regenerateActionVm.disabled"
+              @change="uploadedHandoverSource = $event.target.files[0] || null" />
+          </label>
+          <label class="review-field">
+            <span class="review-field-label">交接班容量报表源文件</span>
+            <input class="review-input" type="file" accept=".xlsx,.xlsm"
+              :disabled="loading || regenerateActionVm.disabled"
+              @change="uploadedCapacitySource = $event.target.files[0] || null" />
+          </label>
+        </div>
+        <div class="btn-line">
+          <button class="btn btn-primary btn-mini" @click="generateFromUploadedSources"
+            :disabled="loading || regenerateActionVm.disabled || !uploadedHandoverSource || !uploadedCapacitySource"
+            :title="regenerateActionVm.disabledReason || ''">
+            {{ regenerating ? '上传并生成中...' : '使用上传文件生成' }}
+          </button>
+        </div>
+      </article>
+    </section>
+
     <section class="review-history-files-section">
       <article class="review-card">
         <div class="review-card-head review-card-head-actions">

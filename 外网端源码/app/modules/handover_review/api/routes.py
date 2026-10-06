@@ -20,6 +20,8 @@ from typing import Any, Dict
 from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
+from pipeline_utils import get_app_dir
+from app.shared.utils.atomic_file import atomic_write_bytes, validate_excel_workbook_file
 
 from app.config.handover_segment_store import building_code_from_name, handover_building_segment_path
 from app.config.settings_loader import (
@@ -83,6 +85,7 @@ from handover_log_module.service.station_h_signature_service import (
 
 router = APIRouter(tags=["handover_review"])
 _REVIEW_DEFAULT_CONFIG_LOCK_GUARD = threading.Lock()
+_REVIEW_REGENERATE_SUBMIT_LOCK = threading.Lock()
 _REVIEW_DEFAULT_CONFIG_LOCKS: dict[str, threading.RLock] = {}
 _REVIEW_DOCUMENT_CACHE_GUARD = threading.Lock()
 _REVIEW_DOCUMENT_CACHE: dict[str, dict[str, Any]] = {}
@@ -291,7 +294,7 @@ def _dedicated_review_bootstrap_endpoint(func):
     )
 
 
-async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int) -> bytes:
+async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int, file_label: str = "110站文件") -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -300,7 +303,7 @@ async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int) -> byte
             break
         total += len(chunk)
         if total > max_bytes:
-            raise HTTPException(status_code=413, detail="上传文件过大，110站文件最大支持50MB")
+            raise HTTPException(status_code=413, detail=f"上传文件过大，{file_label}最大支持{max_bytes // (1024 * 1024)}MB")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -5495,6 +5498,29 @@ def handover_review_regenerate(
     request: Request,
     payload: Dict[str, Any] = Body(...),
 ) -> Dict[str, Any]:
+    return _submit_review_regeneration(building_code, request, payload)
+
+
+def _submit_review_regeneration(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any],
+    *,
+    uploaded_sources: tuple[str, str] | None = None,
+) -> Dict[str, Any]:
+    with _REVIEW_REGENERATE_SUBMIT_LOCK:
+        return _submit_review_regeneration_locked(
+            building_code, request, payload, uploaded_sources=uploaded_sources,
+        )
+
+
+def _submit_review_regeneration_locked(
+    building_code: str,
+    request: Request,
+    payload: Dict[str, Any],
+    *,
+    uploaded_sources: tuple[str, str] | None = None,
+) -> Dict[str, Any]:
     container = request.app.state.container
     service = _build_review_session_service(container)
     handover_cfg = _handover_cfg(container)
@@ -5541,11 +5567,11 @@ def handover_review_regenerate(
     duty_date = str(target.get("duty_date", "") or "").strip()
     duty_shift = str(target.get("duty_shift", "") or "").strip().lower()
     batch_key = str(target.get("batch_key", "") or "").strip() or service.build_batch_key(duty_date, duty_shift)
-    handover_source, capacity_source = _resolve_regenerate_source_files(
-        container,
-        target,
-        building=building,
-    )
+    if uploaded_sources:
+        active_finder = getattr(container.job_service, "find_active_job_by_dedupe_key", None)
+        if callable(active_finder) and active_finder(f"handover_review_regenerate:{session_id_text}"):
+            raise HTTPException(status_code=409, detail="当前楼栋已有生成任务，请等待完成后再上传源文件")
+    handover_source, capacity_source = uploaded_sources or _resolve_regenerate_source_files(container, target, building=building)
     if not handover_source:
         raise HTTPException(status_code=409, detail=f"缺少可用于{action_label.replace('交接班及容量表', '')}的交接班源文件")
     if not capacity_source:
@@ -5586,6 +5612,58 @@ def handover_review_regenerate(
         f"[任务] 已提交: {action_label} building={building}, session={session_id_text} ({job.job_id})"
     )
     return _accepted_job_response(job)
+
+
+@router.post("/api/handover/review/{building_code}/regenerate-from-files")
+async def handover_review_regenerate_from_files(
+    building_code: str,
+    request: Request,
+    handover_source_file: UploadFile = File(...),
+    capacity_source_file: UploadFile = File(...),
+    session_id: str = Form(default=""),
+    duty_date: str = Form(default=""),
+    duty_shift: str = Form(default=""),
+    client_id: str = Form(default=""),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    upload_dir = Path(get_app_dir()) / ".runtime" / "handover" / "manual_sources" / secrets.token_hex(12)
+    stored_files: list[Path] = []
+    try:
+        service = _build_review_session_service(container)
+        _resolve_building_or_404(service, building_code)
+        for kind, label, upload in (
+            ("handover", "交接班日志源文件", handover_source_file),
+            ("capacity", "交接班容量报表源文件", capacity_source_file),
+        ):
+            suffix = Path(upload.filename or "").suffix.lower()
+            if suffix not in {".xlsx", ".xlsm"}:
+                raise HTTPException(status_code=400, detail=f"{label}只支持 .xlsx / .xlsm")
+            content = await _read_upload_file_limited(upload, max_bytes=50 * 1024 * 1024, file_label=label)
+            if not content:
+                raise HTTPException(status_code=400, detail=f"{label}不能为空")
+            path = upload_dir / f"{kind}{suffix}"
+            await asyncio.to_thread(atomic_write_bytes, path, content, validator=validate_excel_workbook_file)
+            stored_files.append(path)
+            del content
+        return await asyncio.to_thread(
+            _submit_review_regeneration, building_code, request,
+            {"session_id": session_id, "duty_date": duty_date, "duty_shift": duty_shift, "client_id": client_id},
+            uploaded_sources=(str(stored_files[0]), str(stored_files[1])),
+        )
+    except Exception as exc:
+        try:
+            for path in stored_files:
+                path.unlink(missing_ok=True)
+            if upload_dir.exists():
+                upload_dir.rmdir()
+        except OSError as cleanup_error:
+            container.add_system_log(f"[交接班][上传源文件] 清理未提交文件失败: {cleanup_error}")
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=400, detail=f"源文件上传或生成任务提交失败: {exc}") from exc
+    finally:
+        await handover_source_file.close()
+        await capacity_source_file.close()
 
 
 @router.put("/api/handover/review/{building_code}")

@@ -186,6 +186,7 @@ def run_from_existing_files(
     duty_date: str | None = None,
     duty_shift: str | None = None,
     auto_send_review_link: bool = True,
+    skip_manual_generated: bool = False,
     emit_log: Callable[[str], None] = print,
 ) -> Dict[str, Any]:
     cfg = load_handover_config(config)
@@ -209,6 +210,7 @@ def run_from_existing_files(
         duty_date=str(duty_date or "").strip() or None,
         duty_shift=str(duty_shift or "").strip().lower() or None,
         auto_send_review_link=bool(auto_send_review_link),
+        skip_manual_generated=bool(skip_manual_generated),
         emit_log=emit_log,
     )
 
@@ -219,6 +221,7 @@ def run_from_download(
     end_time: str | None = None,
     duty_date: str | None = None,
     duty_shift: str | None = None,
+    skip_manual_generated: bool = False,
     emit_log: Callable[[str], None] = print,
 ) -> Dict[str, Any]:
     cfg = load_handover_config(config)
@@ -229,5 +232,6 @@ def run_from_download(
         end_time=end_time,
         duty_date=str(duty_date or "").strip() or None,
         duty_shift=str(duty_shift or "").strip().lower() or None,
+        skip_manual_generated=bool(skip_manual_generated),
         emit_log=emit_log,
     )

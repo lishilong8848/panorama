@@ -28,7 +28,7 @@ from app.modules.shared_bridge.service.internal_runtime_status_presenter import 
 )
 from app.modules.system_screenshot_capture.service.system_screenshot_capture_service import (
     list_system_screenshot_files,
-    run_system_screenshot_capture,
+    submit_system_screenshot_capture,
 )
 
 
@@ -1010,8 +1010,6 @@ def bridge_system_screenshot_run(
     site_building = str(body.get("site_building", "") or body.get("building", "") or "").strip() or None
     force = bool(body.get("force", False))
     wait = bool(body.get("wait", False))
-    lock = getattr(container, "_system_screenshot_capture_run_lock", None)
-    accepted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def emit_log(text: str) -> None:
         logger = getattr(container, "add_system_log", None)
@@ -1022,86 +1020,18 @@ def bridge_system_screenshot_run(
         except TypeError:
             logger(text)
 
-    def _run_once(*, acquired_lock: bool = False) -> Dict[str, Any]:
-        acquired = bool(acquired_lock)
-        if lock is not None and hasattr(lock, "acquire"):
-            if not acquired:
-                acquired = bool(lock.acquire(blocking=False))
-                if not acquired:
-                    return {"status": "running", "message": "系统截图采集已有运行实例"}
-        try:
-            cfg = getattr(container, "_system_screenshot_capture_cfg", lambda: {})()
-            return run_system_screenshot_capture(
-                config=getattr(container, "runtime_config", {}) or {},
-                capture_date=capture_date,
-                capture_hour=capture_hour,
-                state_file=str(cfg.get("state_file", "") or "").strip() or None,
-                download_root=str(cfg.get("download_root", "") or "").strip() or None,
-                site_building=site_building,
-                headless=bool(cfg.get("headless", False)),
-                force=force,
-                emit_log=emit_log,
-            )
-        finally:
-            if acquired:
-                lock.release()
-
-    if wait:
-        try:
-            result = _run_once()
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return {"ok": True, "accepted_at": accepted_at, **result}
-
-    pre_acquired = False
-    if lock is not None and hasattr(lock, "acquire"):
-        pre_acquired = bool(lock.acquire(blocking=False))
-        if not pre_acquired:
-            return {
-                "ok": True,
-                "accepted": False,
-                "running": True,
-                "status": "running",
-                "message": "系统截图采集已有运行实例",
-                "capture_date": capture_date or "",
-                "capture_hour": capture_hour or "",
-                "force": force,
-                "accepted_at": accepted_at,
-            }
-
-    def _worker() -> None:
-        try:
-            result = _run_once(acquired_lock=pre_acquired)
-            emit_log(
-                "[系统截图采集] 本机后台检查完成: "
-                f"date={capture_date or '-'}, hour={capture_hour or '-'}, status={result.get('status', '-')}"
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[系统截图采集] 本机后台检查失败: date={capture_date or '-'}, hour={capture_hour or '-'}, error={exc}")
-
-    worker_thread = threading.Thread(target=_worker, name="local-system-screenshot-capture", daemon=True)
     try:
-        worker_thread.start()
+        result = submit_system_screenshot_capture(
+            container=container, config=container.runtime_config,
+            capture_date=capture_date, capture_hour=capture_hour,
+            site_building=site_building, force=force, wait=wait, emit_log=emit_log,
+            request_id=str(body.get("request_id", "") or ""),
+        )
+        return {**result, "accepted": result.get("status") == "accepted", "running": result.get("status") in {"accepted", "running"}}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        if pre_acquired and lock is not None and hasattr(lock, "release"):
-            try:
-                lock.release()
-            except Exception:
-                pass
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return {
-        "ok": True,
-        "accepted": True,
-        "running": True,
-        "status": "accepted",
-        "message": "已开始检查当天系统截图",
-        "capture_date": capture_date or "",
-        "capture_hour": capture_hour or "",
-        "force": force,
-        "accepted_at": accepted_at,
-    }
 
 
 @router.post("/api/bridge/source-cache/refresh-current-hour")

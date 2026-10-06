@@ -59,6 +59,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     prepareHandoverReviewCapacityImageApi,
     sendHandoverReviewCapacityImageApi,
     regenerateHandoverReviewApi,
+    regenerateHandoverReviewFromFilesApi,
     buildHandoverReviewDownloadUrl,
     buildHandoverReviewCapacityDownloadUrl,
     triggerBrowserDownload,
@@ -471,7 +472,11 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
   }
 
-  async function regenerateCurrentHandover(getJobApi) {
+  async function regenerateCurrentHandover(getJobApi, sourceFiles = null) {
+    if (sourceFiles && (!sourceFiles.handover || !sourceFiles.capacity)) {
+      errorText.value = "请同时选择交接班日志源文件和交接班容量报表源文件";
+      return;
+    }
     if (!regenerateActionBase.value.allowed) {
       statusText.value = regenerateActionVm.value.disabledReason || "";
       return;
@@ -515,7 +520,17 @@ export function createHandoverReviewActionHelpers(options = {}) {
         request.duty_date = dutyDate;
         request.duty_shift = dutyShift;
       }
-      const response = await regenerateHandoverReviewApi(buildingCode, request);
+      let response;
+      if (sourceFiles) {
+        statusText.value = "正在上传两个源文件并提交生成任务...";
+        const form = new FormData();
+        Object.entries(request).forEach(([key, value]) => form.append(key, value));
+        form.append("handover_source_file", sourceFiles.handover);
+        form.append("capacity_source_file", sourceFiles.capacity);
+        response = await regenerateHandoverReviewFromFilesApi(buildingCode, form);
+      } else {
+        response = await regenerateHandoverReviewApi(buildingCode, request);
+      }
       const jobId = String(response?.job?.job_id || response?.job_id || "").trim();
       if (!jobId) {
         throw new Error(sessionId ? "重新生成任务提交失败" : "生成任务提交失败");
@@ -530,7 +545,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       });
       if (job.status === "success") {
         dirty.value = false;
-        statusText.value = sessionId ? "交接班日志和容量表已重新生成" : "当前班次交接班日志和容量表已生成";
+        statusText.value = sourceFiles ? "已使用上传的两个源文件生成，本楼本班次自动生成已跳过" : (sessionId ? "交接班日志和容量表已重新生成" : "当前班次交接班日志和容量表已生成");
         errorText.value = "";
       } else {
         errorText.value = String(job?.error || job?.summary || (sessionId ? "重新生成失败" : "生成失败"));

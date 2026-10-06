@@ -16,7 +16,8 @@ from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
 from app.modules.system_screenshot_capture.service.system_screenshot_capture_service import (
     list_system_screenshot_files,
     resolve_system_screenshot_file,
-    run_system_screenshot_capture,
+    submit_system_screenshot_capture,
+    cancel_system_screenshot_capture,
 )
 from app.modules.internal_bridge_http.service.internal_bridge_http_runner import InternalBridgeHttpTaskRunner
 
@@ -367,7 +368,6 @@ def run_internal_system_screenshot_capture(
     site_building = str(body.get("site_building", "") or body.get("building", "") or "").strip() or None
     force = bool(body.get("force", False))
     wait = bool(body.get("wait", False))
-    accepted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def emit_log(text: str) -> None:
         if not callable(raw_emit_log):
@@ -377,76 +377,25 @@ def run_internal_system_screenshot_capture(
         except TypeError:
             raw_emit_log(text)
 
-    def _run_once(*, acquired_lock: bool = False) -> Dict[str, Any]:
-        lock = getattr(container, "_system_screenshot_capture_run_lock", None)
-        acquired = bool(acquired_lock)
-        if lock is not None and hasattr(lock, "acquire"):
-            if not acquired:
-                acquired = bool(lock.acquire(blocking=False))
-                if not acquired:
-                    return {"status": "running", "message": "系统截图采集已有运行实例"}
-        try:
-            return run_system_screenshot_capture(
-                config=config,
-                capture_date=capture_date,
-                site_building=site_building,
-                force=force,
-                emit_log=emit_log,
-            )
-        finally:
-            if acquired:
-                lock.release()
-
-    if wait:
-        try:
-            result = _run_once()
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return {"ok": True, "accepted_at": accepted_at, **result}
-
-    lock = getattr(container, "_system_screenshot_capture_run_lock", None)
-    pre_acquired = False
-    if lock is not None and hasattr(lock, "acquire"):
-        pre_acquired = bool(lock.acquire(blocking=False))
-        if not pre_acquired:
-            return {
-                "ok": True,
-                "status": "running",
-                "message": "系统截图采集已有运行实例",
-                "capture_date": capture_date or "",
-                "force": force,
-                "accepted_at": accepted_at,
-            }
-
-    def _worker() -> None:
-        try:
-            result = _run_once(acquired_lock=pre_acquired)
-            emit_log(
-                "[系统截图采集] HTTP 后台检查完成: "
-                f"date={capture_date or '-'}, status={result.get('status', '-')}"
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[系统截图采集] HTTP 后台检查失败: date={capture_date or '-'}, error={exc}")
-
-    worker_thread = threading.Thread(target=_worker, name="internal-http-system-screenshot-capture", daemon=True)
     try:
-        worker_thread.start()
+        return submit_system_screenshot_capture(
+            container=container, config=config, capture_date=capture_date,
+            site_building=site_building, force=force, wait=wait, emit_log=emit_log,
+            request_id=str(body.get("request_id", "") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        if pre_acquired and lock is not None and hasattr(lock, "release"):
-            try:
-                lock.release()
-            except Exception:
-                pass
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return {
-        "ok": True,
-        "status": "accepted",
-        "capture_date": capture_date or "",
-        "force": force,
-        "accepted_at": accepted_at,
-    }
+
+
+@router.post("/system-screenshots/cancel")
+def cancel_internal_system_screenshot_capture(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _require_enabled_and_authorized(request)
+    batch_id = str(payload.get("batch_id", "") or "").strip()
+    if not batch_id:
+        raise HTTPException(status_code=400, detail="batch_id 不能为空")
+    return cancel_system_screenshot_capture(request.app.state.container, batch_id)
 
 
 @router.post("/source-index/batch")

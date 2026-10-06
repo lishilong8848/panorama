@@ -32,6 +32,7 @@ import {
   prepareHandoverReviewCapacityImageApi,
   sendHandoverReviewCapacityImageApi,
   regenerateHandoverReviewApi,
+  regenerateHandoverReviewFromFilesApi,
   retryHandoverReview110StationCloudSyncApi,
   uploadHandoverReview110StationFileApi,
   updateHandoverReviewCloudSyncApi,
@@ -3099,6 +3100,8 @@ export function mountHandoverReviewApp(Vue) {
       const capacityDownloading = ref(false);
       const capacityImageSending = ref(false);
       const regenerating = ref(false);
+      const uploadedHandoverSource = ref(null);
+      const uploadedCapacitySource = ref(null);
       const confirming = ref(false);
       const retryingCloudSync = ref(false);
       const updatingHistoryCloudSync = ref(false);
@@ -5097,6 +5100,7 @@ export function mountHandoverReviewApp(Vue) {
         prepareHandoverReviewCapacityImageApi,
         sendHandoverReviewCapacityImageApi,
         regenerateHandoverReviewApi,
+        regenerateHandoverReviewFromFilesApi,
         buildHandoverReviewDownloadUrl,
         buildHandoverReviewCapacityDownloadUrl,
         triggerBrowserDownload,
@@ -5233,6 +5237,8 @@ export function mountHandoverReviewApp(Vue) {
         capacityDownloading,
         capacityImageSending,
         regenerating,
+        uploadedHandoverSource,
+        uploadedCapacitySource,
         confirming,
         retryingCloudSync,
         updatingHistoryCloudSync,
@@ -5349,6 +5355,9 @@ export function mountHandoverReviewApp(Vue) {
         downloadCurrentCapacityReviewFile,
         sendCurrentCapacityImage: () => sendCurrentCapacityImage(getJobApi),
         regenerateCurrentReview: () => regenerateCurrentHandover(getJobApi),
+        generateFromUploadedSources: () => regenerateCurrentHandover(getJobApi, {
+          handover: uploadedHandoverSource.value, capacity: uploadedCapacitySource.value,
+        }),
         refreshData,
       };
     },

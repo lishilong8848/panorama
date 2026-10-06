@@ -226,6 +226,7 @@ def handle_handover_from_download(
                         }
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班调度] 检查本班全量完成状态失败，继续执行: {exc}")
+        skip_manual_generated = bool(payload.get("scheduler_slot") or payload.get("skip_if_batch_fully_generated_and_sent"))
         orchestrator = OrchestratorService(config)
         if str(payload.get("resume_kind", "") or "").strip() == "shared_bridge_handover":
             raw_items = list(payload.get("building_files") or [])
@@ -252,6 +253,7 @@ def handle_handover_from_download(
                 end_time=payload.get("end_time"),
                 duty_date=payload.get("duty_date"),
                 duty_shift=payload.get("duty_shift"),
+                skip_manual_generated=skip_manual_generated,
                 emit_log=emit_log,
             )
         result = orchestrator.run_handover_from_download(
@@ -259,6 +261,7 @@ def handle_handover_from_download(
             end_time=payload.get("end_time"),
             duty_date=payload.get("duty_date"),
             duty_shift=payload.get("duty_shift"),
+            skip_manual_generated=skip_manual_generated,
             emit_log=emit_log,
         )
         failure_summary = orchestrator.build_handover_download_failure_summary(result)
@@ -709,12 +712,15 @@ def handle_system_screenshot_upload(
             trigger_internal_capture=trigger_internal_capture if isinstance(trigger_internal_capture, bool) else None,
             internal_capture_force=internal_capture_force if isinstance(internal_capture_force, bool) else None,
             emit_log=emit_log,
+            capture_request_id=str(payload.get("capture_request_id", "") or ""),
+            runtime=runtime,
         )
         if runtime is not None:
             runtime.raise_if_cancelled()
         return result
     except Exception as exc:  # noqa: BLE001
-        notify.send_failure(stage="系统截图上传", detail=str(exc), emit_log=emit_log)
+        if runtime is None or not runtime.is_cancelled():
+            notify.send_failure(stage="系统截图上传", detail=str(exc), emit_log=emit_log)
         raise
 
 
@@ -758,6 +764,8 @@ def handle_system_screenshot_demand_upload(
             trigger_internal_capture=trigger_internal_capture if isinstance(trigger_internal_capture, bool) else None,
             internal_capture_force=internal_capture_force if isinstance(internal_capture_force, bool) else None,
             emit_log=emit_log,
+            capture_request_id=str(payload.get("capture_request_id", "") or ""),
+            runtime=runtime,
         )
         if runtime is not None:
             runtime.raise_if_cancelled()
@@ -770,7 +778,8 @@ def handle_system_screenshot_demand_upload(
         )
         return result
     except Exception as exc:  # noqa: BLE001
-        notify.send_failure(stage="系统截图上传同步需求", detail=str(exc), emit_log=emit_log)
+        if runtime is None or not runtime.is_cancelled():
+            notify.send_failure(stage="系统截图上传同步需求", detail=str(exc), emit_log=emit_log)
         raise
 
 
@@ -958,6 +967,8 @@ def handle_handover_review_regenerate(
         errors = row.get("errors", []) if isinstance(row, dict) and isinstance(row.get("errors", []), list) else []
         error_text = "; ".join([_text(item) for item in errors if _text(item)]) or _text(result.get("errors")) or "重新生成失败"
         raise RuntimeError(error_text)
+    if _text(row.get("capacity_status")).lower() not in {"success", "ok"}:
+        raise RuntimeError(_text(row.get("capacity_error")) or "交接班容量报表生成失败，未登记人工生成完成标记")
     review_session = row.get("review_session", {}) if isinstance(row.get("review_session", {}), dict) else {}
     regenerated_session_id = _text(review_session.get("session_id")) or session_id
     latest_session = review_service.get_session_by_id(regenerated_session_id)
@@ -977,6 +988,8 @@ def handle_handover_review_regenerate(
     )
     if _text(barrier.get("status")).lower() != "success":
         raise RuntimeError(_text(barrier.get("error")) or "重新生成后容量表补写失败")
+    if runtime is not None:
+        runtime.raise_if_cancelled()
     latest_session = review_service.mark_manual_regenerated(
         building=building,
         duty_date=duty_date,

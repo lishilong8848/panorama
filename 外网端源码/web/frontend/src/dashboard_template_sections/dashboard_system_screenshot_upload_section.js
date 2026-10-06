@@ -90,6 +90,7 @@ export const DASHBOARD_SYSTEM_SCREENSHOT_UPLOAD_SECTION = `        <section clas
                 </div>
                 <div class="hint">{{ systemScreenshotUploadSchedulerQuickSaving ? '系统截图上传调度配置同步中...' : '调度会先触发内网端检查并补齐当天截图，再上传到多维表。' }}</div>
                 <div class="hint">最近判断：{{ systemScreenshotUploadSchedulerDecisionText }}；最近结果：{{ systemScreenshotUploadSchedulerTriggerText }}</div>
+                <div class="hint">同步需求轮询：{{ health.system_screenshot_upload.scheduler.demand_poll?.enabled ? '已启用' : '已停止' }}；{{ health.system_screenshot_upload.scheduler.demand_poll?.last_decision || '-' }}</div>
               </article>
 
               <article class="task-block task-block-compact dashboard-module-status-card">

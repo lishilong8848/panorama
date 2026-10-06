@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List
+from uuid import uuid4
 
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.shared.utils.atomic_file import atomic_write_text
+from pipeline_utils import get_app_dir
 
 
 DEFAULT_DEMAND_POLL_CONFIG: Dict[str, Any] = {
@@ -18,6 +23,7 @@ DEFAULT_DEMAND_POLL_CONFIG: Dict[str, Any] = {
     "completed_field": "上传完成",
     "page_size": 100,
     "max_records": 100,
+    "retry_delay_sec": 300,
 }
 
 
@@ -82,12 +88,18 @@ def normalize_demand_poll_config(
 ) -> Dict[str, Any]:
     screenshot_cfg = _dict(_dict(runtime_config).get("system_screenshot_upload"))
     poll_cfg = _deep_merge(screenshot_cfg.get("demand_poll"), DEFAULT_DEMAND_POLL_CONFIG)
+    scheduler_cfg = _dict(screenshot_cfg.get("scheduler"))
+    poll_cfg["enabled"] = (
+        bool(screenshot_cfg.get("enabled", True)) and bool(poll_cfg.get("enabled", True))
+        and bool(scheduler_cfg.get("auto_start_in_gui", True))
+    )
     for key, value in _dict(overrides).items():
         if key in poll_cfg and value not in (None, ""):
             poll_cfg[key] = value
     poll_cfg["interval_sec"] = _positive_int(poll_cfg.get("interval_sec"), 30, min_value=5, max_value=3600)
     poll_cfg["page_size"] = _positive_int(poll_cfg.get("page_size"), 100, min_value=1, max_value=500)
     poll_cfg["max_records"] = _positive_int(poll_cfg.get("max_records"), 100, min_value=1, max_value=5000)
+    poll_cfg["retry_delay_sec"] = _positive_int(poll_cfg.get("retry_delay_sec"), 300, min_value=60, max_value=3600)
     for key in ("app_token", "table_id", "request_field", "completed_field"):
         poll_cfg[key] = str(poll_cfg.get(key, "") or "").strip()
     return poll_cfg
@@ -172,6 +184,19 @@ class SystemScreenshotDemandPoller:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._submit_lock = threading.Lock()
+        paths = _dict(self._runtime_config().get("paths"))
+        root = Path(str(paths.get("runtime_state_root") or ".runtime"))
+        if not root.is_absolute():
+            root = Path(get_app_dir()) / root
+        self._state_path = root / "system_screenshot_demand_poll.json"
+        try:
+            saved = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        self._jobs_by_record: Dict[str, Dict[str, Any]] = {
+            str(key): dict(value) for key, value in _dict(saved).items() if isinstance(value, dict)
+        }
         self._snapshot: Dict[str, Any] = {
             "enabled": False,
             "running": False,
@@ -214,6 +239,10 @@ class SystemScreenshotDemandPoller:
         with self._lock:
             self._snapshot.update(updates)
 
+    def _save_request_state(self) -> None:
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(self._state_path, json.dumps(self._jobs_by_record, ensure_ascii=False), encoding="utf-8")
+
     def _log(self, text: str) -> None:
         if callable(self._emit_log):
             try:
@@ -238,21 +267,23 @@ class SystemScreenshotDemandPoller:
                 last_decision="同步需求轮询已禁用",
             )
             return {"ok": True, "running": False, "reason": "disabled"}
-        if self._thread and self._thread.is_alive():
-            self._set_snapshot(enabled=True, running=True)
-            return {"ok": True, "running": True, "reason": "already_running"}
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run_loop,
-            name="system-screenshot-demand-poller",
-            daemon=True,
-        )
-        self._thread.start()
-        self._set_snapshot(enabled=True, running=True, last_decision="同步需求轮询已启动")
+        with self._submit_lock:
+            self._stop_event.clear()
+            if self._thread and self._thread.is_alive():
+                self._set_snapshot(enabled=True, running=True)
+                return {"ok": True, "running": True, "reason": "already_running"}
+            self._thread = threading.Thread(
+                target=self._run_loop,
+                name="system-screenshot-demand-poller",
+                daemon=True,
+            )
+            self._thread.start()
+            self._set_snapshot(enabled=True, running=True, last_decision="同步需求轮询已启动")
         return {"ok": True, "running": True, "reason": "started"}
 
     def stop(self) -> Dict[str, Any]:
-        self._stop_event.set()
+        with self._submit_lock:
+            self._stop_event.set()
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=5)
@@ -280,7 +311,12 @@ class SystemScreenshotDemandPoller:
         return payload
 
     def _run_loop(self) -> None:
-        while not self._stop_event.is_set():
+        while True:
+            with self._submit_lock:
+                if self._stop_event.is_set():
+                    self._thread = None
+                    self._set_snapshot(running=False)
+                    return
             cfg = self._config()
             if bool(cfg.get("enabled", True)):
                 try:
@@ -297,7 +333,6 @@ class SystemScreenshotDemandPoller:
                 self._set_snapshot(enabled=False, running=True, last_decision="同步需求轮询已禁用")
             interval = int(cfg.get("interval_sec", 30) or 30)
             self._stop_event.wait(max(5, interval))
-        self._set_snapshot(running=False)
 
     def poll_once(self) -> Dict[str, Any]:
         cfg = self._config()
@@ -320,11 +355,16 @@ class SystemScreenshotDemandPoller:
             max_records=int(cfg.get("max_records", 100) or 100),
             field_names=[cfg["request_field"], cfg["completed_field"]],
         )
+        if self._stop_event.is_set() or not bool(self._config().get("enabled", True)):
+            return {"ok": True, "submitted": False, "reason": "stopped"}
         pending: List[Dict[str, Any]] = []
         for item in records:
             fields = _dict(item.get("fields"))
             if _truthy_checkbox(fields.get(cfg["request_field"])):
                 pending.append(item)
+            else:
+                if self._jobs_by_record.pop(str(item.get("record_id", "") or ""), None) is not None:
+                    self._save_request_state()
         hit_count = len(pending)
         if hit_count <= 0:
             self._set_snapshot(
@@ -342,31 +382,66 @@ class SystemScreenshotDemandPoller:
                 last_decision="已有系统截图上传任务运行，跳过本轮",
             )
             return {"ok": True, "submitted": False, "hit_count": hit_count, "reason": "job_active"}
-        record = pending[0]
-        record_id = str(record.get("record_id", "") or "").strip()
+        record_id = ""
+        reason = ""
+        for record in pending:
+            candidate_id = str(record.get("record_id", "") or "").strip()
+            if not candidate_id:
+                raise ValueError("同步需求记录缺少 record_id")
+            previous = self._jobs_by_record.get(candidate_id, {})
+            if previous.get("job_id"):
+                try:
+                    last_job = self._job_service.get_job(previous["job_id"])
+                except KeyError:
+                    reason = "旧需求任务状态不可用，等待取消勾选后重新发起"
+                    continue
+                if last_job.get("cancel_requested") or last_job.get("status") == "cancelled":
+                    reason = "需求任务已手动取消，等待取消勾选后重新发起"
+                    continue
+                if last_job.get("status") == "success":
+                    reason = "需求任务已完成，等待需求表更新"
+                    continue
+                if last_job.get("status") in {"failed", "partial_failed", "blocked"}:
+                    if previous.get("failed_job_id") != previous["job_id"]:
+                        previous.update(failed_job_id=previous["job_id"], retry_at=time.time() + cfg["retry_delay_sec"])
+                        self._save_request_state()
+                    if time.time() < previous["retry_at"]:
+                        reason = "需求任务失败，等待冷却后续跑原截图批次"
+                        continue
+            record_id = candidate_id
+            break
         if not record_id:
-            raise ValueError("同步需求记录缺少 record_id")
+            self._set_snapshot(last_poll_at=now_text, last_hit_count=hit_count, last_decision=reason)
+            return {"ok": True, "submitted": False, "reason": reason}
         capture_date = datetime.now().strftime("%Y-%m-%d")
-        job = self._job_service.start_worker_job(
-            name=f"系统截图上传-同步需求 {capture_date}",
-            worker_handler="system_screenshot_demand_upload",
-            worker_payload={
-                "capture_date": capture_date,
-                "trigger_internal_capture": True,
-                "internal_capture_force": True,
-                "demand_record_id": record_id,
-                "demand_app_token": cfg["app_token"],
-                "demand_table_id": cfg["table_id"],
-                "demand_request_field": cfg["request_field"],
-                "demand_completed_field": cfg["completed_field"],
-            },
-            resource_keys=["network:external", f"system_screenshot_upload:{capture_date}"],
-            priority="scheduler",
-            feature="system_screenshot_upload",
-            dedupe_key=f"system_screenshot_upload:demand:{capture_date}:{record_id}",
-            submitted_by="demand_poll",
-        )
+        previous = self._jobs_by_record.get(record_id, {})
+        request_id = str(previous.get("request_id") or uuid4().hex)
+        with self._submit_lock:
+            if self._stop_event.is_set() or not bool(self._config().get("enabled", True)):
+                return {"ok": True, "submitted": False, "reason": "stopped"}
+            job = self._job_service.start_worker_job(
+                name=f"系统截图上传-同步需求 {capture_date}",
+                worker_handler="system_screenshot_demand_upload",
+                worker_payload={
+                    "capture_date": capture_date,
+                    "trigger_internal_capture": True,
+                    "internal_capture_force": True,
+                    "capture_request_id": request_id,
+                    "demand_record_id": record_id,
+                    "demand_app_token": cfg["app_token"],
+                    "demand_table_id": cfg["table_id"],
+                    "demand_request_field": cfg["request_field"],
+                    "demand_completed_field": cfg["completed_field"],
+                },
+                resource_keys=["system_screenshot_upload:global", f"system_screenshot_upload:{capture_date}"],
+                priority="scheduler",
+                feature="system_screenshot_upload",
+                dedupe_key=f"system_screenshot_upload:demand:{capture_date}:{record_id}",
+                submitted_by="demand_poll",
+            )
         job_id = str(getattr(job, "job_id", "") or "")
+        self._jobs_by_record[record_id] = {"job_id": job_id, "request_id": request_id}
+        self._save_request_state()
         self._set_snapshot(
             last_poll_at=now_text,
             last_hit_count=hit_count,

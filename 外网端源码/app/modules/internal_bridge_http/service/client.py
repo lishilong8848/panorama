@@ -501,14 +501,21 @@ class InternalBridgeHttpClient:
             },
         )
 
-    def run_system_screenshot_capture(self, *, capture_date: str = "", force: bool = False) -> Dict[str, Any]:
+    def run_system_screenshot_capture(self, *, capture_date: str = "", force: bool = False, request_id: str = "") -> Dict[str, Any]:
         return self._request(
             "POST",
             "/api/internal-bridge/system-screenshots/run",
             payload={
                 "capture_date": str(capture_date or "").strip(),
                 "force": bool(force),
+                **({"request_id": request_id} if request_id else {}),
             },
+        )
+
+    def cancel_system_screenshot_capture(self, *, batch_id: str) -> Dict[str, Any]:
+        return self._request(
+            "POST", "/api/internal-bridge/system-screenshots/cancel",
+            payload={"batch_id": batch_id},
         )
 
     def list_system_screenshot_files(

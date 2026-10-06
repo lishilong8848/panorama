@@ -35,7 +35,7 @@ from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     run_alarm_rule_export,
 )
 from app.modules.system_screenshot_capture.service.system_screenshot_capture_service import (
-    run_system_screenshot_capture,
+    submit_system_screenshot_capture,
 )
 from app.shared.runtime.internal_download_browser_pool_runtime import get_internal_download_browser_pool
 from app.shared.utils.atomic_file import atomic_write_text, validate_json_file
@@ -701,21 +701,13 @@ class AppContainer:
         cfg = self._system_screenshot_capture_cfg()
         if cfg.get("enabled") is False:
             return True, "系统截图采集已禁用"
-        if not self._system_screenshot_capture_run_lock.acquire(blocking=False):
-            return False, "系统截图采集已有运行实例，本次等待现有实例完成"
         try:
-            result = run_system_screenshot_capture(
-                config=self.runtime_config,
-                state_file=str(cfg.get("state_file", "") or "").strip() or None,
-                download_root=str(cfg.get("download_root", "") or "").strip() or None,
-                site_building=None,
-                headless=bool(cfg.get("headless", False)),
+            result = submit_system_screenshot_capture(
+                container=self, config=self.runtime_config, wait=True,
                 emit_log=self.add_system_log,
             )
         except Exception as exc:  # noqa: BLE001
             return False, f"系统截图采集失败: {exc}"
-        finally:
-            self._system_screenshot_capture_run_lock.release()
         status = str(result.get("status", "") or "").strip()
         files = result.get("files", []) if isinstance(result, dict) else []
         count = len(files) if isinstance(files, list) else 0

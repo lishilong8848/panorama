@@ -4150,6 +4150,7 @@ def health(
                     "memory_source": str(system_screenshot_upload_scheduler_snapshot.get("memory_source", "") or ""),
                     "executor_bound": _safe_bool_method("is_system_screenshot_upload_scheduler_executor_bound"),
                     "callback_name": _safe_text_method("system_screenshot_upload_scheduler_executor_name"),
+                    "demand_poll": system_screenshot_upload_scheduler_snapshot.get("demand_poll", {}),
                 },
             },
             "temperature_humidity_upload": {
@@ -5244,10 +5245,10 @@ def job_system_screenshot_upload_run(
                 "capture_date": capture_date,
                 **({"trigger_internal_capture": bool(trigger_internal_capture)} if isinstance(trigger_internal_capture, bool) else {}),
             },
-            resource_keys=_job_resource_keys("network:external", f"system_screenshot_upload:{capture_date}"),
+            resource_keys=_job_resource_keys("system_screenshot_upload:global", f"system_screenshot_upload:{capture_date}"),
             priority="manual",
             feature="system_screenshot_upload",
-            dedupe_key=_job_dedupe_key("system_screenshot_upload", capture_date=capture_date),
+            dedupe_key=f"system_screenshot_upload:{capture_date}",
             submitted_by="manual",
         )
         container.add_system_log(f"[任务] 已提交: 系统截图上传 {capture_date} ({job.job_id})")

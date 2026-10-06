@@ -939,6 +939,16 @@ export async function regenerateHandoverReviewApi(buildingCode, payload = {}) {
   });
 }
 
+export async function regenerateHandoverReviewFromFilesApi(buildingCode, form) {
+  const resp = await fetch(`/api/handover/review/${buildingCode}/regenerate-from-files`, {
+    method: "POST", body: form,
+  });
+  const contentType = String(resp.headers.get("content-type") || "").toLowerCase();
+  const payload = contentType.includes("application/json") ? await resp.json() : { detail: await resp.text() };
+  if (!resp.ok) throw new Error(String(payload?.detail || payload?.error || `上传失败（HTTP ${resp.status}）`));
+  return payload;
+}
+
 export async function getHandoverReviewBatchStatusApi(batchKey) {
   return apiJson(`/api/handover/review/batch/${encodeURIComponent(batchKey)}/status`);
 }

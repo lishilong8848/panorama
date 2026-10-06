@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.modules.scheduler.api._config_persistence import (
     persist_full_config,
-    persist_scheduler_toggle,
     record_scheduler_config_autostart,
 )
 
@@ -70,17 +69,29 @@ def _build_payload(container, action_result: Dict[str, Any] | None = None) -> Di
         "remembered_enabled": bool(snapshot.get("remembered_enabled", False)),
         "effective_auto_start_in_gui": bool(snapshot.get("effective_auto_start_in_gui", False)),
         "memory_source": str(snapshot.get("memory_source", "") or ""),
+        "demand_poll": snapshot.get("demand_poll", {}),
     }
+
+
+def _persist_automatic_triggers(container, enabled: bool) -> None:
+    merged = copy.deepcopy(container.config)
+    upload = merged.setdefault("features", {}).setdefault("system_screenshot_upload", {})
+    scheduler = upload.setdefault("scheduler", {})
+    scheduler["auto_start_in_gui"] = enabled
+    if enabled:
+        scheduler["enabled"] = True
+    upload.setdefault("demand_poll", {})["enabled"] = enabled
+    persist_full_config(container, merged, source="系统截图自动提交开关", mode="light")
+    record_scheduler_config_autostart(
+        container, path=("features", "system_screenshot_upload", "scheduler"),
+        scheduler_cfg=scheduler,
+    )
 
 
 @router.post("/start")
 def system_screenshot_upload_scheduler_start(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(
-        container,
-        path=("features", "system_screenshot_upload", "scheduler"),
-        auto_start_in_gui=True,
-    )
+    _persist_automatic_triggers(container, True)
     action: Dict[str, Any] | None = None
     reloader = getattr(container, "rebuild_system_screenshot_upload_scheduler", None)
     if callable(reloader):
@@ -91,17 +102,15 @@ def system_screenshot_upload_scheduler_start(request: Request) -> Dict[str, Any]
                 action = reload_action
     if action is None:
         action = container.start_system_screenshot_upload_scheduler()
+    container.start_system_screenshot_demand_poller(source="调度启动")
     return _build_payload(container, action_result=action)
 
 
 @router.post("/stop")
 def system_screenshot_upload_scheduler_stop(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    persist_scheduler_toggle(
-        container,
-        path=("features", "system_screenshot_upload", "scheduler"),
-        auto_start_in_gui=False,
-    )
+    container.stop_system_screenshot_demand_poller(source="调度停止")
+    _persist_automatic_triggers(container, False)
     action = container.stop_system_screenshot_upload_scheduler()
     return _build_payload(container, action_result=action)
 

@@ -311,8 +311,22 @@ class SystemScreenshotUploadService:
         trigger_internal_capture: bool | None = None,
         internal_capture_force: bool | None = None,
         emit_log: Callable[[str], None] | None = None,
+        capture_request_id: str = "",
+        runtime: Any = None,
     ) -> Dict[str, Any]:
         log = emit_log if callable(emit_log) else (lambda _msg: None)
+        def check_cancelled() -> None:
+            if runtime is not None:
+                runtime.raise_if_cancelled()
+
+        def wait_poll(seconds: float) -> None:
+            wait_until = time.monotonic() + seconds
+            while time.monotonic() < wait_until:
+                check_cancelled()
+                time.sleep(min(0.25, max(0, wait_until - time.monotonic())))
+            check_cancelled()
+
+        check_cancelled()
         cfg = self._config()
         if not bool(cfg.get("enabled", True)):
             return {"status": "skipped", "reason": "disabled"}
@@ -331,32 +345,41 @@ class SystemScreenshotUploadService:
         should_trigger = bool(cfg.get("trigger_internal_capture", True)) if trigger_internal_capture is None else bool(trigger_internal_capture)
         force_capture = bool(internal_capture_force) if internal_capture_force is not None else False
         fresh_since: datetime | None = None
+        capture_batch_id = ""
+        trigger_result: Dict[str, Any] = {}
         if should_trigger:
             mode_text = "强制重截" if force_capture else "补齐缺失"
             log(f"[系统截图上传] 触发内网端截图检查 date={date_text}, mode={mode_text}")
             if force_capture:
                 grace_sec = max(0, int(float(cfg.get("fresh_capture_grace_sec", 180) or 180)))
                 fresh_since = (datetime.now() - timedelta(seconds=grace_sec)).replace(microsecond=0)
-            trigger_result: Dict[str, Any] = {}
-            while True:
-                trigger_result = internal.run_system_screenshot_capture(capture_date=date_text, force=force_capture)
-                status_text = str(trigger_result.get("status", "") or "").strip().lower() if isinstance(trigger_result, dict) else ""
-                if not force_capture or status_text != "running":
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("内网端系统截图采集一直运行中，无法开始本次强制重截")
-                log("[系统截图上传] 内网端已有截图采集运行中，等待后重新触发强制重截")
-                time.sleep(poll_sec)
-            if force_capture and isinstance(trigger_result, dict):
-                accepted_at = _parse_datetime_text(trigger_result.get("accepted_at"))
-                if accepted_at is not None:
-                    fresh_since = accepted_at - timedelta(seconds=2)
+            trigger_result = internal.run_system_screenshot_capture(
+                capture_date=date_text, force=force_capture,
+                **({"request_id": capture_request_id} if capture_request_id else {}),
+            )
+            capture_batch_id = str(trigger_result.get("batch_id", "") or "")
+            if trigger_result.get("status") == "running":
+                log(f"[系统截图上传] 复用内网端正在执行的截图批次 batch_id={capture_batch_id or '-'}")
+            started_at = _parse_datetime_text(trigger_result.get("started_at"))
+            if force_capture and started_at is not None:
+                fresh_since = started_at - timedelta(seconds=grace_sec)
+
+        if runtime is not None:
+            def cancel_capture() -> None:
+                if runtime.is_cancelled() and capture_batch_id:
+                    internal.cancel_system_screenshot_capture(batch_id=capture_batch_id)
+            runtime.register_cleanup_hook(cancel_capture)
 
         by_pair: Dict[tuple[str, str], Dict[str, Any]] = {}
         missing: List[str] = []
         stale_candidates: Dict[tuple[str, str], str] = {}
+        last_wait_log_at = 0.0
+        last_missing: List[str] = []
+        retriggered_after_join = False
         while True:
+            check_cancelled()
             listing = internal.list_system_screenshot_files(capture_date=date_text)
+            batch = _dict(listing.get("capture_batch"))
             files = listing.get("files", []) if isinstance(listing, dict) else []
             by_pair = {}
             stale_candidates = {}
@@ -366,7 +389,11 @@ class SystemScreenshotUploadService:
                 building = str(item.get("site_building", "") or "").strip()
                 key = str(item.get("target_key", "") or "").strip()
                 if building and key and item.get("file_exists") is True:
-                    if fresh_since is not None:
+                    if force_capture and capture_batch_id:
+                        if item.get("capture_batch_id") != capture_batch_id:
+                            stale_candidates[(building, key)] = str(item.get("captured_at") or "")
+                            continue
+                    elif fresh_since is not None:
                         captured_at = _parse_datetime_text(item.get("captured_at"))
                         modified_at = _parse_datetime_text(item.get("modified_at"))
                         item_fresh_at = max(
@@ -385,9 +412,28 @@ class SystemScreenshotUploadService:
             ]
             if not missing or time.monotonic() >= deadline:
                 break
+            if capture_batch_id and batch.get("batch_id") == capture_batch_id:
+                if batch.get("status") in {"failed", "cancelled"}:
+                    raise RuntimeError(f"内网端截图批次{batch['status']}: {batch.get('error') or ','.join(missing)}")
+                if (force_capture and not retriggered_after_join
+                        and trigger_result.get("status") == "running"
+                        and batch.get("status") in {"success", "skipped"}):
+                    # An existing daily batch may have captured only its missing targets.
+                    retriggered_after_join = True
+                    check_cancelled()
+                    trigger_result = internal.run_system_screenshot_capture(
+                        capture_date=date_text, force=True,
+                        **({"request_id": capture_request_id} if capture_request_id else {}),
+                    )
+                    capture_batch_id = str(trigger_result.get("batch_id", "") or "")
+                    continue
             wait_reason = "等待最新截图完成" if fresh_since is not None else "等待内网端截图完成"
-            log(f"[系统截图上传] {wait_reason}: missing={','.join(missing)}")
-            if fresh_since is not None:
+            should_log = missing != last_missing or time.monotonic() - last_wait_log_at >= 60
+            if should_log:
+                log(f"[系统截图上传] {wait_reason}: missing={','.join(missing)}, batch_id={capture_batch_id or '-'}")
+                last_wait_log_at = time.monotonic()
+                last_missing = list(missing)
+            if fresh_since is not None and should_log:
                 stale = [
                     f"{building}/{target['label']}={stale_candidates.get((building, target['key']), '-')}"
                     for building in expected_buildings
@@ -395,8 +441,8 @@ class SystemScreenshotUploadService:
                     if f"{building}/{target['label']}" in missing and (building, target["key"]) in stale_candidates
                 ]
                 if stale:
-                    log(f"[系统截图上传] 已发现但未达到最新门槛 fresh_since={fresh_since:%Y-%m-%d %H:%M:%S}: {','.join(stale[:8])}")
-            time.sleep(poll_sec)
+                    log(f"[系统截图上传] 等待本批次截图 batch_id={capture_batch_id or '-'}, fresh_since={fresh_since:%Y-%m-%d %H:%M:%S}: {','.join(stale[:8])}")
+            wait_poll(poll_sec)
 
         if missing:
             prefix = "系统截图文件未更新到本次强制截图时间: " if fresh_since is not None else "系统截图文件缺失或为空: "
@@ -416,6 +462,7 @@ class SystemScreenshotUploadService:
         prepared: List[Dict[str, Any]] = []
         for building in expected_buildings:
             for target in targets:
+                check_cancelled()
                 table_id = target["table_id"]
                 item = by_pair[(building, target["key"])]
                 file_name = str(item.get("file_name", "") or "").strip()
@@ -475,6 +522,7 @@ class SystemScreenshotUploadService:
             table_id = str(prepared_item["table_id"])
             table_clients.setdefault(table_id, prepared_item["client"])
         for table_id, client in table_clients.items():
+            check_cancelled()
             record_ids = self._table_record_ids(
                 client,
                 table_id,
@@ -482,6 +530,7 @@ class SystemScreenshotUploadService:
             )
             deleted_count = 0
             if record_ids:
+                check_cancelled()
                 deleted_count = client.batch_delete_records(
                     table_id,
                     record_ids,
@@ -491,6 +540,7 @@ class SystemScreenshotUploadService:
             log(f"[系统截图上传] 已清空目标表: table={table_id}, deleted={deleted_count}")
 
         for prepared_item in prepared:
+            check_cancelled()
             building = prepared_item["building"]
             target = prepared_item["target"]
             table_id = prepared_item["table_id"]
@@ -508,6 +558,7 @@ class SystemScreenshotUploadService:
                 content=content,
                 mime_type=prepared_item["mime_type"],
             )
+            check_cancelled()
             fields: Dict[str, Any] = {
                 attachment_field: [{"file_token": file_token}],
                 building_field: building,
@@ -544,6 +595,7 @@ class SystemScreenshotUploadService:
 
         return {
             "status": "success",
+            "capture_batch_id": capture_batch_id,
             "capture_date": date_text,
             "date_value": date_value,
             "app_token": app_token,

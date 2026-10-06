@@ -1649,6 +1649,21 @@ class HandoverOrchestrator:
             }
             emit_log(f"[交接班][H楼云表] 生成后同步失败但不阻断主流程 batch={batch_key}, error={exc}")
 
+    def _skip_manual_generated_buildings(
+        self, buildings: List[str], *, duty_date: str, duty_shift: str, emit_log: Callable[[str], None]
+    ) -> List[str]:
+        if not duty_date or not duty_shift:
+            raise ValueError("自动交接班生成缺少日期或班次，无法检查人工生成状态")
+        remaining = []
+        for building in buildings:
+            if self._review_session_service.is_manual_regenerated_for_duty(
+                building=building, duty_date=duty_date, duty_shift=duty_shift,
+            ):
+                emit_log(f"[交接班调度] 本楼本班次已人工生成，跳过自动生成: building={building}, duty={duty_date}/{duty_shift}")
+            else:
+                remaining.append(building)
+        return remaining
+
     def run_from_existing_files(
         self,
         *,
@@ -1659,6 +1674,7 @@ class HandoverOrchestrator:
         duty_date: str | None = None,
         duty_shift: str | None = None,
         auto_send_review_link: bool = True,
+        skip_manual_generated: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         summary = RunSummary(mode="from_existing_files")
@@ -1685,6 +1701,22 @@ class HandoverOrchestrator:
             if str(item or "").strip()
         ]
         skipped_buildings = [building for building in configured if building not in selected_buildings]
+        if skip_manual_generated:
+            duty_date = str(duty_date or "").strip()
+            duty_shift = str(duty_shift or "").strip().lower()
+            if not duty_date or not duty_shift:
+                inferred_date, inferred_shift = self._infer_duty_by_now()
+                duty_date = duty_date or inferred_date
+                duty_shift = duty_shift or inferred_shift
+            selected_buildings = self._skip_manual_generated_buildings(
+                selected_buildings, duty_date=str(duty_date or "").strip(),
+                duty_shift=str(duty_shift or "").strip().lower(), emit_log=emit_log,
+            )
+            normalized_files = [(building, path) for building, path in normalized_files if building in selected_buildings]
+            skipped_buildings = [building for building in configured if building not in selected_buildings]
+            if not selected_buildings:
+                return {**summary.to_dict(), "status": "skipped", "reason": "manual_regenerated",
+                        "selected_buildings": [], "skipped_buildings": skipped_buildings}
         query_context = HandoverQueryContext(
             duty_date=str(duty_date or "").strip(),
             duty_shift=str(duty_shift or "").strip().lower(),
@@ -1873,11 +1905,25 @@ class HandoverOrchestrator:
         end_time: str | None = None,
         duty_date: str | None = None,
         duty_shift: str | None = None,
+        skip_manual_generated: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         summary = RunSummary(mode="from_download")
         duty_date_text = str(duty_date or "").strip()
         duty_shift_text = str(duty_shift or "").strip().lower()
+        if skip_manual_generated:
+            if not duty_date_text or not duty_shift_text:
+                inferred_date, inferred_shift = self._infer_duty_by_now()
+                duty_date_text = duty_date_text or inferred_date
+                duty_shift_text = duty_shift_text or inferred_shift
+                duty_date, duty_shift = duty_date_text, duty_shift_text
+            target_buildings = self._resolve_target_buildings(buildings)
+            buildings = self._skip_manual_generated_buildings(
+                target_buildings, duty_date=duty_date_text, duty_shift=duty_shift_text, emit_log=emit_log,
+            )
+            if not buildings:
+                return {**summary.to_dict(), "status": "skipped", "reason": "manual_regenerated",
+                        "selected_buildings": [], "skipped_buildings": target_buildings}
         switched_external = False
         cloud_batch_meta: Dict[str, Any] | None = None
 

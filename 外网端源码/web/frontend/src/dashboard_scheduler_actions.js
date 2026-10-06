@@ -688,6 +688,9 @@ export function createDashboardSchedulerActions(ctx) {
         markSchedulerToggle("system_screenshot_upload", "starting", true);
         try {
           const data = await startSystemScreenshotUploadSchedulerApi();
+          if (config.value?.system_screenshot_upload?.demand_poll) {
+            config.value.system_screenshot_upload.demand_poll.enabled = true;
+          }
           syncLocalSchedulerAutoStart(config.value?.system_screenshot_upload?.scheduler, true, { enableOnStart: true });
           applySchedulerSnapshot(health?.system_screenshot_upload?.scheduler, { ...data, enabled: true, running: true });
           markSchedulerToggle("system_screenshot_upload", "idle", true);
@@ -709,11 +712,14 @@ export function createDashboardSchedulerActions(ctx) {
         markSchedulerToggle("system_screenshot_upload", "stopping", false);
         try {
           const data = await stopSystemScreenshotUploadSchedulerApi();
+          if (config.value?.system_screenshot_upload?.demand_poll) {
+            config.value.system_screenshot_upload.demand_poll.enabled = false;
+          }
           syncLocalSchedulerAutoStart(config.value?.system_screenshot_upload?.scheduler, false);
           applySchedulerSnapshot(health?.system_screenshot_upload?.scheduler, { ...data, running: false });
           markSchedulerToggle("system_screenshot_upload", "idle", false);
           triggerDashboardRefresh("system_screenshot_upload_scheduler_stop");
-          message.value = `系统截图上传调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+          message.value = `系统截图自动上传和同步需求轮询已停止: ${formatSchedulerActionReason(data?.action?.reason)}`;
         } catch (err) {
           markSchedulerToggle("system_screenshot_upload", "idle", null);
           message.value = `停止系统截图上传调度失败: ${err}`;

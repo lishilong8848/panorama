@@ -1679,6 +1679,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         end_time=None,
                         duty_date=duty_date,
                         duty_shift=duty_shift,
+                        skip_manual_generated=True,
                         emit_log=emit_log,
                     )
 
@@ -1707,6 +1708,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     end_time=None,
                     duty_date=duty_date,
                     duty_shift=duty_shift,
+                    skip_manual_generated=True,
                     emit_log=emit_log,
                 )
                 failure_summary = orchestrator.build_handover_download_failure_summary(result)
@@ -2516,7 +2518,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 name=f"系统截图上传 {capture_date}",
                 worker_handler="system_screenshot_upload",
                 worker_payload={"capture_date": capture_date},
-                resource_keys=["network:external", f"system_screenshot_upload:{capture_date}"],
+                resource_keys=["system_screenshot_upload:global", f"system_screenshot_upload:{capture_date}"],
                 priority="scheduler",
                 feature="system_screenshot_upload",
                 dedupe_key=f"system_screenshot_upload:{capture_date}",

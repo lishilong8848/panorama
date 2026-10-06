@@ -85,6 +85,7 @@ class InternalDownloadBrowserPool:
         self._health_probe_task: asyncio.Task[Any] | None = None
         self._prelogin_tasks: set[asyncio.Task[Any]] = set()
         self._job_tasks: set[asyncio.Task[Any]] = set()
+        self._source_job_waiters: Dict[str, int] = {}
         self._health_probe_failures: Dict[str, int] = {}
         self._state_lock = threading.Lock()
         self._stopping = False
@@ -1307,14 +1308,17 @@ class InternalDownloadBrowserPool:
         future.set_exception(RuntimeError(str(error_text or "").strip() or "内网下载浏览器池未就绪"))
         return future
 
-    def _ensure_ready_for_submit(self) -> str:
+    def _ensure_ready_for_submit(self, *, timeout_sec: float | None = None) -> str:
         if self._stopping:
             return "内网下载浏览器池正在关闭"
         if self._thread is None and self._loop is None:
             return "内网下载浏览器池未启动"
         if self._ready_event.is_set():
             return ""
-        ready_result = self.wait_until_ready(timeout_sec=self.SUBMIT_READY_TIMEOUT_SEC, require_prelogin=False)
+        ready_result = self.wait_until_ready(
+            timeout_sec=self.SUBMIT_READY_TIMEOUT_SEC if timeout_sec is None else timeout_sec,
+            require_prelogin=False,
+        )
         if bool(ready_result.get("ready", False)):
             return ""
         return str(
@@ -1327,6 +1331,9 @@ class InternalDownloadBrowserPool:
     async def _building_job_lock(self, building: str, owner: str):
         task = asyncio.current_task()
         self._job_tasks.add(task)
+        is_screenshot = owner == "system_screenshot_capture"
+        if not is_screenshot:
+            self._source_job_waiters[building] = self._source_job_waiters.get(building, 0) + 1
         acquired = False
         try:
             deadline = time.monotonic() + self.BUILDING_RESOURCE_LOCK_TIMEOUT_SEC
@@ -1334,7 +1341,8 @@ class InternalDownloadBrowserPool:
                 if self._stopping:
                     raise asyncio.CancelledError()
                 # Nonblocking acquisition avoids a cancelled thread acquiring a lock later.
-                acquired = acquire_building_browser_lock(building, owner=owner, timeout_sec=0)
+                if not is_screenshot or not self._source_job_waiters.get(building, 0):
+                    acquired = acquire_building_browser_lock(building, owner=owner, timeout_sec=0)
                 if not acquired:
                     if time.monotonic() >= deadline:
                         raise RuntimeError(f"{building} 浏览器资源正在被其他任务占用，等待超时")
@@ -1344,24 +1352,33 @@ class InternalDownloadBrowserPool:
         finally:
             if acquired:
                 release_building_browser_lock(building)
+            if not is_screenshot:
+                count = self._source_job_waiters.get(building, 1) - 1
+                if count:
+                    self._source_job_waiters[building] = count
+                else:
+                    self._source_job_waiters.pop(building, None)
             self._job_tasks.discard(task)
 
     async def _run_building_job(
         self,
         building: str,
         runner: Callable[[Page], Awaitable[Any]],
+        *,
+        owner: str = "source_file_download",
     ) -> Any:
         if building not in self.BUILDINGS:
             raise ValueError(f"不支持的内网下载楼栋: {building}")
         lock = self._locks.get(building)
         if lock is None:
             raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
-        async with self._building_job_lock(building, "source_file_download"):
+        async with self._building_job_lock(building, owner):
             try:
                 self._mark_slot_recycle_pending_if_needed(building)
                 await self._recycle_slot_if_needed(building)
                 last_exc: Exception | None = None
-                for attempt in range(self.MAX_JOB_ATTEMPTS):
+                max_attempts = 1 if owner == "system_screenshot_capture" else self.MAX_JOB_ATTEMPTS
+                for attempt in range(max_attempts):
                     page = await self._ensure_page(building)
                     await self._fail_if_login_not_ready(building, page)
                     try:
@@ -1388,7 +1405,7 @@ class InternalDownloadBrowserPool:
                     self._update_slot(
                         building,
                         in_use=True,
-                        current_task="source_file_download",
+                        current_task=owner,
                         last_used_at=_now_text(),
                         last_result="running",
                         last_error="",
@@ -1442,6 +1459,9 @@ class InternalDownloadBrowserPool:
                         error_text = str(exc)
                         self._last_error = error_text
                         failure_kind = self._classify_failure_kind(error_text)
+                        if owner == "system_screenshot_capture" and failure_kind == "unknown":
+                            self._update_slot(building, last_result="failed", last_error=error_text)
+                            raise
                         if failure_kind == "unknown" and attempt < self.MAX_JOB_ATTEMPTS - 1:
                             self._update_slot(
                                 building,
@@ -1625,9 +1645,15 @@ class InternalDownloadBrowserPool:
         self,
         building: str,
         runner: Callable[[Page], Awaitable[Any]],
+        *,
+        owner: str = "source_file_download",
     ) -> concurrent.futures.Future[Any]:
-        not_ready_reason = self._ensure_ready_for_submit()
+        not_ready_reason = self._ensure_ready_for_submit(
+            timeout_sec=0 if owner == "system_screenshot_capture" else None
+        )
         if not_ready_reason:
+            if owner == "system_screenshot_capture":
+                return self._future_with_error(f"楼栋浏览器仍在初始化，截图延后: {not_ready_reason}")
             return self._future_with_error(f"内网下载浏览器池未就绪: {not_ready_reason}")
         loop = self._loop
         if not self.is_running() or loop is None:
@@ -1635,7 +1661,7 @@ class InternalDownloadBrowserPool:
         if self._locks.get(building) is None:
             return self._future_with_error(f"楼栋浏览器锁未初始化: {building}")
         return asyncio.run_coroutine_threadsafe(
-            self._run_building_job(building, runner),
+            self._run_building_job(building, runner, owner=owner),
             loop,
         )
 

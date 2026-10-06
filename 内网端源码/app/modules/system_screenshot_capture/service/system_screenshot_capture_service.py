@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
+from uuid import uuid4
 
 from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     SiteConfig,
@@ -319,6 +320,113 @@ def _save_state(path: Path, state: Dict[str, Any]) -> None:
     )
 
 
+def _save_capture_batch(path: Path, batch: Dict[str, Any]) -> None:
+    with _STATE_LOCK:
+        state = _load_state(path)
+        state["capture_batch"] = dict(batch)
+        _save_state(path, state)
+
+
+def _raise_if_capture_cancelled(args: argparse.Namespace) -> None:
+    event = getattr(args, "cancel_event", None)
+    if event is not None and event.is_set():
+        raise asyncio.CancelledError("系统截图采集已取消")
+
+
+def submit_system_screenshot_capture(
+    *,
+    container: Any,
+    config: Dict[str, Any],
+    capture_date: str | None = None,
+    capture_hour: str | None = None,
+    site_building: str | None = None,
+    force: bool = False,
+    wait: bool = False,
+    request_id: str = "",
+    emit_log: Callable[[str], None] | None = None,
+) -> Dict[str, Any]:
+    date_text = _capture_date(capture_date)
+    lock = container._system_screenshot_capture_run_lock
+    if not lock.acquire(blocking=False):
+        batch = dict(getattr(container, "_system_screenshot_capture_batch", {}) or {})
+        return {"ok": True, **batch, "status": "running", "message": "复用正在执行的截图批次"}
+    log = emit_log if callable(emit_log) else lambda _message: None
+    batch = {
+        "batch_id": uuid4().hex,
+        "capture_date": date_text,
+        "capture_hour": str(capture_hour or ""),
+        "site_building": str(site_building or ""),
+        "force": bool(force),
+        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "running",
+    }
+    cancel_event = threading.Event()
+    try:
+        state_path = _state_path(config)
+        previous = _load_state(state_path).get("capture_batch", {})
+    except BaseException:
+        lock.release()
+        raise
+    if (request_id and isinstance(previous, dict) and previous.get("request_id") == request_id
+            and previous.get("batch_id")
+            and previous.get("capture_date") == date_text
+            and previous.get("site_building", "") == str(site_building or "")
+            and previous.get("capture_hour", "") == str(capture_hour or "")):
+        batch["batch_id"] = previous["batch_id"]
+        batch["started_at"] = previous.get("started_at", batch["started_at"])
+    batch["request_id"] = request_id
+    container._system_screenshot_capture_batch = batch
+    container._system_screenshot_capture_cancel_event = cancel_event
+
+    def run() -> Dict[str, Any]:
+        try:
+            result = run_system_screenshot_capture(
+                config=config, capture_date=date_text, capture_hour=capture_hour,
+                site_building=site_building, force=force, emit_log=log,
+                batch_id=batch["batch_id"], cancel_event=cancel_event,
+            )
+            batch["status"] = result.get("status", "success")
+            log(f"[系统截图采集] 后台检查完成: date={date_text}, batch_id={batch['batch_id']}, status={batch['status']}")
+            return {"ok": True, **batch, **result}
+        except asyncio.CancelledError:
+            batch["status"] = "cancelled"
+            log(f"[系统截图采集] 批次已取消: batch_id={batch['batch_id']}")
+            return {"ok": True, **batch}
+        except Exception as exc:
+            batch.update(status="failed", error=str(exc))
+            log(f"[系统截图采集] 后台检查失败: date={date_text}, error={exc}")
+            if wait:
+                raise
+            return {"ok": False, **batch}
+        finally:
+            batch["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                _save_capture_batch(state_path, batch)
+            finally:
+                lock.release()
+
+    try:
+        _save_capture_batch(state_path, batch)
+        if wait:
+            return run()
+        thread = threading.Thread(target=run, name="system-screenshot-capture", daemon=True)
+        thread.start()
+    except BaseException:
+        if lock.locked() and "finished_at" not in batch:
+            lock.release()
+        raise
+    return {"ok": True, **batch, "status": "accepted", "accepted_at": batch["started_at"]}
+
+
+def cancel_system_screenshot_capture(container: Any, batch_id: str) -> Dict[str, Any]:
+    batch = dict(getattr(container, "_system_screenshot_capture_batch", {}) or {})
+    event = getattr(container, "_system_screenshot_capture_cancel_event", None)
+    if batch_id and batch.get("batch_id") == batch_id and batch.get("status") == "running" and event is not None:
+        event.set()
+        return {"ok": True, "status": "cancelling", "batch_id": batch_id}
+    return {"ok": True, "status": "skipped", "reason": "batch_not_active"}
+
+
 def _upsert_record(path: Path, record: Dict[str, Any]) -> None:
     with _STATE_LOCK:
         state = _load_state(path)
@@ -409,7 +517,9 @@ def list_system_screenshot_files(
             latest_by_target[key] = item
         elif item_exists and not previous_exists:
             latest_by_target[key] = item
-        elif item_exists == previous_exists and str(item.get("capture_hour", "") or "") >= str(previous.get("capture_hour", "") or ""):
+        elif item_exists == previous_exists and max(
+            str(item.get("captured_at", "") or ""), str(item.get("modified_at", "") or "")
+        ) >= max(str(previous.get("captured_at", "") or ""), str(previous.get("modified_at", "") or "")):
             latest_by_target[key] = item
     files = list(latest_by_target.values())
     files.sort(
@@ -423,6 +533,7 @@ def list_system_screenshot_files(
         "capture_date": date_text,
         "capture_hour": hour_text,
         "state_file": str(state_path),
+        "capture_batch": state.get("capture_batch", {}),
         "files": files,
     }
 
@@ -580,14 +691,22 @@ async def _capture_building_targets(
 ) -> list[Dict[str, Any]]:
     records: list[Dict[str, Any]] = []
     for target in building_targets:
+        _raise_if_capture_cancelled(args)
         # 每张图都重新回到主页，避免停留在上一张系统图后找不到下一个入口。
         await _goto_with_retries(page, site.target_url, args, site.building)
         await _ensure_main_page_loaded(page, site, args)
         prefix = f"{compact_date}{hour_text}" if hour_text else compact_date
         file_name = f"{prefix}--系统截图--{_safe_file_part(site.building)}--{_safe_file_part(target.label)}.png"
         file_path = output_dir / site.building / file_name
-        await _click_target_and_capture(page, target, file_path, args)
+        temp_path = file_path.with_name(f".{file_path.stem}.{getattr(args, 'batch_id', '')}.tmp.png")
+        try:
+            await _click_target_and_capture(page, target, temp_path, args)
+            _raise_if_capture_cancelled(args)
+            os.replace(temp_path, file_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
         record = {
+            "capture_batch_id": getattr(args, "batch_id", ""),
             "capture_date": _capture_date(args.capture_date),
             "capture_hour": hour_text,
             "target_key": target.key,
@@ -628,37 +747,42 @@ async def _capture_with_browser_pool(
     if browser_pool is None or not callable(submit) or (callable(is_running) and not bool(is_running())):
         raise RuntimeError("内网下载浏览器池未启动")
 
-    tasks: list[asyncio.Future[Any]] = []
-    buildings: list[str] = []
-    for building, building_targets in plan_by_building.items():
+    async def capture_building(building: str, building_targets: list[ScreenshotTarget]) -> list[Dict[str, Any]]:
         site = site_by_building[building]
+        records: list[Dict[str, Any]] = []
+        for target in building_targets:
+            _raise_if_capture_cancelled(args)
+            async def runner(page: Any, _target: ScreenshotTarget = target) -> list[Dict[str, Any]]:
+                return await asyncio.wait_for(
+                    _capture_building_targets(
+                        page=page, site=site, building_targets=[_target], args=args,
+                        state_path=state_path, download_root_path=download_root_path,
+                        output_dir=output_dir, compact_date=compact_date,
+                        hour_text=hour_text, emit_log=emit_log,
+                    ), timeout=120,
+                )
+            future = submit(building, runner, owner="system_screenshot_capture")
+            wrapped = asyncio.wrap_future(future)
+            try:
+                while not wrapped.done():
+                    _raise_if_capture_cancelled(args)
+                    await asyncio.wait({wrapped}, timeout=0.5)
+                records.extend(await wrapped)
+            except BaseException:
+                future.cancel()
+                raise
+        return records
 
-        async def _runner(
-            page: Any,
-            *,
-            _site: SiteConfig = site,
-            _targets: list[ScreenshotTarget] = list(building_targets),
-        ) -> list[Dict[str, Any]]:
-            return await _capture_building_targets(
-                page=page,
-                site=_site,
-                building_targets=_targets,
-                args=args,
-                state_path=state_path,
-                download_root_path=download_root_path,
-                output_dir=output_dir,
-                compact_date=compact_date,
-                hour_text=hour_text,
-                emit_log=emit_log,
-            )
-
-        future = submit(building, _runner)
-        tasks.append(asyncio.wrap_future(future))
-        buildings.append(building)
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    buildings = list(plan_by_building)
+    results = await asyncio.gather(
+        *(capture_building(building, plan_by_building[building]) for building in buildings),
+        return_exceptions=True,
+    )
     captured: list[Dict[str, Any]] = []
     errors: list[str] = []
     for building, result in zip(buildings, results):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
         if isinstance(result, Exception):
             errors.append(f"{building}: {result}")
             continue
@@ -755,6 +879,7 @@ async def _capture_with_dedicated_browsers(
 
 
 async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+    _raise_if_capture_cancelled(args)
     date_text = _capture_date(args.capture_date)
     raw_hour = str(getattr(args, "capture_hour", "") or "").strip()
     hour_text = _capture_hour(raw_hour) if raw_hour else ""
@@ -786,10 +911,17 @@ async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_l
         state_file=str(state_path),
     )
     ready_keys = _ready_keys_from_listing(listing)
+    batch_ready_keys = {
+        (item.get("site_building"), item.get("target_key"))
+        for item in listing.get("files", [])
+        if item.get("file_exists") is True and item.get("capture_batch_id") == getattr(args, "batch_id", "")
+    }
     capture_plan: list[tuple[SiteConfig, ScreenshotTarget]] = []
     for site in sites:
         for target in targets:
-            if bool(args.force) or (site.building, target.key) not in ready_keys:
+            if (site.building, target.key) not in ready_keys or (
+                bool(args.force) and (site.building, target.key) not in batch_ready_keys
+            ):
                 capture_plan.append((site, target))
     total_expected = len(sites) * len(targets)
     if not capture_plan:
@@ -819,35 +951,13 @@ async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_l
 
     captured: list[Dict[str, Any]]
     if bool(args.use_browser_pool):
-        try:
-            emit_log("[系统截图采集] 优先复用内网下载浏览器池，按楼栋并发截图")
-            captured = await _capture_with_browser_pool(
-                plan_by_building=plan_by_building,
-                site_by_building=site_by_building,
-                args=args,
-                state_path=state_path,
-                download_root_path=download_root_path,
-                output_dir=output_dir,
-                compact_date=compact,
-                hour_text=hour_text,
-                emit_log=emit_log,
-            )
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc)
-            if not any(token in message for token in ("内网下载浏览器池未启动", "内网下载浏览器池未就绪")):
-                raise
-            emit_log(f"[系统截图采集] 下载浏览器池不可用，改用独立浏览器兜底: {message}")
-            captured = await _capture_with_dedicated_browsers(
-                plan_by_building=plan_by_building,
-                site_by_building=site_by_building,
-                args=args,
-                state_path=state_path,
-                download_root_path=download_root_path,
-                output_dir=output_dir,
-                compact_date=compact,
-                hour_text=hour_text,
-                emit_log=emit_log,
-            )
+        emit_log("[系统截图采集] 复用内网下载浏览器池，逐张排队；源文件下载优先")
+        captured = await _capture_with_browser_pool(
+            plan_by_building=plan_by_building, site_by_building=site_by_building,
+            args=args, state_path=state_path, download_root_path=download_root_path,
+            output_dir=output_dir, compact_date=compact, hour_text=hour_text,
+            emit_log=emit_log,
+        )
     else:
         captured = await _capture_with_dedicated_browsers(
             plan_by_building=plan_by_building,
@@ -861,6 +971,7 @@ async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_l
             emit_log=emit_log,
         )
 
+    _raise_if_capture_cancelled(args)
     final_listing = list_system_screenshot_files(
         config=config,
         capture_date=date_text,
@@ -868,6 +979,12 @@ async def _capture_once(config: Dict[str, Any], args: argparse.Namespace, emit_l
         state_file=str(state_path),
     )
     final_ready_keys = _ready_keys_from_listing(final_listing)
+    if bool(args.force) and getattr(args, "batch_id", ""):
+        final_ready_keys = {
+            (item.get("site_building"), item.get("target_key"))
+            for item in final_listing.get("files", [])
+            if item.get("file_exists") is True and item.get("capture_batch_id") == args.batch_id
+        }
     missing_after = _missing_labels(final_ready_keys)
     if missing_after:
         raise RuntimeError(
@@ -942,6 +1059,8 @@ async def run_system_screenshot_capture_async(
     headless: bool | None = None,
     force: bool = False,
     emit_log: Callable[[str], None] | None = None,
+    batch_id: str = "",
+    cancel_event: threading.Event | None = None,
 ) -> Dict[str, Any]:
     log = emit_log if callable(emit_log) else (lambda text: print(text, flush=True))
     args = _build_args(
@@ -954,6 +1073,8 @@ async def run_system_screenshot_capture_async(
         headless=headless,
         force=force,
     )
+    args.batch_id = batch_id
+    args.cancel_event = cancel_event
     return await _capture_once(config, args, log)
 
 
@@ -968,6 +1089,8 @@ def run_system_screenshot_capture(
     headless: bool | None = None,
     force: bool = False,
     emit_log: Callable[[str], None] | None = None,
+    batch_id: str = "",
+    cancel_event: threading.Event | None = None,
 ) -> Dict[str, Any]:
     return asyncio.run(
         run_system_screenshot_capture_async(
@@ -980,5 +1103,7 @@ def run_system_screenshot_capture(
             headless=headless,
             force=force,
             emit_log=emit_log,
+            batch_id=batch_id,
+            cancel_event=cancel_event,
         )
     )

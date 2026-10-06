@@ -217,6 +217,7 @@ class OrchestratorService:
         duty_date: str | None,
         duty_shift: str | None,
         auto_send_review_link: bool = True,
+        skip_manual_generated: bool = False,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
         selected_buildings = [str(building or "").strip() for building, _ in building_files if str(building or "").strip()]
@@ -239,6 +240,7 @@ class OrchestratorService:
             duty_date=duty_date,
             duty_shift=duty_shift,
             auto_send_review_link=bool(auto_send_review_link),
+            skip_manual_generated=bool(skip_manual_generated),
             emit_log=emit_log,
         )
         emit_log(
@@ -257,6 +259,7 @@ class OrchestratorService:
         end_time: str | None,
         duty_date: str | None,
         duty_shift: str | None,
+        skip_manual_generated: bool = False,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
         show_buildings = ",".join(buildings or []) or "按交接班配置启用楼栋"
@@ -270,6 +273,7 @@ class OrchestratorService:
             end_time=end_time,
             duty_date=duty_date,
             duty_shift=duty_shift,
+            skip_manual_generated=bool(skip_manual_generated),
             emit_log=emit_log,
         )
         emit_log(

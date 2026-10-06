@@ -26,6 +26,7 @@ class FakeJobService:
     def __init__(self, active=False):
         self.active = active
         self.started = []
+        self.snapshots = {}
 
     def has_active_jobs_for_feature_prefixes(self, prefixes):  # noqa: ANN001
         self.prefixes = prefixes
@@ -33,11 +34,17 @@ class FakeJobService:
 
     def start_worker_job(self, **kwargs):  # noqa: ANN001
         self.started.append(kwargs)
-        return SimpleNamespace(job_id="job-1")
+        job_id = f"job-{len(self.started)}"
+        self.snapshots[job_id] = {"status": "running"}
+        return SimpleNamespace(job_id=job_id)
+
+    def get_job(self, job_id):
+        return self.snapshots[job_id]
 
 
-def _config():
+def _config(state_root=".runtime"):
     return {
+        "paths": {"runtime_state_root": str(state_root)},
         "system_screenshot_upload": {
             "demand_poll": {
                 "enabled": True,
@@ -51,11 +58,11 @@ def _config():
     }
 
 
-def test_poll_does_not_submit_when_request_unchecked():
+def test_poll_does_not_submit_when_request_unchecked(tmp_path):
     client = FakeBitableClient([{"record_id": "rec-1", "fields": {"同步需求": False}}])
     jobs = FakeJobService()
     poller = SystemScreenshotDemandPoller(
-        runtime_config_getter=_config,
+        runtime_config_getter=lambda: _config(tmp_path),
         job_service=jobs,
         role_mode_getter=lambda: "external",
         client_factory=lambda _app_token, _table_id: client,
@@ -67,7 +74,7 @@ def test_poll_does_not_submit_when_request_unchecked():
     assert jobs.started == []
 
 
-def test_poll_submits_one_demand_upload_job_when_request_checked():
+def test_poll_submits_one_demand_upload_job_when_request_checked(tmp_path):
     client = FakeBitableClient(
         [
             {"record_id": "rec-1", "fields": {"同步需求": True}},
@@ -76,7 +83,7 @@ def test_poll_submits_one_demand_upload_job_when_request_checked():
     )
     jobs = FakeJobService()
     poller = SystemScreenshotDemandPoller(
-        runtime_config_getter=_config,
+        runtime_config_getter=lambda: _config(tmp_path),
         job_service=jobs,
         role_mode_getter=lambda: "external",
         client_factory=lambda _app_token, _table_id: client,
@@ -90,7 +97,7 @@ def test_poll_submits_one_demand_upload_job_when_request_checked():
     assert job["worker_handler"] == "system_screenshot_demand_upload"
     assert job["feature"] == "system_screenshot_upload"
     assert job["resource_keys"] == [
-        "network:external",
+        "system_screenshot_upload:global",
         f"system_screenshot_upload:{job['worker_payload']['capture_date']}",
     ]
     assert job["worker_payload"]["demand_record_id"] == "rec-1"
@@ -98,11 +105,11 @@ def test_poll_submits_one_demand_upload_job_when_request_checked():
     assert job["worker_payload"]["internal_capture_force"] is True
 
 
-def test_poll_skips_when_system_screenshot_job_is_active():
+def test_poll_skips_when_system_screenshot_job_is_active(tmp_path):
     client = FakeBitableClient([{"record_id": "rec-1", "fields": {"同步需求": True}}])
     jobs = FakeJobService(active=True)
     poller = SystemScreenshotDemandPoller(
-        runtime_config_getter=_config,
+        runtime_config_getter=lambda: _config(tmp_path),
         job_service=jobs,
         role_mode_getter=lambda: "external",
         client_factory=lambda _app_token, _table_id: client,
@@ -130,3 +137,72 @@ def test_mark_demand_record_completed_unchecks_request_and_marks_completed():
     )
 
     assert client.updated == [("demand-table", "rec-1", {"同步需求": False, "上传完成": True})]
+
+
+def test_cancelled_demand_is_not_resubmitted_even_after_restart(tmp_path):
+    client = FakeBitableClient([{"record_id": "rec-1", "fields": {"同步需求": True}}])
+    jobs = FakeJobService()
+    def make_poller():
+        return SystemScreenshotDemandPoller(
+            runtime_config_getter=lambda: _config(tmp_path), job_service=jobs,
+            client_factory=lambda *_: client, role_mode_getter=lambda: "external",
+        )
+    poller = make_poller()
+    assert poller.poll_once()["submitted"]
+    request_id = jobs.started[0]["worker_payload"]["capture_request_id"]
+    jobs.snapshots["job-1"] = {"status": "cancelled", "cancel_requested": True}
+    poller = make_poller()
+    assert not poller.poll_once()["submitted"]
+    assert len(jobs.started) == 1
+    client.records[0]["fields"]["同步需求"] = False
+    poller.poll_once()
+    client.records[0]["fields"]["同步需求"] = True
+    assert poller.poll_once()["submitted"]
+    assert jobs.started[-1]["worker_payload"]["capture_request_id"] != request_id
+
+
+def test_failed_demand_cools_down_and_reuses_capture_request(tmp_path, monkeypatch):
+    from app.modules.system_screenshot_upload.service import system_screenshot_demand_poller as module
+    current_time = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: current_time[0])
+    client = FakeBitableClient([{"record_id": "rec-1", "fields": {"同步需求": True}}])
+    jobs = FakeJobService()
+    poller = SystemScreenshotDemandPoller(
+        runtime_config_getter=lambda: _config(tmp_path), job_service=jobs,
+        client_factory=lambda *_: client, role_mode_getter=lambda: "external",
+    )
+    poller.poll_once()
+    jobs.snapshots["job-1"] = {"status": "failed"}
+    assert not poller.poll_once()["submitted"]
+    current_time[0] += 301
+    assert poller.poll_once()["submitted"]
+    assert jobs.started[0]["worker_payload"]["capture_request_id"] == jobs.started[1]["worker_payload"]["capture_request_id"]
+
+
+def test_stop_during_feishu_read_prevents_submission(tmp_path):
+    client = FakeBitableClient([{"record_id": "rec-1", "fields": {"同步需求": True}}])
+    jobs = FakeJobService()
+    poller = SystemScreenshotDemandPoller(
+        runtime_config_getter=lambda: _config(tmp_path), job_service=jobs,
+        client_factory=lambda *_: client, role_mode_getter=lambda: "external",
+    )
+    def read(**kwargs):
+        poller.stop()
+        return client.records
+    client.list_records = read
+    assert poller.poll_once()["reason"] == "stopped"
+    assert not jobs.started
+
+
+def test_previously_stopped_daily_scheduler_also_disables_demand_poll(tmp_path):
+    config = _config(tmp_path)
+    config["system_screenshot_upload"]["scheduler"] = {"auto_start_in_gui": False}
+    client = FakeBitableClient([{"record_id": "rec-1", "fields": {"同步需求": True}}])
+    jobs = FakeJobService()
+    poller = SystemScreenshotDemandPoller(
+        runtime_config_getter=lambda: config, job_service=jobs,
+        client_factory=lambda *_: client, role_mode_getter=lambda: "external",
+    )
+    assert poller.poll_once()["reason"] == "disabled"
+    assert not jobs.started
+    assert not hasattr(client, "list_kwargs")
