@@ -397,6 +397,7 @@ class HandoverCloudSheetSyncService:
         batch_meta: Dict[str, Any],
         cell_values: Dict[str, Any],
         duty_focus_image_path: str | Path | None = None,
+        skip_values: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         sync_cfg = self._sync_cfg()
@@ -449,6 +450,7 @@ class HandoverCloudSheetSyncService:
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[交接班][H楼云表] 预取 sheet 列表失败，将继续独立写入: {exc}")
 
+        applied: Dict[str, Any] | None = None
         try:
             emit_log(
                 f"[交接班][H楼云表] 开始 batch={normalized_batch.get('batch_key', '-')}, "
@@ -483,6 +485,7 @@ class HandoverCloudSheetSyncService:
                 emit_log=emit_log,
                 sheet_cache=sheet_cache,
                 timings=timings,
+                skip_values=skip_values,
             )
             self._add_elapsed_ms(timings, "snapshot_ms", snapshot_started)
             image_synced = False
@@ -534,6 +537,7 @@ class HandoverCloudSheetSyncService:
             )
             return {
                 "status": "success",
+                "h_values_status": "success",
                 "sheet_title": sheet_title,
                 "spreadsheet_token": spreadsheet_token,
                 "spreadsheet_url": spreadsheet_url,
@@ -556,7 +560,9 @@ class HandoverCloudSheetSyncService:
                 f"elapsed_ms={elapsed_ms}, error={exc}"
             )
             return {
-                "status": "failed",
+                "status": "partial_failed" if applied is not None else "failed",
+                "h_values_status": "success" if applied is not None else "failed",
+                "duty_focus_image_status": "failed" if applied is not None else "skipped",
                 "sheet_title": sheet_title,
                 "spreadsheet_token": spreadsheet_token,
                 "spreadsheet_url": spreadsheet_url,
@@ -1500,6 +1506,7 @@ class HandoverCloudSheetSyncService:
         emit_log: Callable[[str], None],
         sheet_cache: Dict[str, List[Dict[str, Any]]] | None = None,
         timings: Dict[str, int] | None = None,
+        skip_values: bool = False,
     ) -> Dict[str, Any]:
         ensure_started = time.perf_counter()
         target_sheet = client.dedupe_named_sheets(
@@ -1527,6 +1534,19 @@ class HandoverCloudSheetSyncService:
         existing_merges = self._normalize_merge_ranges(target_sheet.get("merges", []))
         if not existing_merges:
             raise RuntimeError("H楼目标 sheet 未检测到模板合并结构，已停止写入以避免生成无格式页面")
+
+        applied = {
+            "sheet_id": target_sheet_id,
+            "sheet_title": sheet_title,
+            "synced_row_count": target_rows,
+            "synced_column_count": target_columns,
+            "synced_merges": existing_merges,
+            "dynamic_merge_signature": self._build_dynamic_merge_signature(existing_merges),
+            "rebuild_mode": "image_only_preserve_layout" if skip_values else "values_only_preserve_layout",
+        }
+        if skip_values:
+            emit_log(f"[交接班][H楼云表] 本班次正文已同步，仅补传值班关注点图片 sheet={sheet_title}")
+            return applied
 
         payload = {
             str(coordinate or "").strip().upper(): value
@@ -1573,13 +1593,7 @@ class HandoverCloudSheetSyncService:
             f"rows={target_rows}, cols={target_columns}, merges={len(existing_merges)}"
         )
         return {
-            "sheet_id": target_sheet_id,
-            "sheet_title": sheet_title,
-            "synced_row_count": target_rows,
-            "synced_column_count": target_columns,
-            "synced_merges": existing_merges,
-            "dynamic_merge_signature": self._build_dynamic_merge_signature(existing_merges),
-            "rebuild_mode": "values_only_preserve_layout",
+            **applied,
             "style_repair": "template_h_column",
             "synced_style_range_count": len(qualified_style_ranges),
         }

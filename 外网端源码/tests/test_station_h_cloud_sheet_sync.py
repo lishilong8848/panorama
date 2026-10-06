@@ -233,6 +233,52 @@ def test_station_h_sync_rejects_image_when_j2_is_not_merge_anchor(tmp_path):
         emit_log=lambda _message: None,
     )
 
-    assert result["status"] == "failed"
+    assert result["status"] == "partial_failed"
+    assert result["h_values_status"] == "success"
     assert "J2 不是合并区域左上角" in result["error"]
     assert client.image_writes == []
+
+
+def test_station_h_image_only_retry_does_not_rewrite_values_or_styles(tmp_path):
+    target_sheet = {
+        "sheet_id": "h_sheet", "title": "H楼", "row_count": 200, "column_count": 20,
+        "merges": [{"start_row_index": 1, "end_row_index": 20, "start_column_index": 9, "end_column_index": 16}],
+    }
+    client = _FakeSheetsClient(target_sheet)
+    service = _service_with_client(tmp_path, client)
+    image_path = tmp_path / "focus.png"
+    image_path.write_bytes(b"image")
+    result = service.sync_station_h_sheet(
+        batch_meta={"batch_key": "2026-10-06|day", "spreadsheet_token": "sheet_token"},
+        cell_values={"B2": "must-not-overwrite"}, duty_focus_image_path=image_path,
+        skip_values=True, emit_log=lambda _: None,
+    )
+    assert result["status"] == "success"
+    assert result["rebuild_mode"] == "image_only_preserve_layout"
+    assert client.value_batches == []
+    assert client.style_batches == []
+    assert len(client.image_writes) == 1
+
+
+def test_station_h_image_upload_error_preserves_body_success(tmp_path):
+    class FailingImageClient(_FakeSheetsClient):
+        def write_cell_image(self, *_args, **_kwargs):
+            raise TimeoutError("image timeout")
+
+    client = FailingImageClient({
+        "sheet_id": "h_sheet", "title": "H楼", "row_count": 200, "column_count": 20,
+        "merges": [{"start_row_index": 1, "end_row_index": 20, "start_column_index": 9, "end_column_index": 16}],
+    })
+    service = _service_with_client(tmp_path, client)
+    image_path = tmp_path / "focus.png"
+    image_path.write_bytes(b"image")
+    result = service.sync_station_h_sheet(
+        batch_meta={"batch_key": "2026-10-06|day", "spreadsheet_token": "sheet_token"},
+        cell_values={"B2": "2026-10-06"}, duty_focus_image_path=image_path, emit_log=lambda _: None,
+    )
+    assert result["status"] == "partial_failed"
+    assert result["h_values_status"] == "success"
+    assert result["duty_focus_image_status"] == "failed"
+    assert result["error"] == "image timeout"
+    assert len(client.value_batches) == 1
+    assert len(client.style_batches) == 1
