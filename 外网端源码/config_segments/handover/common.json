@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 13,
-  "updated_at": "2026-06-12T19:06:44+08:00",
+  "revision": 16,
+  "updated_at": "2026-10-03T09:32:20+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
@@ -363,6 +363,42 @@
         "run_time": "01:00:00",
         "check_interval_sec": 30,
         "state_file": "monthly_change_report_scheduler_state.json"
+      }
+    },
+    "top5_power_report": {
+      "scheduler": {
+        "enabled": true,
+        "auto_start_in_gui": true,
+        "day_of_month": 3,
+        "run_time": "08:30:00",
+        "check_interval_sec": 30,
+        "catch_up_if_missed": false,
+        "retry_failed_on_next_tick": true,
+        "state_file": "top5_power_report_scheduler_state.json"
+      },
+      "notification": {
+        "enabled": true,
+        "chat_id": "oc_3bc648b9b761f24a65366a9b04b32eb2",
+        "receive_id_type": "chat_id",
+        "table_url": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblkh6YCMYtS8nHa"
+      },
+      "monthly_power_alert_report": {
+        "enabled": true,
+        "file_name_pattern": "EA118机柜超功耗告警统计{month}月份_{timestamp}.xlsx",
+        "output_dir": "D:\\QLDownload\\月度超功率统计表"
+      },
+      "over_power_attachment": {
+        "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
+        "enabled": true,
+        "output_dir": "D:\\QLDownload\\月度超功率附件",
+        "table_id": "tblkh6YCMYtS8nHa",
+        "view_id": "vewrHJHl3v",
+        "zip_file_name_pattern": "月度超功率附件_{year}{month}_{timestamp}.zip"
+      },
+      "template": {
+        "file_name_pattern": "TOP5功率文件_{timestamp}.xlsx",
+        "output_dir": "D:\\QLDownload\\TOP5功率文件",
+        "source_path": ""
       }
     },
     "change_management_section": {
@@ -1499,35 +1535,6 @@
       ],
       "building_rows": {}
     },
-    "sites": [],
-    "top5_power_report": {
-      "over_power_attachment": {
-        "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
-        "enabled": true,
-        "output_dir": "D:\\QLDownload\\月度超功率附件",
-        "table_id": "tblkh6YCMYtS8nHa",
-        "view_id": "vewrHJHl3v",
-        "zip_file_name_pattern": "月度超功率附件_{year}{month}_{timestamp}.zip"
-      },
-      "template": {
-        "file_name_pattern": "TOP5功率文件_{timestamp}.xlsx",
-        "output_dir": "D:\\QLDownload\\TOP5功率文件",
-        "source_path": ""
-      },
-      "scheduler": {
-        "enabled": true,
-        "auto_start_in_gui": false,
-        "day_of_month": 3,
-        "run_time": "03:00:00",
-        "check_interval_sec": 30,
-        "retry_failed_on_next_tick": true,
-        "state_file": "top5_power_report_scheduler_state.json"
-      },
-      "monthly_power_alert_report": {
-        "enabled": true,
-        "output_dir": "D:\\QLDownload\\月度超功率统计表",
-        "file_name_pattern": "EA118机柜超功耗告警统计{month}月份_{timestamp}.xlsx"
-      }
-    }
+    "sites": []
   }
 }
