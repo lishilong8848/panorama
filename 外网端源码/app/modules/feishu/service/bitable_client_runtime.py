@@ -102,7 +102,7 @@ class FeishuBitableClient:
     @staticmethod
     def _is_retryable_api_error(body: Dict[str, Any]) -> bool:
         code_text = str(body.get("code", "")).strip()
-        if code_text in {"90217", "1254002", "1254290", "1254607", "1255001", "1255002"}:
+        if code_text in {"90217", "1254002", "1254290", "1254291", "1254607", "1255001", "1255002"}:
             return True
         msg = str(body.get("msg", "")).lower()
         return (
@@ -116,9 +116,8 @@ class FeishuBitableClient:
         )
 
     def _api_retry_attempts(self) -> int:
-        # Feishu Bitable occasionally returns HTTP 400 with code 1254607
-        # ("Data not ready") for freshly-updated or busy tables. The default
-        # retry count is tuned for network glitches and is too short for this.
+        # Busy tables may return 1254607 (data not ready) or 1254291 (write
+        # conflict); network retry limits are too short for both.
         return max(self.request_retry_count + 1, 10)
 
     @staticmethod
@@ -132,7 +131,7 @@ class FeishuBitableClient:
         if self.request_retry_interval_sec <= 0:
             return
         code_text = str((body or {}).get("code", "")).strip()
-        if code_text == "1254607":
+        if code_text in {"1254607", "1254291"}:
             delay = min(12.0, max(2.0, self.request_retry_interval_sec) * max(1, attempt))
         elif code_text == "1254002":
             delay = min(30.0, max(5.0, self.request_retry_interval_sec * 5) * max(1, attempt))
