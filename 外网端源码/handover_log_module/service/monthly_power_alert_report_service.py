@@ -25,10 +25,10 @@ from pipeline_utils import get_app_dir
 _DEFAULT_APP_TOKEN = "ASLxbfESPahdTKs0A9NccgbrnXc"
 _DATA_CENTER_NAME = "EA118"
 _TABLE_DEFAULTS = {
-    "branch": {"table_id": "tblvyOhLPCIH52gB", "view_id": "vewcScal5R", "name": "单支路超6.25KW功率"},
-    "cabinet": {"table_id": "tbloY4JDihNu0aJ7", "view_id": "vewjNHFVZK", "name": "机柜超18KW统计"},
-    "line_head": {"table_id": "tblqxn3BajmZHxb6", "view_id": "vew07sLZm1", "name": "列头柜超107.5功率统计"},
-    "row_line": {"table_id": "tblCcFzmKKz50tYT", "view_id": "vewQialYnD", "name": "机列超215KW功率统计"},
+    "branch": {"table_id": "tblvyOhLPCIH52gB", "view_id": "vewjUPAvZP", "name": "单支路超6.25KW功率"},
+    "cabinet": {"table_id": "tbloY4JDihNu0aJ7", "view_id": "vewnybKvrN", "name": "机柜超18KW统计"},
+    "line_head": {"table_id": "tblqxn3BajmZHxb6", "view_id": "vewkVrqxiG", "name": "列头柜超107.5功率统计"},
+    "row_line": {"table_id": "tblCcFzmKKz50tYT", "view_id": "vew3F3KIqS", "name": "机列超215KW功率统计"},
 }
 _BUILDING_ORDER = {"A": 1, "B": 2, "C": 3, "D": 4, "E": 5}
 _TITLE_FILL = PatternFill("solid", fgColor="FFFFFF00")
@@ -261,7 +261,8 @@ class MonthlyPowerAlertReportService:
         cfg["output_dir"] = str(cfg.get("output_dir", "") or "").strip() or self._defaults()["output_dir"]
         cfg["file_name_pattern"] = str(cfg.get("file_name_pattern", "") or "").strip() or self._defaults()["file_name_pattern"]
         cfg["page_size"] = max(1, min(500, int(cfg.get("page_size", 500) or 500)))
-        cfg["max_records"] = max(0, int(cfg.get("max_records", 0) or 0))
+        # Monthly totals must not be truncated by legacy record limits.
+        cfg["max_records"] = 0
         return cfg
 
     def _power_cfg(self) -> Dict[str, Any]:
@@ -352,13 +353,14 @@ class MonthlyPowerAlertReportService:
         table_id = str(table_cfg.get("table_id", "") or "").strip()
         if not table_id:
             raise RuntimeError(f"月度超功率统计表配置缺少 table_id: {table_cfg.get('name') or '-'}")
+        view_id = str(table_cfg.get("view_id", "") or "").strip()
         records = client.list_records(
             table_id=table_id,
-            view_id=str(table_cfg.get("view_id", "") or "").strip(),
+            view_id=view_id,
             page_size=int(report_cfg.get("page_size", 500) or 500),
-            max_records=int(report_cfg.get("max_records", 0) or 0),
+            max_records=0,
         )
-        emit_log(f"[月度超功率统计表] 多维读取完成: table={table_cfg.get('name') or table_id}, records={len(records)}")
+        emit_log(f"[月度超功率统计表] 多维读取完成: table={table_cfg.get('name') or table_id}, view={view_id or '-'}, records={len(records)}")
         return records
 
     @staticmethod
