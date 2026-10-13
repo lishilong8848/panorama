@@ -741,6 +741,7 @@ _CAPACITY_TEMPLATE_IDENTIFIER_PATTERNS = {
     "ups": re.compile(r"^[A-E]-\d{3}-UPS-\d{3}$", flags=re.IGNORECASE),
     "hvdc": re.compile(r"^[A-E]-\d{3}-HVDC-\d{3}$", flags=re.IGNORECASE),
     "rpp": re.compile(r"^[A-E]-\d{3}-RPP-(?:AC|DC)-\d+$", flags=re.IGNORECASE),
+    "a_line_head": re.compile(r"^A-(?:203|303|403)-[A-Z]列-DC\d+$", flags=re.IGNORECASE),
 }
 
 
@@ -813,6 +814,7 @@ def build_capacity_template_snapshot(sheet: Worksheet, building: str) -> Dict[st
         "ups_entries": _collect_merged_anchor_rows("I", 67, scan_end_row, kind="ups"),
         "hvdc_entries": _collect("O", 67, scan_end_row, kind="hvdc"),
         "rpp_entries": _collect("S", 67, scan_end_row, kind="rpp"),
+        "a_line_head_entries": _collect("B", 159, scan_end_row, kind="a_line_head") if building_code == "A" else [],
     }
 
 

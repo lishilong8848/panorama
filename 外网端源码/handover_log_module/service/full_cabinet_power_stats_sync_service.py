@@ -48,7 +48,6 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
     HEADER_SCAN_ROWS = 4
     HOURS = list(range(24))
     E_BUILDING_LINE_HEAD_THRESHOLD = 117.5
-    E_BUILDING_ROW_LINE_THRESHOLD = 235.0
 
     def _iter_target_tables(self, cfg: Dict[str, Any]) -> tuple[List[_PowerAlertTable], List[str]]:
         target_tables, missing = self._resolve_target_tables(cfg)
@@ -294,10 +293,6 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
     @classmethod
     def _line_head_threshold(cls, building: str, default_threshold: float) -> float:
         return cls.E_BUILDING_LINE_HEAD_THRESHOLD if str(building or "").strip() == "E楼" else default_threshold
-
-    @classmethod
-    def _row_line_threshold(cls, building: str, default_threshold: float) -> float:
-        return cls.E_BUILDING_ROW_LINE_THRESHOLD if str(building or "").strip() == "E楼" else default_threshold
 
     def _needs_previous_state(
         self,

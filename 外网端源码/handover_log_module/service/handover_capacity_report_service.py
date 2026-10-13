@@ -247,10 +247,12 @@ _COOLING_TANK_LEVEL_ALIASES = ["蓄冷罐液位", "蓄冷罐水位", "蓄冷罐�
 _COOLING_SECONDARY_PUMP_ALIASES = ["冷冻水二次泵变频反馈", "二次冷冻泵频率反馈", "二次泵频率反馈", "冷冻水二次泵频率反馈"]
 _LEGACY_CAPACITY_TEMPLATE_NAME = "交接班容量报表空模板.xlsx"
 _CAPACITY_TEMPLATE_BY_FAMILY = {
+    "a_building": "A楼交接班容量报表空模板.xlsx",
     "other_buildings": "其他楼交接班容量报表空模板.xlsx",
     "e_building": "E楼交接班容量报表空模板.xlsx",
 }
 _CAPACITY_TEMPLATE_FAMILY_BY_FILENAME = {
+    "A楼交接班容量报表空模板.xlsx": "a_building",
     "其他楼交接班容量报表空模板.xlsx": "other_buildings",
     "E楼交接班容量报表空模板.xlsx": "e_building",
 }
@@ -544,7 +546,7 @@ class HandoverCapacityReportService:
 
     @staticmethod
     def _default_template_family_for_building(building: str) -> str:
-        return "e_building" if _text(building) == "E楼" else "other_buildings"
+        return {"A楼": "a_building", "E楼": "e_building"}.get(_text(building), "other_buildings")
 
     def resolve_template_selection(self, *, building: str) -> Dict[str, Any]:
         source_path = _text(self._template_cfg().get("source_path"))

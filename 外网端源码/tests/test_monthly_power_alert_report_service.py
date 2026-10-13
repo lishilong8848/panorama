@@ -31,6 +31,38 @@ def _record(fields):
 
 
 class MonthlyPowerAlertReportServiceTest(unittest.TestCase):
+    def test_report_excludes_e_daily_records_below_235_from_main_and_appendix(self):
+        records = [
+            _record({"数据时间": "2026/10/1", "楼栋": "E楼", "房间": "E-202.EA118", "机列": "A列", "功率": "234.999KW", "次数": 5, "时长": "24h"}),
+            _record({"数据时间": "2026/10/2", "楼栋": "E楼", "房间": "E-202.EA118", "机列": "A列", "功率": "235KW", "次数": 1, "时长": "2h"}),
+            _record({"数据时间": "2026/10/1", "楼栋": "E楼", "房间": "E-303.EA118", "机列": "B列", "功率": 220, "次数": 1, "时长": "24h"}),
+            _record({"数据时间": "2026/10/1", "楼栋": "E楼", "房间": "E-403.EA118", "机列": "C列", "功率": float("nan")}),
+            _record({"数据时间": "2026/10/1", "楼栋": "A楼", "房间": "A-202.EA118", "机列": "A列", "功率": "215KW", "次数": 1, "时长": "1h"}),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = MonthlyPowerAlertReportService({"handover_log": {"top5_power_report": {"monthly_power_alert_report": {"output_dir": tmpdir}}}})
+            tables = service._power_cfg()["tables"]
+            client = _FakeBitableClient({tables["row_line"]["table_id"]: records})
+            service._client = lambda _power_cfg, _emit_log: client
+            result = service.run(year="2026", month=10, emit_log=lambda _text: None)
+            self.assertEqual(2, result["row_counts"]["row_line"])
+            items = service._aggregate_row_line(records, year="2026", month=10)
+            e_item = next(item for item in items if item.building == "E")
+            self.assertEqual({"2026-10-02"}, set(e_item.daily))
+            self.assertEqual(235, e_item.max_value)
+            self.assertEqual(2, e_item.duration_hours)
+            workbook = openpyxl.load_workbook(result["output_file"], data_only=True)
+            try:
+                main = workbook["机列超215功率统计"]
+                self.assertEqual(["A", "E"], [main[f"D{row}"].value for row in (3, 4)])
+                self.assertEqual("235kw", main["G4"].value)
+                for sheet_name in ("机列超215功率统计", "机列超功率附表"):
+                    text = " ".join(str(value) for row in workbook[sheet_name].iter_rows(values_only=True) for value in row)
+                    self.assertNotIn("E-303", text)
+                    self.assertNotIn("E-403", text)
+            finally:
+                workbook.close()
+
     def test_run_generates_monthly_report_and_dedupes_cabinet_daily_duration(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = {

@@ -484,16 +484,18 @@
                 <tr v-for="(row, rowIndex) in document.capacity_room_inputs.rows" :key="row.room + ':' + row.row">
                   <td>
                     <strong>{{ row.label || row.room }}</strong>
-                    <small>{{ row.total_cell }} / {{ row.powered_cell }} / {{ row.aircon_cell }}</small>
+                    <small>{{ [row.total_cell, row.powered_cell, row.aircon_cell].filter(Boolean).join(' / ') }}</small>
                   </td>
                   <td>
                     <input
+                      v-if="row.total_cell"
                       class="review-input"
                       :value="row.total_cabinets"
                       :disabled="regenerating"
                       @input="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
                       @change="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
                     />
+                    <span v-else>-</span>
                   </td>
                   <td>
                     <input
@@ -506,12 +508,14 @@
                   </td>
                   <td>
                     <input
+                      v-if="row.aircon_cell"
                       class="review-input"
                       :value="row.aircon_started"
                       :disabled="regenerating"
                       @input="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
                       @change="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
                     />
+                    <span v-else>-</span>
                   </td>
                 </tr>
               </tbody>

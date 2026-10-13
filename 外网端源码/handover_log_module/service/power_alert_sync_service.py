@@ -45,6 +45,7 @@ class PowerAlertSyncService:
     DEFAULT_APP_TOKEN = "ASLxbfESPahdTKs0A9NccgbrnXc"
     DEFAULT_SOURCE_TABLE_ID = "tblT5KbsxGCK1SwA"
     HOURS = list(range(24))
+    E_BUILDING_ROW_LINE_THRESHOLD = 235.0
 
     SOURCE_FIELDS = {
         "building": "机楼",
@@ -991,6 +992,10 @@ class PowerAlertSyncService:
             )
         return output
 
+    @classmethod
+    def _row_line_threshold(cls, building: str, default_threshold: float) -> float:
+        return cls.E_BUILDING_ROW_LINE_THRESHOLD if str(building or "").strip() == "E楼" else default_threshold
+
     def _generate_row_line_rows(
         self,
         rows: List[_SourceRow],
@@ -1000,7 +1005,7 @@ class PowerAlertSyncService:
         data_center_name: str,
         emit_log: Callable[[str], None] | None = None,
     ) -> List[Dict[str, Any]]:
-        groups = self._group_by(rows, lambda row: f"{row.room}||{row.line.get('col')}" if row.line else None)
+        groups = self._group_by(rows, lambda row: f"{row.building}||{row.room}||{row.line.get('col')}" if row.line else None)
         output: List[Dict[str, Any]] = []
         for group in groups.values():
             first = group[0]
@@ -1008,7 +1013,7 @@ class PowerAlertSyncService:
             object_key = self._power_alert_object_key(first.building, first.room_short, row_col)
             stats = self._threshold_stats(
                 self._sum_by_hour(group),
-                threshold,
+                self._row_line_threshold(first.building, threshold),
                 table_key="row_line",
                 object_key=object_key,
                 report_date=report_date,

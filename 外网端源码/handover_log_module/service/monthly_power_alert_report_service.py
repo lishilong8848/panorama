@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import copy
+import math
 import re
 import time
 import warnings
@@ -19,6 +20,7 @@ from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.shared.utils.atomic_file import atomic_save_workbook
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
+from handover_log_module.service.power_alert_sync_service import PowerAlertSyncService
 from pipeline_utils import get_app_dir
 
 
@@ -385,12 +387,17 @@ class MonthlyPowerAlertReportService:
             identifier = _text(fields.get("机列"))
             if not building or not room or not identifier:
                 continue
+            power = _number(fields.get("功率"))
+            if building == "E" and (
+                power is None or not math.isfinite(power) or power < PowerAlertSyncService.E_BUILDING_ROW_LINE_THRESHOLD
+            ):
+                continue
             key = f"{building}|{room}|{identifier}"
             item = items.setdefault(key, _BaseMonthlyItem(building=building, room=room, identifier=identifier, remark=_text(fields.get("备注"))))
             self._merge_daily(
                 item,
                 date_text,
-                max_value=_number(fields.get("功率")),
+                max_value=power,
                 run_count=_int_value(fields.get("次数")),
                 duration_hours=_int_value(fields.get("时长")),
             )

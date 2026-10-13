@@ -13,8 +13,10 @@ class CapacityRoomInputsService:
 
     OTHER_BUILDING_ROWS = (69, 79, 89, 103, 117, 127)
     E_BUILDING_ROWS = (69, 89, 109, 129, 149, 169)
+    A_POTENTIAL_ROOM_ROWS = (("203", 159), ("303", 167), ("403", 175))
     ROOM_NAMES = ("M1", "M2", "M3", "M4", "M5", "M6")
     TEMPLATE_BY_FAMILY = {
+        "a": "A楼交接班容量报表空模板.xlsx",
         "other": "其他楼交接班容量报表空模板.xlsx",
         "e": "E楼交接班容量报表空模板.xlsx",
     }
@@ -25,13 +27,14 @@ class CapacityRoomInputsService:
 
     @classmethod
     def template_family_for_building(cls, building: str) -> str:
-        return "e" if str(building or "").strip() == "E楼" else "other"
+        return {"A楼": "a", "E楼": "e"}.get(str(building or "").strip(), "other")
 
     @classmethod
     def tracked_cells(cls) -> List[str]:
         cells: List[str] = []
         for row in sorted(set(cls.OTHER_BUILDING_ROWS + cls.E_BUILDING_ROWS)):
             cells.extend([f"Z{row}", f"AA{row}", f"AC{row}"])
+        cells.extend(f"J{row}" for _, row in cls.A_POTENTIAL_ROOM_ROWS)
         return cells
 
     @classmethod
@@ -49,6 +52,18 @@ class CapacityRoomInputsService:
                     "powered_cell": f"AA{row}",
                     "aircon_cell": f"AC{row}",
                 }
+            )
+        if str(building or "").strip() == "A楼":
+            specs.extend(
+                {
+                    "room": room,
+                    "label": f"挖潜机房{room}",
+                    "row": row,
+                    "total_cell": "",
+                    "powered_cell": f"J{row}",
+                    "aircon_cell": "",
+                }
+                for room, row in cls.A_POTENTIAL_ROOM_ROWS
             )
         return specs
 
@@ -99,9 +114,16 @@ class CapacityRoomInputsService:
         for spec in cls.row_specs_for_building(building):
             room = cls._text(spec.get("room")).upper()
             row = by_room.get(room, {})
-            cells[str(spec["total_cell"]).upper()] = cls._text(row.get("total_cabinets"))
-            cells[str(spec["powered_cell"]).upper()] = cls._text(row.get("powered_cabinets"))
-            cells[str(spec["aircon_cell"]).upper()] = cls._text(row.get("aircon_started"))
+            if not row and not spec["total_cell"]:
+                continue
+            for cell_key, value_key in (
+                ("total_cell", "total_cabinets"),
+                ("powered_cell", "powered_cabinets"),
+                ("aircon_cell", "aircon_started"),
+            ):
+                cell_name = str(spec[cell_key]).upper()
+                if cell_name:
+                    cells[cell_name] = cls._text(row.get(value_key))
         return cells
 
     @classmethod
@@ -126,7 +148,7 @@ class CapacityRoomInputsService:
                 }
             )
         return {
-            "title": "M1-M6包间机柜与空调启动台数",
+            "title": "机柜数量与空调启动台数" if str(building or "").strip() == "A楼" else "M1-M6包间机柜与空调启动台数",
             "rows": rows,
         }
 
