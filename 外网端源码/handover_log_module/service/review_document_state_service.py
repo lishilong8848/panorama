@@ -648,17 +648,17 @@ class ReviewDocumentStateService:
         current = payload.get("capacity_room_inputs", {})
         if isinstance(current, dict) and isinstance(current.get("rows", []), list) and current.get("rows"):
             payload["capacity_room_inputs"] = self._capacity_room_inputs.normalize_payload(current, building=building)
-            return payload
+            return self._capacity_room_inputs.apply_powered_total_to_document(payload, building=building)[0]
         try:
             defaults = self._store(building).get_default(CapacityRoomInputsService.DEFAULTS_KEY)
         except Exception:  # noqa: BLE001
             defaults = None
         if isinstance(defaults, dict):
             payload["capacity_room_inputs"] = self._capacity_room_inputs.normalize_payload(defaults, building=building)
-            return payload
+            return self._capacity_room_inputs.apply_powered_total_to_document(payload, building=building)[0]
         template_cells = self._capacity_room_inputs.template_cells_for_building(building)
         payload["capacity_room_inputs"] = self._capacity_room_inputs.payload_from_cells(template_cells, building=building)
-        return payload
+        return self._capacity_room_inputs.apply_powered_total_to_document(payload, building=building)[0]
 
     def save_document(
         self,
@@ -671,6 +671,14 @@ class ReviewDocumentStateService:
     ) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
         if ensure_ready:
             self.ensure_document_for_session(session)
+        building = self._building(session)
+        if building == "A楼" and dirty_regions.get("capacity_room_inputs"):
+            cells = self._capacity_room_inputs.extract_cells_from_document(document, building=building)
+            if self._capacity_room_inputs.powered_total_from_cells(cells, building=building) is None:
+                raise ReviewDocumentStateError("请完整填写A楼M1-M6及挖潜机房的已上电机柜数量，数量须为非负整数")
+        document, total_changed = self._capacity_room_inputs.apply_powered_total_to_document(document, building=building)
+        if total_changed:
+            dirty_regions = {**dirty_regions, "fixed_blocks": True}
         try:
             return self._store(self._building(session)).save_document(
                 session=session,
@@ -821,9 +829,11 @@ class ReviewDocumentStateService:
         )
         try:
             with self._excel_lock_for_path(output_path):
+                document = state.get("document", {}) if isinstance(state.get("document", {}), dict) else {}
+                document, _ = self._capacity_room_inputs.apply_powered_total_to_document(document, building=building)
                 self.writer.write(
                     output_file=output_file,
-                    document=state.get("document", {}) if isinstance(state.get("document", {}), dict) else {},
+                    document=document,
                     dirty_regions=dirty_regions,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -1092,9 +1102,23 @@ class ReviewDocumentStateService:
         emit_log: Callable[[str], None] = print,
     ) -> int | None:
         payload = self._store(building).get_default("cabinet_power")
-        if not isinstance(payload, dict):
+        if not isinstance(payload, dict) and building == "A楼":
+            payload = self._cabinet_defaults.get_building_defaults(self.config, building)
+        if not isinstance(payload, dict) and building != "A楼":
             return None
-        cells = self._cabinet_defaults.normalize_cells(payload)
+        cells = self._cabinet_defaults.normalize_cells(payload) if isinstance(payload, dict) else {}
+        if building == "A楼":
+            room_defaults = self._store(building).get_default(CapacityRoomInputsService.DEFAULTS_KEY)
+            room_cells = (
+                self._capacity_room_inputs.cells_from_payload(room_defaults, building=building)
+                if isinstance(room_defaults, dict)
+                else self._capacity_room_inputs.template_cells_for_building(building)
+            )
+            total = self._capacity_room_inputs.powered_total_from_cells(room_cells, building=building)
+            if total is not None:
+                cells["D13"] = total
+        if not cells:
+            return None
         output_path = Path(str(output_file).strip())
         workbook = load_workbook_quietly(output_path)
         try:

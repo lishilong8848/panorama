@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -157,6 +159,44 @@ class CapacityRoomInputsService:
         if isinstance(payload, dict):
             return cls.payload_from_cells(cls.cells_from_payload(payload, building=building), building=building)
         return cls.payload_from_cells({}, building=building)
+
+    @classmethod
+    def powered_total_from_cells(cls, cells: Dict[str, Any], *, building: str) -> str | None:
+        if str(building or "").strip() != "A楼":
+            return None
+        total = 0
+        for spec in cls.row_specs_for_building(building):
+            text = cls._text(cells.get(spec["powered_cell"])).replace(",", "").replace("，", "")
+            if not text:
+                if spec["room"] in cls.ROOM_NAMES:
+                    return None
+                text = "0"
+            if not re.fullmatch(r"\d+(?:\.0+)?", text):
+                return None
+            total += int(text.split(".", 1)[0])
+        return str(total)
+
+    @classmethod
+    def apply_powered_total_to_document(cls, document: Dict[str, Any], *, building: str) -> tuple[Dict[str, Any], bool]:
+        total = cls.powered_total_from_cells(cls.extract_cells_from_document(document, building=building), building=building)
+        if total is None:
+            return document, False
+        blocks = copy.deepcopy(document.get("fixed_blocks", []))
+        if not isinstance(blocks, list):
+            return document, False
+        changed = False
+        for block in blocks:
+            if not isinstance(block, dict) or not isinstance(block.get("fields", []), list):
+                continue
+            for field in block.get("fields", []):
+                if not isinstance(field, dict):
+                    continue
+                if str(field.get("cell", "")).strip().upper() != "D13":
+                    continue
+                if str(field.get("value", "")) != total or not field.get("read_only"):
+                    field.update(value=total, read_only=True)
+                    changed = True
+        return ({**document, "fixed_blocks": blocks}, True) if changed else (document, False)
 
     @classmethod
     def extract_cells_from_document(cls, document: Dict[str, Any], *, building: str = "") -> Dict[str, str]:

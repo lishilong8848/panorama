@@ -5777,6 +5777,9 @@ def handover_review_save(
             if isinstance(_saved_document_state, dict):
                 saved_document_state_for_cache = _saved_document_state
                 saved_document_revision = int(_saved_document_state.get("revision", saved_document_revision) or saved_document_revision)
+                document = _saved_document_state.get("document", document)
+                if building == "A楼" and _saved_document_state.get("dirty_regions", {}).get("fixed_blocks"):
+                    dirty_regions["fixed_blocks"] = True
         except ReviewDocumentStateConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ReviewDocumentStateError as exc:

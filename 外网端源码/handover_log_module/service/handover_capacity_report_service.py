@@ -1075,6 +1075,9 @@ class HandoverCapacityReportService:
                 if not cell_name or cell_name not in handover:
                     continue
                 overlay[cell_name] = _text(handover.get(cell_name))
+        total = CapacityRoomInputsService.powered_total_from_cells(handover, building=building)
+        if total is not None:
+            overlay["AC58"] = total
         return overlay
 
     @staticmethod

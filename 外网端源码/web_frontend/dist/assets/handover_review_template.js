@@ -544,6 +544,8 @@
               <input
                 class="review-input"
                 :value="field.value"
+                :readonly="field.read_only"
+                :title="field.read_only ? '按各机房已上电机柜数量汇总' : ''"
                 :disabled="regenerating"
                 @input="updateFixedField(blockIndex, fieldIndex, $event.target.value)"
                 @change="updateFixedField(blockIndex, fieldIndex, $event.target.value)"

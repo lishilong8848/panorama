@@ -342,6 +342,7 @@ function normalizeField(field) {
     cell,
     label: String(field?.label || cell || "字段"),
     value: String(field?.value ?? ""),
+    read_only: Boolean(field?.read_only),
   };
 }
 
@@ -4845,6 +4846,24 @@ export function mountHandoverReviewApp(Vue) {
         rows[rowIndex][normalizedKey] = nextValue;
         const cellName = String(rows[rowIndex][cellKeyByValueKey[normalizedKey]] || "").trim().toUpperCase();
         markDocumentDirty({ region: "capacity_room_inputs", capacityCell: cellName });
+        if (normalizedKey === "powered_cabinets" && session.value?.building === "A楼") {
+          const byRoom = new Map(rows.map((row) => [String(row.room).toUpperCase(), row]));
+          let total = 0;
+          for (const room of ["M1", "M2", "M3", "M4", "M5", "M6", "203", "303", "403"]) {
+            const raw = String(byRoom.get(room)?.powered_cabinets ?? "").trim().replace(/[,，]/g, "");
+            const text = raw || (room.startsWith("M") ? "" : "0");
+            if (!/^\d+(?:\.0+)?$/.test(text)) return;
+            total += Number(text);
+          }
+          for (const block of documentRef.value.fixed_blocks || []) {
+            for (const field of block.fields || []) {
+              if (field.cell !== "D13") continue;
+              field.value = String(total);
+              field.read_only = true;
+              markDocumentDirty({ region: "fixed_blocks", capacityCell: "D13" });
+            }
+          }
+        }
       }
 
       async function saveSubstation110kvIfNeeded(options = {}) {
