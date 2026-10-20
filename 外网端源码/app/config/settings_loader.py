@@ -12,6 +12,8 @@ from typing import Any, Callable, Dict, Iterable, List
 
 from app.config.config_compat_cleanup import sanitize_day_metric_upload_config
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
+from app.config.feishu_app_migration import migrate_feishu_application
+from app.config.feishu_recipient_defaults import migrate_public_recipient_ids
 from app.config.config_adapter import (
     adapt_runtime_config,
     ensure_v3_config,
@@ -129,6 +131,11 @@ def load_pipeline_config(config_path: str | Path | None = None) -> Dict[str, Any
         if cached is not None:
             return cached
         loaded = _load_pipeline_config_from_disk(target)
+        if migrate_feishu_application(loaded):
+            write_settings_atomically(loaded, target)
+            print("[配置迁移] 飞书鉴权已统一到 common.feishu_auth，其他用户配置保留")
+            if not loaded.get("common", {}).get("feishu_auth", {}).get("app_secret"):
+                print("[配置迁移] 请在配置中心填写当前飞书应用的 App Secret，程序不会复用旧应用密钥")
         _set_cached_pipeline_config(target, loaded, _config_mtime_ns(target))
         return copy.deepcopy(loaded)
 
@@ -2803,6 +2810,7 @@ def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
     _ = _ensure_handover_segment_files(cfg, config_path)
     composed = _compose_handover_segmented_config(cfg, config_path)
+    migrate_public_recipient_ids(composed)
     normalized = validate_settings(composed)
     return _normalize_console_host_for_lan(normalized, config_path)
 
@@ -2810,6 +2818,7 @@ def load_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
 def load_bootstrap_settings(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg = load_pipeline_config(config_path)
     composed = _compose_handover_segmented_config(cfg, config_path)
+    migrate_public_recipient_ids(composed)
     return ensure_v3_config(composed)
 
 

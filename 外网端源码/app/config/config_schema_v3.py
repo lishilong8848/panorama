@@ -3,6 +3,7 @@
 import copy
 from typing import Any, Dict
 
+from app.config.feishu_app_migration import CURRENT_FEISHU_APP_ID, FEISHU_APPLICATION_CONFIG_VERSION
 
 DEFAULT_CONFIG_V3: Dict[str, Any] = {
     "version": 3,
@@ -73,8 +74,9 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             "task_failure_webhook_timeout": 15,
         },
         "feishu_auth": {
-            "app_id": "",
+            "app_id": CURRENT_FEISHU_APP_ID,
             "app_secret": "",
+            "application_config_version": FEISHU_APPLICATION_CONFIG_VERSION,
             "request_retry_count": 3,
             "request_retry_interval_sec": 2,
             "timeout": 30,

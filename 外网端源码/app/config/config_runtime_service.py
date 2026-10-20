@@ -28,6 +28,7 @@ class ConfigRuntimeService:
         self._save_settings = save_settings_func
         self._emit_log = emit_log
         self._debounce_sec = max(0.05, float(debounce_sec or 0.35))
+        self._apply_lock = threading.RLock()
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._config: Dict[str, Any] = {}
@@ -50,7 +51,7 @@ class ConfigRuntimeService:
     def configure(self, config: Dict[str, Any], runtime_config: Dict[str, Any] | None = None) -> None:
         cfg = copy.deepcopy(config if isinstance(config, dict) else {})
         runtime = copy.deepcopy(runtime_config) if isinstance(runtime_config, dict) else adapt_runtime_config(cfg)
-        with self._lock:
+        with self._apply_lock, self._lock:
             self._config = cfg
             self._runtime_config = runtime
             self._config_version += 1
@@ -71,7 +72,31 @@ class ConfigRuntimeService:
         persist_json: bool = False,
         save_options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        with self._apply_lock:
+            return self._apply_config_snapshot(
+                settings, source=source, persist_json=persist_json, save_options=save_options,
+            )
+
+    def _apply_config_snapshot(
+        self,
+        settings: Dict[str, Any],
+        *,
+        source: str,
+        persist_json: bool,
+        save_options: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
         cfg = copy.deepcopy(settings if isinstance(settings, dict) else {})
+        old_auth = self.get_config().get("common", {}).get("feishu_auth", {})
+        new_auth = cfg.get("common", {}).get("feishu_auth", {})
+        auth_changed = any(old_auth.get(key) != new_auth.get(key) for key in ("app_id", "app_secret"))
+        if persist_json and auth_changed:
+            # Workers read the file, so drain older writes before publishing new credentials.
+            if not self.flush(timeout_sec=30.0):
+                raise RuntimeError("飞书鉴权未保存：配置写入队列繁忙，请稍后重试")
+            cfg = self._save_settings(cfg, self.config_path, **(save_options or {}))
+            if not isinstance(cfg, dict):
+                raise RuntimeError("飞书鉴权未保存：配置保存结果无效")
+            persist_json = False
         runtime = adapt_runtime_config(cfg)
         with self._lock:
             self._config = copy.deepcopy(cfg)
@@ -91,15 +116,16 @@ class ConfigRuntimeService:
         persist_json: bool = True,
         save_options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        with self._lock:
-            merged = copy.deepcopy(self._config)
-        self._deep_merge(merged, patch if isinstance(patch, dict) else {})
-        return self.apply_config_snapshot(
-            merged,
-            source=source,
-            persist_json=persist_json,
-            save_options=save_options,
-        )
+        with self._apply_lock:
+            with self._lock:
+                merged = copy.deepcopy(self._config)
+            self._deep_merge(merged, patch if isinstance(patch, dict) else {})
+            return self.apply_config_snapshot(
+                merged,
+                source=source,
+                persist_json=persist_json,
+                save_options=save_options,
+            )
 
     def flush(self, timeout_sec: float = 5.0) -> bool:
         deadline = time.time() + max(0.1, float(timeout_sec or 5.0))

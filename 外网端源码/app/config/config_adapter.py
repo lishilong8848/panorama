@@ -338,6 +338,7 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     legacy_scheduler = _dict(legacy_cfg.get("scheduler"))
     legacy_notify = _dict(legacy_cfg.get("notify"))
     legacy_feishu = _dict(legacy_cfg.get("feishu"))
+    canonical_auth = _dict(_dict(legacy_cfg.get("common")).get("feishu_auth"))
     legacy_web = _dict(legacy_cfg.get("web"))
     common = cfg["common"]
     common_paths = _dict(common.get("paths"))
@@ -353,14 +354,16 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     common["notify"] = deep_merge_defaults(legacy_notify, common.get("notify", {}))
     common["console"] = deep_merge_defaults(legacy_web, common.get("console", {}))
     auth = _dict(common.get("feishu_auth"))
-    auth["app_id"] = str(legacy_feishu.get("app_id", auth.get("app_id", "")) or "").strip()
-    auth["app_secret"] = str(legacy_feishu.get("app_secret", auth.get("app_secret", "")) or "").strip()
+    source_auth = canonical_auth or legacy_feishu
+    auth["app_id"] = str(source_auth.get("app_id", auth.get("app_id", "")) or "").strip()
+    auth["app_secret"] = str(source_auth.get("app_secret", auth.get("app_secret", "")) or "").strip()
     if "request_retry_count" in legacy_feishu:
         auth["request_retry_count"] = legacy_feishu.get("request_retry_count")
     if "request_retry_interval_sec" in legacy_feishu:
         auth["request_retry_interval_sec"] = legacy_feishu.get("request_retry_interval_sec")
     if "timeout" in legacy_feishu:
         auth["timeout"] = legacy_feishu.get("timeout")
+    auth.update(canonical_auth)
     common["feishu_auth"] = deep_merge_defaults(auth, common.get("feishu_auth", {}))
 
     features = cfg["features"]

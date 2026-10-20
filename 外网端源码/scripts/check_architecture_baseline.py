@@ -614,6 +614,10 @@ def check_scheduler_callbacks_do_not_wait_for_jobs() -> None:
 
 
 def check_feishu_invalid_token_refresh_retry() -> None:
+    from app.modules.feishu.service.feishu_auth_resolver import configure_feishu_auth_source
+
+    # Earlier checks build test containers; this check supplies its own fake credentials.
+    configure_feishu_auth_source(None)
     class _FakeResponse:
         def __init__(self, body: dict, status_code: int = 200) -> None:
             self._body = body

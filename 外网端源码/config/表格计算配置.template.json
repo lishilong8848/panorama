@@ -59,8 +59,9 @@
       "task_failure_webhook_timeout": 15
     },
     "feishu_auth": {
-      "app_id": "cli_a9d1c9fe9d381cee",
+      "app_id": "cli_aa42dc770a381cb3",
       "app_secret": "",
+      "application_config_version": 1,
       "request_retry_count": 3,
       "request_retry_interval_sec": 2,
       "timeout": 30

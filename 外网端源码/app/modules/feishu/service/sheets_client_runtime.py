@@ -137,6 +137,8 @@ class FeishuSheetsClientRuntime:
         raise RuntimeError("飞书请求失败: 未知错误")
 
     def refresh_token(self, force: bool = False) -> str:
+        auth = resolve_feishu_auth_settings({"app_id": self.app_id, "app_secret": self.app_secret})
+        self.app_id, self.app_secret = auth["app_id"], auth["app_secret"]
         self._tenant_access_token = feishu_token_manager.get_token(
             app_id=self.app_id,
             app_secret=self.app_secret,

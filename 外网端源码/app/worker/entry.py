@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 from app.worker.task_handlers import HANDLER_REGISTRY
+from app.config.settings_loader import load_pipeline_config
+from app.modules.feishu.service.feishu_auth_resolver import configure_feishu_auth_source
 
 
 class WorkerCancelledError(RuntimeError):
@@ -216,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
     payload_file = Path(args.payload_file).resolve()
     stage_id = str(args.stage_id or "").strip() or "main"
     config_snapshot = _load_json(job_dir / "config_snapshot.json")
+    config_path = str(config_snapshot.get("_config_path", "") or "").strip() or None
+    configure_feishu_auth_source(lambda: load_pipeline_config(config_path))
     payload = _load_json(payload_file)
 
     handler_name = str(args.handler or "").strip()

@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+from app.modules.feishu.service.feishu_auth_resolver import current_feishu_config, resolve_feishu_auth_settings
 from app.modules.feishu.service.feishu_token_manager import feishu_token_manager
 
 
@@ -94,6 +94,8 @@ class FeishuImFileMessageClient:
         raise RuntimeError("飞书请求失败: 未知错误")
 
     def refresh_token(self, force: bool = False) -> str:
+        auth = resolve_feishu_auth_settings({"app_id": self.app_id, "app_secret": self.app_secret})
+        self.app_id, self.app_secret = auth["app_id"], auth["app_secret"]
         token = feishu_token_manager.get_token(
             app_id=self.app_id,
             app_secret=self.app_secret,
@@ -121,6 +123,24 @@ class FeishuImFileMessageClient:
     ) -> Dict[str, Any]:
         for auth_attempt in range(2):
             token = self.refresh_token(force=auth_attempt > 0)
+            request_payload = payload
+            if (url == self.SEND_MESSAGE_URL and method.upper() == "POST"
+                    and (params or {}).get("receive_id_type") == "open_id"
+                    and current_feishu_config() is not None):
+                from app.modules.feishu.service.feishu_recipient_directory import feishu_recipient_directory
+
+                identity = (self.app_id, self.app_secret)
+                request_payload = dict(payload or {})
+                request_payload["receive_id"] = feishu_recipient_directory.resolve(
+                    str(request_payload.get("receive_id", "")).strip(),
+                    app_id=self.app_id, app_secret=self.app_secret,
+                    request=self._request_json_with_auth_retry,
+                )
+                token = self.refresh_token(force=False)
+                if identity != (self.app_id, self.app_secret):
+                    if auth_attempt == 0:
+                        continue
+                    raise RuntimeError("飞书鉴权正在切换，请稍后重新发送")
             merged_headers: Dict[str, str] = {"Authorization": f"Bearer {token}"}
             if headers:
                 merged_headers.update(headers)
@@ -130,7 +150,7 @@ class FeishuImFileMessageClient:
                 method,
                 url,
                 params=params,
-                json=payload,
+                json=request_payload,
                 data=data,
                 files=files,
                 headers=merged_headers,

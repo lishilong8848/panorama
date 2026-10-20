@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 16,
-  "updated_at": "2026-10-03T09:32:20+08:00",
+  "revision": 17,
+  "updated_at": "2026-10-20T15:28:02+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
@@ -895,17 +895,17 @@
         "110站": [
           {
             "note": "lsl",
-            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
             "enabled": true
           },
           {
             "note": "m",
-            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "open_id": "ou_cee45ea48df99def799710e782f5434c",
             "enabled": false
           },
           {
             "note": "110",
-            "open_id": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
+            "open_id": "ou_ca8103bc15b06b448ab94958d5cfef43",
             "enabled": true
           }
         ],

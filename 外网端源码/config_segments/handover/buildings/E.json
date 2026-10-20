@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 21,
-  "updated_at": "2026-08-28T16:17:20+08:00",
+  "revision": 22,
+  "updated_at": "2026-10-20T15:28:02+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -647,17 +647,17 @@
         "E楼": [
           {
             "note": "李世龙E",
-            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
             "enabled": true
           },
           {
             "note": "E",
-            "open_id": "ou_f0fe7137818e8b422b0594e51eab13f3",
+            "open_id": "ou_fb53efe356466339f4f3cc22f2c7f9fb",
             "enabled": true
           },
           {
             "note": "m",
-            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "open_id": "ou_cee45ea48df99def799710e782f5434c",
             "enabled": false
           }
         ]

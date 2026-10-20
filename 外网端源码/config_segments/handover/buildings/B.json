@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 17,
-  "updated_at": "2026-09-04T07:07:53+08:00",
+  "revision": 18,
+  "updated_at": "2026-10-20T15:28:02+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -685,17 +685,17 @@
         "B楼": [
           {
             "note": "李世龙B",
-            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
             "enabled": true
           },
           {
             "note": "B",
-            "open_id": "ou_160e991b0fd811cda7260de056d8a363",
+            "open_id": "ou_ac4e1a554a6cabab4d8eea7e3956bec3",
             "enabled": true
           },
           {
             "note": "m",
-            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "open_id": "ou_cee45ea48df99def799710e782f5434c",
             "enabled": false
           }
         ]

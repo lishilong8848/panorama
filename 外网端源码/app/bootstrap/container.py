@@ -18,6 +18,7 @@ from app.config.runtime_role import apply_forced_role_mode, forced_role_mode_fro
 from app.config.settings_loader import load_bootstrap_settings, save_settings
 from app.core.app_state import AppStateRepository
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
+from app.modules.feishu.service.feishu_auth_resolver import configure_feishu_auth_source
 from app.modules.report_pipeline.service.job_service import JobService
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
 from app.modules.shared_bridge.service.bridge_status_presenter import (
@@ -3708,7 +3709,9 @@ class AppContainer:
 
     def _apply_runtime_config_snapshot(self, settings: Dict[str, Any]) -> None:
         self.config = copy.deepcopy(settings)
+        configure_feishu_auth_source(lambda: self.config)
         self.runtime_config = adapt_runtime_config(self.config)
+        self.runtime_config["_config_path"] = str(self.config_path)
         if self.config_runtime_service is not None:
             self.config_runtime_service.configure(self.config, self.runtime_config)
         self.job_service.update_log_buffer_size(int(self._console_cfg().get("log_buffer_size", 5000)))
@@ -4074,6 +4077,7 @@ def build_container() -> AppContainer:
     _, cfg_path = load_masked_settings()
     raw_cfg = load_bootstrap_settings(cfg_path)
     runtime_cfg = adapt_runtime_config(apply_forced_role_mode(raw_cfg))
+    runtime_cfg["_config_path"] = str(cfg_path)
     frontend_mode, frontend_root, frontend_assets_dir = _resolve_frontend_runtime()
     console_cfg = raw_cfg.get("common", {}).get("console", {}) if isinstance(raw_cfg, dict) else {}
     job_service = JobService(log_buffer_size=int(console_cfg.get("log_buffer_size", 5000)))
@@ -4087,6 +4091,7 @@ def build_container() -> AppContainer:
         frontend_assets_dir=frontend_assets_dir,
         job_service=job_service,
     )
+    configure_feishu_auth_source(lambda: container.config)
     container.add_system_log(
         f"Web控制台已就绪, 前端模式={container.frontend_mode}, "
         f"root={container.frontend_root}, assets={container.frontend_assets_dir}"

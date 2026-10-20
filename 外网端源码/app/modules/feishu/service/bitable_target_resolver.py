@@ -403,6 +403,8 @@ class BitableTargetResolver:
                 message="请先填写目标多维 App Token 和 Table ID",
             )
 
+        auth = resolve_feishu_auth_settings({"app_id": self.app_id, "app_secret": self.app_secret})
+        self.app_id, self.app_secret = auth["app_id"], auth["app_secret"]
         cache_key = (
             configured_text,
             table_text,

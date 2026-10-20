@@ -1,9 +1,30 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from pipeline_utils import resolve_config_path
+
+_config_getter: Callable[[], Dict[str, Any]] | None = None
+
+
+def configure_feishu_auth_source(getter: Callable[[], Dict[str, Any]] | None) -> None:
+    global _config_getter
+    _config_getter = getter
+
+
+def current_feishu_config() -> Dict[str, Any] | None:
+    getter = _config_getter
+    if getter is None:
+        return None
+    return _dict(getter())
+
+
+def current_feishu_auth_settings() -> Dict[str, Any] | None:
+    config = current_feishu_config()
+    if config is None:
+        return None
+    return _normalize_auth(_dict(_dict(config.get("common")).get("feishu_auth")))
 
 
 def _dict(value: Any) -> Dict[str, Any]:
@@ -48,9 +69,11 @@ def _merge_auth(base: Dict[str, Any], candidate: Dict[str, Any] | None) -> Dict[
 
 def _extract_from_source(source: Any) -> Dict[str, Any]:
     current = _dict(source)
+    common = _dict(current.get("common"))
+    if isinstance(common.get("feishu_auth"), dict):
+        return _normalize_auth(common["feishu_auth"])
     resolved: Dict[str, Any] = {}
     candidates = [
-        _dict(_dict(current.get("common")).get("feishu_auth")),
         _dict(current.get("feishu")),
         _dict(current.get("_global_feishu")),
         _dict(_dict(current.get("handover_log")).get("_global_feishu")),
@@ -68,16 +91,21 @@ def _load_from_config(config_path: str | Path | None = None) -> Dict[str, Any]:
     except Exception:
         return _normalize_auth({})
     try:
-        from app.config.settings_loader import load_settings
+        from app.config.settings_loader import load_pipeline_config
 
-        cfg = load_settings(resolved_path)
+        cfg = load_pipeline_config(resolved_path)
     except Exception:
         return _normalize_auth({})
     return _normalize_auth(_extract_from_source(cfg))
 
 
 def resolve_feishu_auth_settings(source: Any = None, *, config_path: str | Path | None = None) -> Dict[str, Any]:
+    configured = current_feishu_auth_settings()
+    if configured is not None:
+        return configured
     primary = _extract_from_source(source)
+    if isinstance(_dict(_dict(source).get("common")).get("feishu_auth"), dict):
+        return _normalize_auth(primary)
     if _has_meaningful_auth(primary):
         return _normalize_auth(primary)
     fallback = _load_from_config(config_path)

@@ -300,6 +300,12 @@ def merge_user_config_payload(
             ),
         )
 
+    incoming_auth = _get_path(merged_v3, "common.feishu_auth") or {}
+    previous_auth = _get_path(old_v3, "common.feishu_auth") or {}
+    if (incoming_auth.get("app_id") and incoming_auth.get("app_secret")
+            and incoming_auth.get("app_id") != previous_auth.get("app_id")):
+        auth = _get_path(protected, "common.feishu_auth")
+        auth.update(app_id=incoming_auth["app_id"], app_secret=incoming_auth["app_secret"])
     return ConfigMergeResult(merged=ensure_v3_config(protected), suspicious_loss_paths=suspicious)
 
 

@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 19,
-  "updated_at": "2026-09-03T05:20:34+08:00",
+  "revision": 20,
+  "updated_at": "2026-10-20T15:28:02+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -647,17 +647,17 @@
         "D楼": [
           {
             "note": "李世龙D",
-            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
             "enabled": true
           },
           {
             "note": "D",
-            "open_id": "ou_b9c26b4da3721c2de11ee175c707e756",
+            "open_id": "ou_18396043dc393fafd3b7f43f0e284396",
             "enabled": true
           },
           {
             "note": "m",
-            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "open_id": "ou_cee45ea48df99def799710e782f5434c",
             "enabled": false
           }
         ]

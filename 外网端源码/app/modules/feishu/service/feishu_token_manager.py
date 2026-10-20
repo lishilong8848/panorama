@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 import requests
 
+from app.modules.feishu.service.feishu_auth_resolver import current_feishu_auth_settings
 
 AUTH_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 TOKEN_TTL_SEC = 7200
@@ -34,6 +35,9 @@ class FeishuTokenManager:
         return bool(entry.token) and time.monotonic() < entry.expires_at_monotonic - TOKEN_REFRESH_MARGIN_SEC
 
     def invalidate(self, *, app_id: str, app_secret: str) -> None:
+        configured = current_feishu_auth_settings()
+        if configured is not None:
+            app_id, app_secret = configured["app_id"], configured["app_secret"]
         key = self._cache_key(app_id, app_secret)
         with self._lock:
             self._entries.pop(key, None)
@@ -46,8 +50,11 @@ class FeishuTokenManager:
         timeout: int,
         force_refresh: bool = False,
     ) -> str:
-        app_id_text = str(app_id or "").strip()
-        app_secret_text = str(app_secret or "").strip()
+        auth = current_feishu_auth_settings()
+        if auth is None:
+            auth = {"app_id": app_id, "app_secret": app_secret}
+        app_id_text = str(auth["app_id"] or "").strip()
+        app_secret_text = str(auth["app_secret"] or "").strip()
         if not app_id_text or not app_secret_text:
             raise ValueError("飞书配置缺失: common.feishu_auth.app_id/app_secret")
         key = self._cache_key(app_id_text, app_secret_text)

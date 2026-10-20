@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -22,8 +21,19 @@ def load_config(
         config_path,
         resolve_pipeline_config_path=resolve_pipeline_config_path,
     )
-    with resolved.open("r", encoding="utf-8-sig") as f:
-        return json.load(f)
+    from app.config.config_adapter import adapt_runtime_config
+    from app.config.settings_loader import load_pipeline_config
+    from app.modules.feishu.service.feishu_auth_resolver import (
+        configure_feishu_auth_source,
+        current_feishu_config,
+    )
+
+    loaded = load_pipeline_config(resolved)
+    if current_feishu_config() is None:
+        configure_feishu_auth_source(lambda: load_pipeline_config(resolved))
+    runtime = adapt_runtime_config(loaded)
+    runtime["_config_path"] = str(resolved)
+    return runtime
 
 
 def discover_latest_files(excel_dir: Path, buildings: List[str], file_glob_template: str) -> Dict[str, Path]:

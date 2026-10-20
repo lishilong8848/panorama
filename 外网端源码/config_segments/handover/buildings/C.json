@@ -1,6 +1,6 @@
 ﻿{
-  "revision": 11,
-  "updated_at": "2026-09-03T07:05:52+08:00",
+  "revision": 12,
+  "updated_at": "2026-10-20T15:28:02+08:00",
   "data": {
     "cell_rules": {
       "building_rows": {
@@ -69,17 +69,17 @@
         "C楼": [
           {
             "note": "李世龙C",
-            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+            "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
             "enabled": true
           },
           {
             "note": "C",
-            "open_id": "ou_99391b00c1406917930483d8500af400",
+            "open_id": "ou_f2879fa04399d43bff26f92616678b6d",
             "enabled": true
           },
           {
             "note": "m",
-            "open_id": "ou_a6644e62a43b916c6bc26148cf74f208",
+            "open_id": "ou_cee45ea48df99def799710e782f5434c",
             "enabled": false
           }
         ]
