@@ -22,6 +22,7 @@ from app.shared.utils.artifact_naming import OUTPUT_TYPE_HANDOVER_CAPACITY, buil
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.shift_window import parse_duty_date
 from handover_log_module.core.normalizers import format_number
+from handover_log_module.core.oil_tank_calibration import B_OIL_CALIBRATION_VERSION, b_oil_litres_from_level_cm
 from handover_log_module.repository.excel_reader import load_rows, load_workbook_quietly
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service import capacity_report_a, capacity_report_b, capacity_report_c, capacity_report_d, capacity_report_e
@@ -612,9 +613,13 @@ class HandoverCapacityReportService:
         return workbook.sheetnames[0]
 
     @staticmethod
-    def _read_handover_cells(output_file: str, cells: List[str], sheet_name: str = "") -> Dict[str, str]:
+    def _read_handover_cells(
+        output_file: str, cells: List[str], sheet_name: str = "", *, required_keyword: str = "",
+    ) -> Dict[str, str]:
         workbook = load_workbook_quietly(output_file, data_only=True, read_only=True)
         try:
+            if required_keyword and required_keyword not in (workbook.properties.keywords or "").split(";"):
+                raise ValueError("上一班B楼油量未使用液位标定表，不能沿用旧换算值")
             ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook[workbook.sheetnames[0]]
             values: Dict[str, str] = {}
             for cell_name in cells:
@@ -664,7 +669,7 @@ class HandoverCapacityReportService:
         return duty_day.strftime("%Y-%m-%d"), "day"
 
     @staticmethod
-    def _scale_ab_oil_value(raw_value: Any) -> str:
+    def _scale_a_oil_value(raw_value: Any) -> str:
         number = _to_float(raw_value)
         if number is None:
             return _text(raw_value)
@@ -679,17 +684,29 @@ class HandoverCapacityReportService:
     ) -> Dict[str, str]:
         building_text = _text(building)
         raw_values = self._extract_oil_values(rows)
+        if building_text == "B楼":
+            raw_values = {
+                "first": self._extract_specific_oil_value(rows, ["油罐1液位"]),
+                "second": self._extract_specific_oil_value(rows, ["油罐2液位"]),
+            }
         if building_text == "D楼":
             raw_values = {
                 "first": self._extract_specific_oil_value(rows, ["1#油罐体积"]),
                 "second": self._extract_specific_oil_value(rows, ["2#油罐体积"]),
             }
         display_values = dict(raw_values)
-        if building_text in {"A楼", "B楼"}:
+        if building_text == "A楼":
             display_values = {
-                "first": self._scale_ab_oil_value(raw_values.get("first")),
-                "second": self._scale_ab_oil_value(raw_values.get("second")),
+                "first": self._scale_a_oil_value(raw_values.get("first")),
+                "second": self._scale_a_oil_value(raw_values.get("second")),
             }
+        elif building_text == "B楼":
+            for key, tank in (("first", "1#"), ("second", "2#")):
+                try:
+                    display_values[key] = b_oil_litres_from_level_cm(raw_values.get(key))
+                except ValueError as exc:
+                    display_values[key] = ""
+                    emit_log(f"[交接班][容量报表][燃油] B楼{tank}油罐留空: {exc}; raw={raw_values.get(key)!r}")
         emit_log(
             "[交接班][容量报表][燃油] 当前班次取值 "
             f"building={building_text}, raw_first={_text(raw_values.get('first')) or '-'}, "
@@ -744,6 +761,10 @@ class HandoverCapacityReportService:
                 "[交接班][容量报表][燃油] 上一班油量缓存读取失败 "
                 f"building={building}, duty={previous_date}/{previous_shift}, error={exc}"
             )
+        if building == "B楼" and isinstance(cached_previous, dict):
+            if cached_previous.get("calculation_version") != B_OIL_CALIBRATION_VERSION:
+                cached_previous = {}
+                emit_log("[交接班][容量报表][燃油] B楼上一班无同口径油量缓存，忽略旧换算值")
         cached_first = _text(cached_previous.get("first") if isinstance(cached_previous, dict) else "")
         cached_second = _text(cached_previous.get("second") if isinstance(cached_previous, dict) else "")
         if cached_first or cached_second:
@@ -799,6 +820,7 @@ class HandoverCapacityReportService:
                 previous_capacity_output,
                 ["U13", "X13"],
                 sheet_name=_text(self._template_cfg().get("sheet_name")),
+                required_keyword=B_OIL_CALIBRATION_VERSION if building == "B楼" else "",
             )
         except Exception as exc:  # noqa: BLE001
             warning = f"上一班容量文件读取失败，已回退当前班次值: {exc}"
@@ -2998,6 +3020,9 @@ class HandoverCapacityReportService:
             _write_cells_with_merged_support(sheet, cell_values)
             sheet[_CAPACITY_WATER_RESERVE_CELL].number_format = _CAPACITY_WATER_RESERVE_NUMBER_FORMAT
             self._apply_load_rate_number_format(sheet)
+            if building_text == "B楼":
+                keywords = (workbook.properties.keywords or "").split(";")
+                workbook.properties.keywords = ";".join(dict.fromkeys(filter(None, [*keywords, B_OIL_CALIBRATION_VERSION])))
             atomic_save_workbook(workbook, output_file)
             _cleanup_indexed_siblings(output_file, emit_log=emit_log)
             self._save_current_capacity_display_oil_values(

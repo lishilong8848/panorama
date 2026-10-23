@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from app.modules.scheduler.repository.scheduler_state_repository import SchedulerStateRepository
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
+from handover_log_module.core.oil_tank_calibration import B_OIL_CALIBRATION_VERSION
 
 
 _STATE_REPOSITORY = SchedulerStateRepository()
@@ -55,6 +56,7 @@ class HandoverCapacityOilCacheService:
         return {
             "first": str(row.get("first", "") or "").strip(),
             "second": str(row.get("second", "") or "").strip(),
+            "calculation_version": str(row.get("calculation_version", "") or ""),
         }
 
     def save_current_values(
@@ -73,6 +75,7 @@ class HandoverCapacityOilCacheService:
             "duty_shift": str(duty_shift or "").strip().lower(),
             "first": str(first or "").strip(),
             "second": str(second or "").strip(),
+            "calculation_version": B_OIL_CALIBRATION_VERSION if str(building).strip() == "B楼" else "",
             "updated_at": _now_text(),
         }
         self._save(payload)
