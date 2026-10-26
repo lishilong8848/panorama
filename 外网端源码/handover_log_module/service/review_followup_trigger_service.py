@@ -427,9 +427,6 @@ class ReviewFollowupTriggerService:
         if cloud_status == "disabled" or cloud_disabled:
             emit_log("[交接班][机柜班次多维] 跳过: 云文档同步已禁用")
             return self._existing_cabinet_shift_record_export(normalized_sessions)
-        if cloud_status != "ok" and not self._all_sessions_cloud_synced_current_revision(normalized_sessions):
-            emit_log(f"[交接班][机柜班次多维] 跳过: 云表同步状态={_followup_status_text(cloud_status)}")
-            return self._existing_cabinet_shift_record_export(normalized_sessions)
 
         candidates: List[Dict[str, Any]] = []
         skipped_buildings: List[Dict[str, str]] = []
@@ -437,20 +434,6 @@ class ReviewFollowupTriggerService:
             building = str(session.get("building", "")).strip() or "-"
             session_id = str(session.get("session_id", "")).strip()
             revision = int(session.get("revision", 0) or 0)
-            state = _normalize_export_state(session.get("cabinet_shift_record_export", {}))
-            state_status = str(state.get("status", "")).strip().lower()
-            state_reason = str(state.get("reason", "")).strip().lower()
-            if (
-                state_status == "skipped"
-                and state_reason in {"disabled", "missing_duty_context"}
-                and self._is_export_complete_for_revision(
-                    state,
-                    revision,
-                    static_skip_reasons={"disabled", "missing_duty_context"},
-                )
-            ):
-                skipped_buildings.append({"building": building, "reason": state_reason})
-                continue
             if not self._is_cloud_sync_complete_for_revision(session.get("cloud_sheet_sync", {}), revision):
                 skipped_buildings.append({"building": building, "reason": "cloud_sync_pending"})
                 continue
@@ -655,19 +638,13 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
         refreshed_sessions = self._list_batch_sessions_resilient(target_batch, emit_log=emit_log)
-        daily_report_record_export = self._existing_daily_report_record_export(refreshed_sessions or [session])
-        if self._all_sessions_cloud_synced_current_revision(refreshed_sessions):
-            cloud_summary = self._summarize_cloud_sheet_sync(
-                batch_key=target_batch,
-                sessions=refreshed_sessions,
-            )
-            daily_report_record_export = self._run_daily_report_record_export(
-                batch_key=target_batch,
-                sessions=refreshed_sessions,
-                cloud_result=cloud_summary,
-                emit_log=emit_log,
-            )
-            refreshed_sessions = self._list_batch_sessions_resilient(target_batch, emit_log=emit_log)
+        daily_report_record_export = self._run_daily_report_record_export(
+            batch_key=target_batch,
+            sessions=refreshed_sessions or [session],
+            cloud_result=cloud_result,
+            emit_log=emit_log,
+        )
+        refreshed_sessions = self._list_batch_sessions_resilient(target_batch, emit_log=emit_log)
         return self._compose_followup_result(
             batch_key=target_batch,
             export_result=export_result,
@@ -794,8 +771,6 @@ class ReviewFollowupTriggerService:
                 cloud_summary.get("failed_buildings", []) or []
             )
             cloud_summary = self._refresh_cloud_result_status(cloud_summary)
-            cabinet_shift_record_export = self._existing_cabinet_shift_record_export(sessions)
-            daily_report_record_export = self._existing_daily_report_record_export(sessions)
             if self._all_sessions_cloud_synced_current_revision(sessions):
                 cloud_summary = self._attach_extra_cloud_sheet_sync_results(
                     batch_key=target_batch,
@@ -803,21 +778,14 @@ class ReviewFollowupTriggerService:
                     cloud_result=cloud_summary,
                     emit_log=emit_log,
                 )
-                cabinet_shift_record_export = self._run_cabinet_shift_record_export(
-                    batch_key=target_batch,
-                    sessions=sessions,
-                    cloud_result=cloud_summary,
-                    emit_log=emit_log,
-                )
-                sessions = self._review_service.list_batch_sessions(target_batch)
-                if str(daily_report_record_export.get("status", "")).strip().lower() != "success":
-                    daily_report_record_export = self._run_daily_report_record_export(
-                        batch_key=target_batch,
-                        sessions=sessions,
-                        cloud_result=cloud_summary,
-                        emit_log=emit_log,
-                    )
-                    sessions = self._review_service.list_batch_sessions(target_batch)
+            cabinet_shift_record_export = self._run_cabinet_shift_record_export(
+                batch_key=target_batch, sessions=sessions, cloud_result=cloud_summary, emit_log=emit_log,
+            )
+            sessions = self._review_service.list_batch_sessions(target_batch)
+            daily_report_record_export = self._run_daily_report_record_export(
+                batch_key=target_batch, sessions=sessions, cloud_result=cloud_summary, emit_log=emit_log,
+            )
+            sessions = self._review_service.list_batch_sessions(target_batch)
             return self._compose_followup_result(
                 batch_key=target_batch,
                 export_result=self._empty_export_result(),
@@ -875,19 +843,10 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
         refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
-        daily_report_record_export = self._existing_daily_report_record_export(refreshed_sessions)
-        if self._all_sessions_cloud_synced_current_revision(refreshed_sessions):
-            cloud_summary = self._summarize_cloud_sheet_sync(
-                batch_key=target_batch,
-                sessions=refreshed_sessions,
-            )
-            daily_report_record_export = self._run_daily_report_record_export(
-                batch_key=target_batch,
-                sessions=refreshed_sessions,
-                cloud_result=cloud_summary,
-                emit_log=emit_log,
-            )
-            refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
+        daily_report_record_export = self._run_daily_report_record_export(
+            batch_key=target_batch, sessions=refreshed_sessions, cloud_result=cloud_result, emit_log=emit_log,
+        )
+        refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
 
         return self._compose_followup_result(
             batch_key=target_batch,
@@ -1326,6 +1285,11 @@ class ReviewFollowupTriggerService:
             if not building:
                 continue
             combined_failed_map[building] = str(item.get("error", "")).strip()
+        if str(daily_report_record_export.get("status", "")).strip().lower() in {"failed", "partial_failed"}:
+            combined_failed_map["日报链接多维"] = str(
+                daily_report_record_export.get("error_detail") or daily_report_record_export.get("error")
+                or "日报链接多维同步失败"
+            ).strip()
         station_h_result = normalized_cloud.get("station_h_sync", {})
         if str(station_h_result.get("status", "")).strip().lower() in {"failed", "partial_failed"}:
             combined_failed_map["H楼"] = str(
@@ -2675,6 +2639,7 @@ class ReviewFollowupTriggerService:
             error_code = str(getattr(exc, "error_code", "") or "daily_report_export_failed").strip()
             error = str(getattr(exc, "user_message", "") or "").strip() or "日报多维写入失败。"
             error_detail = str(getattr(exc, "error_detail", "") or str(exc)).strip()
+            emit_log(f"[交接班][日报多维] 同步失败 batch={duty_date}|{duty_shift}, code={error_code}, error={error_detail}")
             return self._daily_report_export_state(
                 status="failed",
                 spreadsheet_url=spreadsheet_url,
@@ -2706,18 +2671,17 @@ class ReviewFollowupTriggerService:
                 spreadsheet_url = str(batch_meta.get("spreadsheet_url", "")).strip()
 
         emit_log(f"[交接班][日报多维] 开始 batch={target_batch}")
-        if cloud_status != "ok":
-            emit_log(f"[交接班][日报多维] 跳过: 云表同步状态={_followup_status_text(cloud_status)}")
-            state = self._daily_report_export_state(
-                status="skipped_due_to_cloud_sync_not_ok",
-                spreadsheet_url=spreadsheet_url,
-                error=f"云表同步状态不是成功: {_followup_status_text(cloud_status)}",
-            )
-            return self._daily_report_state_service.update_export_state(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                daily_report_record_export=state,
-            )
+        cloud_skips = [item for item in (cloud_result.get("skipped_buildings", []) or []) if isinstance(item, dict)]
+        cloud_disabled = cloud_status == "disabled" or (bool(cloud_skips) and all(
+            str(item.get("reason", "")).strip().lower() == "disabled" for item in cloud_skips
+        ))
+        has_synced_building = any(
+            self._is_cloud_sync_complete_for_revision(session.get("cloud_sheet_sync", {}), int(session.get("revision", 0) or 0))
+            for session in sessions if isinstance(session, dict)
+        )
+        if cloud_disabled or not has_synced_building:
+            emit_log("[交接班][日报多维] 暂不写入: 云表同步已禁用或尚无本次修订上传成功的楼栋")
+            return self._existing_daily_report_record_export(sessions)
 
         if not spreadsheet_url:
             emit_log("[交接班][日报多维] 跳过: 缺少云表链接")
@@ -2785,6 +2749,22 @@ class ReviewFollowupTriggerService:
             daily_report_record_export=state,
         )
 
+    def _reconcile_cloud_bitable_records(
+        self, *, batch_key: str, sessions: List[Dict[str, Any]], cloud_result: Dict[str, Any],
+        emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        cabinet_result = self._run_cabinet_shift_record_export(
+            batch_key=batch_key, sessions=sessions, cloud_result=cloud_result, emit_log=emit_log,
+        )
+        daily_result = self._run_daily_report_record_export(
+            batch_key=batch_key, sessions=sessions, cloud_result=cloud_result, emit_log=emit_log,
+        )
+        return self._compose_followup_result(
+            batch_key=batch_key, sessions=self._review_service.list_batch_sessions(batch_key),
+            export_result={}, cloud_result=cloud_result, cabinet_shift_record_export=cabinet_result,
+            daily_report_record_export=daily_result,
+        )
+
     def retry_cloud_sheet_for_building(
         self,
         building: str,
@@ -2832,7 +2812,10 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
         return {
-            "status": str(cloud_result.get("status", "")).strip() or "failed",
+            **self._reconcile_cloud_bitable_records(
+                batch_key=batch_key, sessions=self._review_service.list_batch_sessions(batch_key),
+                cloud_result=cloud_result, emit_log=emit_log,
+            ),
             "batch_key": batch_key,
             "session": self._review_service.get_latest_session(building),
             "batch_status": self._review_service.get_batch_status(batch_key),
@@ -2887,7 +2870,10 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
         return {
-            "status": str(cloud_result.get("status", "")).strip() or "failed",
+            **self._reconcile_cloud_bitable_records(
+                batch_key=batch_key, sessions=self._review_service.list_batch_sessions(batch_key),
+                cloud_result=cloud_result, emit_log=emit_log,
+            ),
             "batch_key": batch_key,
             "session": self._review_service.get_session_by_id(target_session_id),
             "batch_status": self._review_service.get_batch_status(batch_key),
@@ -2928,9 +2914,15 @@ class ReviewFollowupTriggerService:
             sessions=self._review_service.list_batch_sessions(str(session.get("batch_key", "")).strip()),
             emit_log=emit_log,
         )
-        status = str(cloud_result.get("status", "")).strip() or "failed"
+        followup_result = self._reconcile_cloud_bitable_records(
+            batch_key=str(session.get("batch_key", "")).strip(),
+            sessions=self._review_service.list_batch_sessions(str(session.get("batch_key", "")).strip()),
+            cloud_result=cloud_result, emit_log=emit_log,
+        )
+        status = str(followup_result.get("status", "")).strip() or "failed"
         emit_log(f"[交接班][历史云表更新] 完成 building={building}, 状态={_followup_status_text(status)}")
         return {
+            **followup_result,
             "status": status,
             "batch_key": str(session.get("batch_key", "")).strip(),
             "session": self._review_service.get_session_by_id(target_session_id),
@@ -2960,22 +2952,16 @@ class ReviewFollowupTriggerService:
                 skipped_buildings.append({"building": building, "reason": "already_success"})
 
         if not retry_sessions:
+            result = self._reconcile_cloud_bitable_records(
+                batch_key=target_batch_key, sessions=sessions,
+                cloud_result=self._summarize_cloud_sheet_sync(batch_key=target_batch_key, sessions=sessions),
+                emit_log=emit_log,
+            )
             return {
-                "status": "skipped",
+                **result,
                 "batch_key": target_batch_key,
-                "batch_status": batch_status,
-                "updated_sessions": sessions,
-                "cloud_sheet_sync": {
-                    "status": "skipped",
-                    "spreadsheet_token": "",
-                    "spreadsheet_url": "",
-                    "spreadsheet_title": "",
-                    "uploaded_buildings": [],
-                    "skipped_buildings": skipped_buildings,
-                    "failed_buildings": [],
-                    "details": {},
-                    "blocked_reason": "",
-                },
+                "batch_status": self._review_service.get_batch_status(target_batch_key),
+                "updated_sessions": self._review_service.list_batch_sessions(target_batch_key),
             }
 
         self._ensure_external_network(emit_log)
@@ -2992,10 +2978,12 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
         return {
-            "status": str(cloud_result.get("status", "")).strip() or "failed",
+            **self._reconcile_cloud_bitable_records(
+                batch_key=target_batch_key, sessions=refreshed_sessions, cloud_result=cloud_result, emit_log=emit_log,
+            ),
             "batch_key": target_batch_key,
             "batch_status": self._review_service.get_batch_status(target_batch_key),
-            "updated_sessions": refreshed_sessions,
+            "updated_sessions": self._review_service.list_batch_sessions(target_batch_key),
             "cloud_sheet_sync": cloud_result,
         }
 
@@ -3268,18 +3256,9 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
         refreshed_sessions = self._review_service.list_batch_sessions(batch_key)
-        daily_report_record_export = self._existing_daily_report_record_export(refreshed_sessions or sessions)
-        if self._all_sessions_cloud_synced_current_revision(refreshed_sessions or sessions):
-            cloud_summary = self._summarize_cloud_sheet_sync(
-                batch_key=batch_key,
-                sessions=refreshed_sessions or sessions,
-            )
-            daily_report_record_export = self._run_daily_report_record_export(
-                batch_key=batch_key,
-                sessions=refreshed_sessions or sessions,
-                cloud_result=cloud_summary,
-                emit_log=emit_log,
-            )
+        daily_report_record_export = self._run_daily_report_record_export(
+            batch_key=batch_key, sessions=refreshed_sessions or sessions, cloud_result=cloud_result, emit_log=emit_log,
+        )
         refreshed_sessions = self._review_service.list_batch_sessions(batch_key)
         return self._compose_followup_result(
             batch_key=batch_key,
@@ -3413,29 +3392,9 @@ class ReviewFollowupTriggerService:
         )
         refreshed_sessions = self._review_service.list_batch_sessions(target_batch)
 
-        daily_report_record_export = {}
-        if refreshed_sessions:
-            first_session = refreshed_sessions[0]
-            duty_date = str(first_session.get("duty_date", "")).strip()
-            duty_shift = str(first_session.get("duty_shift", "")).strip().lower()
-            existing_daily_report = self._daily_report_state_service.get_export_state(
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-            )
-            existing_daily_report = _normalize_daily_report_export_state(existing_daily_report)
-            if str(existing_daily_report.get("status", "")).strip().lower() == "success":
-                daily_report_record_export = existing_daily_report
-            elif str(cloud_result.get("status", "")).strip().lower() == "ok":
-                daily_report_record_export = self._run_daily_report_record_export(
-                    batch_key=target_batch,
-                    sessions=refreshed_sessions,
-                    cloud_result=cloud_result,
-                    emit_log=emit_log,
-                )
-            else:
-                daily_report_record_export = existing_daily_report
-        if not isinstance(daily_report_record_export, dict):
-            daily_report_record_export = self._daily_report_export_state(status="idle")
+        daily_report_record_export = self._run_daily_report_record_export(
+            batch_key=target_batch, sessions=refreshed_sessions, cloud_result=cloud_result, emit_log=emit_log,
+        )
 
         return self._compose_followup_result(
             batch_key=target_batch,

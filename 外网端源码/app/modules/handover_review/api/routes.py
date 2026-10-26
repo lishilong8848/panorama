@@ -2986,6 +2986,15 @@ def _build_review_confirm_feedback(
 def _build_review_cloud_retry_feedback(result: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = result if isinstance(result, dict) else {}
     status = str(payload.get("status", "")).strip().lower()
+    if status == "partial_failed":
+        detail = "；".join(
+            f"{item.get('building', '')}: {item.get('error', '')}"
+            for item in (payload.get("failed_buildings", []) or []) if isinstance(item, dict)
+        )
+        return _review_display_item(
+            status="partial_failed", text="上传部分完成，仍有后续同步失败", tone="warning",
+            reason_code="partial_failed", detail_text=detail or "请重试未完成的后续同步。",
+        )
     if status in {"ok", "success"}:
         return _review_display_item(
             status="success",
@@ -3020,6 +3029,8 @@ def _build_review_cloud_retry_feedback(result: Dict[str, Any] | None = None) -> 
 def _build_review_history_cloud_update_feedback(result: Dict[str, Any] | None = None) -> Dict[str, Any]:
     payload = result if isinstance(result, dict) else {}
     status = str(payload.get("status", "")).strip().lower()
+    if status == "partial_failed":
+        return _build_review_cloud_retry_feedback(payload)
     if status in {"ok", "success"}:
         return _review_display_item(
             status="success",
@@ -6720,6 +6731,9 @@ def handover_review_retry_cloud_sync(
             "cloud_sheet_sync": result.get("cloud_sheet_sync", {}),
             "status": result.get("status", ""),
             "operation_feedback": _build_review_cloud_retry_feedback(result),
+            "daily_report_record_export": result.get("daily_report_record_export", {}),
+            "cabinet_shift_record_export": result.get("cabinet_shift_record_export", {}),
+            "failed_buildings": result.get("failed_buildings", []),
             "latest_session_id": _safe_latest_session_id(service, building=building, emit_log=emit_log),
         }
         return _attach_review_display_state(
@@ -6793,6 +6807,9 @@ def handover_review_update_cloud_sync(
             "batch_status": batch_status,
             "cloud_sheet_sync": result.get("cloud_sheet_sync", {}),
             "operation_feedback": _build_review_history_cloud_update_feedback(result),
+            "daily_report_record_export": result.get("daily_report_record_export", {}),
+            "cabinet_shift_record_export": result.get("cabinet_shift_record_export", {}),
+            "failed_buildings": result.get("failed_buildings", []),
             "latest_session_id": _safe_latest_session_id(service, building=building, emit_log=container.add_system_log),
         }
         return _attach_review_display_state(
@@ -6831,12 +6848,15 @@ def handover_review_retry_cloud_sync_batch(
         _review_history_cache_invalidate_sessions(updated_sessions)
         status = str(result.get("status", "")).strip().lower()
         return {
-            "ok": status != "blocked",
+            "ok": status in {"ok", "success", "skipped"},
             "status": result.get("status", ""),
             "batch_key": batch_key,
             "batch_status": batch_status,
             "updated_sessions": updated_sessions,
             "cloud_sheet_sync": result.get("cloud_sheet_sync", {}),
+            "daily_report_record_export": result.get("daily_report_record_export", {}),
+            "cabinet_shift_record_export": result.get("cabinet_shift_record_export", {}),
+            "failed_buildings": result.get("failed_buildings", []),
         }
 
     job = _start_handover_background_job(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 from typing import Any, Callable, Dict, List
 
@@ -326,7 +326,6 @@ class HandoverDailyReportBitableExportService:
         cfg: Dict[str, Any],
     ) -> List[str]:
         fields = cfg.get("fields", {})
-        target_year = self._year_text(duty_date)
         target_date_ms = self._midnight_timestamp_ms(duty_date)
         target_shift = self._shift_text(duty_shift)
         matched: List[str] = []
@@ -337,10 +336,9 @@ class HandoverDailyReportBitableExportService:
             payload_fields = item.get("fields", {})
             if not record_id or not isinstance(payload_fields, dict):
                 continue
-            year_text = self._normalize_select_text(payload_fields.get(fields.get("year", "年度")))
             shift_text = self._normalize_select_text(payload_fields.get(fields.get("shift", "班次")))
             date_ms = self._normalize_date_to_midnight_ms(payload_fields.get(fields.get("date", "日期")))
-            if year_text == target_year and shift_text == target_shift and date_ms == target_date_ms:
+            if shift_text == target_shift and date_ms == target_date_ms:
                 matched.append(record_id)
         return matched
 
@@ -370,10 +368,16 @@ class HandoverDailyReportBitableExportService:
         except Exception as exc:  # noqa: BLE001
             fields_meta = []
             emit_log(f"[交接班][日报多维] 字段元数据读取失败，将按超链接对象写入: {exc}")
+        fields = cfg.get("fields", {})
+        start_day = datetime.strptime(duty_date, "%Y-%m-%d")
+        end_day = (start_day + timedelta(days=1)).strftime("%Y-%m-%d")
+        date_field = fields["date"]
         existing_records = client.list_records(
             table_id=table_id,
             page_size=int(target.get("page_size", 500) or 500),
-            max_records=int(target.get("max_records", 5000) or 5000),
+            max_records=0,
+            filter_formula=(f'AND(CurrentValue.[{date_field}]>=TODATE("{duty_date}"), '
+                            f'CurrentValue.[{date_field}]<TODATE("{end_day}"))'),
         )
         matched_ids = self._match_existing_record_ids(
             existing_records=existing_records,

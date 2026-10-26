@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, List, Set
 
@@ -453,15 +453,25 @@ class HandoverCabinetShiftRecordBitableExportService:
             "error": "",
         }
 
-    def list_existing_records(self, emit_log: Callable[[str], None] = print) -> List[Dict[str, Any]]:
+    def list_existing_records(
+        self, emit_log: Callable[[str], None] = print, *, duty_date: str = "",
+    ) -> List[Dict[str, Any]]:
         cfg = self._normalize_cfg()
         target = cfg.get("target", {})
         table_id = str(target.get("table_id", "") or "").strip()
         client = self._new_client(cfg)
+        filter_formula = ""
+        if duty_date:
+            start_day = datetime.strptime(duty_date, "%Y-%m-%d")
+            end_day = (start_day + timedelta(days=1)).strftime("%Y-%m-%d")
+            date_field = cfg["fields"]["date"]
+            filter_formula = (f'AND(CurrentValue.[{date_field}]>=TODATE("{duty_date}"), '
+                              f'CurrentValue.[{date_field}]<TODATE("{end_day}"))')
         records = client.list_records(
             table_id=table_id,
             page_size=int(target.get("page_size", 500) or 500),
-            max_records=int(target.get("max_records", 5000) or 5000),
+            max_records=0,
+            filter_formula=filter_formula,
         )
         self._emit(emit_log, f"旧记录读取完成: table_id={table_id}, total={len(records)}")
         return records
@@ -685,9 +695,12 @@ class HandoverCabinetShiftRecordBitableExportService:
             }
 
         try:
-            cached_records = list(existing_records) if isinstance(existing_records, list) else self.list_existing_records(
-                emit_log=emit_log
-            )
+            if isinstance(existing_records, list):
+                cached_records = list(existing_records)
+            else:
+                cached_records = []
+                for duty_date in sorted({row["duty_date"] for row in rows}):
+                    cached_records.extend(self.list_existing_records(emit_log=emit_log, duty_date=duty_date))
             client = self._new_client(cfg)
             writable_field_names = self._writable_field_names(client, table_id=table_id, emit_log=emit_log)
             update_records: List[Dict[str, Any]] = []
@@ -725,6 +738,10 @@ class HandoverCabinetShiftRecordBitableExportService:
                     batch_size=int(target.get("create_batch_size", 200) or 200),
                 )
                 created_record_ids = self._extract_created_record_ids(responses)
+                if len(created_record_ids) != len(create_rows) or len(set(created_record_ids)) != len(create_rows):
+                    raise RuntimeError(
+                        f"机柜班次记录创建结果不完整: expected={len(create_rows)}, returned_ids={len(created_record_ids)}"
+                    )
             for index, row in enumerate(create_rows):
                 row["record_id"] = created_record_ids[index] if index < len(created_record_ids) else ""
 

@@ -1263,6 +1263,9 @@ def handle_handover_cloud_retry_single(
         "session": session,
         "batch_status": batch_status,
         "cloud_sheet_sync": result.get("cloud_sheet_sync", {}),
+        "daily_report_record_export": result.get("daily_report_record_export", {}),
+        "cabinet_shift_record_export": result.get("cabinet_shift_record_export", {}),
+        "failed_buildings": result.get("failed_buildings", []),
         "status": result.get("status", ""),
         "history": routes._build_history_payload_safe(
             service,
@@ -1291,12 +1294,15 @@ def handle_handover_cloud_retry_batch(
     updated_sessions = result.get("updated_sessions") if isinstance(result.get("updated_sessions"), list) else service.list_batch_sessions(batch_key)
     status = str(result.get("status", "")).strip().lower()
     return {
-        "ok": status != "blocked",
+        "ok": status in {"ok", "success", "skipped"},
         "status": result.get("status", ""),
         "batch_key": batch_key,
         "batch_status": batch_status,
         "updated_sessions": updated_sessions,
         "cloud_sheet_sync": result.get("cloud_sheet_sync", {}),
+        "daily_report_record_export": result.get("daily_report_record_export", {}),
+        "cabinet_shift_record_export": result.get("cabinet_shift_record_export", {}),
+        "failed_buildings": result.get("failed_buildings", []),
     }
 
 
