@@ -34,6 +34,28 @@ def test_save_selection_filters_long_day_people_from_duty_fields(tmp_path):
     assert saved["next_people_text"] == "张岳军"
 
 
+def test_training_survives_new_service_and_people_only_save(tmp_path):
+    service, repository = _service(tmp_path)
+    rows = [{"row_id": "training:test", "cells": {"B": "培训", "D": "17：30-18：00", "E": "理论", "F": "讲师", "G": "甲、乙"}}]
+    service.save_selection(duty_date="2026-10-27", duty_shift="day", current_people="甲", next_people="乙", long_day_people=[], training_rows=rows)
+    restarted = StationHReviewSelectionService({}, app_state_repository=repository)
+    assert restarted.get_selection("2026-10-27", "day")["training_rows"] == rows
+    saved = restarted.save_selection(duty_date="2026-10-27", duty_shift="day", current_people="甲", next_people="丙", long_day_people=[])
+    assert saved["training_rows"] == rows
+
+
+def test_auto_training_append_preserves_saved_people_and_manual_edits(tmp_path):
+    service, _repository = _service(tmp_path)
+    original = [{"row_id": "training:1", "cells": {"B": "手工改名", "G": "手工人员"}}]
+    service.save_selection(duty_date="2026-10-27", duty_shift="day", current_people="已保存甲", next_people="已保存乙", long_day_people=[], training_rows=original)
+    result = service.save_selection(duty_date="2026-10-27", duty_shift="day", current_people="旧甲", next_people="旧乙", long_day_people=[],
+                                    training_rows=[{"row_id": "training:1", "cells": {"B": "接口名称"}}, {"row_id": "training:2", "cells": {"B": "新增"}}], append_training_only=True)
+    assert result["current_people"] == ["已保存甲"]
+    assert result["next_people"] == ["已保存乙"]
+    assert result["training_rows"][0]["cells"]["B"] == "手工改名"
+    assert len(result["training_rows"]) == 2
+
+
 def test_get_selection_sanitizes_legacy_dirty_payload(tmp_path):
     service, repository = _service(tmp_path)
     key = station_h_build_batch_key("2026-06-09", "night")
@@ -115,6 +137,7 @@ def test_shift_roster_cache_only_does_not_call_feishu(tmp_path, monkeypatch):
 
 
 def test_station_h_status_returns_pending_without_remote_lookup(monkeypatch):
+    monkeypatch.setattr(review_routes, "_is_current_handover_duty_context", lambda **_kw: True)
     class _SelectionService:
         @staticmethod
         def get_selection(_duty_date, _duty_shift):

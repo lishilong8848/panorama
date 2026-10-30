@@ -49,6 +49,7 @@ export function createSchedulerUiHelpers(options = {}) {
     if (normalized === "alarm_event_upload") return health.alarm_event_upload?.scheduler || {};
     if (normalized === "system_screenshot_upload") return health.system_screenshot_upload?.scheduler || {};
     if (normalized === "temperature_humidity_upload") return health.temperature_humidity_upload?.scheduler || {};
+    if (normalized === "inspection_data_upload") return health.inspection_data_upload?.scheduler || {};
     if (normalized === "top5_power_report") return health.top5_power_report?.scheduler || {};
     if (normalized === "alarm_rule_export_upload") return health.alarm_rule_export_upload?.scheduler || {};
     if (normalized === "monthly_event_report") return health.monthly_event_report?.scheduler || {};
@@ -233,6 +234,13 @@ export function createSchedulerUiHelpers(options = {}) {
       && typeof config.value.temperature_humidity_upload.scheduler === "object"
     ) {
       config.value.temperature_humidity_upload.scheduler.auto_start_in_gui = remembered;
+      return;
+    }    if (
+      normalized === "inspection_data_upload"
+      && config?.value?.inspection_data_upload?.scheduler
+      && typeof config.value.inspection_data_upload.scheduler === "object"
+    ) {
+      config.value.inspection_data_upload.scheduler.auto_start_in_gui = remembered;
       return;
     }
     if (

@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from app.config.config_adapter import normalize_role_mode
+from app.config.inspection_data_config import INSPECTION_FAMILY_LABELS
 from app.modules.shared_bridge.service.bridge_status_presenter import (
     bridge_text,
     present_current_hour_refresh_overview,
@@ -144,6 +145,7 @@ def _complete_internal_source_family(
             source_family=key,
         )
         for building in INTERNAL_RUNTIME_BUILDINGS.values()
+        if key not in INSPECTION_FAMILY_LABELS or building in {"D楼", "E楼"}
     ]
     presented = present_source_cache_family(
         {
@@ -183,6 +185,12 @@ def build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "last_error": bridge_text(raw_cache.get("last_error", "")),
         "cache_root": str(raw_cache.get("cache_root", "") or "").strip(),
         "current_hour_refresh": copy.deepcopy(raw_cache.get("current_hour_refresh", {}) if isinstance(raw_cache.get("current_hour_refresh", {}), dict) else {}),
+        **{family: _complete_internal_source_family(
+            raw_cache.get(family, {}),
+            key=family,
+            title=label,
+            fallback_bucket=current_bucket,
+        ) for family, label in INSPECTION_FAMILY_LABELS.items()},
         "handover_log_family": _complete_internal_source_family(
             raw_cache.get("handover_log_family", {}),
             key="handover_log_family",
@@ -300,6 +308,12 @@ def build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building
         "building_code": building_code,
         "page_slot": present_internal_page_slot(copy.deepcopy(matched_slot if isinstance(matched_slot, dict) else {"building": building})),
         "source_families": {
+            **({family: select_internal_runtime_building_row(
+                raw_cache.get(family, {}),
+                building=building,
+                fallback_bucket=current_bucket,
+                source_family=family,
+            ) for family in INSPECTION_FAMILY_LABELS} if building in {"D楼", "E楼"} else {}),
             "handover_log_family": select_internal_runtime_building_row(
                 raw_cache.get("handover_log_family", {}),
                 building=building,

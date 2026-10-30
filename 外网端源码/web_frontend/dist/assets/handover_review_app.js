@@ -24,6 +24,7 @@ import {
   retryHandoverReviewCloudSyncApi,
   refreshHandoverReviewEventSectionsApi,
   refreshHandoverReviewStationHSignaturesApi,
+  refreshHandoverReviewStationHTrainingApi,
   regenerateHandoverReviewStationHDutyFocusImageApi,
   saveHandoverReview110StationParsedRowsApi,
   saveHandoverReviewApi,
@@ -41,6 +42,7 @@ import { HANDOVER_REVIEW_TEMPLATE } from "./handover_review_template.js";
 import { createHandoverReviewDisplayUiHelpers } from "./handover_review_display_ui_helpers.js";
 import { createHandoverReviewDocumentEditHelpers } from "./handover_review_document_edit_helpers.js";
 import { createHandoverReviewActionHelpers } from "./handover_review_action_helpers.js";
+import { appendTrainingRows, TRAINING_COLUMNS } from "./handover_training_helpers.js";
 
 const FALLBACK_COLUMN_LETTERS = ["B", "C", "D", "E", "F", "G", "H", "I"];
 const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
@@ -732,6 +734,27 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           >{{ item.name }}<span v-if="item.role"> · {{ item.role }}</span></button>
         </div>
         <small class="person-picker-hint">{{ state.rules.long_day_people || "默认复用上一班组保存的长白岗；不上班时清空后保存。" }}</small>
+      </article>
+    </section>
+
+    <section v-if="!loading" class="review-current-view-section">
+      <article class="review-card">
+        <div class="review-card-head">
+          <h2>培训管理</h2>
+          <div class="review-inline-actions">
+            <button type="button" class="btn btn-secondary btn-mini" :disabled="saving || trainingRefreshing" @click="addTrainingRow" title="新增培训">新增</button>
+            <button type="button" class="btn btn-secondary btn-mini" :disabled="saving || trainingRefreshing" @click="refreshTraining">{{ trainingRefreshing ? '刷新中...' : '刷新' }}</button>
+          </div>
+        </div>
+        <div class="review-table-wrap">
+          <table class="review-table">
+            <thead><tr><th v-for="column in trainingColumns" :key="column.key">{{ column.label }}</th></tr></thead>
+            <tbody><tr v-for="row in form.training_rows" :key="row.row_id">
+              <td v-for="column in trainingColumns" :key="column.key"><textarea class="review-input" rows="2" v-model="row.cells[column.key]" :aria-label="column.label" :disabled="saving"></textarea></td>
+            </tr></tbody>
+          </table>
+          <p v-if="!form.training_rows.length" class="review-empty">暂无培训记录</p>
+        </div>
       </article>
     </section>
 
@@ -1490,6 +1513,7 @@ function normalizeStationHState(raw = {}) {
       batch_key: String(batch.batch_key || "").trim(),
     },
     saved: Boolean(raw?.saved),
+    historical: Boolean(raw?.historical),
     selection: {
       current_people_text: String(selection.current_people_text || "").trim(),
       next_people_text: String(selection.next_people_text || "").trim(),
@@ -1514,6 +1538,7 @@ function normalizeStationHState(raw = {}) {
     rules: raw?.rules && typeof raw.rules === "object" ? raw.rules : {},
     candidate_source: raw?.candidate_source && typeof raw.candidate_source === "object" ? raw.candidate_source : {},
     duty_focus: normalizeStationHDutyFocus(raw?.duty_focus || {}),
+    training_rows: Array.isArray(raw?.training_rows) ? cloneDeep(raw.training_rows) : [],
   };
 }
 
@@ -2322,6 +2347,8 @@ function mountHandoverStationHApp(Vue) {
       const loading = ref(true);
       const saving = ref(false);
       const signatureRefreshing = ref(false);
+      const trainingRefreshing = ref(false);
+      let stationHRequestSeq = 0;
       const signatureSearch = ref({ handover: "", takeover: "" });
       const signaturePickerOpen = ref({ handover: false, takeover: false });
       const signaturePickerActive = ref({ handover: 0, takeover: 0 });
@@ -2344,6 +2371,7 @@ function mountHandoverStationHApp(Vue) {
         next_people_text: "",
         long_day_people_text: "",
         duty_focus: normalizeStationHDutyFocus({}),
+        training_rows: [],
       });
       const stationHRefreshTimers = new Set();
       let stationHCandidateRetryCount = 0;
@@ -2364,8 +2392,10 @@ function mountHandoverStationHApp(Vue) {
         || String(form.value.next_people_text || "").trim() !== String(state.value.selection.next_people_text || "").trim()
         || String(form.value.long_day_people_text || "").trim() !== String(state.value.selection.long_day_people_text || "").trim()
         || JSON.stringify(buildDutyFocusPayload(form.value.duty_focus)) !== JSON.stringify(buildDutyFocusPayload(state.value.duty_focus))
+        || JSON.stringify(form.value.training_rows) !== JSON.stringify(state.value.training_rows)
       ));
       const canPrintDutyFocus = computed(() => {
+        if (state.value.historical && state.value.duty_focus?.image_status?.available && !hasUnsavedChanges.value) return true;
         const people = Array.isArray(state.value.duty_focus?.signature_directory?.people)
           ? state.value.duty_focus.signature_directory.people
           : [];
@@ -2428,6 +2458,7 @@ function mountHandoverStationHApp(Vue) {
           next_people_text: normalized.selection.next_people_text,
           long_day_people_text: normalized.selection.long_day_people_text,
           duty_focus: cloneStationHDutyFocus(normalized.duty_focus),
+          training_rows: cloneDeep(normalized.training_rows),
         };
         scheduleStationHCandidateRefresh(normalized);
         scheduleDutyFocusImagePreview(normalized);
@@ -2504,8 +2535,8 @@ function mountHandoverStationHApp(Vue) {
         const batch = normalized?.batch && typeof normalized.batch === "object" ? normalized.batch : {};
         const batchKey = String(batch.batch_key || `${batch.duty_date || ""}|${batch.duty_shift || ""}`).trim();
         const imageStatus = normalized?.duty_focus?.image_status || {};
-        const canLoadExisting = Boolean(imageStatus.current);
-        const canGenerate = Boolean(normalized?.duty_focus?.print_ready);
+        const canLoadExisting = Boolean(imageStatus.current || (normalized?.historical && imageStatus.available));
+        const canGenerate = !normalized?.historical && Boolean(normalized?.duty_focus?.print_ready);
         if (!batchKey || dutyFocusImageAttemptedBatchKey === batchKey || (!canLoadExisting && !canGenerate)) return;
         dutyFocusImageAttemptedBatchKey = batchKey;
         Promise.resolve().then(() => ensureDutyFocusImage({ force: false, silent: true }));
@@ -2578,7 +2609,8 @@ function mountHandoverStationHApp(Vue) {
       }
 
       async function refreshStatus({ background = false, forceCurrent = false, includeSelectedDuty = false } = {}) {
-        if (background && (saving.value || hasUnsavedChanges.value)) return;
+        if (background && (loading.value || saving.value || trainingRefreshing.value || hasUnsavedChanges.value)) return;
+        const requestSeq = ++stationHRequestSeq;
         if (!background) {
           loading.value = true;
           errorText.value = "";
@@ -2588,20 +2620,27 @@ function mountHandoverStationHApp(Vue) {
             ...((routeHadExplicitDuty || includeSelectedDuty) && !forceCurrent ? buildContextPayload() : {}),
             _t: Date.now(),
           });
+          if (requestSeq !== stationHRequestSeq) return;
           if (background && (saving.value || hasUnsavedChanges.value)) return;
           applyState(response);
           if (!background) statusText.value = "H楼人员选择已刷新";
         } catch (error) {
+          if (requestSeq !== stationHRequestSeq) return;
           if (!background) {
             errorText.value = String(error?.message || error || "读取H楼人员选择失败");
             statusText.value = "";
           }
         } finally {
-          if (!background) loading.value = false;
+          if (!background && requestSeq === stationHRequestSeq) loading.value = false;
         }
       }
 
       function onDutyChange() {
+        if (hasUnsavedChanges.value && !window.confirm("有未保存内容，是否放弃修改并切换班次？")) {
+          dutyDate.value = state.value.batch.duty_date;
+          dutyShift.value = state.value.batch.duty_shift;
+          return;
+        }
         routeHadExplicitDuty = true;
         syncReviewSelectionToUrl({ dutyDate: dutyDate.value, dutyShift: dutyShift.value });
         void refreshStatus({ forceCurrent: false, includeSelectedDuty: true });
@@ -2800,6 +2839,7 @@ function mountHandoverStationHApp(Vue) {
             next_people_text: form.value.next_people_text,
             long_day_people_text: form.value.long_day_people_text,
             duty_focus: buildDutyFocusPayload(form.value.duty_focus),
+            training_rows: form.value.training_rows,
           });
           applyState(response);
           if (!silent) statusText.value = "H楼人员和值班关注点已保存。";
@@ -2834,9 +2874,39 @@ function mountHandoverStationHApp(Vue) {
         }
       }
 
+      function addTrainingRow() {
+        form.value.training_rows.push({ row_id: `manual-training:${Date.now()}:${Math.random()}`, cells: {
+          B: "", D: "17：30-18：00", E: "理论", F: "", G: "",
+        } });
+      }
+
+      async function refreshTraining() {
+        if (loading.value || saving.value || trainingRefreshing.value) return;
+        trainingRefreshing.value = true;
+        try {
+          if (!await saveSelection({ silent: true })) return;
+          const context = buildContextPayload();
+          const batchKey = `${context.duty_date}|${context.duty_shift}`;
+          const response = await refreshHandoverReviewStationHTrainingApi(context);
+          if (response.batch_key !== batchKey || `${dutyDate.value}|${dutyShift.value}` !== batchKey) return;
+          const previousCount = form.value.training_rows.length;
+          form.value.training_rows = appendTrainingRows(form.value.training_rows, response.training_rows);
+          const added = form.value.training_rows.length - previousCount;
+          if (!await saveSelection({ silent: true })) return;
+          statusText.value = `培训已刷新，新增 ${added} 条，原有内容已保留`;
+        } catch (error) {
+          errorText.value = String(error?.message || error || "刷新培训失败，已保留原有内容");
+        } finally {
+          trainingRefreshing.value = false;
+        }
+      }
+
       async function ensureDutyFocusImage({ force = false, silent = false } = {}) {
         if (dutyFocusImageLoading.value) return false;
-        const hasCurrentImage = Boolean(state.value.duty_focus?.image_status?.current);
+        const context = buildContextPayload();
+        const stillSelected = () => context.duty_date === dutyDate.value && context.duty_shift === dutyShift.value;
+        const hasCurrentImage = Boolean(state.value.duty_focus?.image_status?.current
+          || (state.value.historical && state.value.duty_focus?.image_status?.available));
         if ((force || !hasCurrentImage) && !canPrintDutyFocus.value) {
           const message = dutyFocusPrintReason.value || "签名不完整，暂不能生成图片";
           dutyFocusImageError.value = message;
@@ -2854,21 +2924,24 @@ function mountHandoverStationHApp(Vue) {
             const saved = await saveSelection({ silent: true });
             if (!saved) return false;
           }
-          if (force || !Boolean(state.value.duty_focus?.image_status?.current)) {
+          if (force || !hasCurrentImage) {
             const generated = await regenerateHandoverReviewStationHDutyFocusImageApi({
-              ...buildContextPayload(),
+              ...context,
               force,
             });
+            if (!stillSelected()) return false;
             state.value.duty_focus.image_status = normalizeStationHDutyFocusImageStatus(generated || {});
           }
           const imageBlob = await downloadHandoverReviewStationHDutyFocusImageApi({
-            ...buildContextPayload(),
+            ...context,
             _t: Date.now(),
           });
+          if (!stillSelected()) return false;
           replaceDutyFocusImageUrl(URL.createObjectURL(imageBlob));
           if (!silent) statusText.value = "值班关注点成品图片已更新。";
           return true;
         } catch (error) {
+          if (!stillSelected()) return false;
           const message = String(error?.message || error || "生成值班关注点图片失败");
           dutyFocusImageError.value = message;
           if (!silent) {
@@ -2990,7 +3063,8 @@ function mountHandoverStationHApp(Vue) {
         statusText.value = "正在准备最新值班关注点图片并调用打印...";
         try {
           const forceRegenerate = hasUnsavedChanges.value
-            || !Boolean(state.value.duty_focus?.image_status?.current);
+            || !(state.value.duty_focus?.image_status?.current
+              || (state.value.historical && state.value.duty_focus?.image_status?.available));
           const ready = await ensureDutyFocusImage({ force: forceRegenerate, silent: true });
           if (!ready || !dutyFocusImageUrl.value) {
             throw new Error(
@@ -3027,6 +3101,10 @@ function mountHandoverStationHApp(Vue) {
         loading,
         saving,
         signatureRefreshing,
+        trainingRefreshing,
+        trainingColumns: TRAINING_COLUMNS,
+        refreshTraining,
+        addTrainingRow,
         signatureSearch,
         signaturePickerOpen,
         signaturePickerActive,
@@ -3437,7 +3515,7 @@ export function mountHandoverReviewApp(Vue) {
 
       function isEventRefreshSection(section) {
         const name = normalizeHeaderLabel(section?.name);
-        return ["新事件处理", "历史事件跟进", "维护管理", "变更管理"]
+        return ["新事件处理", "历史事件跟进", "维护管理", "变更管理", "培训管理"]
           .some((target) => name.includes(target));
       }
 
@@ -3548,6 +3626,7 @@ export function mountHandoverReviewApp(Vue) {
       async function refreshEventSectionFromBitable(sectionName) {
         const targetName = String(sectionName || "").trim();
         if (!session.value?.session_id || !targetName) return;
+        if (targetName === "培训管理") return refreshTrainingSection();
         if (dirtyRegions.value.sections && typeof window !== "undefined") {
           const confirmed = window.confirm("刷新会覆盖该分类当前未保存内容，是否继续？");
           if (!confirmed) return;
@@ -3580,6 +3659,37 @@ export function mountHandoverReviewApp(Vue) {
         } catch (error) {
           errorText.value = String(error?.message || error || "刷新分类数据失败");
           statusText.value = "刷新分类数据失败";
+        } finally {
+          eventSectionsRefreshing.value = false;
+        }
+      }
+
+      async function refreshTrainingSection() {
+        if (eventSectionsRefreshing.value || saving.value || loading.value) return;
+        const sessionId = session.value?.session_id;
+        eventSectionsRefreshing.value = true;
+        errorText.value = "";
+        try {
+          if (dirty.value && !await saveDocument({ reason: "training_refresh", allowSubstationFailure: true })) return;
+          if (!await ensureEditingLock()) throw new Error("当前审核页正在其他终端编辑，请稍后刷新");
+          const response = await refreshHandoverReviewEventSectionsApi(buildingCode, {
+            session_id: sessionId, client_id: reviewClientId, section_name: "培训管理",
+          });
+          if (session.value?.session_id !== sessionId || response.session_id !== sessionId) return;
+          const section = documentRef.value.sections.find((item) => item.name === "培训管理");
+          if (!section) throw new Error("当前模板未找到培训管理分类");
+          const existing = section.rows.filter((row) => String(row.row_id || "").startsWith("training:")
+            || !row.is_placeholder_row || hasSectionRowContent(row, section.columns));
+          const merged = appendTrainingRows(existing, response.sections?.["培训管理"]);
+          const added = merged.length - existing.length;
+          if (added) {
+            section.rows = merged.map((row) => normalizeSectionRow(row, resolveSectionColumns(section)));
+            markDocumentDirty({ region: "sections" });
+            if (!await saveDocument({ reason: "training_refresh", allowSubstationFailure: true })) return;
+          }
+          statusText.value = `培训已刷新，新增 ${added} 条，原有内容已保留`;
+        } catch (error) {
+          errorText.value = String(error?.message || error || "刷新培训失败，已保留原有内容");
         } finally {
           eventSectionsRefreshing.value = false;
         }
@@ -3828,6 +3938,14 @@ export function mountHandoverReviewApp(Vue) {
         return true;
       }
 
+      const selectedDutyDate = computed(() => activeRouteSelection.value.dutyDate || session.value?.duty_date || reviewContext.value?.duty_date || "");
+      const selectedDutyShift = computed(() => activeRouteSelection.value.dutyShift || session.value?.duty_shift || reviewContext.value?.duty_shift || "day");
+      const selectionBusy = computed(() => loading.value || saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || eventSectionsRefreshing.value);
+      async function selectDutyContext(dutyDate, dutyShift) {
+        if (selectionBusy.value || !dutyDate || !["day", "night"].includes(dutyShift)) return;
+        await switchToSession("", { dutyDate, dutyShift });
+      }
+
       function syncRouteToCurrentSelection(nextHistory = historyState.value) {
         const selectedId = String(nextHistory?.selected_session_id || session.value?.session_id || "").trim();
         if (!selectedId && activeRouteSelection.value?.dutyDate && activeRouteSelection.value?.dutyShift) {
@@ -3852,6 +3970,7 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       function applyPayloadMeta(payload = {}) {
+        const requestedSelection = { ...activeRouteSelection.value };
         const hasSessionPayload = Object.prototype.hasOwnProperty.call(payload || {}, "session");
         const nextSession = payload?.session && typeof payload.session === "object" ? cloneDeep(payload.session) : null;
         const nextDocumentRevision = updateDocumentRevisionFromPayload(payload, nextSession);
@@ -3884,7 +4003,7 @@ export function mountHandoverReviewApp(Vue) {
           const currentHistory = historyState.value && typeof historyState.value === "object"
             ? cloneDeep(historyState.value)
             : {};
-          const selectedId = String(nextSession?.session_id || currentHistory.selected_session_id || session.value?.session_id || "").trim();
+          const selectedId = String(hasSessionPayload ? (nextSession?.session_id || "") : (currentHistory.selected_session_id || session.value?.session_id || "")).trim();
           const latestId = String(
             payload?.latest_session_id
             || currentHistory.latest_session_id
@@ -3909,7 +4028,10 @@ export function mountHandoverReviewApp(Vue) {
           }
         }
         const selectedId = String(historyState.value?.selected_session_id || nextSession?.session_id || session.value?.session_id || "").trim();
-        if (!selectedId && reviewContext.value?.duty_date && reviewContext.value?.duty_shift) {
+        if (requestedSelection.sessionId || (requestedSelection.dutyDate && requestedSelection.dutyShift)) {
+          activeRouteSelection.value = requestedSelection;
+          syncReviewSelectionToUrl(requestedSelection);
+        } else if (!selectedId && reviewContext.value?.duty_date && reviewContext.value?.duty_shift) {
           const routeHadExplicitDuty = Boolean(activeRouteSelection.value.dutyDate && activeRouteSelection.value.dutyShift);
           activeRouteSelection.value = {
             sessionId: "",
@@ -3974,13 +4096,7 @@ export function mountHandoverReviewApp(Vue) {
         historyState.value = normalizedHistory;
         historyLoaded.value = true;
         historyCacheKey.value = buildHistoryCacheKey(session.value, normalizedHistory);
-        const selectedId = String(normalizedHistory?.selected_session_id || session.value?.session_id || "").trim();
-        activeRouteSelection.value = {
-          sessionId: normalizedHistory?.selected_is_latest ? "" : selectedId,
-          dutyDate: "",
-          dutyShift: "",
-        };
-        syncRouteToCurrentSelection(normalizedHistory);
+        // A history list is metadata, not a navigation response.
       }
 
       async function ensureHistoryLoaded({ force = false } = {}) {
@@ -3996,8 +4112,11 @@ export function mountHandoverReviewApp(Vue) {
         }
         const shouldForce = Boolean(force || !historyLoaded.value);
         historyLoading.value = true;
+        const requestSeq = latestLoadRequestSeq;
         try {
           const params = buildLoadParams();
+          const selectedDate = activeRouteSelection.value.dutyDate || session.value?.duty_date;
+          if (selectedDate) params.history_date = selectedDate;
           if (shouldForce) {
             params.force = Date.now();
           }
@@ -4005,7 +4124,7 @@ export function mountHandoverReviewApp(Vue) {
             buildingCode,
             params,
           );
-          applyHistoryPayload(payload || {});
+          if (requestSeq === latestLoadRequestSeq) applyHistoryPayload(payload || {});
         } catch (error) {
           if (!errorText.value) {
             statusText.value = String(error?.message || error || "历史交接班日志加载失败");
@@ -4364,6 +4483,10 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function applyStatusPayload(payload = {}, { background = false } = {}) {
+        if (background && documentOmitted.value && !dirty.value && !errorText.value && payload?.session?.session_id) {
+          await loadReviewData({ background: false, mode: "bootstrap" });
+          return;
+        }
         const reviewUi = payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {};
         pollIntervalMs.value = resolvePollInterval(reviewUi);
         restartPollTimer();
@@ -4506,7 +4629,7 @@ export function mountHandoverReviewApp(Vue) {
         documentHydrating.value = true;
         building.value = String(payload?.building || nextSession?.building || "");
         documentRef.value = nextDocument;
-        documentOmitted.value = false;
+        documentOmitted.value = Boolean(payload?.document_omitted);
         applyPayloadMeta(payload);
         dirtyRegions.value = emptyDirtyRegions();
         outdoorTemperatureDirty.value = false;
@@ -4572,6 +4695,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         const resolvedMode = background ? "status" : (mode === "bootstrap" ? "bootstrap" : "full");
         const requestSeq = ++latestLoadRequestSeq;
+        const requestedParams = buildLoadParams();
         if (activeLoadController && typeof activeLoadController.abort === "function") {
           activeLoadController.abort();
         }
@@ -4590,12 +4714,11 @@ export function mountHandoverReviewApp(Vue) {
             try {
               const snapshotPayload = await getHandoverReviewSnapshotApi(
                 buildingCode,
-                buildLoadParams(),
+                requestedParams,
                 buildRequestOptions(activeLoadController),
               );
               if (requestSeq === latestLoadRequestSeq) {
                 applySnapshotPayload(snapshotPayload);
-                loading.value = false;
               }
             } catch (error) {
               if (isRequestAbort(error)) {
@@ -4607,7 +4730,7 @@ export function mountHandoverReviewApp(Vue) {
             try {
               payload = await getHandoverReviewBootstrapApi(
                 buildingCode,
-                buildLoadParams(),
+                requestedParams,
                 buildRequestOptions(activeLoadController),
               );
             } catch (error) {
@@ -4623,6 +4746,14 @@ export function mountHandoverReviewApp(Vue) {
             if (requestSeq !== latestLoadRequestSeq) {
               return false;
             }
+            for (let attempt = 0; payload?.document_import?.pending && attempt < 12; attempt += 1) {
+              statusText.value = "正在加载该班次的本机历史记录...";
+              await new Promise((resolve) => window.setTimeout(resolve, 2000));
+              if (requestSeq !== latestLoadRequestSeq) return false;
+              payload = await getHandoverReviewBootstrapApi(buildingCode, requestedParams, buildRequestOptions(activeLoadController));
+              if (requestSeq !== latestLoadRequestSeq) return false;
+            }
+            if (payload?.document_import?.error) errorText.value = payload.document_import.error;
             pollIntervalMs.value = resolvePollInterval(payload?.review_ui && typeof payload.review_ui === "object" ? payload.review_ui : {});
             restartPollTimer();
             hydrateFromPayload(payload, { fromBackground: false });
@@ -4689,7 +4820,7 @@ export function mountHandoverReviewApp(Vue) {
           if (requestSeq === latestLoadRequestSeq) {
             activeLoadController = null;
           }
-          if (!background) {
+          if (!background && requestSeq === latestLoadRequestSeq) {
             loading.value = false;
           }
         }
@@ -5284,6 +5415,10 @@ export function mountHandoverReviewApp(Vue) {
         isHistoryMode,
         currentDutyDateText,
         currentDutyShiftText,
+        selectedDutyDate,
+        selectedDutyShift,
+        selectionBusy,
+        selectDutyContext,
         currentModeText,
         reviewPendingTitle,
         reviewPendingMessage,

@@ -10,6 +10,7 @@ from app.config.config_compat_cleanup import (
     sanitize_wet_bulb_collection_config,
 )
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
+from app.config.inspection_data_config import normalize_inspection_scheduler
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.cell_rule_compiler import migrate_legacy_rule_structures, normalize_cell_rules
 from pipeline_utils import get_app_dir
@@ -427,6 +428,12 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     features["sheet_import"] = deep_merge_defaults(_dict(legacy_cfg.get("feishu_sheet_import")), _dict(features.get("sheet_import")))
     features["handover_log"] = deep_merge_defaults(_dict(legacy_cfg.get("handover_log")), _dict(features.get("handover_log")))
     features["manual_upload_gui"] = deep_merge_defaults(_dict(legacy_cfg.get("manual_upload_gui")), _dict(features.get("manual_upload_gui")))
+    features["inspection_data_upload"] = deep_merge_defaults(
+        _dict(legacy_cfg.get("inspection_data_upload")), features["inspection_data_upload"]
+    )
+    features["inspection_data_upload"]["scheduler"] = normalize_inspection_scheduler(
+        features["inspection_data_upload"]["scheduler"]
+    )
     features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
     features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
     features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
@@ -475,6 +482,9 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
             _strip_external_source_site_config(common, features)
         else:
             common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
+        features["inspection_data_upload"]["scheduler"] = normalize_inspection_scheduler(
+            features["inspection_data_upload"]["scheduler"]
+        )
         features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
         features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
         features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
@@ -764,6 +774,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "branch_power_upload": copy.deepcopy(branch_power_upload),
         "alarm_rule_export_upload": copy.deepcopy(alarm_rule_export_upload),
         "temperature_humidity_upload": copy.deepcopy(temperature_humidity_upload),
+        "inspection_data_upload": copy.deepcopy(features["inspection_data_upload"]),
         "system_screenshot_upload": copy.deepcopy(system_screenshot_upload),
         "alarm_export": copy.deepcopy(alarm_export),
         "wet_bulb_collection": copy.deepcopy(wet_bulb_collection),
@@ -890,6 +901,12 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
     features["alarm_rule_export_upload"] = deep_merge_defaults(
         _dict(runtime.get("alarm_rule_export_upload")),
         _dict(features.get("alarm_rule_export_upload")),
+    )
+    features["inspection_data_upload"] = deep_merge_defaults(
+        _dict(runtime.get("inspection_data_upload")), features["inspection_data_upload"]
+    )
+    features["inspection_data_upload"]["scheduler"] = normalize_inspection_scheduler(
+        features["inspection_data_upload"]["scheduler"]
     )
     features["temperature_humidity_upload"] = deep_merge_defaults(
         _dict(runtime.get("temperature_humidity_upload")),

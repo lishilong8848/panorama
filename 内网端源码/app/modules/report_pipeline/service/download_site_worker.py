@@ -154,31 +154,17 @@ async def download_single_url_once(
             await instant_report.first.click()
 
         async def _resolve_report_frames(frame_timeout_ms: int = 10000):
-            first_frame_sel = await page.wait_for_selector("iframe#right-content", state="attached", timeout=frame_timeout_ms)
-            first_iframe = await first_frame_sel.content_frame()
-            if first_iframe is None:
-                raise RuntimeError("未获取到第一级iframe")
+            # Reuse the paginated report lookup instead of assuming the first page.
+            from handover_log_module.repository.download_gateway import DownloadGateway
 
-            await first_iframe.wait_for_selector("div.showTemplate >> text=全景平台月报", state="visible", timeout=frame_timeout_ms)
-            target_element = first_iframe.locator('div.showTemplate:has-text("全景平台月报")')
-            await target_element.scroll_into_view_if_needed()
-            await target_element.hover()
-            await asyncio.sleep(0.2)
-            await target_element.click(force=True)
-
-            first_frame_sel = await page.wait_for_selector("iframe#right-content", state="attached", timeout=frame_timeout_ms)
-            first_iframe = await first_frame_sel.content_frame()
-            if first_iframe is None:
-                raise RuntimeError("未获取到第一级iframe(模板点击后)")
-            second_frame_sel = await first_iframe.wait_for_selector(
-                "iframe#laminationFrame",
-                state="attached",
-                timeout=frame_timeout_ms,
+            return await DownloadGateway({})._resolve_report_frames(
+                page,
+                template_name="全景平台月报",
+                force_iframe_reopen_each_task=force_iframe_reopen_each_task,
+                iframe_timeout_ms=frame_timeout_ms,
+                debug_step_log=True,
+                building=building,
             )
-            second_iframe = await second_frame_sel.content_frame()
-            if second_iframe is None:
-                raise RuntimeError("未获取到第二级iframe")
-            return second_iframe
 
         await prepare_reusable_page(
             page,

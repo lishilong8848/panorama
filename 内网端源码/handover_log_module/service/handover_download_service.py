@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES
+
 from handover_log_module.repository.download_gateway import (
     download_handover_xlsx_batch,
     set_runtime_config,
@@ -43,6 +45,31 @@ class HandoverDownloadService:
             cloned_config,
             self._download_browser_pool,
             business_root_override=self._business_root_override,
+        )
+
+    def run_inspection_data_only(
+        self, *, building: str, source_family: str, emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        if source_family not in INSPECTION_REPORT_TEMPLATES:
+            raise ValueError("不支持的巡检源文件类型")
+        if self.config.get("inspection_data", {}).get("enabled") is not True:
+            raise ValueError("巡检源文件采集未启用")
+        if building not in {"D楼", "E楼"}:
+            raise ValueError("巡检数据源文件仅支持D楼、E楼")
+        download_cfg = copy.deepcopy(self.config.get("download", {}))
+        download_cfg.update(self.config.get("inspection_data", {}).get("download", {}))
+        download_cfg.update(
+            template_name=INSPECTION_REPORT_TEMPLATES[source_family],
+            sheet_name="",
+            scale_label="5分钟",
+            lookback_minutes=20,
+            skip_query_conditions=False,
+            report_kind=source_family,
+            export_button_text="原样导出",
+            menu_path=["报表报告", "数据查询", "即时报表"],
+        )
+        return self._clone_with_download_config(download_cfg).run(
+            buildings=[building], switch_network=False, reuse_cached=False, emit_log=emit_log,
         )
 
     def _capacity_download_config(self, *, template_name_override: str | None = None) -> Dict[str, Any]:

@@ -195,6 +195,22 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             },
         },
         "sheet_import": {},
+        "inspection_data": {
+            "enabled": False,
+            "download": {
+                "template_names": {
+                    "electrical_inspection_family": "电气巡检表",
+                    "hvac_inspection_family": "暖通巡检表",
+                },
+                "query_result_timeout_ms": 120000,
+                "skip_query_conditions": False,
+                "lookback_minutes": 20,
+                "sheet_name": "",
+                "scale_label": "5分钟",
+                "menu_path": ["报表报告", "数据查询", "即时报表"],
+                "export_button_text": "原样导出",
+            },
+        },
         "handover_log": {
             "enabled": True,
             "scheduler": {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 from app.core.app_state import AppStateRepository
 from pipeline_utils import get_app_dir
+from handover_log_module.service.training_management_payload_builder import normalize_training_rows, append_training_rows
 
 
 STATION_H_REVIEW_NAMESPACE = "station_h_review"
@@ -180,6 +182,8 @@ class StationHReviewSelectionService:
         next_people: Any,
         long_day_people: Any,
         duty_focus: Any = None,
+        training_rows: Any = None,
+        append_training_only: bool = False,
         source: str = "manual",
     ) -> Dict[str, Any]:
         duty_date_text = str(duty_date or "").strip()
@@ -201,6 +205,8 @@ class StationHReviewSelectionService:
             "next_people": station_h_normalize_duty_people(next_people),
             "long_day_people": self._normalize_long_day_people(long_day_people),
             "duty_focus": normalized_duty_focus,
+            "training_rows": (normalize_training_rows(training_rows) if training_rows is not None
+                              else deepcopy(existing.get("training_rows", []))),
             "source": str(source or "manual").strip() or "manual",
             "updated_at": _now_text(),
         }
@@ -210,7 +216,26 @@ class StationHReviewSelectionService:
         repository = self._repository
         if repository is None:
             raise RuntimeError("H楼审核页本地状态库不可用")
-        repository.put_runtime_kv(STATION_H_REVIEW_NAMESPACE, payload["batch_key"], payload)
+        # Merge under the DB transaction so cloud generation cannot replace a concurrent manual save.
+        with repository.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT payload_json FROM runtime_kv WHERE namespace=? AND key=?",
+                               (STATION_H_REVIEW_NAMESPACE, payload["batch_key"])).fetchone()
+            latest = self._normalize_payload(json.loads(row["payload_json"])) if row else {}
+            if append_training_only:
+                incoming = payload["training_rows"]
+                payload = {**(latest or payload), "updated_at": _now_text()}
+                payload["training_rows"] = append_training_rows(latest.get("training_rows", []), incoming)
+            elif training_rows is None:
+                payload["training_rows"] = deepcopy(latest.get("training_rows", []))
+            else:
+                payload["training_rows"] = append_training_rows(payload["training_rows"], latest.get("training_rows", []))
+            if duty_focus is None and latest:
+                payload["duty_focus"] = deepcopy(latest.get("duty_focus", {}))
+            payload["training_rows"] = normalize_training_rows(payload["training_rows"])
+            conn.execute("""INSERT INTO runtime_kv(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)
+                         ON CONFLICT(namespace, key) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at""",
+                         (STATION_H_REVIEW_NAMESPACE, payload["batch_key"], json.dumps(payload, ensure_ascii=False), payload["updated_at"]))
         return dict(payload)
 
     def resolve_selection(

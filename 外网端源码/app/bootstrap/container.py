@@ -36,6 +36,8 @@ from app.modules.scheduler.service.apscheduler_orchestrator import (
     ApschedulerSchedulerFacade,
 )
 from app.modules.updater.service.updater_service import UpdaterService
+from app.modules.scheduler.service.inspection_data_scheduler import InspectionDataScheduler
+from app.config.inspection_data_config import normalize_inspection_scheduler
 from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from app.shared.utils.file_utils import (
     canonicalize_windows_path_for_compare,
@@ -52,6 +54,7 @@ _STARTUP_ROLE_HANDOFF_FILE_NAME = "startup_role_handoff.json"
 _STARTUP_ROLE_HANDOFF_TTL = timedelta(minutes=5)
 _EXTERNAL_SCHEDULER_AUTOSTART_FILE_NAME = "external_scheduler_autostart_state.json"
 _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("inspection_data_upload", "巡检数据处理", ("features", "inspection_data_upload", "scheduler")),
     ("auto_flow", "每日用电明细自动流程", ("common", "scheduler")),
     ("handover", "交接班调度", ("features", "handover_log", "scheduler")),
     ("wet_bulb_collection", "湿球温度定时采集", ("features", "wet_bulb_collection", "scheduler")),
@@ -74,6 +77,7 @@ _EXTERNAL_SCHEDULER_AUTOSTART_PATHS = {
     key: path for key, _label, path in _EXTERNAL_SCHEDULER_AUTOSTART_ITEMS
 }
 _EXTERNAL_SCHEDULER_OBJECT_ATTRS = {
+    "inspection_data_upload": "inspection_data_upload_scheduler",
     "auto_flow": "scheduler",
     "handover": "handover_scheduler_manager",
     "wet_bulb_collection": "wet_bulb_collection_scheduler",
@@ -170,6 +174,7 @@ class AppContainer:
     system_screenshot_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     system_screenshot_demand_poller: SystemScreenshotDemandPoller | None = None
     temperature_humidity_upload_scheduler: ApschedulerSchedulerFacade | None = None
+    inspection_data_upload_scheduler: InspectionDataScheduler | None = None
     temperature_humidity_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     top5_power_report_scheduler: ApschedulerSchedulerFacade | None = None
     top5_power_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
@@ -323,6 +328,9 @@ class AppContainer:
         if not self.temperature_humidity_upload_scheduler:
             _report_progress("building_temperature_humidity_upload_scheduler")
             self.temperature_humidity_upload_scheduler = self._build_temperature_humidity_upload_scheduler()
+        if not self.inspection_data_upload_scheduler:
+            _report_progress("building_inspection_data_upload_scheduler")
+            self.inspection_data_upload_scheduler = self._build_inspection_data_upload_scheduler()
         if not self.top5_power_report_scheduler:
             _report_progress("building_top5_power_report_scheduler")
             self.top5_power_report_scheduler = self._build_top5_power_report_scheduler()
@@ -703,6 +711,103 @@ class AppContainer:
             emit_log=self.add_system_log,
             role_mode_getter=lambda: str(self._configured_deployment_snapshot().get("role_mode", "") or ""),
         )
+
+    def _build_inspection_data_upload_scheduler(self) -> InspectionDataScheduler:
+        return InspectionDataScheduler(
+            scheduler_key="inspection_data_upload", feature="inspection_data_upload",
+            scheduler_cfg=self.runtime_config.get("inspection_data_upload", {}).get("scheduler", {}),
+            runtime_state_root=self._runtime_state_root_text(), emit_log=self.add_system_log,
+            run_callback=self._submit_inspection_data_upload,
+            lookup_job=self._lookup_inspection_data_job,
+            find_slot_job=self._find_inspection_data_slot_job,
+            is_busy=self._job_busy_for_feature_prefixes("inspection_data_upload"),
+            orchestrator=self.ensure_scheduler_orchestrator(), schedule_kind="daily",
+            source_name="巡检数据处理",
+        )
+
+    def _submit_inspection_data_upload(self, slot: str):
+        if slot[:10] != datetime.now().strftime("%Y-%m-%d"):
+            raise ValueError("巡检快照不补传历史调度日期")
+        if self._configured_deployment_snapshot().get("role_mode") != "external":
+            raise ValueError("巡检数据处理仅允许在外网端执行")
+        if not self.runtime_config.get("inspection_data_upload", {}).get("enabled", True):
+            raise ValueError("巡检数据处理模块已关闭")
+        job = self.job_service.start_worker_job(
+            name=f"巡检数据处理 {slot}", worker_handler="inspection_data_upload",
+            worker_payload={"source_date": slot[:10], "dry_run": False},
+            resource_keys=["inspection_data_upload:global"], priority="scheduler",
+            feature="inspection_data_upload", dedupe_key="inspection_data_upload",
+            submitted_by="scheduler",
+        )
+        return self.job_service.get_job_state(job.job_id) or job
+
+    def _lookup_inspection_data_job(self, job_id: str):
+        job = self.job_service.get_job_state(job_id)
+        if job is not None:
+            return job
+        try:
+            return self.job_service.get_job(job_id)
+        except KeyError:
+            return None
+
+    def _find_inspection_data_slot_job(self, slot: str, attempt_at: str):
+        # shortcut: bounded recovery scan; add an indexed slot lookup for higher task volume.
+        jobs = self.job_service.list_jobs(limit=1000)
+        for job in jobs:
+            if (job.get("feature") == "inspection_data_upload"
+                    and job.get("name") == f"巡检数据处理 {slot}"
+                    and str(job.get("created_at", "")) >= attempt_at):
+                return self._lookup_inspection_data_job(job["job_id"])
+        if len(jobs) >= 1000:
+            raise RuntimeError("巡检派发恢复超出任务历史窗口，请人工核查后重试")
+        return None
+
+    def start_inspection_data_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if self._configured_deployment_snapshot().get("role_mode") != "external":
+            raise ValueError("巡检数据处理调度仅允许在外网端启动")
+        if not self.runtime_config.get("inspection_data_upload", {}).get("enabled", True):
+            raise ValueError("巡检数据处理模块已关闭")
+        if not self.inspection_data_upload_scheduler:
+            self.inspection_data_upload_scheduler = self._build_inspection_data_upload_scheduler()
+        result = self.inspection_data_upload_scheduler.start()
+        self.add_system_log(f"[巡检数据处理调度] {source}启动: {result['reason']}")
+        return result
+
+    def stop_inspection_data_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        result = self.inspection_data_upload_scheduler.stop() if self.inspection_data_upload_scheduler else {
+            "stopped": False, "running": False, "reason": "not_initialized",
+        }
+        self.add_system_log(f"[巡检数据处理调度] {source}停止")
+        return result
+
+    def rebuild_inspection_data_upload_scheduler(self, source: str = "配置热重载") -> Dict[str, Any]:
+        feature_cfg = self.runtime_config.get("inspection_data_upload", {})
+        cfg = normalize_inspection_scheduler(feature_cfg.get("scheduler", {}))
+        scheduler = self.inspection_data_upload_scheduler
+        was_running = bool(scheduler and scheduler.is_running())
+        if scheduler:
+            scheduler.reconfigure(cfg)
+        else:
+            self.inspection_data_upload_scheduler = self._build_inspection_data_upload_scheduler()
+        action = {"started": False, "running": False, "reason": "disabled"}
+        if (self._configured_deployment_snapshot().get("role_mode") == "external"
+                and feature_cfg.get("enabled", True) and cfg["enabled"] and cfg["run_times"]
+                and (was_running or (self.runtime_services_armed and cfg["auto_start_in_gui"]))):
+            action = self.start_inspection_data_upload_scheduler(source=source)
+        return {"reloaded": True, "was_running": was_running, "action": action}
+
+    def inspection_data_upload_scheduler_status(self) -> Dict[str, Any]:
+        scheduler = self.inspection_data_upload_scheduler
+        cfg = normalize_inspection_scheduler(self.runtime_config.get("inspection_data_upload", {}).get("scheduler", {}))
+        payload = scheduler.get_runtime_snapshot() if scheduler else {
+            "enabled": cfg["enabled"], "running": False, "status": "未初始化",
+            "run_times": cfg["run_times"], "next_run_time": "", "last_trigger_at": "",
+            "last_trigger_result": "",
+        }
+        payload.update(self.external_scheduler_runtime_memory_fields("inspection_data_upload"))
+        payload.update(executor_bound=callable(self._submit_inspection_data_upload),
+                       callback_name="_submit_inspection_data_upload")
+        return self._record_scheduler_runtime_snapshot("inspection_data_upload", "inspection_data_upload", payload)
 
     def _build_temperature_humidity_upload_scheduler(self) -> ApschedulerSchedulerFacade:
         upload_cfg = self.runtime_config.get("temperature_humidity_upload", {})
@@ -2013,6 +2118,7 @@ class AppContainer:
             f"executor_bound={self.is_temperature_humidity_upload_scheduler_executor_bound()}, "
             f"callback={self.temperature_humidity_upload_scheduler_executor_name()}"
         )
+        self.rebuild_inspection_data_upload_scheduler(source=source)
         temperature_humidity_status = self.temperature_humidity_upload_scheduler_status()
         if role_mode == "internal":
             self.add_system_log("[空调温湿度上传调度] 当前为内网端，启动时不自动开启")
@@ -2192,6 +2298,11 @@ class AppContainer:
                 self.system_screenshot_upload_scheduler,
             ),
             (
+                "巡检数据处理调度", ("features", "inspection_data_upload", "scheduler"),
+                bool(self.inspection_data_upload_scheduler and self.inspection_data_upload_scheduler.is_running()),
+                self.inspection_data_upload_scheduler,
+            ),
+            (
                 "空调温湿度上传调度",
                 ("features", "temperature_humidity_upload", "scheduler"),
                 bool(self.temperature_humidity_upload_scheduler.is_running())
@@ -2309,6 +2420,7 @@ class AppContainer:
                     failed_cancellations.append({"job_id": job_text, "error": str(exc)})
 
         stop_actions = (
+            ("inspection_data_upload_scheduler", self.stop_inspection_data_upload_scheduler),
             ("scheduler", self.stop_scheduler),
             ("handover_scheduler", self.stop_handover_scheduler),
             ("wet_bulb_collection_scheduler", self.stop_wet_bulb_collection_scheduler),
@@ -3730,7 +3842,14 @@ class AppContainer:
             return
         if normalized_mode != "light":
             raise ValueError(f"unsupported config apply mode: {mode}")
+        previous_inspection = copy.deepcopy(self.runtime_config.get("inspection_data_upload", {}))
+        previous_role = self._configured_deployment_snapshot().get("role_mode")
         self._apply_runtime_config_snapshot(settings)
+        if self.inspection_data_upload_scheduler and (
+            previous_inspection != self.runtime_config.get("inspection_data_upload", {})
+            or previous_role != self._configured_deployment_snapshot().get("role_mode")
+        ):
+            self.rebuild_inspection_data_upload_scheduler()
 
     def reload_config(self, settings: Dict[str, Any]) -> None:
         self._apply_runtime_config_snapshot(settings)
@@ -3786,6 +3905,7 @@ class AppContainer:
         self._stop_shared_bridge_for_rebuild()
         if self.scheduler:
             self.scheduler.stop()
+        self.rebuild_inspection_data_upload_scheduler()
         if self.handover_scheduler_manager:
             self.handover_scheduler_manager.stop()
         if self.wet_bulb_collection_scheduler:

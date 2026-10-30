@@ -95,6 +95,14 @@
     }
   },
   "features": {
+    "inspection_data_upload": {
+      "scheduler": {
+        "enabled": false,
+        "auto_start_in_gui": false,
+        "run_times": [],
+        "catch_up_if_missed": false
+      }
+    },
     "monthly_report": {
       "buildings": [
         "A楼",
@@ -443,6 +451,10 @@
           "night_anchor": "18:00:00",
           "night_default_end_next_day": "08:00:00"
         }
+      },
+      "training_management_section": {
+        "enabled": true,
+        "api_key": ""
       },
       "exercise_management_section": {
         "enabled": true,

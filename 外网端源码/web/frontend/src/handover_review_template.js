@@ -1,5 +1,5 @@
 ﻿export const HANDOVER_REVIEW_TEMPLATE = `
-  <div class="review-shell">
+  <div class="review-shell review-building-shell">
     <header class="review-header review-header-sticky">
       <div class="review-header-main">
         <div class="review-header-copy">
@@ -113,11 +113,13 @@
         <div class="review-fixed-fields review-current-view-fields">
           <label class="review-field">
             <span class="review-field-label">日期</span>
-            <input class="review-input" :value="currentDutyDateText" readonly />
+            <input class="review-input" type="date" :value="selectedDutyDate" :disabled="selectionBusy" @change="selectDutyContext($event.target.value, selectedDutyShift)" />
           </label>
           <label class="review-field">
             <span class="review-field-label">班次</span>
-            <input class="review-input" :value="currentDutyShiftText" readonly />
+            <select class="review-input" :value="selectedDutyShift" :disabled="selectionBusy" @change="selectDutyContext(selectedDutyDate, $event.target.value)">
+              <option value="day">白班</option><option value="night">夜班</option>
+            </select>
           </label>
           <label class="review-field">
             <span class="review-field-label">模式</span>
@@ -132,7 +134,7 @@
                 @focus="ensureHistoryLoaded()"
                 @mousedown="ensureHistoryLoaded()"
                 @change="onHistorySelectionChange($event.target.value)"
-                :disabled="loading || saving || regenerating || confirming || cloudSyncBusy || historyLoading"
+                :disabled="selectionBusy || historyLoading"
               >
                 <option v-if="historyLoading" value="" disabled>
                   正在加载历史交接班日志...
@@ -267,7 +269,8 @@
     </section>
 
     <template v-else>
-      <section class="review-shared-grid">
+      <section class="review-shared-grid review-details-columns">
+        <div class="review-detail-column">
         <article class="review-card review-substation-card">
           <div class="review-card-head">
             <div>
@@ -317,6 +320,67 @@
           </div>
         </article>
 
+        <article v-if="document.capacity_room_inputs && document.capacity_room_inputs.rows && document.capacity_room_inputs.rows.length" class="review-card review-section-card review-capacity-card">
+          <div class="review-card-head">
+            <div>
+              <h2>{{ document.capacity_room_inputs.title || "M1-M6包间机柜与空调启动台数" }}</h2>
+              <p class="review-card-subtitle">保存后会作为本楼下次生成容量表的默认值，并同步补写当前容量表。</p>
+            </div>
+          </div>
+          <div class="review-table-wrap capacity-room-table-wrap">
+            <table class="review-table capacity-room-table">
+              <thead>
+                <tr>
+                  <th>包间</th>
+                  <th>总机柜数</th>
+                  <th>上电机柜数</th>
+                  <th>空调启动台数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, rowIndex) in document.capacity_room_inputs.rows" :key="row.room + ':' + row.row">
+                  <td>
+                    <strong>{{ row.label || row.room }}</strong>
+                    <small>{{ [row.total_cell, row.powered_cell, row.aircon_cell].filter(Boolean).join(' / ') }}</small>
+                  </td>
+                  <td>
+                    <input
+                      v-if="row.total_cell"
+                      class="review-input"
+                      :value="row.total_cabinets"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
+                    />
+                    <span v-else>-</span>
+                  </td>
+                  <td>
+                    <input
+                      class="review-input"
+                      :value="row.powered_cabinets"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'powered_cabinets', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'powered_cabinets', $event.target.value)"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      v-if="row.aircon_cell"
+                      class="review-input"
+                      :value="row.aircon_started"
+                      :disabled="regenerating"
+                      @input="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
+                      @change="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
+                    />
+                    <span v-else>-</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+        </div>
+        <div class="review-detail-column">
         <article class="review-card review-pump-card">
           <div class="review-card-head">
             <div>
@@ -460,71 +524,7 @@
             </label>
           </div>
         </article>
-      </section>
-
-      <section v-if="document.capacity_room_inputs && document.capacity_room_inputs.rows && document.capacity_room_inputs.rows.length" class="review-sections">
-        <article class="review-card review-section-card">
-          <div class="review-card-head">
-            <div>
-              <h2>{{ document.capacity_room_inputs.title || "M1-M6包间机柜与空调启动台数" }}</h2>
-              <p class="review-card-subtitle">保存后会作为本楼下次生成容量表的默认值，并同步补写当前容量表。</p>
-            </div>
-          </div>
-          <div class="review-table-wrap capacity-room-table-wrap">
-            <table class="review-table capacity-room-table">
-              <thead>
-                <tr>
-                  <th>包间</th>
-                  <th>总机柜数</th>
-                  <th>上电机柜数</th>
-                  <th>空调启动台数</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(row, rowIndex) in document.capacity_room_inputs.rows" :key="row.room + ':' + row.row">
-                  <td>
-                    <strong>{{ row.label || row.room }}</strong>
-                    <small>{{ [row.total_cell, row.powered_cell, row.aircon_cell].filter(Boolean).join(' / ') }}</small>
-                  </td>
-                  <td>
-                    <input
-                      v-if="row.total_cell"
-                      class="review-input"
-                      :value="row.total_cabinets"
-                      :disabled="regenerating"
-                      @input="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
-                      @change="updateCapacityRoomInput(rowIndex, 'total_cabinets', $event.target.value)"
-                    />
-                    <span v-else>-</span>
-                  </td>
-                  <td>
-                    <input
-                      class="review-input"
-                      :value="row.powered_cabinets"
-                      :disabled="regenerating"
-                      @input="updateCapacityRoomInput(rowIndex, 'powered_cabinets', $event.target.value)"
-                      @change="updateCapacityRoomInput(rowIndex, 'powered_cabinets', $event.target.value)"
-                    />
-                  </td>
-                  <td>
-                    <input
-                      v-if="row.aircon_cell"
-                      class="review-input"
-                      :value="row.aircon_started"
-                      :disabled="regenerating"
-                      @input="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
-                      @change="updateCapacityRoomInput(rowIndex, 'aircon_started', $event.target.value)"
-                    />
-                    <span v-else>-</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </article>
-      </section>
-
-      <section class="review-fixed-grid">
+      <section class="review-fixed-grid review-overview-grid">
         <article
           v-for="(block, blockIndex) in document.fixed_blocks"
           :key="block.id || blockIndex"
@@ -553,6 +553,9 @@
             </label>
           </div>
         </article>
+      </section>
+
+        </div>
       </section>
 
       <section class="review-sections">

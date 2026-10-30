@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List
 
+from app.config.inspection_data_config import INSPECTION_FAMILY_LABELS
+
 
 INTERNAL_BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"]
 
@@ -1000,6 +1002,13 @@ def present_internal_source_cache_overview(payload: Any) -> Dict[str, Any]:
     )
     families = [
         handover_family,
+        *(present_source_cache_family(
+            source_cache.get(family, {}),
+            key=family,
+            title=label,
+            fallback_bucket=current_hour_bucket,
+            bucket_scope_text="本小时",
+        ) for family, label in INSPECTION_FAMILY_LABELS.items()),
         handover_capacity_family,
         monthly_family,
         top5_monthly_family,
@@ -1161,6 +1170,7 @@ def present_external_source_cache_overview(payload: Any) -> Dict[str, Any]:
     families = []
     gating_families = []
     for key, title in (
+        *INSPECTION_FAMILY_LABELS.items(),
         ("handover_log_family", "交接班日志源文件"),
         ("handover_capacity_report_family", "交接班容量报表源文件"),
         ("branch_power_family", "支路功率源文件"),

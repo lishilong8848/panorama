@@ -183,8 +183,11 @@ def _register_common_routes(app: FastAPI) -> None:
 def _internal_config_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     root = config if isinstance(config, dict) else {}
     common = root.get("common", {}) if isinstance(root.get("common", {}), dict) else {}
+    features = root.get("features", {}) if isinstance(root.get("features", {}), dict) else {}
+    inspection = features.get("inspection_data", {}) if isinstance(features.get("inspection_data", {}), dict) else {}
     return {
         "version": int(root.get("version", 3) or 3),
+        "features": {"inspection_data": {"enabled": bool(inspection.get("enabled", False))}},
         "common": {
             "console": copy.deepcopy(common.get("console", {}) if isinstance(common.get("console", {}), dict) else {}),
             "deployment": {
@@ -227,6 +230,14 @@ def _merge_internal_config_payload(current: Dict[str, Any], payload: Dict[str, A
         raise ValueError("请求体必须是 JSON 对象")
     incoming_common = payload.get("common", {}) if isinstance(payload.get("common", {}), dict) else {}
     merged = copy.deepcopy(current if isinstance(current, dict) else {})
+    features = payload.get("features", {})
+    if not isinstance(features, dict) or not isinstance(features.get("inspection_data", {}), dict):
+        raise ValueError("巡检采集配置必须为JSON对象")
+    inspection = features.get("inspection_data", {})
+    if "enabled" in inspection:
+        if not isinstance(inspection["enabled"], bool):
+            raise ValueError("inspection_data.enabled 必须是布尔值")
+        merged.setdefault("features", {}).setdefault("inspection_data", {})["enabled"] = inspection["enabled"]
     common = merged.setdefault("common", {})
     if not isinstance(common, dict):
         common = {}

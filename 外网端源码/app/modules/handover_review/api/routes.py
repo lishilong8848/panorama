@@ -63,6 +63,9 @@ from handover_log_module.service.review_session_service import (
     ReviewSessionService,
     ReviewSessionStoreUnavailableError,
 )
+from handover_log_module.service.training_management_payload_builder import (
+    TrainingManagementPayloadBuilder, TRAINING_SECTION,
+)
 from handover_log_module.service.station_h_review_selection_service import (
     STATION_H_LONG_DAY_ROLE_BY_NAME,
     StationHReviewSelectionService,
@@ -90,6 +93,9 @@ _REVIEW_DEFAULT_CONFIG_LOCKS: dict[str, threading.RLock] = {}
 _REVIEW_DOCUMENT_CACHE_GUARD = threading.Lock()
 _REVIEW_DOCUMENT_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_DOCUMENT_WARMUPS_INFLIGHT: set[str] = set()
+_REVIEW_HISTORY_IMPORT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="review-history-import")
+_REVIEW_HISTORY_IMPORTS: Dict[str, Dict[str, Any]] = {}
+_REVIEW_HISTORY_IMPORT_LOCK = threading.Lock()
 _REVIEW_BOOTSTRAP_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_HISTORY_CACHE: dict[str, dict[str, Any]] = {}
 _REVIEW_DOCUMENT_CACHE_TTL_SEC = 30 * 60.0
@@ -820,6 +826,47 @@ def _load_existing_review_document_snapshot(
         document=document,
     )
     return copy.deepcopy(document), resolved_session, True
+
+
+def _schedule_history_document_import(container, service, parser, *, building, duty_date, duty_shift, session=None):
+    key = f"{building}|{duty_date}|{duty_shift}"
+    with _REVIEW_HISTORY_IMPORT_LOCK:
+        now = time.monotonic()
+        for old_key, status in list(_REVIEW_HISTORY_IMPORTS.items()):
+            if not status.get("pending") and now - status.get("at", 0) > 60:
+                _REVIEW_HISTORY_IMPORTS.pop(old_key, None)
+        if key in _REVIEW_HISTORY_IMPORTS:
+            return dict(_REVIEW_HISTORY_IMPORTS[key])
+        if len(_REVIEW_HISTORY_IMPORTS) >= 32:
+            return {"pending": False, "error": "历史记录加载繁忙，请稍后重试"}
+        _REVIEW_HISTORY_IMPORTS[key] = {"pending": True, "at": now, "error": ""}
+
+    def run():
+        error = ""
+        try:
+            target = session or service.recover_history_session(building, duty_date, duty_shift)
+            if not target:
+                raise ValueError("该日期和班次没有历史记录或本机交接班文件")
+            path = str(target.get("output_file") or "")
+            if not path or ReviewSessionService._is_shared_filesystem_path(path) or not Path(path).is_file():
+                raise ValueError("历史正文未保存，且本机交接班文件不存在")
+            document = parser.parse(path)
+            ReviewBuildingDocumentStore(config=_handover_cfg(container), building=building).upsert_imported_document(
+                session=target, document=document, imported_from_excel=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+            container.add_system_log(f"[交接班][历史正文加载] batch={key}, error={error}")
+        finally:
+            with _REVIEW_HISTORY_IMPORT_LOCK:
+                _REVIEW_HISTORY_IMPORTS[key] = {"pending": False, "at": time.monotonic(), "error": error}
+    try:
+        _REVIEW_HISTORY_IMPORT_EXECUTOR.submit(run)
+    except RuntimeError:
+        with _REVIEW_HISTORY_IMPORT_LOCK:
+            _REVIEW_HISTORY_IMPORTS.pop(key, None)
+        return {"pending": False, "error": "服务正在关闭，请稍后重试"}
+    return {"pending": True, "error": ""}
 
 
 def _review_ui_payload(parser: ReviewDocumentParser | None) -> Dict[str, Any]:
@@ -2358,6 +2405,13 @@ def _resolve_review_duty_context(
     if str(session_id or "").strip():
         return "", ""
     duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
+    if duty_date or duty_shift:
+        try:
+            if not duty_date_text or not duty_shift_text:
+                raise ValueError("missing context")
+            datetime.strptime(duty_date_text, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="请提供有效日期和白班/夜班，不会自动切换到当前班次") from exc
     if duty_date_text and duty_shift_text:
         return duty_date_text, duty_shift_text
     return _current_handover_duty_context(config or getattr(service, "config", {}) or {})
@@ -2580,7 +2634,10 @@ def _build_history_payload(
     history_getter = getattr(service, "list_building_generated_file_history_sessions_fast", None)
     if not callable(history_getter):
         history_getter = getattr(service, "list_building_generated_file_history_sessions", None)
-    if callable(history_getter):
+    if history_date_text and callable(getattr(service, "list_building_sessions", None)):
+        sessions = [item for item in service.list_building_sessions(building)
+                    if str(item.get("duty_date", "")) == history_date_text]
+    elif callable(history_getter):
         try:
             sessions = history_getter(
                 building,
@@ -3908,10 +3965,13 @@ def _station_h_status_payload(
     duty_shift: str = "",
 ) -> Dict[str, Any]:
     handover_cfg = _handover_cfg(container)
-    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
+    duty_date_text, duty_shift_text = _resolve_review_duty_context(
+        None, duty_date=duty_date, duty_shift=duty_shift, config=handover_cfg,
+    )
     if not duty_date_text or not duty_shift_text:
         duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
     batch_key = station_h_build_batch_key(duty_date_text, duty_shift_text)
+    historical = not _is_current_handover_duty_context(duty_date=duty_date_text, duty_shift=duty_shift_text)
     selection_service = _build_station_h_review_selection_service(container)
     saved_selection = selection_service.get_selection(duty_date_text, duty_shift_text)
     resolved_selection = selection_service.resolve_selection(duty_date=duty_date_text, duty_shift=duty_shift_text)
@@ -3927,7 +3987,7 @@ def _station_h_status_payload(
     roster_long_day_candidates: list[str] = []
     roster_candidate_error = ""
     roster_source_records = 0
-    if not selected_current_people or not selected_next_people or not bool(saved_selection):
+    if not historical and (not selected_current_people or not selected_next_people or not bool(saved_selection)):
         (
             roster_current_candidates,
             roster_next_candidates,
@@ -3953,7 +4013,7 @@ def _station_h_status_payload(
             selected_long_day = roster_long_day_candidates
     selected_long_day_people = split_station_h_people(selected_long_day)
     needs_roster_defaults = not selected_current_people or not selected_next_people or not saved_selection
-    roster_refresh_pending = bool(roster_source_records <= 0 and needs_roster_defaults)
+    roster_refresh_pending = bool(not historical and roster_source_records <= 0 and needs_roster_defaults)
     roster_refreshing = False
     if roster_refresh_pending:
         roster_refreshing = _schedule_station_h_roster_refresh(
@@ -3978,6 +4038,7 @@ def _station_h_status_payload(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             selection=focus_selection,
+            historical=historical,
         )
     except Exception as exc:  # noqa: BLE001
         duty_focus = {
@@ -4004,6 +4065,7 @@ def _station_h_status_payload(
             "batch_key": batch_key,
         },
         "saved": bool(saved_selection),
+        "historical": historical,
         "selection": {
             "duty_date": duty_date_text,
             "duty_shift": duty_shift_text,
@@ -4037,6 +4099,7 @@ def _station_h_status_payload(
             "retry_after_ms": 4000 if roster_refresh_pending else 0,
         },
         "duty_focus": duty_focus,
+        "training_rows": resolved_selection.get("training_rows", []),
     }
 
 
@@ -4137,6 +4200,7 @@ def handover_review_station_h_save(
             next_people=next_people,
             long_day_people=long_day_people,
             duty_focus=duty_focus,
+            training_rows=body.get("training_rows"),
             source="manual",
         )
     except ValueError as exc:
@@ -4154,6 +4218,32 @@ def handover_review_station_h_save(
     status = _station_h_status_payload(container, duty_date=duty_date_text, duty_shift=duty_shift_text)
     status["saved_selection"] = saved
     return status
+
+
+@router.post("/api/handover/review/station-h/training/refresh")
+@_dedicated_review_endpoint
+def handover_review_station_h_refresh_training(
+    request: Request, payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    duty_date, duty_shift = _normalize_duty_context(
+        str(payload.get("duty_date", "")), str(payload.get("duty_shift", "")),
+    )
+    if not duty_date or duty_shift not in {"day", "night"}:
+        raise HTTPException(status_code=400, detail="请指定培训所属日期和班次")
+    selection = _build_station_h_review_selection_service(container).get_selection(duty_date, duty_shift)
+    if selection is None:
+        raise HTTPException(status_code=409, detail="请先保存本班人员再刷新培训")
+    try:
+        sections = TrainingManagementPayloadBuilder(_handover_cfg(container)).build(
+            building="H楼", duty_date=duty_date,
+            current_people=selection.get("current_people", []), next_people=selection.get("next_people", []),
+            emit_log=container.add_system_log,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "batch_key": station_h_build_batch_key(duty_date, duty_shift),
+            "training_rows": sections.get(TRAINING_SECTION, [])}
 
 
 @router.post("/api/handover/review/station-h/signatures/refresh")
@@ -4322,6 +4412,7 @@ def handover_review_station_h_duty_focus_image(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             focus=focus,
+            allow_archived=not _is_current_handover_duty_context(duty_date=duty_date_text, duty_shift=duty_shift_text),
         )
     except StationHDutyFocusError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -4805,6 +4896,10 @@ def handover_review_bootstrap(
         emit_log=container.add_system_log,
     )
     if pending_payload is not None:
+        if duty_date and duty_shift:
+            pending_payload["document_import"] = _schedule_history_document_import(
+                container, service, parser, building=building, duty_date=duty_date, duty_shift=duty_shift,
+            )
         return pending_payload
     document, session_with_sync, found_snapshot = _load_existing_review_document_snapshot(container, session)
     session_for_response = session_with_sync if isinstance(session_with_sync, dict) else dict(session)
@@ -4821,6 +4916,11 @@ def handover_review_bootstrap(
         "snapshot_revision": revision,
         "snapshot_source": "sqlite_document" if found_snapshot else "missing_sqlite_document",
     }
+    if not found_snapshot:
+        payload["document_import"] = _schedule_history_document_import(
+            container, service, parser, building=building, duty_date=session.get("duty_date", ""),
+            duty_shift=session.get("duty_shift", ""), session=session,
+        )
     return _attach_review_display_state(
         payload,
         service=service,
@@ -4891,7 +4991,14 @@ def handover_review_refresh_event_sections(
 
     started = time.perf_counter()
     try:
-        if requested_section in event_names:
+        if requested_section == TRAINING_SECTION:
+            sections = TrainingManagementPayloadBuilder(handover_cfg).build(
+                building=building, duty_date=duty_date_text,
+                current_people=_fixed_cell_value_from_review_document(document, "C3"),
+                next_people=_fixed_cell_value_from_review_document(document, "G3"),
+                emit_log=container.add_system_log,
+            )
+        elif requested_section in event_names:
             sections = EventCategoryPayloadBuilder(handover_cfg).build(
                 building=building,
                 duty_date=duty_date_text,

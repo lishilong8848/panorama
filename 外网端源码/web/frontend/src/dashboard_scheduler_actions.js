@@ -3,6 +3,7 @@ import {
   saveAlarmEventUploadSchedulerConfigApi,
   saveSystemScreenshotUploadSchedulerConfigApi,
   saveTemperatureHumidityUploadSchedulerConfigApi,
+  saveInspectionDataUploadSchedulerConfigApi,
   saveDayMetricUploadSchedulerConfigApi,
   saveHandoverSchedulerConfigApi,
   saveSchedulerConfigApi,
@@ -10,6 +11,7 @@ import {
   startAlarmEventUploadSchedulerApi,
   startSystemScreenshotUploadSchedulerApi,
   startTemperatureHumidityUploadSchedulerApi,
+  startInspectionDataUploadSchedulerApi,
   startDayMetricUploadSchedulerApi,
   startHandoverSchedulerApi,
   startSchedulerApi,
@@ -17,6 +19,7 @@ import {
   stopAlarmEventUploadSchedulerApi,
   stopSystemScreenshotUploadSchedulerApi,
   stopTemperatureHumidityUploadSchedulerApi,
+  stopInspectionDataUploadSchedulerApi,
   stopDayMetricUploadSchedulerApi,
   stopHandoverSchedulerApi,
   stopSchedulerApi,
@@ -53,8 +56,11 @@ const ACTION_KEYS = {
   systemScreenshotUploadSchedulerStop: "system_screenshot_upload_scheduler:stop",
   systemScreenshotUploadSchedulerSave: "system_screenshot_upload_scheduler:save",
   temperatureHumidityUploadSchedulerStart: "temperature_humidity_upload_scheduler:start",
+  inspectionDataUploadSchedulerStart: "inspection_data_upload_scheduler:start",
   temperatureHumidityUploadSchedulerStop: "temperature_humidity_upload_scheduler:stop",
+  inspectionDataUploadSchedulerStop: "inspection_data_upload_scheduler:stop",
   temperatureHumidityUploadSchedulerSave: "temperature_humidity_upload_scheduler:save",
+  inspectionDataUploadSchedulerSave: "inspection_data_upload_scheduler:save",
 };
 
 function formatSchedulerActionReason(reason) {
@@ -89,6 +95,8 @@ export function createDashboardSchedulerActions(ctx) {
     alarmEventUploadSchedulerQuickSaving,
     systemScreenshotUploadSchedulerQuickSaving,
     temperatureHumidityUploadSchedulerQuickSaving,
+    inspectionDataUploadSchedulerQuickSaving,
+    inspectionDataUploadRunTimeDraft,
     fetchExternalDashboardSummary,
     scheduleExternalDashboardRefresh,
     runSingleFlight,
@@ -814,6 +822,33 @@ export function createDashboardSchedulerActions(ctx) {
       { cooldownMs: 500 },
     );
   }
+  async function startInspectionDataUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.inspectionDataUploadSchedulerStart,
+      async () => {
+        markSchedulerToggle("inspection_data_upload", "starting", true);
+        try {
+          const data = await startInspectionDataUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(
+            config.value?.inspection_data_upload?.scheduler,
+            true,
+            { enableOnStart: true },
+          );
+          applySchedulerSnapshot(
+            health?.inspection_data_upload?.scheduler,
+            { ...data, enabled: true, running: true },
+          );
+          markSchedulerToggle("inspection_data_upload", "idle", true);
+          triggerDashboardRefresh("inspection_data_upload_scheduler_start");
+          message.value = `巡检数据处理调度启动结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          markSchedulerToggle("inspection_data_upload", "idle", null);
+          message.value = `启动巡检数据处理调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
 
   async function stopTemperatureHumidityUploadScheduler() {
     return guardedRun(
@@ -836,6 +871,32 @@ export function createDashboardSchedulerActions(ctx) {
         } catch (err) {
           markSchedulerToggle("temperature_humidity_upload", "idle", null);
           message.value = `停止空调温湿度上传调度失败: ${err}`;
+        }
+      },
+      { cooldownMs: 500 },
+    );
+  }
+  async function stopInspectionDataUploadScheduler() {
+    return guardedRun(
+      ACTION_KEYS.inspectionDataUploadSchedulerStop,
+      async () => {
+        markSchedulerToggle("inspection_data_upload", "stopping", false);
+        try {
+          const data = await stopInspectionDataUploadSchedulerApi();
+          syncLocalSchedulerAutoStart(
+            config.value?.inspection_data_upload?.scheduler,
+            false,
+          );
+          applySchedulerSnapshot(
+            health?.inspection_data_upload?.scheduler,
+            { ...data, running: false },
+          );
+          markSchedulerToggle("inspection_data_upload", "idle", false);
+          triggerDashboardRefresh("inspection_data_upload_scheduler_stop");
+          message.value = `巡检数据处理调度停止结果: ${formatSchedulerActionReason(data?.action?.reason)}`;
+        } catch (err) {
+          markSchedulerToggle("inspection_data_upload", "idle", null);
+          message.value = `停止巡检数据处理调度失败: ${err}`;
         }
       },
       { cooldownMs: 500 },
@@ -920,6 +981,47 @@ export function createDashboardSchedulerActions(ctx) {
     );
   }
 
+  async function saveInspectionDataUploadSchedulerQuickConfig(overrides = {}) {
+    const scheduler = config.value.inspection_data_upload.scheduler;
+    const raw = overrides.run_times ?? scheduler.run_times;
+    if (!Array.isArray(raw)) {
+      message.value = "每日执行时间必须是数组";
+      return;
+    }
+    const times = raw.map((item) => {
+      const text = String(item || "").trim();
+      return /^\d{2}:\d{2}$/.test(text) ? text + ":00" : text;
+    });
+    if (times.some((time) => !/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(time))) {
+      message.value = "请输入有效时间（HH:MM:SS）";
+      return;
+    }
+    return guardedRun(ACTION_KEYS.inspectionDataUploadSchedulerSave, async () => {
+      inspectionDataUploadSchedulerQuickSaving.value = true;
+      try {
+        const data = await saveInspectionDataUploadSchedulerConfigApi({ run_times: [...new Set(times)].sort() });
+        Object.assign(scheduler, data.scheduler_config || {});
+        applySchedulerSnapshot(health.inspection_data_upload.scheduler, data.scheduler_status || data);
+        triggerDashboardRefresh("inspection_data_upload_scheduler_save");
+        message.value = data.message || "巡检每日执行时间已保存";
+        return true;
+      } catch (err) {
+        message.value = `巡检调度保存失败: ${err}`;
+        return false;
+      } finally {
+        inspectionDataUploadSchedulerQuickSaving.value = false;
+      }
+    }, { cooldownMs: 0, queueLatest: true });
+  }
+
+  async function addInspectionDataUploadRunTime() {
+    const value = inspectionDataUploadRunTimeDraft.value;
+    const current = config.value.inspection_data_upload.scheduler.run_times;
+    if (await saveInspectionDataUploadSchedulerQuickConfig({ run_times: [...current, value] })) {
+      inspectionDataUploadRunTimeDraft.value = "";
+    }
+  }
+
   return {
     startScheduler,
     saveSchedulerQuickConfig,
@@ -940,7 +1042,11 @@ export function createDashboardSchedulerActions(ctx) {
     stopSystemScreenshotUploadScheduler,
     saveSystemScreenshotUploadSchedulerQuickConfig,
     startTemperatureHumidityUploadScheduler,
+    startInspectionDataUploadScheduler,
     stopTemperatureHumidityUploadScheduler,
+    stopInspectionDataUploadScheduler,
+    addInspectionDataUploadRunTime,
     saveTemperatureHumidityUploadSchedulerQuickConfig,
+    saveInspectionDataUploadSchedulerQuickConfig,
   };
 }

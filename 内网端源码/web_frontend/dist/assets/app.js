@@ -1,7 +1,11 @@
 const BUILDINGS = ["A楼", "B楼", "C楼", "D楼", "E楼"];
+const INSPECTION_FAMILIES = ["electrical_inspection_family", "hvac_inspection_family"];
+const INSPECTION_BUILDINGS = ["D楼", "E楼"];
 const SOURCE_FAMILIES = [
   ["handover_log_family", "交接班日志源文件"],
   ["handover_capacity_report_family", "交接班容量报表源文件"],
+  ["electrical_inspection_family", "电气巡检源文件"],
+  ["hvac_inspection_family", "暖通巡检源文件"],
   ["monthly_report_family", "全景平台月报源文件"],
   ["top5_monthly_report_family", "TOP5月报源文件"],
   ["branch_power_family", "支路功率源文件"],
@@ -24,14 +28,14 @@ const SYSTEM_SCREENSHOT_TARGETS = [
 const SOURCE_FILTERS = [
   { key: "all", label: "全部", families: SOURCE_FAMILIES.map(([key]) => key) },
   { key: "problem", label: "只看异常", families: SOURCE_FAMILIES.map(([key]) => key) },
-  { key: "hourly", label: "当前小时", families: ["handover_log_family", "handover_capacity_report_family"] },
+  { key: "hourly", label: "当前小时", families: ["handover_log_family", "handover_capacity_report_family", ...INSPECTION_FAMILIES] },
   { key: "daily", label: "每日整日", families: ["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family", "air_conditioner_temperature_humidity_family"] },
   { key: "monthly", label: "月报/TOP5", families: ["monthly_report_family", "top5_monthly_report_family", "alarm_rule_export_family"] },
   { key: "special", label: "告警/制冷", families: ["alarm_event_family", "chiller_mode_switch_family"] },
 ];
 const DAILY_SOURCE_FAMILIES = new Set(["branch_power_family", "branch_current_family", "branch_switch_family", "building_full_cabinet_power_family", "air_conditioner_temperature_humidity_family"]);
 const MONTHLY_SOURCE_FAMILIES = new Set(["monthly_report_family", "top5_monthly_report_family", "alarm_rule_export_family"]);
-const HOURLY_SOURCE_FAMILIES = new Set(["handover_log_family", "handover_capacity_report_family"]);
+const HOURLY_SOURCE_FAMILIES = new Set(["handover_log_family", "handover_capacity_report_family", ...INSPECTION_FAMILIES]);
 const SPECIAL_SOURCE_FAMILIES = new Set(["alarm_event_family", "chiller_mode_switch_family"]);
 const RUNTIME_STATUS_REFRESH_MS = 5000;
 const SLOW_STATUS_REFRESH_MS = 60000;
@@ -431,6 +435,7 @@ function renderSourceFamily(key, fallbackTitle) {
   const family = cache[key] || {};
   const rows = family.buildings || [];
   const rowByBuilding = Object.fromEntries(rows.map((row) => [row.building, row]));
+  const familyBuildings = INSPECTION_FAMILIES.includes(key) ? INSPECTION_BUILDINGS : BUILDINGS;
   return `
     <section class="panel">
       <div class="panel-head">
@@ -441,7 +446,7 @@ function renderSourceFamily(key, fallbackTitle) {
         </div>
       </div>
       <div class="source-list">
-        ${BUILDINGS.map((building) => {
+        ${familyBuildings.map((building) => {
           const row = rowByBuilding[building] || { building, source_family: key };
           const action = ((row.actions || {}).refresh || {});
           const busyKey = `${key}:${building}`;
@@ -583,6 +588,19 @@ function buildAlarmRuleExportFamily() {
 function sourceCacheForDisplay() {
   const cache = { ...(((state.summary || {}).source_cache || {})) };
   cache.alarm_rule_export_family = buildAlarmRuleExportFamily();
+  if (state.config?.features?.inspection_data?.enabled !== true) {
+    for (const key of INSPECTION_FAMILIES) {
+      const family = cache[key] || {};
+      cache[key] = {
+        ...family, status_text: "未启用", tone: "neutral",
+        buildings: INSPECTION_BUILDINGS.map((building) => ({
+          ...(family.buildings || []).find((row) => row.building === building),
+          building, status_text: "未启用", tone: "neutral",
+          actions: { refresh: { allowed: false, disabled_reason: "请先在内网端配置中开启巡检数据采集" } },
+        })),
+      };
+    }
+  }
   return cache;
 }
 
@@ -629,6 +647,9 @@ function renderSourceMatrix() {
                 <small>${(family.meta_lines || []).map((line) => escapeHtml(shortLine(line, 42))).join("<br>") || "等待后端状态"}</small>
               </div>
               ${BUILDINGS.map((building) => {
+                if (INSPECTION_FAMILIES.includes(key) && !INSPECTION_BUILDINGS.includes(building)) {
+                  return `<div class="source-status-cell"><span class="pill">不适用</span></div>`;
+                }
                 const row = rowByBuilding[building] || { building, source_family: key };
                 const action = ((row.actions || {}).refresh || {});
                 const busyKey = `${key}:${building}`;
@@ -784,6 +805,7 @@ function renderConfig() {
   const common = config.common || {};
   const bridge = common.shared_bridge || {};
   const cache = common.internal_source_cache || {};
+  const inspectionEnabled = config.features?.inspection_data?.enabled === true;
   const paths = common.paths || {};
   return `
     <section class="panel">
@@ -826,6 +848,10 @@ function renderConfig() {
             <input name="checkInterval" type="number" min="5" value="${escapeHtml(cache.check_interval_sec || 30)}" />
           </label>
         </div>
+        <label class="checkbox-cell">
+          <input name="inspectionEnabled" type="checkbox" ${inspectionEnabled ? "checked" : ""} />
+          <span>D/E楼电气、暖通巡检采集（每小时）</span>
+        </label>
         <h3>五楼内网页面</h3>
         <div class="site-table">
           <div class="site-head">楼栋</div>
@@ -897,6 +923,10 @@ function collectConfigPayload() {
   const sharedRoot = field("sharedRoot").value.trim();
   return {
     version: current.version || 3,
+    features: {
+      ...(current.features || {}),
+      inspection_data: { ...(current.features?.inspection_data || {}), enabled: field("inspectionEnabled").checked },
+    },
     common: {
       console: common.console || {},
       deployment: {
@@ -981,6 +1011,14 @@ async function handleAction(event) {
     } else if (action === "refresh-building") {
       const family = target.dataset.family || "";
       const building = target.dataset.building || "";
+      if (INSPECTION_FAMILIES.includes(family) && !INSPECTION_BUILDINGS.includes(building)) {
+        setMessage(`${text(building, "当前楼栋")}不适用巡检数据源文件，已忽略刷新`, true);
+        return;
+      }
+      if (INSPECTION_FAMILIES.includes(family) && state.config?.features?.inspection_data?.enabled !== true) {
+        setMessage("巡检数据采集未启用，请先在内网端配置中开启", true);
+        return;
+      }
       busyKey = `${family}:${building}`;
       state.busy.add(busyKey);
       render();

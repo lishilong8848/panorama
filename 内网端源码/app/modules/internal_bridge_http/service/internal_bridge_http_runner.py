@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES
+
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
@@ -396,6 +398,8 @@ class InternalBridgeHttpTaskRunner:
         status: str = "ready",
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
+        if str(source_family or "").strip().lower() == "inspection_data_family":
+            raise ValueError("inspection_data_family 已停用，请分别使用电气、暖通巡检源文件")
         store = self._get_store()
         bucket_text = str(bucket_or_date or "").strip()
         kind_text = str(bucket_kind or "").strip().lower()
@@ -433,6 +437,8 @@ class InternalBridgeHttpTaskRunner:
         output: List[Dict[str, Any]] = []
         for entry in entries:
             if not isinstance(entry, dict):
+                continue
+            if entry.get("source_family") == "inspection_data_family":
                 continue
             item = copy.deepcopy(entry)
             relative = str(item.get("relative_path", "") or "").replace("\\", "/").strip()
@@ -797,6 +803,25 @@ class InternalBridgeHttpTaskRunner:
             return entries
         main_cache = getattr(self._main_service, "_source_cache_service", None)
         if main_cache is None:
+            return entries
+        if family in INSPECTION_REPORT_TEMPLATES and not entries and not bucket_key:
+            root = getattr(main_cache, "shared_root", None)
+            if building_name not in {"D楼", "E楼"} or root is None or _is_potentially_blocking_path(str(root)):
+                return entries
+            day = str(duty_date or datetime.now().strftime("%Y-%m-%d"))
+            try:
+                if datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d") != day:
+                    return entries
+            except ValueError:
+                return entries
+            # A date filter is not a bucket: recover the newest exact hourly file locally.
+            for hour in range(23, -1, -1):
+                recovered = self._recover_exact_existing_source_file_to_index(
+                    main_cache=main_cache, source_family=family, building=building_name,
+                    bucket_key=f"{day} {hour:02d}",
+                )
+                if recovered:
+                    return [recovered]
             return entries
         if (
             family.strip().lower() == FAMILY_CHILLER_MODE_SWITCH
@@ -1164,8 +1189,19 @@ class InternalBridgeHttpTaskRunner:
         bucket_key = str(target_bucket_key or "").strip()
         if not family:
             raise ValueError("source_family 不能为空")
+        if family.lower() == "inspection_data_family":
+            raise ValueError("inspection_data_family 已停用，请分别使用电气、暖通巡检源文件")
         if not target_buildings:
             raise ValueError("buildings 不能为空")
+        if family in INSPECTION_REPORT_TEMPLATES and any(building not in {"D楼", "E楼"} for building in target_buildings):
+            raise ValueError("巡检数据源文件仅支持D楼、E楼")
+        if family in INSPECTION_REPORT_TEMPLATES and bucket_key:
+            try:
+                parsed_bucket = datetime.strptime(bucket_key, "%Y-%m-%d %H")
+            except ValueError as exc:
+                raise ValueError("巡检数据源文件时间桶必须为 YYYY-MM-DD HH") from exc
+            if parsed_bucket.strftime("%Y-%m-%d %H") != bucket_key:
+                raise ValueError("巡检数据源文件时间桶必须为 YYYY-MM-DD HH")
         accepted = len(target_buildings)
         results: List[Dict[str, Any]] = [
             {

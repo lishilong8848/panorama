@@ -45,6 +45,7 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     SharedSourceCacheService,
     is_accessible_cached_file_path,
 )
+from app.config.inspection_data_config import INSPECTION_FAMILY_LABELS
 from app.modules.report_pipeline.service.job_service import JobService
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.shared.runtime.internal_download_browser_pool_runtime import (
@@ -1681,6 +1682,7 @@ class SharedBridgeRuntimeService:
         root_text = str(self.shared_bridge_root or "").strip()
         role_label = _role_label(self.role_mode)
         families = (
+            *INSPECTION_FAMILY_LABELS.items(),
             (FAMILY_HANDOVER_LOG, FAMILY_LABELS[FAMILY_HANDOVER_LOG]),
             (FAMILY_HANDOVER_CAPACITY_REPORT, FAMILY_LABELS[FAMILY_HANDOVER_CAPACITY_REPORT]),
             (FAMILY_MONTHLY_REPORT, FAMILY_LABELS[FAMILY_MONTHLY_REPORT]),
@@ -1725,6 +1727,8 @@ class SharedBridgeRuntimeService:
             ("artifacts", "任务产物目录", root_path / "artifacts", "directory"),
             ("logs", "桥接日志目录", root_path / "logs", "directory"),
             ("tmp", "桥接临时目录", root_path / "tmp", "directory"),
+            *((family, label, Path(str(cache_paths.get(family) or (root_path / label))), "directory")
+              for family, label in INSPECTION_FAMILY_LABELS.items()),
             (
                 FAMILY_HANDOVER_LOG,
                 FAMILY_LABELS[FAMILY_HANDOVER_LOG],
@@ -2008,6 +2012,8 @@ class SharedBridgeRuntimeService:
                 "scope_text": "当前小时",
             },
             "handover_log_family": {},
+            "electrical_inspection_family": {},
+            "hvac_inspection_family": {},
             "handover_capacity_report_family": {},
             "monthly_report_family": {},
             "branch_power_family": {},

@@ -4153,6 +4153,10 @@ def health(
                     "demand_poll": system_screenshot_upload_scheduler_snapshot.get("demand_poll", {}),
                 },
             },
+            "inspection_data_upload": {
+                "enabled": bool(runtime_cfg.get("inspection_data_upload", {}).get("enabled", True)),
+                "scheduler": _safe_scheduler_snapshot("inspection_data_upload_scheduler_status"),
+            },
             "temperature_humidity_upload": {
                 "enabled": bool(runtime_cfg.get("temperature_humidity_upload", {}).get("enabled", True))
                 if isinstance(runtime_cfg.get("temperature_humidity_upload", {}), dict)
@@ -5252,6 +5256,43 @@ def job_system_screenshot_upload_run(
             submitted_by="manual",
         )
         container.add_system_log(f"[任务] 已提交: 系统截图上传 {capture_date} ({job.job_id})")
+        return job.to_dict()
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/jobs/inspection-data/upload")
+def job_inspection_data_upload_run(
+    request: Request,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
+    from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
+
+    container = request.app.state.container
+    if _deployment_role_mode(container) != "external":
+        raise HTTPException(status_code=409, detail="请在已确认角色的外网端处理巡检数据")
+    if not _runtime_config(container).get("inspection_data_upload", {}).get("enabled", True):
+        raise HTTPException(status_code=409, detail="巡检数据处理模块已关闭")
+    dry_run = payload.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        raise HTTPException(status_code=400, detail="dry_run 必须是布尔值")
+    try:
+        source_date = InspectionDataUploadService.normalize_source_date(payload.get("source_date") or None)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        job = _start_background_job(
+            container,
+            name=f"巡检数据处理 {source_date}",
+            run_func=None,
+            worker_handler="inspection_data_upload",
+            worker_payload={"source_date": source_date, "dry_run": dry_run},
+            resource_keys=_job_resource_keys("inspection_data_upload:global"),
+            priority="manual",
+            feature="inspection_data_upload",
+            dedupe_key="inspection_data_upload",
+            submitted_by="manual",
+        )
         return job.to_dict()
     except JobBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -7209,6 +7250,7 @@ def _external_scheduler_status_summary(container, *, role_mode: str) -> Dict[str
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
         "system_screenshot_upload_scheduler": _safe_scheduler("system_screenshot_upload_scheduler_status"),
+        "inspection_data_upload_scheduler": _safe_scheduler("inspection_data_upload_scheduler_status"),
         "temperature_humidity_upload_scheduler": _safe_scheduler(
             "temperature_humidity_upload_scheduler_status"
         ),
@@ -7919,6 +7961,7 @@ def get_external_dashboard_summary(request: Request) -> Dict[str, Any]:
         "branch_power_upload_scheduler": _safe_scheduler("branch_power_upload_scheduler_status"),
         "alarm_event_upload_scheduler": _safe_scheduler("alarm_event_upload_scheduler_status"),
         "system_screenshot_upload_scheduler": _safe_scheduler("system_screenshot_upload_scheduler_status"),
+        "inspection_data_upload_scheduler": _safe_scheduler("inspection_data_upload_scheduler_status"),
         "temperature_humidity_upload_scheduler": _safe_scheduler(
             "temperature_humidity_upload_scheduler_status"
         ),

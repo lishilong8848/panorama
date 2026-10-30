@@ -178,6 +178,9 @@ export async function submitSystemScreenshotUploadJob(payload = {}) {
 export async function submitTemperatureHumidityUploadJob(payload = {}) {
   return startJsonJobApi("/api/jobs/temperature-humidity/upload", payload || {});
 }
+export async function submitInspectionDataUploadJob(payload = {}) {
+  return startJsonJobApi("/api/jobs/inspection-data/upload", payload || {});
+}
 
 export async function getJobApi(jobId) {
   return apiJson(`/api/jobs/${jobId}`);
@@ -489,17 +492,32 @@ export async function saveSystemScreenshotUploadSchedulerConfigApi(payload) {
 export async function startTemperatureHumidityUploadSchedulerApi() {
   return apiJson("/api/scheduler/temperature-humidity-upload/start", { method: "POST", body: "{}" });
 }
+export async function startInspectionDataUploadSchedulerApi() {
+  return apiJson("/api/scheduler/inspection-data-upload/start", { method: "POST", body: "{}" });
+}
 
 export async function stopTemperatureHumidityUploadSchedulerApi() {
   return apiJson("/api/scheduler/temperature-humidity-upload/stop", { method: "POST", body: "{}" });
+}
+export async function stopInspectionDataUploadSchedulerApi() {
+  return apiJson("/api/scheduler/inspection-data-upload/stop", { method: "POST", body: "{}" });
 }
 
 export async function getTemperatureHumidityUploadSchedulerStatusApi() {
   return apiJson("/api/scheduler/temperature-humidity-upload/status");
 }
+export async function getInspectionDataUploadSchedulerStatusApi() {
+  return apiJson("/api/scheduler/inspection-data-upload/status");
+}
 
 export async function saveTemperatureHumidityUploadSchedulerConfigApi(payload) {
   return apiJson("/api/scheduler/temperature-humidity-upload/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+export async function saveInspectionDataUploadSchedulerConfigApi(payload) {
+  return apiJson("/api/scheduler/inspection-data-upload/config", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -749,6 +767,12 @@ export async function refreshHandoverReviewStationHSignaturesApi(payload = {}) {
     method: "POST",
     body: JSON.stringify(payload || {}),
   }, 120000);
+}
+
+export async function refreshHandoverReviewStationHTrainingApi(payload = {}) {
+  return apiJsonWithTimeout("/api/handover/review/station-h/training/refresh", {
+    method: "POST", body: JSON.stringify(payload),
+  }, 30000);
 }
 
 export async function downloadHandoverReviewStationHSignaturePreviewApi(selectionId) {

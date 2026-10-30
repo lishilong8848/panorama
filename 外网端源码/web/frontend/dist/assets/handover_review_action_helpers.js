@@ -108,9 +108,10 @@ export function createHandoverReviewActionHelpers(options = {}) {
     return null;
   }
 
-  async function switchToSession(sessionId, { toLatest = false } = {}) {
+  async function switchToSession(sessionId, { toLatest = false, dutyDate = "", dutyShift = "" } = {}) {
     const nextSessionId = String(sessionId || "").trim();
-    if (!toLatest && (!nextSessionId || nextSessionId === selectedSessionId.value)) return;
+    const explicitDuty = Boolean(dutyDate && ["day", "night"].includes(dutyShift));
+    if (!toLatest && !explicitDuty && (!nextSessionId || nextSessionId === selectedSessionId.value)) return;
     if (dirty.value) {
       const saved = await saveDocument({ reason: "switch" });
       if (!saved) return;
@@ -122,10 +123,10 @@ export function createHandoverReviewActionHelpers(options = {}) {
     errorText.value = "";
     activeRouteSelection.value = {
       sessionId: toLatest ? "" : nextSessionId,
-      dutyDate: "",
-      dutyShift: "",
+      dutyDate: explicitDuty ? dutyDate : "",
+      dutyShift: explicitDuty ? dutyShift : "",
     };
-    syncReviewSelectionToUrl({ sessionId: toLatest ? "" : nextSessionId, isLatest: toLatest });
+    syncReviewSelectionToUrl(explicitDuty ? { dutyDate, dutyShift } : { sessionId: toLatest ? "" : nextSessionId, isLatest: toLatest });
     statusText.value = toLatest ? "正在切换到最新交接班日志..." : "正在切换历史交接班日志...";
     await loadReviewData({
       background: false,

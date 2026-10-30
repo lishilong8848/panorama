@@ -1414,6 +1414,10 @@ class InternalDownloadBrowserPool:
                         result = await runner(page)
                         if self._runner_result_failed(result):
                             error_text = self._runner_result_error_text(result)
+                            # A missing inspection report must not recycle the shared building browser.
+                            if owner == "inspection_data_source" and self._classify_failure_kind(error_text) == "unknown":
+                                self._update_slot(building, last_result="failed", last_error=error_text)
+                                return result
                             self._last_error = error_text
                             self._update_slot(
                                 building,
@@ -1459,7 +1463,7 @@ class InternalDownloadBrowserPool:
                         error_text = str(exc)
                         self._last_error = error_text
                         failure_kind = self._classify_failure_kind(error_text)
-                        if owner == "system_screenshot_capture" and failure_kind == "unknown":
+                        if owner in {"system_screenshot_capture", "inspection_data_source"} and failure_kind == "unknown":
                             self._update_slot(building, last_result="failed", last_error=error_text)
                             raise
                         if failure_kind == "unknown" and attempt < self.MAX_JOB_ATTEMPTS - 1:

@@ -24,6 +24,7 @@ from handover_log_module.repository.shift_roster_repository import (
 from handover_log_module.service.change_management_payload_builder import ChangeManagementPayloadBuilder
 from handover_log_module.service.event_category_payload_builder import EventCategoryPayloadBuilder
 from handover_log_module.service.exercise_management_payload_builder import ExerciseManagementPayloadBuilder
+from handover_log_module.service.training_management_payload_builder import TrainingManagementPayloadBuilder
 from handover_log_module.service.handover_download_service import HandoverDownloadService
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
@@ -1106,6 +1107,13 @@ class HandoverOrchestrator:
             )
             combined_category_payloads: Dict[str, Any] = {}
             try:
+                combined_category_payloads.update(TrainingManagementPayloadBuilder(self.config).build(
+                    building=building, duty_date=duty_date_text,
+                    current_people=current_people_text, next_people=next_people_text, emit_log=emit_log,
+                ))
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][培训管理] 自动读取失败，可在审核页刷新重试: {exc}")
+            try:
                 event_payloads = self._event_category_builder.build(
                     building=building,
                     duty_date=duty_date_text,
@@ -1389,7 +1397,9 @@ class HandoverOrchestrator:
                         else {}
                     )
                     try:
-                        ReviewDocumentStateService(self.config, emit_log=emit_log).ensure_document_for_session(review_session)
+                        ReviewDocumentStateService(self.config, emit_log=emit_log).ensure_document_for_session(
+                            review_session, training_rows=normalized_category_payloads.get("培训管理", []),
+                        )
                         try:
                             from app.modules.handover_review.api.routes import schedule_latest_review_documents_warmup
 

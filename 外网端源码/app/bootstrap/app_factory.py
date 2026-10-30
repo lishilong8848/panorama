@@ -51,6 +51,7 @@ from app.modules.scheduler.api.monthly_change_report_routes import router as mon
 from app.modules.scheduler.api.monthly_event_report_routes import router as monthly_event_report_scheduler_router
 from app.modules.scheduler.api.routes import router as scheduler_router
 from app.modules.scheduler.api.system_screenshot_upload_routes import router as system_screenshot_upload_scheduler_router
+from app.modules.scheduler.api.inspection_data_upload_routes import router as inspection_data_upload_scheduler_router
 from app.modules.scheduler.api.temperature_humidity_upload_routes import (
     router as temperature_humidity_upload_scheduler_router,
 )
@@ -294,6 +295,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(alarm_rule_export_upload_scheduler_router)
     app.include_router(system_screenshot_upload_scheduler_router)
     app.include_router(temperature_humidity_upload_scheduler_router)
+    app.include_router(inspection_data_upload_scheduler_router)
     app.include_router(wet_bulb_collection_scheduler_router)
     app.include_router(top5_power_report_scheduler_router)
     app.include_router(monthly_change_report_scheduler_router)
@@ -571,6 +573,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_alarm_event_upload_scheduler(source="关闭自动")
             if getattr(container, "temperature_humidity_upload_scheduler", None):
                 container.stop_temperature_humidity_upload_scheduler(source="关闭自动")
+            if getattr(container, "inspection_data_upload_scheduler", None):
+                container.stop_inspection_data_upload_scheduler(source="关闭自动")
             if getattr(container, "top5_power_report_scheduler", None):
                 container.stop_top5_power_report_scheduler(source="关闭自动")
             if getattr(container, "alarm_rule_export_upload_scheduler", None):

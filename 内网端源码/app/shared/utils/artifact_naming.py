@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from app.config.inspection_data_config import (
+    FAMILY_ELECTRICAL_INSPECTION,
+    FAMILY_HVAC_INSPECTION,
+    INSPECTION_FAMILY_LABELS,
+)
+
 
 FAMILY_HANDOVER_LOG = "handover_log_family"
 FAMILY_HANDOVER_CAPACITY_REPORT = "handover_capacity_report_family"
@@ -19,6 +25,7 @@ FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY = "air_conditioner_temperature_humid
 FAMILY_CHILLER_MODE_SWITCH = "chiller_mode_switch_family"
 
 SOURCE_TYPE_FOLDERS = {
+    **INSPECTION_FAMILY_LABELS,
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
     FAMILY_HANDOVER_CAPACITY_REPORT: "交接班容量报表源文件",
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
@@ -188,6 +195,8 @@ def build_source_artifact_path(
     now: datetime | None = None,
 ) -> ArtifactPathInfo:
     normalized_family = str(source_family or "").strip()
+    if normalized_family == "inspection_data_family":
+        raise ValueError("inspection_data_family 已停用，请分别使用电气、暖通巡检源文件")
     type_folder = SOURCE_TYPE_FOLDERS.get(normalized_family, sanitize_windows_path_part(normalized_family))
     bucket_segment = source_bucket_segment(
         source_family=normalized_family,

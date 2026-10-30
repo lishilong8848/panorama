@@ -24,6 +24,10 @@ class _FakeSheetsClient:
         self.value_batches = []
         self.style_batches = []
         self.image_writes = []
+        self.dimension_updates = []
+
+    def update_dimension_range(self, _token, **kwargs):
+        self.dimension_updates.append(kwargs)
 
     def query_sheets(self, _spreadsheet_token, *, sheet_cache=None, force_refresh=False):
         del sheet_cache, force_refresh
@@ -76,6 +80,21 @@ def _service_with_client(tmp_path, client):
     )
     service._build_client = lambda: client
     return service
+
+
+def test_station_h_training_updates_only_training_cells_and_row_height(tmp_path):
+    client = _FakeSheetsClient({"sheet_id": "h_sheet", "row_count": 200, "column_count": 20,
+                               "merges": [{"start_row_index": 1, "end_row_index": 2,
+                                           "start_column_index": 1, "end_column_index": 4}]})
+    service = _service_with_client(tmp_path, client)
+    result = service.sync_station_h_sheet(
+        batch_meta={"spreadsheet_token": "mock"},
+        cell_values={"B31": "培训一\n培训二", "D31": "17：30-18：00\n17：30-18：00", "E31": "理论\n理论",
+                     "F31": "讲师甲\n讲师乙", "G31": "值班甲、接班乙\n值班甲、接班乙"}, emit_log=lambda _s: None,
+    )
+    assert result["status"] == "success"
+    assert any(item["values"] == [["培训一\n培训二"]] for item in client.value_batches[0])
+    assert client.dimension_updates == [{"sheet_id": "h_sheet", "major_dimension": "ROWS", "start_index": 30, "end_index": 31, "pixel_size": 88}]
 
 
 def test_station_h_sync_updates_only_allowed_values_and_preserves_cloud_layout(tmp_path):

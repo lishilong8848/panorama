@@ -9,6 +9,7 @@ from app.config.config_compat_cleanup import (
     sanitize_wet_bulb_collection_config,
 )
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
+from app.config.inspection_data_config import normalize_inspection_data_config
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.cell_rule_compiler import migrate_legacy_rule_structures, normalize_cell_rules
 from pipeline_utils import get_app_dir
@@ -387,6 +388,9 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     features["sheet_import"] = deep_merge_defaults(_dict(legacy_cfg.get("feishu_sheet_import")), _dict(features.get("sheet_import")))
     features["handover_log"] = deep_merge_defaults(_dict(legacy_cfg.get("handover_log")), _dict(features.get("handover_log")))
+    features["inspection_data"] = normalize_inspection_data_config(
+        deep_merge_defaults(_dict(legacy_cfg.get("inspection_data")), _dict(features.get("inspection_data")))
+    )
     features["manual_upload_gui"] = deep_merge_defaults(_dict(legacy_cfg.get("manual_upload_gui")), _dict(features.get("manual_upload_gui")))
     features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
     features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
@@ -427,6 +431,7 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
         common["deployment"] = deployment
         common["shared_bridge"] = _resolve_shared_bridge_paths(common, deployment)
         common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
+        features["inspection_data"] = normalize_inspection_data_config(features.get("inspection_data"))
         features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
         features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
         features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
@@ -686,6 +691,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "feishu": runtime_feishu,
         "feishu_sheet_import": copy.deepcopy(sheet_import),
         "handover_log": runtime_handover_log,
+        "inspection_data": copy.deepcopy(_dict(features.get("inspection_data"))),
         "day_metric_upload": copy.deepcopy(day_metric_upload),
         "alarm_export": copy.deepcopy(alarm_export),
         "alarm_rule_export": copy.deepcopy(_dict(features.get("alarm_rule_export"))),

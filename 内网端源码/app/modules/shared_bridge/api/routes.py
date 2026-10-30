@@ -73,6 +73,8 @@ _BRIDGE_ERROR_TEXTS = {
 }
 
 _LATEST_REFRESHABLE_SOURCE_FAMILIES = {
+    "electrical_inspection_family": "电气巡检源文件",
+    "hvac_inspection_family": "暖通巡检源文件",
     "handover_log_family": "交接班日志源文件",
     "handover_capacity_report_family": "交接班容量报表源文件",
     "monthly_report_family": "全景平台月报源文件",
@@ -112,6 +114,8 @@ def _internal_summary_has_runtime_signal(payload: Any) -> bool:
             return True
     for key in (
         "handover_log_family",
+        "electrical_inspection_family",
+        "hvac_inspection_family",
         "handover_capacity_report_family",
         "monthly_report_family",
         "top5_monthly_report_family",
@@ -165,6 +169,8 @@ def _wrap_internal_light_snapshot(snapshot: Any) -> Dict[str, Any]:
         return raw
     family_keys = (
         "handover_log_family",
+        "electrical_inspection_family",
+        "hvac_inspection_family",
         "handover_capacity_report_family",
         "monthly_report_family",
         "top5_monthly_report_family",
@@ -1079,6 +1085,8 @@ def bridge_source_cache_refresh_building_latest(
         raise HTTPException(status_code=400, detail="不支持的共享文件类型")
     if not building_text:
         raise HTTPException(status_code=400, detail="缺少楼栋参数")
+    if normalized_family in {"electrical_inspection_family", "hvac_inspection_family"} and building_text not in {"D楼", "E楼"}:
+        raise HTTPException(status_code=400, detail="巡检数据源文件仅支持D楼、E楼")
     container = request.app.state.container
     service = getattr(container, "shared_bridge_service", None)
     if service is None:
@@ -1089,6 +1097,18 @@ def bridge_source_cache_refresh_building_latest(
     )
     reason = str(result.get("reason", "") or "").strip()
     family_label = _LATEST_REFRESHABLE_SOURCE_FAMILIES.get(normalized_family, normalized_family)
+    if not bool(result.get("accepted")) and reason == "already_ready":
+        return {
+            **result,
+            "ok": True,
+            "accepted": False,
+            "running": False,
+            "ready": True,
+            "scope": "single_building_family",
+            "source_family": normalized_family,
+            "building": building_text,
+            "message": f"{building_text} {family_label}已有可用文件，无需重复下载",
+        }
     if not bool(result.get("accepted")) and reason == "already_running":
         return {
             "ok": True,
@@ -1108,7 +1128,8 @@ def bridge_source_cache_refresh_building_latest(
             "bucket_unavailable": "当前小时告警桶不可用，请稍后重试或使用一键拉取告警文件",
             "unsupported_family": "不支持的共享文件类型",
         }
-        raise HTTPException(status_code=409, detail=detail_map.get(reason, "单楼共享文件拉取未被接受"))
+        detail = detail_map.get(reason, f"单楼共享文件拉取未被接受（{reason or 'unknown'}）")
+        raise HTTPException(status_code=409, detail=f"{building_text} {family_label}：{detail}")
     container.add_system_log(
         f"[共享缓存] 已手动触发单楼 latest 拉取 family={normalized_family} building={building_text}"
     )

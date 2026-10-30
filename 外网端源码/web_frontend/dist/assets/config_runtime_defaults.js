@@ -142,6 +142,7 @@ function ensureRoot(cfg) {
   cfg.chiller_mode_upload = cfg.chiller_mode_upload || {};
   cfg.system_screenshot_upload = cfg.system_screenshot_upload || {};
   cfg.temperature_humidity_upload = cfg.temperature_humidity_upload || {};
+  cfg.inspection_data_upload = cfg.inspection_data_upload || {};
   cfg.alarm_rule_export_upload = cfg.alarm_rule_export_upload || {};
   cfg.alarm_rule_export_upload.scheduler = cfg.alarm_rule_export_upload.scheduler || {};
   cfg.handover_log.template = cfg.handover_log.template || {};
@@ -226,6 +227,7 @@ function ensureRoot(cfg) {
   cfg.chiller_mode_upload.mode_value_map = cfg.chiller_mode_upload.mode_value_map || {};
   cfg.system_screenshot_upload.scheduler = cfg.system_screenshot_upload.scheduler || {};
   cfg.temperature_humidity_upload.scheduler = cfg.temperature_humidity_upload.scheduler || {};
+  cfg.inspection_data_upload.scheduler = cfg.inspection_data_upload.scheduler || {};
   cfg.alarm_export.scheduler = cfg.alarm_export.scheduler || {};
   cfg.alarm_export.feishu = cfg.alarm_export.feishu || {};
   cfg.alarm_export.shared_source_upload =
@@ -1118,6 +1120,25 @@ function applySystemScreenshotUploadDefaults(cfg) {
   setStringDefault(scheduler, "state_file", "system_screenshot_upload_scheduler_state.json");
 }
 
+function applyInspectionDataUploadDefaults(cfg) {
+  const upload = cfg.inspection_data_upload;
+  setBooleanDefault(upload, "enabled", true);
+  delete upload.source_family;
+  upload.source_families = {
+    "电气": "electrical_inspection_family",
+    "暖通": "hvac_inspection_family",
+  };
+  if (!Array.isArray(upload.buildings)) upload.buildings = ["D楼", "E楼"];
+  const scheduler = upload.scheduler;
+  setBooleanDefault(scheduler, "enabled", false);
+  setBooleanDefault(scheduler, "auto_start_in_gui", false);
+  if (!Array.isArray(scheduler.run_times)) scheduler.run_times = [];
+  setNumberDefault(scheduler, "check_interval_sec", 30);
+  setBooleanDefault(scheduler, "catch_up_if_missed", false);
+  setBooleanDefault(scheduler, "retry_failed_in_same_period", true);
+  setStringDefault(scheduler, "state_file", "inspection_data_upload_scheduler_state.json");
+}
+
 function applyTemperatureHumidityUploadDefaults(cfg) {
   const upload = cfg.temperature_humidity_upload;
   const scheduler = upload.scheduler || {};
@@ -1388,6 +1409,7 @@ export function ensureConfigShape(raw) {
   applyAlarmExportDefaults(cfg);
   applySystemScreenshotUploadDefaults(cfg);
   applyTemperatureHumidityUploadDefaults(cfg);
+  applyInspectionDataUploadDefaults(cfg);
   applyNetworkDefaults(cfg);
   applyWetBulbCollectionDefaults(cfg);
   applyChillerModeUploadDefaults(cfg);

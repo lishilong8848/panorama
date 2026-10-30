@@ -16,6 +16,7 @@ from handover_log_module.service.capacity_room_inputs_service import CapacityRoo
 from handover_log_module.service.footer_inventory_defaults_service import FooterInventoryDefaultsService
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_writer import ReviewDocumentWriter
+from handover_log_module.service.training_management_payload_builder import attach_training_row_ids
 
 
 _ATTENTION_HANDOVER_SECTION_NAME = "三、注意事项交接"
@@ -80,7 +81,7 @@ class ReviewDocumentStateService:
     def _output_file(session: Dict[str, Any]) -> str:
         return str(session.get("output_file", "") or "").strip()
 
-    def ensure_document_for_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
+    def ensure_document_for_session(self, session: Dict[str, Any], *, training_rows=None) -> Dict[str, Any]:
         building = self._building(session)
         session_id = self._session_id(session)
         if not building or not session_id:
@@ -137,6 +138,8 @@ class ReviewDocumentStateService:
             raise ReviewDocumentStateError(f"解析交接班文件失败，无法初始化审核文档: {exc}") from exc
         document = self.attach_cooling_pump_pressures(document=document, session=session)
         document = self.attach_capacity_room_inputs(document=document, session=session)
+        if training_rows:
+            attach_training_row_ids(document, training_rows)
         imported = store.upsert_imported_document(
             session=session,
             document=document,

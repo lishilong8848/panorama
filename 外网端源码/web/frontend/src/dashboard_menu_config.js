@@ -96,6 +96,11 @@ const SPECIAL_GROUP = {
       desc: '读取内网端每日空调温湿度源文件，上传温度、湿度和运行状态。',
     },
     {
+      id: 'inspection_data_upload',
+      title: '巡检数据处理',
+      desc: 'D楼、E楼巡检数据',
+    },
+    {
       id: 'system_screenshot_upload',
       title: '系统截图上传',
       desc: '读取内网端每日生成的 5 张系统图截图，并上传到对应多维表。',

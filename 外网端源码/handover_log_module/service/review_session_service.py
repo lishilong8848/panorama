@@ -2500,6 +2500,21 @@ class ReviewSessionService:
             allow_recover=False,
         )
 
+    def recover_history_session(self, building: str, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
+        """Background-only local recovery; never promote an old session to latest."""
+        session = self.get_session_for_building_duty_fast(building, duty_date, duty_shift)
+        if session is not None:
+            return session
+        for path in self._list_formal_output_files(building):
+            if self._infer_duty_context_from_output(building, path) != (duty_date, duty_shift):
+                continue
+            session = self._build_recovered_output_session(
+                building=building, duty_date=duty_date, duty_shift=duty_shift, output_file=str(path),
+            )
+            self._apply_review_state_changes(upsert_sessions=[session])
+            return session
+        return None
+
     def _get_session_for_building_duty(
         self,
         building: str,

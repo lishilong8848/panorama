@@ -463,9 +463,10 @@ class StationHDutyFocusService:
         normalized["shift"] = duty_shift
         return normalized
 
-    def build_status(self, *, duty_date: str, duty_shift: str, selection: Dict[str, Any]) -> Dict[str, Any]:
+    def build_status(self, *, duty_date: str, duty_shift: str, selection: Dict[str, Any], historical: bool = False) -> Dict[str, Any]:
         saved_focus = selection.get("duty_focus") if isinstance(selection, dict) else None
-        fallback = self.build_auto_focus(duty_date=duty_date, duty_shift=duty_shift, selection=selection)
+        fallback = ({"date_text": duty_date, "shift": duty_shift} if historical else
+                    self.build_auto_focus(duty_date=duty_date, duty_shift=duty_shift, selection=selection))
         focus = self.normalize_focus(saved_focus, fallback=fallback)
         saved_auto_source = saved_focus.get("auto_source", {}) if isinstance(saved_focus, dict) else {}
         saved_revision = _text(saved_auto_source.get("mode_revision")) if isinstance(saved_auto_source, dict) else ""
@@ -490,7 +491,8 @@ class StationHDutyFocusService:
                 if automatic:
                     item["modes"] = dict(automatic.get("modes", {}))
                     item["change_note"] = _text(automatic.get("change_note")) or "无"
-        focus["auto_source"] = dict(fallback.get("auto_source", {}))
+        if not historical:
+            focus["auto_source"] = dict(fallback.get("auto_source", {}))
         current_people = split_station_h_people(selection.get("current_people", selection.get("current_people_text", "")))
         next_people = split_station_h_people(selection.get("next_people", selection.get("next_people_text", "")))
         candidate_names = {
@@ -522,8 +524,8 @@ class StationHDutyFocusService:
                     required_names=required_names,
                     required_selection_ids=required_selection_ids,
                 )
-                if callable(ensure_directory)
-                else self.signature_service.refresh_directory()
+                if callable(ensure_directory) and not historical
+                else (directory if historical else self.signature_service.refresh_directory())
             )
         except Exception as exc:  # noqa: BLE001
             directory = dict(directory)
@@ -538,6 +540,8 @@ class StationHDutyFocusService:
             selected = focus["signatures"][slot]
             selection_id = _text(selected.get("selection_id"))
             match_source = _text(selected.get("match_source")).lower()
+            if historical:
+                continue
             expected_name = expected_names[slot]
             auto_match = (
                 match_source == "auto"
@@ -690,13 +694,14 @@ class StationHDutyFocusService:
         duty_date: str,
         duty_shift: str,
         focus: Dict[str, Any],
+        allow_archived: bool = False,
     ) -> Path:
         image_path, _metadata_path = self._image_artifacts(
             duty_date=duty_date,
             duty_shift=duty_shift,
         )
         status = self.image_status(duty_date=duty_date, duty_shift=duty_shift, focus=focus)
-        if not bool(status.get("current", False)):
+        if not bool(status.get("current", False)) and not (allow_archived and status.get("available")):
             raise StationHDutyFocusError("值班关注点图片尚未生成或已过期，请重新生成")
         try:
             validate_image_file(image_path)

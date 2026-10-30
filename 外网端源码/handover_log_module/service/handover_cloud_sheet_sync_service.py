@@ -1553,7 +1553,8 @@ class HandoverCloudSheetSyncService:
             for coordinate, value in (cell_values.items() if isinstance(cell_values, dict) else [])
         }
         value_ranges: List[Dict[str, Any]] = []
-        for coordinate in sorted(self.STATION_H_ALLOWED_CELLS, key=coordinate_to_tuple):
+        training_cells = {"B31", "D31", "E31", "F31", "G31"} & payload.keys()
+        for coordinate in sorted(self.STATION_H_ALLOWED_CELLS | training_cells, key=coordinate_to_tuple):
             row_index, column_index = coordinate_to_tuple(coordinate)
             value_ranges.append(
                 {
@@ -1571,6 +1572,12 @@ class HandoverCloudSheetSyncService:
         value_started = time.perf_counter()
         client.batch_update_values(spreadsheet_token, value_ranges)
         self._add_elapsed_ms(timings, "value_ms", value_started)
+        if training_cells:
+            lines = max(str(payload.get(cell) or "").count("\n") + 1 for cell in training_cells)
+            client.update_dimension_range(
+                spreadsheet_token, sheet_id=target_sheet_id, major_dimension="ROWS",
+                start_index=30, end_index=31, pixel_size=max(48, min(1000, lines * 44)),
+            )
 
         qualified_style_ranges: List[Dict[str, Any]] = []
         for item in template_style_ranges if isinstance(template_style_ranges, list) else []:

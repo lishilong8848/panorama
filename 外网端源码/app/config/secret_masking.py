@@ -8,6 +8,7 @@ from app.config.settings_loader import get_settings_path, load_settings
 
 
 SENSITIVE_KEYS = {
+    "api_key",
     "password",
     "app_secret",
     "feishu_webhook_url",

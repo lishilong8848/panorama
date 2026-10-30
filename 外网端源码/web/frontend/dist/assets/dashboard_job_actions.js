@@ -20,6 +20,7 @@ import {
   submitMonthlyPowerAlertReportJob,
   submitSystemScreenshotUploadJob,
   submitTemperatureHumidityUploadJob,
+  submitInspectionDataUploadJob,
   submitTop5OverPowerAttachmentJob,
   submitTop5PowerReportJob,
 } from "./api_client.js";
@@ -41,6 +42,7 @@ const ACTION_KEYS = {
   alarmRuleExportUpload: "job:alarm_rule_export_upload",
   systemScreenshotUpload: "job:system_screenshot_upload",
   temperatureHumidityUpload: "job:temperature_humidity_upload",
+  inspectionDataUpload: "job:inspection_data_upload",
   dayMetricFromFile: "job:day_metric_from_file",
   dayMetricRetryUnit: "job:day_metric_retry_unit",
   dayMetricRetryFailed: "job:day_metric_retry_failed",
@@ -88,6 +90,8 @@ export function createDashboardJobActions(ctx) {
     alarmRuleExportUploadMonth,
     systemScreenshotUploadDate,
     temperatureHumidityUploadDate,
+    inspectionDataUploadDate,
+    inspectionDataUploadDryRun,
     streamController,
     fetchHealth,
     fetchJobs,
@@ -680,6 +684,12 @@ if (!canRun.value) return;
     return job;
   }
 
+  function getInspectionDataUploadJob() {
+    const job = currentJob?.value && typeof currentJob.value === "object" ? currentJob.value : null;
+    if (!job || String(job.feature || "").trim() !== "inspection_data_upload") return null;
+    return job;
+  }
+
   function getTop5PowerReportResult() {
     const job = getTop5PowerReportJob();
     const result = job?.result && typeof job.result === "object" ? job.result : {};
@@ -735,6 +745,12 @@ if (!canRun.value) return;
 
   function getTemperatureHumidityUploadResult() {
     const job = getTemperatureHumidityUploadJob();
+    const result = job?.result && typeof job.result === "object" ? job.result : {};
+    return result && typeof result === "object" ? result : {};
+  }
+
+  function getInspectionDataUploadResult() {
+    const job = getInspectionDataUploadJob();
     const result = job?.result && typeof job.result === "object" ? job.result : {};
     return result && typeof result === "object" ? result : {};
   }
@@ -844,8 +860,31 @@ if (!canRun.value) return;
     return job.status || "处理中";
   }
 
+  function getInspectionDataUploadStatusText() {
+    const job = getInspectionDataUploadJob();
+    if (!job) return "尚未执行";
+    const status = String(job.status || "").trim().toLowerCase();
+    if (status === "success") return "已上传";
+    if (status === "failed") return "上传失败";
+    if (status === "running") return "上传中";
+    if (status === "queued") return "排队中";
+    if (status === "waiting_resource") return "等待资源";
+    if (status === "cancelled") return "已取消";
+    return job.status || "处理中";
+  }
+
   function getTemperatureHumidityUploadStatusTone() {
     const job = getTemperatureHumidityUploadJob();
+    const status = String(job?.status || "").trim().toLowerCase();
+    if (status === "success") return "success";
+    if (status === "failed") return "danger";
+    if (status === "running" || status === "queued" || status === "waiting_resource") return "info";
+    if (status === "cancelled") return "neutral";
+    return "neutral";
+  }
+
+  function getInspectionDataUploadStatusTone() {
+    const job = getInspectionDataUploadJob();
     const status = String(job?.status || "").trim().toLowerCase();
     if (status === "success") return "success";
     if (status === "failed") return "danger";
@@ -1087,6 +1126,28 @@ if (!canRun.value) return;
     );
   }
 
+  async function runInspectionDataUpload() {
+    if (!canRun.value) return;
+    const sourceDate = String(inspectionDataUploadDate?.value || formatDateObj(new Date())).trim();
+    if (!parseDateText(sourceDate)) {
+      message.value = "巡检数据处理日期格式错误，请使用 YYYY-MM-DD";
+      return;
+    }
+    return guardedRun(
+      ACTION_KEYS.inspectionDataUpload,
+      async () => {
+        try {
+          message.value = `巡检数据处理任务已提交: ${sourceDate}`;
+          const response = await submitInspectionDataUploadJob({ source_date: sourceDate, dry_run: Boolean(inspectionDataUploadDryRun.value) });
+          await applyAcceptedExecutionResponse(response, "巡检数据处理");
+        } catch (err) {
+          message.value = `巡检数据处理提交失败: ${err}`;
+        }
+      },
+      { cooldownMs: 0 },
+    );
+  }
+
   async function runDayMetricFromFile() {
     const building = String(dayMetricLocalBuilding.value || "").trim();
     const dutyDate = String(dayMetricLocalDate.value || "").trim();
@@ -1267,9 +1328,13 @@ if (!canRun.value) return;
     getSystemScreenshotUploadStatusText,
     getSystemScreenshotUploadStatusTone,
     runTemperatureHumidityUpload,
+    runInspectionDataUpload,
     getTemperatureHumidityUploadResult,
+    getInspectionDataUploadResult,
     getTemperatureHumidityUploadStatusText,
+    getInspectionDataUploadStatusText,
     getTemperatureHumidityUploadStatusTone,
+    getInspectionDataUploadStatusTone,
     runDayMetricFromFile,
     retryDayMetricUnit,
     retryFailedDayMetricUnits,

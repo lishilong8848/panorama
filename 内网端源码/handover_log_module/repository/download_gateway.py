@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
+from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES
+
 from pipeline_utils import configure_playwright_environment
 
 from app.shared.runtime.internal_download_browser_pool_runtime import (
@@ -189,6 +191,14 @@ class DownloadGateway:
     @staticmethod
     def _report_template_selectors(name: str) -> List[str]:
         name_literal = _xpath_literal(name)
+        if name in INSPECTION_REPORT_TEMPLATES.values() or name == "全景平台月报":
+            return [
+                "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
+                f"' showTemplate ') and normalize-space(@title)={name_literal}]",
+                "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
+                "' showTemplate ') and (.//span[normalize-space(.)="
+                f"{name_literal}] or normalize-space(.)={name_literal})]",
+            ]
         return [
             (
                 "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
@@ -709,6 +719,7 @@ class DownloadGateway:
             or self._is_building_full_cabinet_power_download(template_name=template_name, sheet_name="")
             or self._is_air_conditioner_temperature_humidity_download(template_name=template_name, sheet_name="")
             or self._is_top5_monthly_report_download(template_name=template_name, sheet_name="")
+            or template_name in INSPECTION_REPORT_TEMPLATES.values()
         )
         if slow_report:
             frame_timeout = max(frame_timeout, 45000)
@@ -1036,6 +1047,7 @@ class DownloadGateway:
                 is_chiller_mode_switch
                 or is_building_full_cabinet_power
                 or is_air_conditioner_temperature_humidity
+                or template_name in INSPECTION_REPORT_TEMPLATES.values()
             )
             await self._fill_text_input_by_widget_or_label(
                 frame2,
@@ -1439,7 +1451,7 @@ class DownloadGateway:
                         self._debug_log(
                             debug_step_log,
                             building,
-                            f"TOP5月报源文件跳过填参，直接等待报表加载 query={query_attempt}/{query_session_attempts}",
+                            f"{template_name}跳过填参，直接等待报表加载 query={query_attempt}/{query_session_attempts}",
                         )
                     else:
                         await _run_step(
@@ -1459,7 +1471,10 @@ class DownloadGateway:
                         lambda: self._wait_query_ready(
                             frame2,
                             timeout_ms=query_wait_timeout_ms,
-                            allow_initial_blank_ms=60000 if is_top5_monthly_report else 0,
+                            allow_initial_blank_ms=(
+                                query_wait_timeout_ms if template_name in INSPECTION_REPORT_TEMPLATES.values()
+                                else (60000 if is_top5_monthly_report else 0)
+                            ),
                         ),
                     )
                     break
@@ -1704,8 +1719,11 @@ class DownloadGateway:
                         debug_step_log=debug_step_log,
                     )
 
+                job_options = {}
+                if template_name in INSPECTION_REPORT_TEMPLATES.values():
+                    job_options["owner"] = "inspection_data_source"
                 result = await asyncio.wrap_future(
-                    browser_pool.submit_building_job(building, _runner)
+                    browser_pool.submit_building_job(building, _runner, **job_options)
                 )
                 return idx, result
 

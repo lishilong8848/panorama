@@ -724,6 +724,31 @@ def handle_system_screenshot_upload(
         raise
 
 
+def handle_inspection_data_upload(
+    config: Dict[str, Any],
+    payload: Dict[str, Any],
+    emit_log: Callable[[str], None],
+    runtime: Any = None,
+) -> Dict[str, Any]:
+    from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
+
+    check_cancel = runtime.raise_if_cancelled if runtime is not None else None
+    if check_cancel:
+        check_cancel()
+    dry_run = payload.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        raise ValueError("dry_run 必须是布尔值")
+    result = InspectionDataUploadService(config).run(
+        source_date=payload.get("source_date") or None,
+        log=emit_log,
+        check_cancel=check_cancel,
+        dry_run=dry_run,
+    )
+    if check_cancel:
+        check_cancel()
+    return result
+
+
 def handle_temperature_humidity_upload(
     config: Dict[str, Any],
     payload: Dict[str, Any],
@@ -1345,6 +1370,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "alarm_rule_export_upload": handle_alarm_rule_export_upload,
     "system_screenshot_upload": handle_system_screenshot_upload,
     "temperature_humidity_upload": handle_temperature_humidity_upload,
+    "inspection_data_upload": handle_inspection_data_upload,
     "system_screenshot_demand_upload": handle_system_screenshot_demand_upload,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,

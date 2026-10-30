@@ -36,6 +36,12 @@ from app.modules.shared_bridge.service.bridge_status_presenter import (
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver, build_bitable_url
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.config.config_adapter import normalize_role_mode, resolve_shared_bridge_paths
+from app.config.inspection_data_config import (
+    FAMILY_ELECTRICAL_INSPECTION,
+    FAMILY_HVAC_INSPECTION,
+    INSPECTION_FAMILY_LABELS,
+    INSPECTION_REPORT_TEMPLATES,
+)
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from app.modules.sheet_import.core.field_value_converter import parse_timestamp_ms
@@ -64,6 +70,8 @@ LEGACY_FAMILY_ALIASES = {
     FAMILY_MONTHLY_REPORT: ("monthly_family",),
 }
 FAMILY_DIR_NAMES = {
+    FAMILY_ELECTRICAL_INSPECTION: "electrical_inspection",
+    FAMILY_HVAC_INSPECTION: "hvac_inspection",
     FAMILY_HANDOVER_LOG: "handover_log",
     FAMILY_HANDOVER_CAPACITY_REPORT: "handover_capacity_report",
     FAMILY_MONTHLY_REPORT: "monthly_report",
@@ -77,6 +85,7 @@ FAMILY_DIR_NAMES = {
     FAMILY_CHILLER_MODE_SWITCH: "chiller_mode_switch",
 }
 FAMILY_LABELS = {
+    **INSPECTION_FAMILY_LABELS,
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
     FAMILY_HANDOVER_CAPACITY_REPORT: "交接班容量报表源文件",
     FAMILY_MONTHLY_REPORT: "全景平台月报源文件",
@@ -263,6 +272,8 @@ class SharedSourceCacheService:
         self._monthly_download_module: Any | None = None
         self._monthly_download_module_lock = threading.Lock()
         self._family_status: Dict[str, Dict[str, Any]] = {
+            **{family: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""}
+               for family in INSPECTION_REPORT_TEMPLATES},
             FAMILY_HANDOVER_LOG: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_HANDOVER_CAPACITY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
             FAMILY_MONTHLY_REPORT: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
@@ -276,6 +287,7 @@ class SharedSourceCacheService:
             FAMILY_CHILLER_MODE_SWITCH: {"ready_count": 0, "failed_buildings": [], "blocked_buildings": [], "last_success_at": ""},
         }
         self._light_building_status: Dict[str, Dict[str, Dict[str, Any]]] = {
+            **{family: {} for family in INSPECTION_REPORT_TEMPLATES},
             FAMILY_HANDOVER_LOG: {},
             FAMILY_HANDOVER_CAPACITY_REPORT: {},
             FAMILY_MONTHLY_REPORT: {},
@@ -574,7 +586,6 @@ class SharedSourceCacheService:
         }
 
     def _reset_light_building_state_unlocked(self) -> None:
-        buildings = self.get_enabled_buildings()
         current_bucket = self._current_hour_bucket or self.current_hour_bucket()
         monthly_bucket = self._monthly_report_business_date()
         top5_monthly_bucket = self._top5_monthly_report_period_date()
@@ -605,6 +616,8 @@ class SharedSourceCacheService:
         ] = air_conditioner_temperature_humidity_bucket
         self._family_status.setdefault(FAMILY_CHILLER_MODE_SWITCH, {})["current_bucket"] = chiller_mode_switch_bucket
         for family_name, bucket_key in (
+            (FAMILY_ELECTRICAL_INSPECTION, current_bucket),
+            (FAMILY_HVAC_INSPECTION, current_bucket),
             (FAMILY_HANDOVER_LOG, current_bucket),
             (FAMILY_HANDOVER_CAPACITY_REPORT, current_bucket),
             (FAMILY_MONTHLY_REPORT, monthly_bucket),
@@ -618,7 +631,7 @@ class SharedSourceCacheService:
             (FAMILY_CHILLER_MODE_SWITCH, chiller_mode_switch_bucket),
         ):
             family_cache = self._light_building_status.setdefault(family_name, {})
-            for building in buildings:
+            for building in self._family_buildings(family_name):
                 family_cache.setdefault(
                     building,
                     self._default_light_building_status(building=building, bucket_key=bucket_key),
@@ -633,9 +646,10 @@ class SharedSourceCacheService:
     ) -> None:
         normalized_family = self._normalize_source_family(source_family)
         family_cache = self._light_building_status.setdefault(normalized_family, {})
-        for building in (buildings or self.get_enabled_buildings()):
+        allowed_buildings = self._family_buildings(normalized_family)
+        for building in (buildings if buildings is not None else allowed_buildings):
             building_name = str(building or "").strip()
-            if not building_name:
+            if not building_name or building_name not in allowed_buildings:
                 continue
             current = family_cache.get(building_name)
             current_bucket = str(current.get("bucket_key", "") or "").strip() if isinstance(current, dict) else ""
@@ -681,7 +695,7 @@ class SharedSourceCacheService:
         ).strip()
         family_cache = self._light_building_status.setdefault(normalized_family, {})
         rows: List[Dict[str, Any]] = []
-        for building in self.get_enabled_buildings():
+        for building in self._family_buildings(normalized_family):
             row = family_cache.get(building)
             if not isinstance(row, dict):
                 row = self._default_light_building_status(building=building, bucket_key=effective_bucket)
@@ -792,7 +806,7 @@ class SharedSourceCacheService:
         active_downloads: Dict[tuple[str, str, str, str], str],
     ) -> Dict[str, Any]:
         normalized_family = self._normalize_source_family(source_family)
-        buildings = self.get_enabled_buildings()
+        buildings = self._family_buildings(normalized_family)
         building_rows: List[Dict[str, Any]] = []
         for building in buildings:
             cached = copy.deepcopy(cached_rows.get(building) or self._default_light_building_status(building=building, bucket_key=current_bucket))
@@ -893,6 +907,15 @@ class SharedSourceCacheService:
             or self.current_chiller_mode_switch_bucket()
         )
         snapshot_error = ""
+        for family in INSPECTION_REPORT_TEMPLATES:
+            try:
+                families[family] = self._build_family_health_snapshot(
+                    source_family=family, current_bucket=current_bucket,
+                    include_latest_selection=include_latest_selection,
+                )
+            except Exception as exc:  # noqa: BLE001
+                families[family] = {"current_bucket": current_bucket, "buildings": []}
+                snapshot_error = snapshot_error or str(exc)
         try:
             handover_family = self._build_family_health_snapshot(
                 source_family=FAMILY_HANDOVER_LOG,
@@ -1040,6 +1063,7 @@ class SharedSourceCacheService:
             "monthly_source_refresh": monthly_source_refresh,
             "top5_monthly_source_refresh": top5_monthly_source_refresh,
             FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
+            **{family: families.get(family, {}) for family in INSPECTION_REPORT_TEMPLATES},
             FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
             FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
             FAMILY_TOP5_MONTHLY_REPORT: families.get(FAMILY_TOP5_MONTHLY_REPORT, {}),
@@ -1405,6 +1429,9 @@ class SharedSourceCacheService:
             "last_error": self._last_error,
             "cache_root": str(self.shared_root) if self.shared_root else "",
             "current_hour_refresh": copy.deepcopy(self._current_hour_refresh),
+            **{family: self._build_fast_external_family_from_index(
+                source_family=family, current_bucket=current_bucket, buildings=self._family_buildings(family),
+            ) for family in INSPECTION_REPORT_TEMPLATES},
             FAMILY_HANDOVER_LOG: self._build_fast_external_family_from_index(
                 source_family=FAMILY_HANDOVER_LOG,
                 current_bucket=current_bucket,
@@ -1697,6 +1724,16 @@ class SharedSourceCacheService:
             output.append(key)
         return output
 
+    def _family_buildings(self, source_family: str) -> List[str]:
+        buildings = self.get_enabled_buildings()
+        if self._normalize_source_family(source_family) == "inspection_data_family":
+            return []
+        if self._normalize_source_family(source_family) in INSPECTION_REPORT_TEMPLATES:
+            if self.runtime_config.get("inspection_data", {}).get("enabled") is not True:
+                return []
+            return [building for building in buildings if building in {"D楼", "E楼"}]
+        return buildings
+
     def get_enabled_buildings(self) -> List[str]:
         configured_sites = self.runtime_config.get("internal_source_sites", [])
         if isinstance(configured_sites, list):
@@ -1919,6 +1956,12 @@ class SharedSourceCacheService:
                 "monthly_source_refresh": monthly_source_refresh,
                 "top5_monthly_source_refresh": top5_monthly_source_refresh,
                 FAMILY_HANDOVER_LOG: families.get(FAMILY_HANDOVER_LOG, {}),
+                **{family: self._build_internal_light_family_snapshot(
+                    source_family=family,
+                    current_bucket=current_bucket,
+                    cached_rows=light_building_status.get(family, {}),
+                    active_downloads=active_downloads,
+                ) for family in INSPECTION_REPORT_TEMPLATES},
                 FAMILY_HANDOVER_CAPACITY_REPORT: families.get(FAMILY_HANDOVER_CAPACITY_REPORT, {}),
                 FAMILY_MONTHLY_REPORT: families.get(FAMILY_MONTHLY_REPORT, {}),
                 FAMILY_TOP5_MONTHLY_REPORT: families.get(FAMILY_TOP5_MONTHLY_REPORT, {}),
@@ -2092,7 +2135,7 @@ class SharedSourceCacheService:
         current_bucket: str,
         include_latest_selection: bool,
     ) -> Dict[str, Any]:
-        buildings = self.get_enabled_buildings()
+        buildings = self._family_buildings(source_family)
         building_rows = [
             self._build_building_cache_status(
                 source_family=source_family,
@@ -2165,6 +2208,8 @@ class SharedSourceCacheService:
     def _ensure_dirs(self) -> None:
         if self.shared_root is None or self._tmp_root is None:
             raise RuntimeError("共享缓存根目录未配置")
+        for label in INSPECTION_FAMILY_LABELS.values():
+            (self.shared_root / label).mkdir(parents=True, exist_ok=True)
         if self._handover_cache_root is not None:
             self._handover_cache_root.mkdir(parents=True, exist_ok=True)
         if self._handover_capacity_cache_root is not None:
@@ -2195,6 +2240,8 @@ class SharedSourceCacheService:
 
     def get_required_directory_paths(self) -> Dict[str, str]:
         return {
+            **{family: str(self.shared_root / label) if self.shared_root else ""
+               for family, label in INSPECTION_FAMILY_LABELS.items()},
             FAMILY_HANDOVER_LOG: str(self._handover_cache_root) if self._handover_cache_root is not None else "",
             FAMILY_HANDOVER_CAPACITY_REPORT: str(self._handover_capacity_cache_root) if self._handover_capacity_cache_root is not None else "",
             FAMILY_MONTHLY_REPORT: str(self._monthly_cache_root) if self._monthly_cache_root is not None else "",
@@ -2297,6 +2344,8 @@ class SharedSourceCacheService:
 
     def _family_root(self, source_family: str) -> Path:
         normalized_family = self._normalize_source_family(source_family)
+        if normalized_family in INSPECTION_REPORT_TEMPLATES and self.shared_root is not None:
+            return self.shared_root / FAMILY_LABELS[normalized_family]
         if normalized_family == FAMILY_HANDOVER_LOG and self._handover_cache_root is not None:
             return self._handover_cache_root
         if normalized_family == FAMILY_HANDOVER_CAPACITY_REPORT and self._handover_capacity_cache_root is not None:
@@ -2828,6 +2877,8 @@ class SharedSourceCacheService:
     ) -> None:
         if self.store is None:
             return
+        if self._normalize_source_family(source_family) in INSPECTION_REPORT_TEMPLATES:
+            duty_date = bucket_key[:10]
         payload = dict(metadata or {})
         if error_text:
             payload["error"] = error_text
@@ -4439,6 +4490,63 @@ class SharedSourceCacheService:
             source_path=source_path,
             status="ready",
             metadata=entry_metadata,
+        )
+
+    def fill_electrical_inspection_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+        return self._fill_inspection_latest(
+            source_family=FAMILY_ELECTRICAL_INSPECTION, building=building, bucket_key=bucket_key, emit_log=emit_log,
+        )
+
+    def fill_hvac_inspection_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+        return self._fill_inspection_latest(
+            source_family=FAMILY_HVAC_INSPECTION, building=building, bucket_key=bucket_key, emit_log=emit_log,
+        )
+
+    def _fill_inspection_latest(
+        self, *, source_family: str, building: str, bucket_key: str, emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        self._ensure_internal_source_writer("巡检最新源文件补采")
+        if source_family not in INSPECTION_REPORT_TEMPLATES:
+            raise ValueError("不支持的巡检源文件类型")
+        parsed_bucket = _parse_hour_bucket(bucket_key)
+        if parsed_bucket is None or parsed_bucket.strftime("%Y-%m-%d %H") != bucket_key:
+            raise ValueError("巡检数据源文件时间桶必须为 YYYY-MM-DD HH")
+        if building not in self._family_buildings(source_family):
+            raise ValueError("巡检数据源文件未启用或楼栋不支持")
+        if self._stop_event.is_set():
+            raise RuntimeError("巡检数据源文件下载已取消")
+        existing = self._existing_latest_refresh_result(
+            source_family=source_family, building=building, bucket_key=bucket_key,
+        )
+        if existing is not None:
+            return existing
+        if self.download_browser_pool is None:
+            raise RuntimeError("巡检数据源文件等待内网浏览器池就绪")
+        cfg = load_handover_config(self.runtime_config)
+        cfg["inspection_data"] = copy.deepcopy(self.runtime_config.get("inspection_data", {}))
+        if self._tmp_root is None:
+            raise RuntimeError("共享缓存根目录未配置")
+        service = HandoverDownloadService(
+            cfg,
+            download_browser_pool=self.download_browser_pool,
+            business_root_override=self._tmp_root / self._family_dir_name(source_family) / self._bucket_path_segment(bucket_key) / building,
+        )
+        result = service.run_inspection_data_only(building=building, source_family=source_family, emit_log=emit_log)
+        success_files = result.get("success_files", [])
+        if not success_files:
+            errors = [str(item.get("error", "")) for item in result.get("failed", [])]
+            raise RuntimeError(f"巡检数据源文件下载失败: {building}; {'; '.join(errors)}")
+        if self._stop_event.is_set():
+            raise RuntimeError("巡检数据源文件下载已取消")
+        return self._store_entry(
+            source_family=source_family, building=building,
+            bucket_kind="latest", bucket_key=bucket_key, duty_date=bucket_key[:10], duty_shift="",
+            source_path=Path(success_files[0]["file_path"]), status="ready",
+            metadata={
+                "family": source_family, "building": building, "template_name": INSPECTION_REPORT_TEMPLATES[source_family],
+                "query_start": str(result.get("start_time", "")),
+                "query_end": str(result.get("end_time", "")), "scale_label": "5分钟",
+            },
         )
 
     def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
@@ -6392,7 +6500,7 @@ class SharedSourceCacheService:
         buildings: List[str] | None = None,
         force_refresh_existing: bool = False,
     ) -> Dict[str, Any]:
-        enabled_buildings = set(self.get_enabled_buildings())
+        enabled_buildings = set(self._family_buildings(source_family))
         requested_buildings = buildings if isinstance(buildings, list) and buildings else self.get_enabled_buildings()
         buildings = []
         for item in requested_buildings:
@@ -6428,6 +6536,18 @@ class SharedSourceCacheService:
                 bucket_kind=bucket_kind_for_entry,
                 bucket_key=bucket_key,
             )
+            if normalized_family in INSPECTION_REPORT_TEMPLATES and entry_exists:
+                refreshing = self._get_source_cache_entry(
+                    source_family=normalized_family, building=building,
+                    bucket_kind=bucket_kind_for_entry, bucket_key=bucket_key, status="refreshing",
+                )
+                reference = self._entry_reference_datetime(refreshing)
+                with self._lock:
+                    active = (normalized_family, building, "latest", bucket_key) in self._active_latest_downloads
+                if not active and reference and (_now_dt() - reference).total_seconds() >= self.REFRESHING_ENTRY_TIMEOUT_SEC:
+                    self._repair_entry_to_failed(
+                        refreshing, error_text="共享文件刷新超时", log_reason="巡检 refreshing 条目超时已转失败",
+                    )
             ready_entry = self._get_ready_entry(
                 source_family=normalized_family,
                 building=building,
@@ -6526,6 +6646,9 @@ class SharedSourceCacheService:
                     active_key = (normalized_family, building, "latest", bucket_key)
                     started_at = _now_text()
                     with self._lock:
+                        if normalized_family in INSPECTION_REPORT_TEMPLATES and active_key in self._active_latest_downloads:
+                            running_buildings.append(building)
+                            continue
                         self._active_latest_downloads[active_key] = started_at
                         self._set_light_building_status_unlocked(
                             source_family=normalized_family,
@@ -6645,6 +6768,12 @@ class SharedSourceCacheService:
         ]
         if alarm_bucket_key:
             steps.append((FAMILY_ALARM_EVENT, alarm_bucket_key, self.fill_alarm_event_latest))
+        for family, fill in (
+            (FAMILY_ELECTRICAL_INSPECTION, self.fill_electrical_inspection_latest),
+            (FAMILY_HVAC_INSPECTION, self.fill_hvac_inspection_latest),
+        ):
+            if self._family_buildings(family):
+                steps.append((family, bucket_key, fill))
         return steps
 
     def _prepare_latest_source_steps_state(
@@ -6681,6 +6810,10 @@ class SharedSourceCacheService:
         step_names = " -> ".join(FAMILY_LABELS.get(source_family, source_family) for source_family, _bucket_key, _fill_func in steps)
         self._emit(f"[共享缓存] 楼栋流水线开始 building={building}, steps={step_names}")
         for source_family, bucket_key, fill_func in steps:
+            if self._stop_event.is_set():
+                break
+            if building not in self._family_buildings(source_family):
+                continue
             result = self._refresh_family_bucket(
                 source_family=source_family,
                 bucket_key=bucket_key,
@@ -6782,8 +6915,30 @@ class SharedSourceCacheService:
             if (
                 not handover_failed
                 and not handover_capacity_failed
+                and not any(self._family_status.get(family, {}).get("failed_buildings")
+                            for family in INSPECTION_REPORT_TEMPLATES)
             ):
                 self._last_error = ""
+
+    def _retry_inspection_data_if_needed(self) -> None:
+        if self._stop_event.is_set():
+            return
+        for family, fill in (
+            (FAMILY_ELECTRICAL_INSPECTION, self.fill_electrical_inspection_latest),
+            (FAMILY_HVAC_INSPECTION, self.fill_hvac_inspection_latest),
+        ):
+            if not self._family_buildings(family):
+                continue
+            with self._lock:
+                state = self._family_status.get(family, {})
+                buildings = list(dict.fromkeys([*state.get("failed_buildings", []), *state.get("blocked_buildings", [])]))
+            if buildings:
+                self._refresh_family_bucket(
+                    source_family=family,
+                    bucket_key=self._current_hour_bucket or self.current_hour_bucket(),
+                    fill_func=fill,
+                    buildings=buildings,
+                )
 
     @staticmethod
     def _monthly_report_business_date(when: datetime | None = None) -> str:
@@ -7335,6 +7490,15 @@ class SharedSourceCacheService:
             source_family=normalized_family,
             bucket_key=target_bucket_key,
         )
+        if normalized_family in INSPECTION_REPORT_TEMPLATES:
+            if requested_bucket and (_parse_hour_bucket(requested_bucket) is None or len(requested_bucket) != 13):
+                return {"source_family": normalized_family, "fill_func": None, "reason": "invalid_bucket"}
+            return {
+                "source_family": normalized_family,
+                "bucket_key": requested_bucket or self.current_hour_bucket(),
+                "fill_func": (self.fill_electrical_inspection_latest if normalized_family == FAMILY_ELECTRICAL_INSPECTION
+                              else self.fill_hvac_inspection_latest),
+            }
         if normalized_family == FAMILY_HANDOVER_LOG:
             return {
                 "source_family": normalized_family,
@@ -7499,11 +7663,15 @@ class SharedSourceCacheService:
         normalized_family = self._normalize_source_family(source_family)
         bucket_kind = self._latest_refresh_bucket_kind(normalized_family)
         suffix = ".json" if normalized_family == FAMILY_ALARM_EVENT else ".xlsx"
+        if normalized_family in INSPECTION_REPORT_TEMPLATES:
+            parsed_bucket = _parse_hour_bucket(bucket_key)
+            if parsed_bucket is None or parsed_bucket.strftime("%Y-%m-%d %H") != bucket_key:
+                return []
         contexts: List[Dict[str, str]] = [
             {
                 "bucket_kind": bucket_kind,
                 "bucket_key": bucket_key,
-                "duty_date": bucket_key if bucket_kind == "daily" else "",
+                "duty_date": bucket_key[:10] if normalized_family in INSPECTION_REPORT_TEMPLATES else (bucket_key if bucket_kind == "daily" else ""),
                 "duty_shift": "",
             }
         ]
@@ -7561,7 +7729,7 @@ class SharedSourceCacheService:
         building: str,
         bucket_key: str,
     ) -> List[Dict[str, Any]]:
-        if self.shared_root is None:
+        if self.shared_root is None or str(self.shared_root).replace("\\", "/").startswith("//"):
             return []
         normalized_family = self._normalize_source_family(source_family)
         suffix = ".json" if normalized_family == FAMILY_ALARM_EVENT else ".xlsx"
@@ -7984,7 +8152,7 @@ class SharedSourceCacheService:
         if not self.enabled or self.role_mode != "internal" or self.store is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
         building_name = str(building or "").strip()
-        if not building_name or building_name not in self.get_enabled_buildings():
+        if not building_name or building_name not in self._family_buildings(source_family):
             return {"accepted": False, "running": False, "reason": "invalid_building"}
         target = self._resolve_latest_refresh_target(
             source_family=source_family,
@@ -8148,6 +8316,7 @@ class SharedSourceCacheService:
                     self._run_chiller_mode_switch_if_due()
                     self._run_temperature_humidity_file_if_due()
                     self._run_daily_source_files_if_due()
+                self._retry_inspection_data_if_needed()
                 if startup_done:
                     handover_status = self._family_status.get(FAMILY_HANDOVER_LOG, {})
                     monthly_status = self._family_status.get(FAMILY_MONTHLY_REPORT, {})

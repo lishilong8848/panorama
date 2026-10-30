@@ -1748,6 +1748,18 @@ export function createRuntimeHealthConfigActions(ctx) {
         );
       }
     }
+    if (data.inspection_data_upload && typeof data.inspection_data_upload === "object") {
+      health.inspection_data_upload.enabled = Boolean(data.inspection_data_upload.enabled);
+      if (
+        data.inspection_data_upload.scheduler
+        && typeof data.inspection_data_upload.scheduler === "object"
+      ) {
+        Object.assign(
+          health.inspection_data_upload.scheduler,
+          data.inspection_data_upload.scheduler,
+        );
+      }
+    }
     if (data.deployment && typeof data.deployment === "object") {
       Object.assign(health.deployment, data.deployment);
     }
@@ -2060,6 +2072,14 @@ export function createRuntimeHealthConfigActions(ctx) {
       && health?.temperature_humidity_upload?.scheduler
     ) {
       Object.assign(health.temperature_humidity_upload.scheduler, temperatureHumidityUpload);
+    }
+    const inspectionDataUpload = summary.inspection_data_upload_scheduler;
+    if (
+      inspectionDataUpload
+      && typeof inspectionDataUpload === "object"
+      && health?.inspection_data_upload?.scheduler
+    ) {
+      Object.assign(health.inspection_data_upload.scheduler, inspectionDataUpload);
     }
     const top5PowerReport = summary.top5_power_report_scheduler;
     if (top5PowerReport && typeof top5PowerReport === "object" && health?.top5_power_report?.scheduler) {

@@ -2,6 +2,7 @@
 
 import copy
 from typing import Any, Dict
+from app.config.inspection_data_config import INSPECTION_DATA_UPLOAD_DEFAULTS
 
 from app.config.feishu_app_migration import CURRENT_FEISHU_APP_ID, FEISHU_APPLICATION_CONFIG_VERSION
 
@@ -549,6 +550,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                     "night_default_end_next_day": "08:00:00",
                 },
             },
+            "training_management_section": {"enabled": True, "api_key": ""},
             "exercise_management_section": {
                 "enabled": True,
                 "source": {
@@ -1426,6 +1428,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
                 },
             },
         },
+        "inspection_data_upload": copy.deepcopy(INSPECTION_DATA_UPLOAD_DEFAULTS),
         "temperature_humidity_upload": {
             "enabled": True,
             "source_family": "air_conditioner_temperature_humidity_family",

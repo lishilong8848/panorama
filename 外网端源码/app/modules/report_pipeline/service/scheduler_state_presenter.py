@@ -290,6 +290,10 @@ def present_scheduler_overview_items(
     temperature_humidity_upload_snapshot = _dict(
         summary_payload.get("temperature_humidity_upload_scheduler")
     )
+    inspection_snapshot = _dict(summary_payload.get("inspection_data_upload_scheduler"))
+    inspection_cfg = _dict(_cfg_get(config_payload, ("inspection_data_upload", "scheduler"),
+                                    ("features", "inspection_data_upload", "scheduler")))
+    inspection_display = present_scheduler_state(inspection_snapshot, role_mode=role_mode)
     top5_power_report_snapshot = _dict(summary_payload.get("top5_power_report_scheduler"))
     monthly_event_snapshot = _dict(summary_payload.get("monthly_event_report_scheduler"))
     monthly_change_snapshot = _dict(summary_payload.get("monthly_change_report_scheduler"))
@@ -617,6 +621,23 @@ def present_scheduler_overview_items(
                     last_trigger_at=system_screenshot_upload_snapshot.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(system_screenshot_upload_snapshot.get("last_trigger_result")),
                 )
+            ],
+        },
+        {
+            "key": "inspection_data_upload",
+            "title": "巡检数据处理",
+            "module_id": "inspection_data_upload",
+            "focus_key": "",
+            "tone": inspection_display.get("tone", "neutral"),
+            "status_text": inspection_display.get("status_text", "未启动"),
+            "summary_text": _map_scheduler_trigger_text(inspection_snapshot.get("last_trigger_result")),
+            "parts": [
+                _overview_part(
+                    label="每日调度", run_time_text=run_time,
+                    next_run_time=inspection_snapshot.get("next_run_time"),
+                    last_trigger_at=inspection_snapshot.get("last_trigger_at"),
+                    result_text=_map_scheduler_trigger_text(inspection_snapshot.get("last_trigger_result")),
+                ) for run_time in (inspection_cfg.get("run_times") or ["未设置"])
             ],
         },
         {

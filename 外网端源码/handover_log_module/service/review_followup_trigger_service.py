@@ -31,6 +31,9 @@ from handover_log_module.service.review_session_service import (
     ReviewSessionService,
     ReviewSessionStoreUnavailableError,
 )
+from handover_log_module.service.training_management_payload_builder import (
+    TrainingManagementPayloadBuilder, TRAINING_SECTION, TRAINING_COLUMNS, append_training_rows,
+)
 from handover_log_module.service.station_h_review_selection_service import (
     StationHReviewSelectionService,
     station_h_default_long_day_people_from_roster,
@@ -1846,6 +1849,29 @@ class ReviewFollowupTriggerService:
         }
         for cell in ("H40", "H41", "H42", "H45", "H46", "H47", "H48"):
             cells[cell] = next_first
+        try:
+            incoming = TrainingManagementPayloadBuilder(self.config).build(
+                building="H楼", duty_date=duty_date,
+                current_people=current_names, next_people=next_names, emit_log=emit_log,
+            ).get(TRAINING_SECTION, [])
+            latest_selection = self._station_h_review_selection_service.get_selection(duty_date, duty_shift) or selection
+            training_rows = append_training_rows(latest_selection.get("training_rows", []), incoming)
+            if training_rows != latest_selection.get("training_rows", []):
+                latest_selection = self._station_h_review_selection_service.save_selection(
+                    duty_date=duty_date, duty_shift=duty_shift,
+                    current_people=latest_selection.get("current_people", current_names),
+                    next_people=latest_selection.get("next_people", next_names),
+                    long_day_people=latest_selection.get("long_day_people", long_day_people),
+                    training_rows=training_rows, append_training_only=True, source=latest_selection.get("source") or "auto",
+                )
+            selection["training_rows"] = latest_selection.get("training_rows", training_rows)
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][H楼培训管理] 读取失败，保留已保存培训内容: {exc}")
+        # H楼保留现有模板合并结构，多项培训在同一行各字段中按相同顺序换行。
+        training_rows = selection.get("training_rows", [])
+        if training_rows:
+            cells.update({f"{column}31": "\n".join(str(row.get("cells", {}).get(column) or "")
+                                                for row in training_rows) for column in TRAINING_COLUMNS})
         return {"ok": True, "cells": cells, "selection": selection}
 
     def _persist_station_h_sync_result(self, *, batch_key: str, sync_result: Dict[str, Any]) -> None:
