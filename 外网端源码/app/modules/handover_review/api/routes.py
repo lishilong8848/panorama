@@ -49,6 +49,7 @@ from handover_log_module.service.handover_110_station_upload_service import Hand
 from handover_log_module.service.change_management_payload_builder import ChangeManagementPayloadBuilder
 from handover_log_module.service.event_category_payload_builder import EventCategoryPayloadBuilder
 from handover_log_module.service.maintenance_management_payload_builder import MaintenanceManagementPayloadBuilder
+from handover_log_module.service.maintenance_recurring_service import MaintenanceRecurringService
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateConflictError,
@@ -4935,6 +4936,84 @@ def handover_review_bootstrap(
     )
 
 
+def _maintenance_recurring_context(request: Request, building_code: str, payload=None):
+    container = request.app.state.container
+    service = _build_review_session_service(container)
+    building = _resolve_building_or_404(service, building_code)
+    if building not in {"A楼", "B楼", "C楼", "D楼", "E楼"}:
+        raise HTTPException(status_code=400, detail="常驻维护记录仅支持A-E楼审核页")
+    target = None
+    if payload is not None:
+        session_id = str(payload.get("session_id", "") or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        target = _load_target_session_or_404(service, building=building, session_id=session_id)
+        _ensure_session_lock_held_or_409(
+            service, building=building, session_id=session_id,
+            client_id=str(payload.get("client_id", "") or "").strip(),
+        )
+    return MaintenanceRecurringService(_handover_cfg(container)), building, target
+
+
+def _maintenance_recurring_error(exc: ValueError) -> HTTPException:
+    messages = {
+        "revision_conflict": "常驻维护记录已被其他人修改，请重新打开后编辑",
+        "invalid_values": "维护内容格式不正确，每项最多2000字",
+        "maintenance_item_required": "请填写维护总项",
+        "invalid_mode": "请选择每班次或每天白班",
+        "invalid_duty_context": "当前审核记录缺少有效日期或班次",
+        "duplicate_item": "已有同名常驻维护记录，请编辑已有记录",
+        "maintenance_recurring_limit": "每楼最多保存200条常驻维护记录",
+        "maintenance_recurring_corrupt": "常驻维护记录读取异常，已保留原数据，请联系管理员",
+    }
+    code = str(exc)
+    return HTTPException(status_code=409 if code == "revision_conflict" else 400,
+                         detail=messages.get(code, "常驻维护记录参数不正确，请重新打开后重试"))
+
+
+@router.get("/api/handover/review/{building_code}/maintenance-recurring")
+def handover_review_list_maintenance_recurring(building_code: str, request: Request) -> Dict[str, Any]:
+    recurring, building, _ = _maintenance_recurring_context(request, building_code)
+    try:
+        return {"ok": True, "building": building, "records": recurring.list_records(building)}
+    except ValueError as exc:
+        raise _maintenance_recurring_error(exc) from exc
+
+
+@router.post("/api/handover/review/{building_code}/maintenance-recurring")
+def handover_review_save_maintenance_recurring(
+    building_code: str, request: Request, payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    recurring, building, target = _maintenance_recurring_context(request, building_code, payload)
+    try:
+        record = recurring.upsert(
+            building, values=payload.get("values"), mode=payload.get("mode"),
+            duty_date=str(target.get("duty_date", "")), duty_shift=str(target.get("duty_shift", "")),
+            record_id=str(payload.get("record_id", "") or ""), revision=payload.get("revision"),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="常驻维护记录已删除，请刷新后重试") from exc
+    except ValueError as exc:
+        raise _maintenance_recurring_error(exc) from exc
+    request.app.state.container.add_system_log(f"[交接班][常驻维护] 已保存 building={building}, id={record['id']}, mode={record['mode']}")
+    return {"ok": True, "building": building, "record": record, "records": recurring.list_records(building)}
+
+
+@router.delete("/api/handover/review/{building_code}/maintenance-recurring/{record_id}")
+def handover_review_delete_maintenance_recurring(
+    building_code: str, record_id: str, request: Request, payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    recurring, building, _ = _maintenance_recurring_context(request, building_code, payload)
+    try:
+        recurring.delete(building, record_id=record_id, revision=payload.get("revision"))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="常驻维护记录已删除，请刷新列表") from exc
+    except ValueError as exc:
+        raise _maintenance_recurring_error(exc) from exc
+    request.app.state.container.add_system_log(f"[交接班][常驻维护] 已停止复用 building={building}, id={record_id}")
+    return {"ok": True, "building": building, "records": recurring.list_records(building)}
+
+
 @router.post("/api/handover/review/{building_code}/sections/events/refresh")
 def handover_review_refresh_event_sections(
     building_code: str,
@@ -5022,6 +5101,7 @@ def handover_review_refresh_event_sections(
                 building=building,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
+                require_source_success=True,
                 emit_log=container.add_system_log,
             )
         else:

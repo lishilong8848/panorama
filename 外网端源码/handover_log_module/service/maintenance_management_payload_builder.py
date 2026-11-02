@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 from typing import Any, Callable, Dict, List
 
 import openpyxl
@@ -16,6 +17,7 @@ from handover_log_module.repository.maintenance_management_repository import (
     MaintenanceRowsByBuilding,
 )
 from handover_log_module.repository.shift_roster_repository import ShiftRosterRepository
+from handover_log_module.service.maintenance_recurring_service import MaintenanceRecurringService
 
 
 def _norm_header(value: Any) -> str:
@@ -174,6 +176,55 @@ class MaintenanceManagementPayloadBuilder:
         return "/"
 
     def build(
+        self,
+        *,
+        building: str,
+        duty_date: str,
+        duty_shift: str,
+        preloaded_rows_by_building: MaintenanceRowsByBuilding | None = None,
+        preloaded_engineers: List[Dict[str, str]] | None = None,
+        emit_log: Callable[[str], None] = print,
+        require_source_success: bool = False,
+    ) -> Dict[str, Any]:
+        source = self._build_source(
+            building=building,
+            duty_date=duty_date,
+            duty_shift=duty_shift,
+            preloaded_rows_by_building=preloaded_rows_by_building,
+            preloaded_engineers=preloaded_engineers,
+            emit_log=emit_log,
+        )
+        cfg = self.repo.get_config()
+        sections_cfg = cfg.get("sections", {}) if isinstance(cfg.get("sections", {}), dict) else {}
+        section_name = str(sections_cfg.get("maintenance_management", "维护管理")).strip() or "维护管理"
+        if require_source_success and bool(cfg.get("enabled", True)) and section_name not in source:
+            raise ValueError("维护数据源读取失败，已保留当前内容")
+        try:
+            recurring = MaintenanceRecurringService(self.handover_cfg)
+            if not recurring.list_records(building):
+                return source
+            col_map = self._resolve_section_column_mapping(cfg=cfg, emit_log=emit_log).get(section_name, {})
+            recurring_rows = recurring.applicable_rows(
+                building, duty_date, duty_shift, col_map
+            )
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            if require_source_success:
+                raise
+            emit_log(f"[交接班][常驻维护] 读取失败，保留已获取的普通维护记录，本次未带入常驻记录: building={building}, error={exc}")
+            return source
+        if not recurring_rows:
+            return source
+        rows = list(source.get(section_name, []))
+        item_col = col_map["maintenance_item"]
+        seen_items = {_dedupe_text(row.get("cells", {}).get(item_col, "")) for row in rows}
+        for row in recurring_rows:
+            item = _dedupe_text(row["cells"][item_col])
+            if item not in seen_items:
+                rows.append(row)
+                seen_items.add(item)
+        return {**source, section_name: rows}
+
+    def _build_source(
         self,
         *,
         building: str,

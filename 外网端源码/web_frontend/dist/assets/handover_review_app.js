@@ -23,6 +23,9 @@ import {
   releaseHandoverReviewLockApi,
   retryHandoverReviewCloudSyncApi,
   refreshHandoverReviewEventSectionsApi,
+  getMaintenanceRecurringApi,
+  saveMaintenanceRecurringApi,
+  deleteMaintenanceRecurringApi,
   refreshHandoverReviewStationHSignaturesApi,
   refreshHandoverReviewStationHTrainingApi,
   regenerateHandoverReviewStationHDutyFocusImageApi,
@@ -43,6 +46,7 @@ import { createHandoverReviewDisplayUiHelpers } from "./handover_review_display_
 import { createHandoverReviewDocumentEditHelpers } from "./handover_review_document_edit_helpers.js";
 import { createHandoverReviewActionHelpers } from "./handover_review_action_helpers.js";
 import { appendTrainingRows, TRAINING_COLUMNS } from "./handover_training_helpers.js";
+import { createMaintenanceRecurringHelpers } from "./handover_maintenance_recurring_helpers.js";
 
 const FALLBACK_COLUMN_LETTERS = ["B", "C", "D", "E", "F", "G", "H", "I"];
 const DEFAULT_FOOTER_INVENTORY_COLUMNS = [
@@ -4631,6 +4635,9 @@ export function mountHandoverReviewApp(Vue) {
         documentRef.value = nextDocument;
         documentOmitted.value = Boolean(payload?.document_omitted);
         applyPayloadMeta(payload);
+        if (nextDocument.sections.some(maintenanceRecurring.isMaintenanceSection)) {
+          maintenanceRecurring.hydrateMaintenanceRecurring();
+        }
         dirtyRegions.value = emptyDirtyRegions();
         outdoorTemperatureDirty.value = false;
         dirty.value = false;
@@ -5139,6 +5146,13 @@ export function mountHandoverReviewApp(Vue) {
         }
       }
 
+      const maintenanceRecurring = createMaintenanceRecurringHelpers({
+        ref, session, buildingCode, reviewClientId, ensureEditingLock, statusText,
+        isBusy: () => saving.value || regenerating.value || syncingRemoteRevision.value || eventSectionsRefreshing.value || loading.value,
+        getApi: getMaintenanceRecurringApi, saveApi: saveMaintenanceRecurringApi,
+        deleteApi: deleteMaintenanceRecurringApi,
+      });
+
       const {
         markDocumentDirty,
         updateFixedField,
@@ -5394,6 +5408,7 @@ export function mountHandoverReviewApp(Vue) {
         updatingHistoryCloudSync,
         eventSectionsRefreshing,
         cloudSyncBusy,
+        ...maintenanceRecurring,
         dirty,
         needsRefresh,
         errorText,

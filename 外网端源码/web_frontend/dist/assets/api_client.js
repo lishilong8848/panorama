@@ -687,6 +687,22 @@ export async function refreshHandoverReviewEventSectionsApi(buildingCode, payloa
   });
 }
 
+export function getMaintenanceRecurringApi(buildingCode) {
+  return apiJsonWithTimeout(`/api/handover/review/${buildingCode}/maintenance-recurring`, {}, 10000);
+}
+
+export function saveMaintenanceRecurringApi(buildingCode, payload) {
+  return apiJsonWithTimeout(`/api/handover/review/${buildingCode}/maintenance-recurring`, {
+    method: "POST", body: JSON.stringify(payload),
+  }, 15000);
+}
+
+export function deleteMaintenanceRecurringApi(buildingCode, recordId, payload) {
+  return apiJsonWithTimeout(`/api/handover/review/${buildingCode}/maintenance-recurring/${encodeURIComponent(recordId)}`, {
+    method: "DELETE", body: JSON.stringify(payload),
+  }, 15000);
+}
+
 export async function getHandoverReviewHistoryApi(buildingCode, params = {}, options = {}) {
   return apiJsonWithTimeout(appendQuery(`/api/handover/review/${buildingCode}/history`, params), options, 8000);
 }

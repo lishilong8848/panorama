@@ -623,7 +623,7 @@
                   <th v-for="(column, columnIndex) in section.columns" :key="section.name + '-head-' + column.key + '-' + columnIndex">
                     {{ column.label || column.key }}
                   </th>
-                  <th class="review-col-action">操作</th>
+                  <th class="review-col-action" :class="{ 'review-col-action-maintenance': isMaintenanceSection(section) }">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -660,8 +660,27 @@
                       <small v-else-if="engineerDirectoryError" class="person-picker-hint tone-danger">{{ engineerDirectoryError }}</small>
                     </details>
                   </td>
-                  <td class="review-col-action">
+                  <td class="review-col-action" :class="{ 'review-col-action-maintenance': isMaintenanceSection(section) }">
                     <div class="review-row-actions">
+                      <div v-if="isMaintenanceSection(section)" class="review-maintenance-row-repeat">
+                        <label>
+                          <span>本条循环填写</span>
+                          <select :value="maintenanceRecurringRowMode(section, row)"
+                            @change="setMaintenanceRecurringRowMode(section, row, $event.target.value)"
+                            :disabled="maintenanceRecurringBusy || maintenanceRecurringLoading || maintenanceRecurringError || saving || regenerating || syncingRemoteRevision || eventSectionsRefreshing || loading">
+                            <option value="none">仅本班</option>
+                            <option value="every_shift">每班次常驻</option>
+                            <option value="day_only">每天白班常驻</option>
+                          </select>
+                        </label>
+                        <button class="btn btn-secondary btn-mini" @click="saveMaintenanceRecurringRow(section, row)"
+                          :disabled="!maintenanceRecurringCanSave(section, row) || maintenanceRecurringBusy || maintenanceRecurringLoading || maintenanceRecurringError || saving || regenerating || syncingRemoteRevision || eventSectionsRefreshing || loading">
+                          {{ maintenanceRecurringLoading ? '读取中...' : (maintenanceRecurringBusy ? '处理中...' : '保存本条设置') }}
+                        </button>
+                        <small v-if="maintenanceRecurringRowError(section, row)" class="tone-danger" role="alert">{{ maintenanceRecurringRowError(section, row) }}</small>
+                        <button v-if="maintenanceRecurringRowError(section, row)" class="btn btn-secondary btn-mini"
+                          @click="loadMaintenanceRecurring" :disabled="maintenanceRecurringBusy || maintenanceRecurringLoading">刷新本条设置</button>
+                      </div>
                       <button
                         v-if="canTransferSectionRowToOtherImportantWork(section, row)"
                         class="btn btn-secondary btn-mini"

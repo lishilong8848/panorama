@@ -3642,6 +3642,30 @@ button:disabled,
   text-align: center;
 }
 
+.review-col-action-maintenance {
+  width: 300px;
+  min-width: 280px;
+}
+
+.review-maintenance-row-repeat {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  flex: 1 0 100%;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+}
+
+.review-maintenance-row-repeat label { display: grid; flex: 1 1 130px; gap: 4px; min-width: 0; font-size: 12px; text-align: left; }
+.review-maintenance-row-repeat select { width: 100%; min-width: 0; box-sizing: border-box; }
+.review-maintenance-row-repeat small { flex: 1 0 100%; overflow-wrap: anywhere; font-size: 12px; }
+
+@media (max-width: 640px) {
+  .review-maintenance-row-repeat select,
+  .review-maintenance-row-repeat button { min-height: 44px; }
+}
+
 .review-row-actions {
   display: grid;
   gap: 8px;
@@ -3652,6 +3676,18 @@ button:disabled,
   width: 100%;
   white-space: normal;
   line-height: 1.25;
+}
+
+.review-col-action-maintenance .review-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.review-col-action-maintenance .review-row-actions .btn {
+  width: auto;
+  max-width: 100%;
 }
 
 .review-row-placeholder {
