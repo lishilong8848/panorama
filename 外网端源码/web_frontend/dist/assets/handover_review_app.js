@@ -7,6 +7,7 @@ import {
   downloadHandoverReviewStationHSignaturePreviewApi,
   downloadHandoverReviewStationHDutyFocusImageApi,
   getHandoverEngineerDirectoryApi,
+  getHandoverInspectionAccessApi,
   getJobApi,
   getHandoverReviewApi,
   getHandoverReview110StationStatusApi,
@@ -3171,6 +3172,18 @@ export function mountHandoverReviewApp(Vue) {
   createApp({
     setup() {
       const buildingCode = resolveReviewBuildingCode();
+      const inspectionPointsQuery = new URLSearchParams(window.location.search);
+      inspectionPointsQuery.set("from_review", "1");
+      const inspectionPointsUrl = ref("");
+      if (["d", "e"].includes(buildingCode)) {
+        onMounted(() => {
+          void getHandoverInspectionAccessApi(buildingCode).then(result => {
+            if (result.allowed === true) {
+              inspectionPointsUrl.value = `/handover/review/${buildingCode}/inspection-points?${inspectionPointsQuery}`;
+            }
+          }).catch(() => {});
+        });
+      }
       const initialSelection = resolveReviewSelection();
       const activeRouteSelection = ref({
         sessionId: String(initialSelection.sessionId || "").trim(),
@@ -5396,6 +5409,7 @@ export function mountHandoverReviewApp(Vue) {
 
       return {
         loading,
+        inspectionPointsUrl,
         saving,
         downloading,
         capacityDownloading,

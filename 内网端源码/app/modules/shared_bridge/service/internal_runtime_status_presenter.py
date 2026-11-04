@@ -5,7 +5,8 @@ from datetime import datetime
 from typing import Any, Dict
 
 from app.config.config_adapter import normalize_role_mode
-from app.config.inspection_data_config import INSPECTION_FAMILY_LABELS
+from app.config.energy_report_download_config import ENERGY_REPORT_LABELS, energy_report_period
+from app.config.inspection_data_config import INSPECTION_FAMILY_LABELS, inspection_hour_bucket
 from app.modules.shared_bridge.service.bridge_status_presenter import (
     bridge_text,
     present_current_hour_refresh_overview,
@@ -156,7 +157,9 @@ def _complete_internal_source_family(
         key=key,
         title=title,
         fallback_bucket=current_bucket,
-        bucket_scope_text="本小时",
+        bucket_scope_text=(
+            "月份" if key in ENERGY_REPORT_LABELS else "巡检时段" if key in INSPECTION_FAMILY_LABELS else "本小时"
+        ),
     )
     return {
         **presented,
@@ -189,7 +192,13 @@ def build_internal_runtime_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             raw_cache.get(family, {}),
             key=family,
             title=label,
-            fallback_bucket=current_bucket,
+            fallback_bucket=energy_report_period(family),
+        ) for family, label in ENERGY_REPORT_LABELS.items()},
+        **{family: _complete_internal_source_family(
+            raw_cache.get(family, {}),
+            key=family,
+            title=label,
+            fallback_bucket=inspection_hour_bucket(),
         ) for family, label in INSPECTION_FAMILY_LABELS.items()},
         "handover_log_family": _complete_internal_source_family(
             raw_cache.get("handover_log_family", {}),
@@ -308,10 +317,16 @@ def build_internal_runtime_building_status(snapshot: Dict[str, Any], *, building
         "building_code": building_code,
         "page_slot": present_internal_page_slot(copy.deepcopy(matched_slot if isinstance(matched_slot, dict) else {"building": building})),
         "source_families": {
+            **{family: select_internal_runtime_building_row(
+                raw_cache.get(family, {}),
+                building=building,
+                fallback_bucket=energy_report_period(family),
+                source_family=family,
+            ) for family in ENERGY_REPORT_LABELS},
             **({family: select_internal_runtime_building_row(
                 raw_cache.get(family, {}),
                 building=building,
-                fallback_bucket=current_bucket,
+                fallback_bucket=inspection_hour_bucket(),
                 source_family=family,
             ) for family in INSPECTION_FAMILY_LABELS} if building in {"D楼", "E楼"} else {}),
             "handover_log_family": select_internal_runtime_building_row(

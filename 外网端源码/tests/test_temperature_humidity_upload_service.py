@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 from openpyxl import Workbook
 
 from app.modules.temperature_humidity_upload.service.temperature_humidity_upload_service import (
+    SOURCE_FAMILY,
     TemperatureHumidityUploadService,
 )
 
@@ -370,3 +372,315 @@ def test_internal_absolute_path_is_remapped_through_external_shared_root(tmp_pat
     assert result["status"] == "success"
     assert result["source_files"]["A楼"] == str(mapped_source)
     assert result["uploaded_count"] == 3
+
+
+def _json_payload(*, building="A楼"):
+    return {
+        "schema_version": 1,
+        "business_date": "2026-07-18",
+        "query_end": "2026-07-18 10:00:00",
+        "source_family": SOURCE_FAMILY,
+        "building": building,
+        "sheets": [
+            {
+                "name": "sheet1",
+                "rows": [
+                    [None, None, "机房一", "室内温度值", "26.5℃"],
+                    [None, None, None, "相对湿度", "52.5%"],
+                    [],
+                    [None, None, None, "空调一运行状态", "1"],
+                    [None, None, None, "空调二运行状态", 0],
+                    [None, None, "机房二", "温度", "1,234.5"],
+                    [None, None, None, "湿度", 40.5],
+                ],
+            },
+            {
+                "name": "ignored",
+                "rows": [[None, None, None, "无效的运行状态", 2]],
+            },
+        ],
+    }
+
+
+def _write_json(path: Path, payload) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("excel_suffix", [".xlsx", ".xlsm"])
+def test_json_and_excel_parse_the_same_first_sheet(tmp_path, excel_suffix):
+    payload = _json_payload()
+    json_path = tmp_path / "source.JSON"
+    excel_path = tmp_path / f"source{excel_suffix}"
+    _write_json(json_path, payload)
+
+    workbook = Workbook()
+    for index, source_sheet in enumerate(payload["sheets"]):
+        sheet = workbook.active if index == 0 else workbook.create_sheet()
+        sheet.title = source_sheet["name"]
+        for row in source_sheet["rows"]:
+            sheet.append(row)
+        if index == 0:
+            sheet.merge_cells("C1:C2")
+            sheet.merge_cells("C6:C7")
+    workbook.save(excel_path)
+    workbook.close()
+
+    json_result = TemperatureHumidityUploadService.parse_workbook(json_path, building="A楼")
+    excel_result = TemperatureHumidityUploadService.parse_workbook(excel_path, building="A楼")
+
+    assert {key: value for key, value in json_result.items() if key != "file_path"} == {
+        key: value for key, value in excel_result.items() if key != "file_path"
+    }
+    assert json_result["sheet_name"] == "sheet1"
+    assert json_result["temperature_location_count"] == 2
+    assert json_result["status_location_count"] == 2
+    assert [item.get("running_status") for item in json_result["rows"][2:]] == ["开启", "关闭"]
+
+
+@pytest.mark.parametrize("excel_suffix", [".xlsx", ".xlsm"])
+def test_source_index_selects_json_and_legacy_excel(tmp_path, excel_suffix):
+    json_path = tmp_path / "A楼.json"
+    excel_path = tmp_path / f"B楼{excel_suffix}"
+    _write_json(json_path, _json_payload())
+    _write_source_file(excel_path, temperature=27.0, humidity=50.0)
+    service = TemperatureHumidityUploadService(_runtime_config(["A楼", "B楼"]))
+
+    selected, missing, errors = service._query_source_files(
+        FakeInternalClient({"A楼": json_path, "B楼": excel_path}),
+        source_family=SOURCE_FAMILY,
+        source_date="2026-07-18",
+        buildings=["A楼", "B楼"],
+    )
+
+    assert selected == {"A楼": json_path, "B楼": excel_path}
+    assert missing == []
+    assert errors == []
+
+
+def test_source_index_rejects_json_under_another_configured_family(tmp_path):
+    json_path = tmp_path / "A楼.json"
+    excel_path = tmp_path / "B楼.xlsx"
+    _write_json(json_path, _json_payload())
+    _write_source_file(excel_path, temperature=27.0, humidity=50.0)
+    service = TemperatureHumidityUploadService(_runtime_config(["A楼", "B楼"]))
+
+    selected, missing, errors = service._query_source_files(
+        FakeInternalClient({"A楼": json_path, "B楼": excel_path}),
+        source_family="branch_power_family",
+        source_date="2026-07-18",
+        buildings=["A楼", "B楼"],
+    )
+
+    assert selected == {"B楼": excel_path}
+    assert missing == ["A楼"]
+    assert errors == []
+
+
+def test_json_relative_path_is_remapped_through_shared_root(tmp_path):
+    shared_root = tmp_path / "external-share"
+    relative_path = Path("空调温湿度源文件", "20260718", "A楼.json")
+    mapped_source = shared_root / relative_path
+    mapped_source.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(mapped_source, _json_payload())
+    internal = FakeInternalClient(
+        {"A楼": Path(r"D:\share\internal-only\A楼.json")},
+        entry_overrides={"A楼": {"relative_path": relative_path.as_posix()}},
+    )
+    service = TemperatureHumidityUploadService(_runtime_config(["A楼"], shared_root=shared_root))
+
+    selected, missing, errors = service._query_source_files(
+        internal, source_family=SOURCE_FAMILY, source_date="2026-07-18", buildings=["A楼"]
+    )
+
+    assert selected == {"A楼": mapped_source}
+    assert missing == []
+    assert errors == []
+    assert service.parse_workbook(selected["A楼"], building="A楼")["temperature_location_count"] == 2
+
+
+def test_json_with_utf8_bom_is_supported(tmp_path):
+    source = tmp_path / "bom.json"
+    source.write_text(json.dumps(_json_payload(), ensure_ascii=False), encoding="utf-8-sig")
+
+    result = TemperatureHumidityUploadService.parse_workbook(source, building="A楼")
+
+    assert result["temperature_location_count"] == 2
+    assert result["status_location_count"] == 2
+
+
+def test_run_accepts_mixed_json_and_excel_with_fake_clients(tmp_path):
+    json_path = tmp_path / "A楼.json"
+    excel_path = tmp_path / "B楼.xlsx"
+    _write_json(json_path, _json_payload())
+    _write_source_file(excel_path, temperature=27.0, humidity=50.0)
+    target = FakeBitableClient()
+
+    result = TemperatureHumidityUploadService(
+        _runtime_config(["A楼", "B楼"]),
+        internal_client=FakeInternalClient({"A楼": json_path, "B楼": excel_path}),
+        bitable_client=target,
+    ).run(source_date="2026-07-18")
+
+    assert result["source_files"] == {"A楼": str(json_path), "B楼": str(excel_path)}
+    assert result["temperature_location_count"] == 3
+    assert result["status_location_count"] == 4
+    assert result["uploaded_count"] == 7
+    assert any(row.get("楼栋") == "A楼" and row.get("温度") == 26.5 for row in target.created)
+    assert any(row.get("楼栋") == "B楼" and row.get("温度") == 27.0 for row in target.created)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda data: data.update(schema_version=2), "版本"),
+        (lambda data: data.pop("source_family"), "来源"),
+        (lambda data: data.update(source_family="branch_power_family"), "来源"),
+        (lambda data: data.update(source_family=None), "来源"),
+        (lambda data: data.update(source_family=f" {SOURCE_FAMILY}"), "来源"),
+        (lambda data: data.pop("building"), "楼栋"),
+        (lambda data: data.update(building="B楼"), "楼栋"),
+        (lambda data: data.update(building=True), "楼栋"),
+        (lambda data: data.update(building=" A楼"), "楼栋"),
+        (lambda data: data.update(sheets={}), "工作表"),
+        (lambda data: data.update(sheets=[]), "工作表"),
+        (lambda data: data.update(sheets=[None]), "工作表"),
+        (lambda data: data["sheets"][0].pop("name"), "工作表"),
+        (lambda data: data["sheets"][0].update(name=""), "工作表"),
+        (lambda data: data["sheets"][0].pop("rows"), "工作表"),
+        (lambda data: data["sheets"][0].update(rows={}), "工作表"),
+        (lambda data: data["sheets"][0].update(rows=[{}]), "工作表"),
+        (lambda data: data["sheets"][0].update(rows=[[[1]]]), "工作表"),
+        (lambda data: data["sheets"][0].update(rows=[[float("inf")]]), "格式无效"),
+        (lambda data: data["sheets"][1].update(rows=[None]), "工作表"),
+    ],
+)
+def test_invalid_json_metadata_and_structure_are_rejected(tmp_path, change, message):
+    payload = _json_payload()
+    change(payload)
+    source = tmp_path / "invalid.json"
+    _write_json(source, payload)
+
+    with pytest.raises(ValueError, match=message):
+        TemperatureHumidityUploadService.parse_workbook(source, building="A楼")
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        (b"{", "格式无效"),
+        (b"[]", "顶层"),
+        (b"\xff", "格式无效"),
+        (b'{"source_family": NaN}', "无效数字"),
+    ],
+)
+def test_invalid_json_document_is_rejected(tmp_path, contents, message):
+    source = tmp_path / "invalid.json"
+    source.write_bytes(contents)
+
+    with pytest.raises(ValueError, match=message):
+        TemperatureHumidityUploadService.parse_workbook(source, building="A楼")
+
+
+def test_duplicate_source_family_is_rejected_even_when_last_value_matches(tmp_path):
+    source = tmp_path / "duplicate.json"
+    content = json.dumps(_json_payload(), ensure_ascii=False)
+    content = content.replace('"source_family":', '"source_family": "wrong", "source_family":', 1)
+    source.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="重复字段"):
+        TemperatureHumidityUploadService.parse_workbook(source, building="A楼")
+
+
+def test_nonfinite_json_number_is_rejected(tmp_path):
+    source = tmp_path / "overflow.json"
+    content = json.dumps(_json_payload(), ensure_ascii=False)
+    source.write_text(content.replace('"26.5℃"', "1e999", 1), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="工作表"):
+        TemperatureHumidityUploadService.parse_workbook(source, building="A楼")
+
+
+def test_json_integer_outside_float_range_uses_numeric_error_protection(tmp_path):
+    payload = _json_payload()
+    payload["sheets"][0]["rows"][0][4] = 10**400
+    source = tmp_path / "huge-number.json"
+    _write_json(source, payload)
+
+    with pytest.raises(ValueError, match="不是有效数字"):
+        TemperatureHumidityUploadService.parse_workbook(source, building="A楼")
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([[None, None, "机房", "温度", "not a number"]], "不是有效数字"),
+        ([[None, None, "机房", "温度", True]], "不是有效数字"),
+        ([[None, None, "机房", "温度", 25]], "未成对温湿度"),
+        ([[None, None, None, "温度", 25]], "缺少位置"),
+        ([[None, None, None, "空调运行状态", 2]], "运行状态必须为0或1"),
+        ([[None, None, None, "空调运行状态", True]], "运行状态必须为0或1"),
+        (
+            [
+                [None, None, "机房", "温度", 25],
+                [None, None, None, "空调运行状态", 1],
+                [None, None, None, "湿度", 50],
+            ],
+            "缺少位置",
+        ),
+        ([[]], "未解析到可上传数据"),
+    ],
+)
+def test_json_uses_existing_row_error_protection(tmp_path, rows, message):
+    payload = _json_payload()
+    payload["sheets"][0]["rows"] = rows
+    source = tmp_path / "invalid-row.json"
+    excel_source = tmp_path / "invalid-row.xlsx"
+    _write_json(source, payload)
+    workbook = Workbook()
+    for row in rows:
+        workbook.active.append(row)
+    workbook.save(excel_source)
+    workbook.close()
+
+    with pytest.raises(ValueError, match=message) as json_error:
+        TemperatureHumidityUploadService.parse_workbook(source, building="A楼")
+    with pytest.raises(ValueError, match=message) as excel_error:
+        TemperatureHumidityUploadService.parse_workbook(excel_source, building="A楼")
+    assert str(json_error.value) == str(excel_error.value)
+
+
+@pytest.mark.parametrize("invalid_case", ["building", "family", "row", "syntax", "date", "version", "query_date"])
+def test_invalid_json_stops_before_any_target_access(tmp_path, invalid_case):
+    good_source = tmp_path / "A楼.json"
+    bad_source = tmp_path / "B楼.json"
+    _write_json(good_source, _json_payload())
+    bad_payload = _json_payload(building="B楼")
+    if invalid_case == "building":
+        bad_payload["building"] = "A楼"
+    elif invalid_case == "family":
+        bad_payload["source_family"] = "branch_power_family"
+    elif invalid_case == "row":
+        bad_payload["sheets"][0]["rows"][3][4] = 2
+    elif invalid_case == "date":
+        bad_payload["business_date"] = "2026-07-17"
+    elif invalid_case == "version":
+        bad_payload["schema_version"] = 2
+    elif invalid_case == "query_date":
+        bad_payload["query_end"] = "2026-07-19 10:00:00"
+    if invalid_case == "syntax":
+        bad_source.write_text("{", encoding="utf-8")
+    else:
+        _write_json(bad_source, bad_payload)
+
+    class NoTargetAccess:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected target access: {name}")
+
+    service = TemperatureHumidityUploadService(
+        _runtime_config(["A楼", "B楼"]),
+        internal_client=FakeInternalClient({"A楼": good_source, "B楼": bad_source}),
+        bitable_client=NoTargetAccess(),
+    )
+
+    with pytest.raises(ValueError):
+        service.run(source_date="2026-07-18")

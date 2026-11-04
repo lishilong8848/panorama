@@ -1382,7 +1382,8 @@ class InternalDownloadBrowserPool:
                     page = await self._ensure_page(building)
                     await self._fail_if_login_not_ready(building, page)
                     try:
-                        await self._ensure_logged_in(building, page)
+                        if owner != "inspection_data_source" or self._slot_login_state(building) != "ready":
+                            await self._ensure_logged_in(building, page)
                     except Exception as exc:  # noqa: BLE001
                         failure_kind = self._classify_failure_kind(exc, login_state=self._slot_login_state(building))
                         if failure_kind == "unknown":

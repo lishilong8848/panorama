@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+from datetime import datetime
 from typing import Any
 
 
@@ -13,6 +14,15 @@ INSPECTION_SOURCE_CONTRACTS = {
         "discipline": "暖通", "report_name": "暖通巡检表", "label": "暖通巡检源文件",
     },
 }
+
+INSPECTION_ROUND_FIELDS = {
+    "day_1": "白1目标单元格", "day_2": "白2目标单元格",
+    "night_1": "夜1目标单元格", "night_2": "夜2目标单元格",
+}
+
+
+def inspection_hour_bucket(when: datetime) -> str:
+    return when.replace(hour=when.hour - when.hour % 2).strftime("%Y-%m-%d %H")
 
 
 INSPECTION_DATA_UPLOAD_DEFAULTS = {

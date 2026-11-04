@@ -323,6 +323,12 @@ class FeishuBitableClient:
             params=params or {},
         )
 
+    def create_record(self, table_id: str, fields: Dict[str, Any], *, client_token: str) -> Dict[str, Any]:
+        url = self.CREATE_RECORD_URL.format(app_token=self.app_token, table_id=table_id)
+        return self._request_json_with_auth_retry(
+            "POST", url, payload={"fields": fields}, params={"client_token": client_token}, content_type_json=True,
+        )
+
     def batch_create_records(
         self,
         table_id: str,
@@ -472,12 +478,15 @@ class FeishuBitableClient:
         table_id: str,
         page_size: int = 500,
         field_names: Optional[List[str]] = None,
+        *,
+        require_complete: bool = False,
     ) -> List[str]:
         if page_size <= 0:
             raise ValueError("page_size 必须大于0")
         url = self.LIST_RECORD_URL.format(app_token=self.app_token, table_id=table_id)
         record_ids: List[str] = []
         page_token = ""
+        seen_tokens: set[str] = set()
         normalized_field_names = [
             str(name).strip()
             for name in (field_names or [])
@@ -492,20 +501,34 @@ class FeishuBitableClient:
             data = self._get_json(url, params=params)
             payload = data.get("data") if isinstance(data, dict) else {}
             items = payload.get("items") if isinstance(payload, dict) else []
+            if require_complete and (not isinstance(payload, dict) or not isinstance(items, list)):
+                raise RuntimeError("读取多维表旧记录失败：响应格式无效")
             if isinstance(items, list):
                 for item in items:
                     if not isinstance(item, dict):
+                        if require_complete:
+                            raise RuntimeError("读取多维表旧记录失败：记录格式无效")
                         continue
-                    record_id = str(item.get("record_id", "")).strip()
+                    raw_record_id = item.get("record_id")
+                    record_id = str(raw_record_id or "").strip()
                     if record_id:
                         record_ids.append(record_id)
+                    elif require_complete:
+                        raise RuntimeError("读取多维表旧记录失败：缺少记录 ID")
 
+            if require_complete and type(payload.get("has_more")) is not bool:
+                raise RuntimeError("读取多维表旧记录失败：缺少有效分页状态")
             has_more = bool(payload.get("has_more")) if isinstance(payload, dict) else False
             if not has_more:
                 break
-            page_token = str(payload.get("page_token", "")).strip() if isinstance(payload, dict) else ""
+            page_token = str(payload.get("page_token") or "").strip() if isinstance(payload, dict) else ""
+            if require_complete and (not page_token or page_token in seen_tokens):
+                raise RuntimeError("读取多维表旧记录失败：分页不完整或重复")
             if not page_token:
                 break
+            seen_tokens.add(page_token)
+        if require_complete and len(record_ids) != len(set(record_ids)):
+            raise RuntimeError("读取多维表旧记录失败：记录 ID 重复")
         return record_ids
 
     def get_record_by_id(self, table_id: str, record_id: str) -> Dict[str, Any]:
@@ -637,7 +660,8 @@ class FeishuBitableClient:
         return self.upload_attachment_bytes(
             file_name=path.name,
             content=content,
-            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mime_type=("application/json" if path.suffix.lower() == ".json"
+                       else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             timeout=timeout,
         )
 

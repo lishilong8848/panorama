@@ -40,10 +40,12 @@ def discover_latest_files(excel_dir: Path, buildings: List[str], file_glob_templ
     mapping: Dict[str, Path] = {}
     for building in buildings:
         pattern = file_glob_template.format(building=building)
+        if pattern.lower().endswith((".xlsx", ".xlsm")):
+            pattern = pattern.rsplit(".", 1)[0] + ".json"
         candidates = [
             p
             for p in excel_dir.glob(pattern)
-            if p.is_file() and p.suffix.lower() == ".xlsx" and not p.name.startswith("~$")
+            if p.is_file() and p.suffix.lower() == ".json" and not p.name.startswith("~$")
         ]
         if not candidates:
             continue
@@ -101,8 +103,8 @@ def build_results_from_file_items(
         path_obj = Path(file_path)
         if not path_obj.exists():
             raise FileNotFoundError(f"file_items 第{idx}项文件不存在: {file_path}")
-        if path_obj.suffix.lower() != ".xlsx":
-            raise ValueError(f"file_items 第{idx}项仅支持 xlsx 文件: {file_path}")
+        if path_obj.suffix.lower() not in {".xlsx", ".json"}:
+            raise ValueError(f"file_items 第{idx}项仅支持 xlsx 或 JSON 文件: {file_path}")
 
         emit_log(f"[{building}] 读取文件: {file_path}")
         result = calculate_monthly_report(str(path_obj), building, business_date)

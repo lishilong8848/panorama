@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import copy
 import gc
 import hashlib
@@ -10,6 +12,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+
+from app.modules.shared_bridge.service.report_api_query import query_report_json
+from app.shared.utils.atomic_file import atomic_write_text
+from app.shared.utils.report_source_json import validate_report_source_json
 
 from app.modules.report_pipeline.core.time_window_policy import (
     build_time_range as build_time_range_policy,
@@ -532,19 +538,42 @@ async def _run_download_tasks_by_building(
     failure_stage: str,
     success_detail_prefix: str = "下载成功 URL=",
 ) -> List[Tuple[DownloadTask, DownloadOutcome]]:
-    pairs = await run_download_tasks_by_building_runtime(
-        config=config,
-        download_tasks=download_tasks,
-        feature=feature,
-        success_stage=success_stage,
-        failure_stage=failure_stage,
-        success_detail_prefix=success_detail_prefix,
-        group_download_tasks_by_building=_group_download_tasks_by_building,
-        download_site_with_retry=_download_site_with_retry,
-        log_file_success=_log_file_success,
-        log_file_failure=_log_file_failure,
-    )
-    return [(task, outcome) for task, outcome in pairs]
+    def query_one(task: DownloadTask) -> Tuple[DownloadTask, DownloadOutcome]:
+        site = getattr(task, "site", {})
+        building = str(site.get("building", "") or "").strip()
+        date_text = str(getattr(task, "date_text", "") or "").strip()
+        try:
+            payload = query_report_json(
+                site, source_family="monthly_report_family", report_name="全景平台月报",
+                query_start=str(getattr(task, "start_time", "") or ""),
+                query_end=str(getattr(task, "end_time", "") or ""),
+                scale_label="小时", business_date=date_text,
+            )
+            save_dir = Path(str(getattr(task, "save_dir", "") or ""))
+            save_dir.mkdir(parents=True, exist_ok=True)
+            target = save_dir / f"{building}_{date_text}_{uuid.uuid4().hex[:8]}.json"
+            atomic_write_text(
+                target, json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8",
+                validator=lambda path: validate_report_source_json(
+                    path, expected_family="monthly_report_family",
+                    expected_building=building, expected_business_date=date_text,
+                ),
+                allow_overwrite_fallback=False,
+            )
+            outcome = DownloadOutcome(building=building, success=True, file_path=str(target), used_url="动环报表API")
+            _log_file_success(feature=feature, stage=success_stage, building=building,
+                              file_path=str(target), upload_date=date_text, detail="动环报表API")
+        except Exception as exc:  # noqa: BLE001
+            outcome = DownloadOutcome(building=building, success=False, error=str(exc), used_url="动环报表API")
+            _log_file_failure(feature=feature, stage=failure_stage, building=building,
+                              file_path="-", upload_date=date_text, error=str(exc))
+        return task, outcome
+
+    if not download_tasks:
+        return []
+    loop = asyncio.get_running_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(download_tasks), 5), thread_name_prefix="monthly-report-api") as executor:
+        return list(await asyncio.gather(*(loop.run_in_executor(executor, query_one, task) for task in download_tasks)))
 
 
 async def _retry_failed_download_tasks(

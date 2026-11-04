@@ -463,6 +463,7 @@ class InternalBridgeHttpClient:
         source_family: str,
         buildings: List[str],
         target_bucket_key: str = "",
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         return self._request(
             "POST",
@@ -471,8 +472,20 @@ class InternalBridgeHttpClient:
                 "source_family": str(source_family or "").strip(),
                 "buildings": [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()],
                 "target_bucket_key": str(target_bucket_key or "").strip(),
+                **({"force_refresh": True} if force_refresh else {}),
             },
         )
+
+    def get_inspection_snapshot(self, *, source_date: str, bucket_key: str = "") -> Dict[str, Any]:
+        return self._request("GET", "/api/internal-bridge/inspection/snapshot",
+                             query={"source_date": source_date, "bucket_key": bucket_key})
+
+    def put_inspection_point_rules(self, rules: dict, *, revision: int) -> Dict[str, Any]:
+        return self._request("PUT", "/api/internal-bridge/inspection/point-rules",
+                             payload={"revision": revision, "point_overrides": rules})
+
+    def get_latest_inspection_points(self, *, building: str) -> Dict[str, Any]:
+        return self._request("GET", "/api/internal-bridge/inspection/latest-points", query={"building": building})
 
     def list_alarm_rule_export_files(self, *, period: str = "", building: str = "") -> Dict[str, Any]:
         return self._request(

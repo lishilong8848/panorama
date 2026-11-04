@@ -16,6 +16,25 @@ from app.modules.scheduler.api._config_persistence import (
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
 
 
+@router.post("/energy-report-upload/backfill")
+def enqueue_energy_report_backfill(payload: dict, request: Request):
+    from datetime import datetime
+    from app.modules.report_pipeline.service.energy_report_upload_service import enqueue_period
+
+    container = request.app.state.container
+    if (container._configured_deployment_snapshot().get("role_mode") != "external"
+            or container.runtime_config.get("energy_report_upload", {}).get("enabled", True) is not True):
+        raise HTTPException(status_code=409, detail="月度能耗报表上传未启用")
+    period = payload.get("period")
+    if not isinstance(period, str):
+        raise HTTPException(status_code=400, detail="月份必须为 YYYY-MM")
+    try:
+        queued = enqueue_period(container.runtime_config, period, datetime.now())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "period": period, "queued": queued}
+
+
 ALLOWED_KEYS = {
     "enabled",
     "auto_start_in_gui",

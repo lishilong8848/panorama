@@ -31,7 +31,10 @@ from app.modules.report_pipeline.service.calc_source_runtime import (
     extract_building as extract_building_runtime,
     extract_month as extract_month_runtime,
     extract_row_sources as extract_row_sources_runtime,
+    load_monthly_json_source,
     locate_stat_columns as locate_stat_columns_runtime,
+    validate_business_date,
+    validate_monthly_json_columns,
 )
 from app.modules.sheet_import.core.field_value_converter import (
     convert_value_for_field as convert_value_for_field_runtime,
@@ -364,25 +367,66 @@ def calculate_monthly_report(
     building_override: Optional[str] = None,
     business_date: str | None = None,
 ) -> CalculationResult:
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="Workbook contains no default style, apply openpyxl's default",
-            category=UserWarning,
-            module=r"openpyxl\.styles\.stylesheet",
+    is_json_source = Path(file_path).suffix.lower() == ".json"
+    if is_json_source:
+        wb, building, business_date = load_monthly_json_source(
+            file_path,
+            expected_building=building_override,
+            expected_business_date=business_date,
         )
-        wb = openpyxl.load_workbook(file_path, data_only=True)
+    else:
+        business_date_text = str(business_date or "").strip()
+        business_date = validate_business_date(business_date_text) if business_date_text else None
+        building = building_override or _extract_building(file_path)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Workbook contains no default style, apply openpyxl's default",
+                category=UserWarning,
+                module=r"openpyxl\.styles\.stylesheet",
+            )
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+
+    try:
+        return _calculate_monthly_report_workbook(file_path, wb, building, business_date, is_json_source)
+    finally:
+        wb.close()
+
+
+def _calculate_monthly_report_workbook(
+    file_path: str,
+    wb: openpyxl.Workbook,
+    building: str,
+    business_date: str | None,
+    is_json_source: bool,
+) -> CalculationResult:
     ws = wb.active
 
     stat_cols = _locate_stat_columns(ws)
-    business_date_text = str(business_date or "").strip()
-    if business_date_text:
-        try:
-            datetime.strptime(business_date_text, "%Y-%m-%d")
-        except ValueError as exc:
-            raise ValueError(f"业务日期格式错误，必须为YYYY-MM-DD: {business_date_text}") from exc
+    business_date_text = business_date or ""
     month = business_date_text[:7] if business_date_text else _extract_month(ws, stat_cols["max"])
-    building = building_override or _extract_building(file_path)
+    json_data_columns = None
+    if is_json_source:
+        json_data_columns = validate_monthly_json_columns(
+            ws,
+            header_row=HEADER_ROW,
+            data_start_col=DATA_START_COL,
+            data_end_col=stat_cols["max"] - 1,
+            business_date=business_date_text,
+        )
+        tracked_metrics = {metric for metric, _method in BASE_RULES}
+        if building == "A楼":
+            tracked_metrics.add(canonical_metric_name("总_电度"))
+        seen_metrics = set()
+        for row in range(DATA_START_ROW, ws.max_row + 1):
+            item_name = ws.cell(row, ITEM_COL).value
+            if item_name is None or not str(item_name).strip():
+                continue
+            metric = canonical_metric_name(item_name)
+            if metric in tracked_metrics:
+                if metric in seen_metrics:
+                    raise ValueError(f"月报源JSON存在重复指标: {metric}")
+                seen_metrics.add(metric)
 
     source_map, default_type, default_category = _extract_row_sources(
         ws,
@@ -394,6 +438,25 @@ def calculate_monthly_report(
         source_map=source_map,
         canonical_metric_name=canonical_metric_name,
     )
+    if json_data_columns is not None:
+        incomplete = []
+        for metric, _method in BASE_RULES:
+            source = source_map.get(metric)
+            # Some metrics are intentionally absent in certain buildings; keep
+            # the existing missing-metric policy, but never accept partial values.
+            if source is None:
+                continue
+            if (
+                len(source.data_values) != len(json_data_columns)
+                or any(not math.isfinite(value) for value in source.data_values)
+                or any(
+                    value is not None and not math.isfinite(value)
+                    for value in (source.max_value, source.min_value, source.avg_value)
+                )
+            ):
+                incomplete.append(metric)
+        if incomplete:
+            raise ValueError("月报源JSON指标或业务日数据不完整: " + ",".join(incomplete))
     it_source = source_map.get("IT负载率")
     if it_source is not None:
         if it_source.type_name:
@@ -415,6 +478,8 @@ def calculate_monthly_report(
         if raw_value is None:
             missing_metrics.append(metric)
             raw_value = 0.0
+        if is_json_source and not math.isfinite(raw_value):
+            raise ValueError(f"月报源JSON指标计算结果无效: {metric}")
         value = _round6(raw_value)
         values[metric] = value
         type_name, category_name = _pick_context(metric, source_map, default_type, default_category)
@@ -431,6 +496,8 @@ def calculate_monthly_report(
         )
 
     derived_values = _compute_derived(values, building=building)
+    if is_json_source and any(not math.isfinite(value) for value in derived_values.values()):
+        raise ValueError("月报源JSON派生指标计算结果无效")
     for metric, method in DERIVED_RULES:
         method = _resolve_derived_calc_method(metric, method, building)
         value = _round_metric_value(metric, derived_values.get(metric, 0.0))
@@ -456,7 +523,6 @@ def calculate_monthly_report(
         records=records,
         missing_metrics=missing_metrics,
     )
-    wb.close()
     return result
 
 

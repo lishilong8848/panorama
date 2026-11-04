@@ -64,6 +64,8 @@ class HandoverExtractService:
             data_file=data_file,
             parsing_cfg=parsing_cfg if isinstance(parsing_cfg, dict) else {},
             normalize_cfg=normalize_cfg if isinstance(normalize_cfg, dict) else {},
+            expected_building=building,
+            expected_source_family="handover_log_family",
         )
         hits, missing = compute_metric_hits(rows=rows, rules=rules)
         return {

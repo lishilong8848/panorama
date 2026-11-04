@@ -16,6 +16,7 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     SharedSourceCacheService,
 )
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
+from app.shared.utils.report_source_json import REPORT_JSON_FAMILIES, validate_report_source_json
 from pipeline_utils import get_app_dir
 
 
@@ -447,6 +448,14 @@ class InternalBridgeHttpTaskRunner:
             file_path_text = str(item.get("file_path", "") or "").strip()
             item_status = str(item.get("status", "") or "").strip().lower()
             if item_status == "ready":
+                if str(item.get("source_family", "") or "").strip() in REPORT_JSON_FAMILIES and not file_path_text.lower().endswith(".json"):
+                    item["file_verified"] = False
+                    item["status"] = "missing"
+                    item["file_missing_reason"] = "source_format_changed"
+                    if status_filter == "ready":
+                        continue
+                    output.append(item)
+                    continue
                 verified = self._source_index_file_accessible(file_path_text)
                 verified_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 item["file_verified"] = verified
@@ -956,6 +965,22 @@ class InternalBridgeHttpTaskRunner:
             context_bucket = str(context.get("bucket_key", "") or bucket_key).strip()
             duty_date = str(context.get("duty_date", "") or "").strip()
             duty_shift = str(context.get("duty_shift", "") or "").strip().lower()
+            try:
+                if source_family in REPORT_JSON_FAMILIES:
+                    daily = {"monthly_report_family", "branch_power_family", "branch_current_family",
+                             "branch_switch_family", "building_full_cabinet_power_family",
+                             "air_conditioner_temperature_humidity_family"}
+                    validate_report_source_json(
+                        candidate_path, expected_family=source_family, expected_building=building,
+                        expected_business_date=duty_date if source_family in daily else "",
+                    )
+                else:
+                    validator = getattr(main_cache, "_validate_cached_source_file", None)
+                    if not callable(validator):
+                        continue
+                    validator(source_family=source_family, path=candidate_path)
+            except Exception:  # noqa: BLE001
+                continue
             entry = {
                 "entry_id": "|".join(
                     [
@@ -1036,13 +1061,15 @@ class InternalBridgeHttpTaskRunner:
         def _consider_candidate(candidate: Path, *, bucket_key: str = "") -> None:
             nonlocal best_path, best_key, best_bucket_key
             try:
-                if not candidate.is_file() or candidate.suffix.lower() != ".xlsx":
+                if not candidate.is_file() or candidate.suffix.lower() != ".json":
                     return
                 if building_text and building_text not in candidate.name:
                     return
                 stat = candidate.stat()
                 if int(stat.st_size) <= 0:
                     return
+                from app.shared.utils.report_source_json import validate_report_source_json
+                validate_report_source_json(candidate, expected_family=FAMILY_CHILLER_MODE_SWITCH, expected_building=building_text)
                 bucket_epoch = _bucket_epoch(bucket_key)
                 if bucket_epoch <= 0:
                     parent_digits = "".join(ch for ch in candidate.parent.name if ch.isdigit())
@@ -1060,7 +1087,7 @@ class InternalBridgeHttpTaskRunner:
                                 f"{parent_digits[:4]}-{parent_digits[4:6]}-{parent_digits[6:8]} "
                                 f"{parent_digits[8:10]}:{parent_digits[10:12]}"
                             )
-            except OSError:
+            except (OSError, ValueError):
                 return
 
         if callable(candidate_builder) and callable(resolver):
@@ -1099,7 +1126,7 @@ class InternalBridgeHttpTaskRunner:
                 return None
             scanned = 0
             try:
-                for candidate in month_dir.rglob(f"*{building_text}*.xlsx"):
+                for candidate in month_dir.rglob(f"*{building_text}*.json"):
                     scanned += 1
                     if scanned > 3000:
                         self._emit(
@@ -1183,12 +1210,18 @@ class InternalBridgeHttpTaskRunner:
         source_family: str,
         buildings: List[str],
         target_bucket_key: str = "",
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         family = str(source_family or "").strip()
         target_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
         bucket_key = str(target_bucket_key or "").strip()
         if not family:
             raise ValueError("source_family 不能为空")
+        if force_refresh:
+            from app.config.energy_report_download_config import ENERGY_REPORT_LABELS
+
+            if family not in ENERGY_REPORT_LABELS:
+                raise ValueError("强制补采仅支持月度能耗报表")
         if family.lower() == "inspection_data_family":
             raise ValueError("inspection_data_family 已停用，请分别使用电气、暖通巡检源文件")
         if not target_buildings:
@@ -1221,6 +1254,7 @@ class InternalBridgeHttpTaskRunner:
                     source_family=family,
                     building=building,
                     target_bucket_key=bucket_key,
+                    **({"force_refresh": True} if force_refresh else {}),
                 )
                 reason = str(result.get("reason", "") or "").strip() if isinstance(result, dict) else ""
                 self._emit(

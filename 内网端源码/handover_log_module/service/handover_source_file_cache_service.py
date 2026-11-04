@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import re
+import threading
 from typing import Any, Callable, Dict, Iterable
 
 from pipeline_utils import get_app_dir
@@ -22,6 +23,8 @@ from app.shared.utils.artifact_naming import (
     FAMILY_HANDOVER_LOG,
     build_source_artifact_path,
 )
+
+_DOWNLOAD_INDEX_LOCK = threading.RLock()
 
 
 def _now_text() -> str:
@@ -129,6 +132,11 @@ class HandoverSourceFileCacheService:
     @staticmethod
     def _validate_cached_source(path: Path) -> None:
         suffix = path.suffix.lower()
+        if suffix == ".json":
+            from app.shared.utils.report_source_json import validate_report_source_json
+
+            validate_report_source_json(path)
+            return
         if suffix in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
             validate_excel_workbook_file(path)
             return
@@ -168,7 +176,8 @@ class HandoverSourceFileCacheService:
         identity_text = str(identity or "").strip()
         if not identity_text:
             return ""
-        payload = self._load_download_index()
+        with _DOWNLOAD_INDEX_LOCK:
+            payload = self._load_download_index()
         record = payload.get(identity_text, {})
         if not isinstance(record, dict):
             return ""
@@ -181,8 +190,11 @@ class HandoverSourceFileCacheService:
         try:
             self._validate_cached_source(path)
         except Exception:
-            payload.pop(identity_text, None)
-            self._save_download_index(payload)
+            with _DOWNLOAD_INDEX_LOCK:
+                current = self._load_download_index()
+                if current.get(identity_text) == record:
+                    current.pop(identity_text, None)
+                    self._save_download_index(current)
             return ""
         return str(path)
 
@@ -225,13 +237,14 @@ class HandoverSourceFileCacheService:
                 self._validate_cached_source(target_path)
         except Exception:
             target_path = source_path
-        payload = self._load_download_index()
-        payload[identity_text] = {
-            "file_path": str(target_path),
-            "updated_at": _now_text(),
-            "naming_version": 2,
-        }
-        self._save_download_index(payload)
+        with _DOWNLOAD_INDEX_LOCK:
+            payload = self._load_download_index()
+            payload[identity_text] = {
+                "file_path": str(target_path),
+                "updated_at": _now_text(),
+                "naming_version": 2,
+            }
+            self._save_download_index(payload)
         emit_log(f"[交接班][源文件缓存] 已登记共享源文件 identity={identity_text}, file={str(target_path)}")
         return str(target_path)
 
@@ -269,7 +282,9 @@ class HandoverSourceFileCacheService:
         duty_date_text = str(duty_date or "").strip()
         if not building_text or not duty_date_text:
             return ""
-        payload = self._load_download_index()
+        with _DOWNLOAD_INDEX_LOCK:
+            payload = self._load_download_index()
+        original_payload = dict(payload)
         best_path = ""
         best_updated_at = datetime.min
         mutated = False
@@ -305,7 +320,12 @@ class HandoverSourceFileCacheService:
                 best_updated_at = updated_at
                 best_path = str(path)
         if mutated:
-            self._save_download_index(payload)
+            with _DOWNLOAD_INDEX_LOCK:
+                current = self._load_download_index()
+                for identity in set(original_payload) - set(payload):
+                    if current.get(identity) == original_payload[identity]:
+                        current.pop(identity, None)
+                self._save_download_index(current)
         return best_path
 
     @staticmethod

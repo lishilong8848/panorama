@@ -10,14 +10,48 @@ from handover_log_module.service.power_alert_sync_service import PowerAlertSyncS
 
 
 class _MainTableClient:
-    def __init__(self) -> None:
+    def __init__(self, *, old_ids=None, failure="") -> None:
         self.created: list[dict] = []
+        self.ids: list[str] = list(old_ids or [])
+        self.events: list[str] = []
+        self.failure = failure
+        self.serial = 0
 
     def clear_table(self, _table_id, **_kwargs) -> int:
         return 0
 
-    def batch_create_records(self, _table_id, fields_list, **_kwargs) -> None:
+    def list_record_ids(self, _table_id, **_kwargs):
+        self.events.append("list")
+        if self.failure == "list":
+            raise RuntimeError("mock incomplete pagination")
+        if self.failure == "external" and self.serial and "external-1" not in self.ids:
+            self.ids.append("external-1")
+        if self.failure == "not_visible" and self.serial:
+            return [item for item in self.ids if not item.startswith("new-")]
+        return self.ids[:]
+
+    def batch_delete_records(self, _table_id, record_ids, **_kwargs):
+        self.events.append("delete")
+        if self.failure == "delete":
+            raise RuntimeError("mock deletion failed")
+        if self.failure == "partial_delete":
+            return 0
+        self.ids = [item for item in self.ids if item not in record_ids]
+        if self.failure == "external_after_delete":
+            self.ids.append("external-after-delete")
+        return len(record_ids)
+
+    def batch_create_records(self, _table_id, fields_list, **_kwargs):
+        self.events.append("create")
         self.created = [dict(item) for item in fields_list]
+        self.serial += 1
+        ids = [f"new-{self.serial}-{i}" for i in range(len(fields_list))]
+        self.ids.extend(ids)
+        if self.failure == "create":
+            raise RuntimeError("mock create failed after partial upload")
+        if self.failure == "response":
+            return [{"data": {"records": []}}]
+        return [{"data": {"records": [{"record_id": item} for item in ids]}}]
 
 
 class _AlertTableClient:
@@ -117,9 +151,9 @@ def _full_cabinet_success() -> dict:
 
 
 class BranchPowerDailyAlertSyncTests(unittest.TestCase):
-    def _run_daily_upload(self, branch_result: dict, *, upload_main_table: bool = True):
+    def _run_daily_upload(self, branch_result: dict, *, upload_main_table: bool = True, main_client=None):
         service = BranchPowerUploadService({})
-        main_client = _MainTableClient()
+        main_client = main_client or _MainTableClient()
         branch_sync = Mock()
         branch_sync.sync.side_effect = AssertionError("automatic flow must not reread Feishu main table")
         branch_sync.sync_from_source_records.return_value = branch_result
@@ -130,7 +164,7 @@ class BranchPowerDailyAlertSyncTests(unittest.TestCase):
             patch.object(
                 service,
                 "_normalize_range_source_bundles",
-                return_value=[SimpleNamespace(building="A楼")],
+                return_value=[SimpleNamespace(building="A楼", full_cabinet_power_file="full_cabinet.xlsx")],
             ),
             patch.object(
                 service,
@@ -155,6 +189,60 @@ class BranchPowerDailyAlertSyncTests(unittest.TestCase):
                 emit_log=lambda _line: None,
             )
         return result, main_client, branch_sync, full_sync
+
+    def test_main_table_create_then_delete_only_old_ids(self) -> None:
+        client = _MainTableClient(old_ids=["old-1", "old-2"])
+        result, _, _, _ = self._run_daily_upload(_branch_success(), main_client=client)
+        self.assertEqual(client.events, ["list", "create", "list", "delete", "list"])
+        self.assertEqual(client.ids, ["new-1-0"])
+        self.assertEqual(result["deleted"], 2)
+
+    def test_main_table_does_not_delete_records_created_after_snapshot(self) -> None:
+        client = _MainTableClient(old_ids=["old-1"], failure="external")
+        with patch("handover_log_module.service.branch_power_upload_service.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "并发写入，旧记录未删除"):
+                self._run_daily_upload(_branch_success(), main_client=client)
+        self.assertEqual(client.ids, ["old-1", "new-1-0", "external-1"])
+
+    def test_main_table_failed_create_or_unconfirmed_new_preserves_old(self) -> None:
+        for failure in ("list", "create", "response", "not_visible"):
+            client = _MainTableClient(old_ids=["old-1"], failure=failure)
+            with self.subTest(failure=failure), patch("handover_log_module.service.branch_power_upload_service.time.sleep"):
+                with self.assertRaises(RuntimeError):
+                    self._run_daily_upload(_branch_success(), main_client=client)
+            self.assertIn("old-1", client.ids)
+            self.assertNotIn("delete", client.events)
+
+    def test_main_table_incomplete_delete_is_reported(self) -> None:
+        client = _MainTableClient(old_ids=["old-1"], failure="partial_delete")
+        with patch("handover_log_module.service.branch_power_upload_service.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "替换后校验不完整"):
+                self._run_daily_upload(_branch_success(), main_client=client)
+        self.assertEqual(client.ids, ["old-1", "new-1-0"])
+
+    def test_main_table_reports_external_write_after_deleting_old(self) -> None:
+        client = _MainTableClient(old_ids=["old-1"], failure="external_after_delete")
+        with self.assertRaisesRegex(RuntimeError, "冲突记录已保留"):
+            self._run_daily_upload(_branch_success(), main_client=client)
+        self.assertEqual(client.ids, ["new-1-0", "external-after-delete"])
+
+    def test_main_table_retry_cleans_old_and_partial_new_after_failure(self) -> None:
+        client = _MainTableClient(old_ids=["old-1"], failure="create")
+        with self.assertRaises(RuntimeError):
+            self._run_daily_upload(_branch_success(), main_client=client)
+        self.assertEqual(client.ids, ["old-1", "new-1-0"])
+        client.failure = ""
+        self._run_daily_upload(_branch_success(), main_client=client)
+        self.assertEqual(client.ids, ["new-2-0"])
+
+    def test_main_table_delete_failure_keeps_new_and_retry_cleans_up(self) -> None:
+        client = _MainTableClient(old_ids=["old-1"], failure="delete")
+        with self.assertRaisesRegex(RuntimeError, "deletion failed"):
+            self._run_daily_upload(_branch_success(), main_client=client)
+        self.assertEqual(client.ids, ["old-1", "new-1-0"])
+        client.failure = ""
+        self._run_daily_upload(_branch_success(), main_client=client)
+        self.assertEqual(client.ids, ["new-2-0"])
 
     def test_automatic_upload_uses_local_records_for_branch_alerts(self) -> None:
         result, main_client, branch_sync, _full_sync = self._run_daily_upload(_branch_success())

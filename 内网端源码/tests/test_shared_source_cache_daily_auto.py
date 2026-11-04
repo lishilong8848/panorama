@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -295,6 +296,15 @@ def test_air_conditioner_temperature_humidity_reuses_existing_daily_file(tmp_pat
     assert captured["bucket_key"] == "2026-06-28"
     assert captured["duty_date"] == "2026-06-28"
     assert captured["metadata"]["business_date"] == "2026-06-28"
+
+
+def test_air_conditioner_temperature_humidity_does_not_backfill_history_with_current_snapshot(tmp_path, monkeypatch):
+    service = _build_service(tmp_path)
+    monkeypatch.setattr(service, "_store_existing_canonical_entry_if_ready", lambda **kwargs: None)
+    with pytest.raises(ValueError, match="不能使用当前数据补采历史日期"):
+        service.fill_air_conditioner_temperature_humidity_day_latest(
+            building="A楼", business_date="2000-01-01", emit_log=lambda _message: None,
+        )
 
 
 def test_air_conditioner_temperature_humidity_uses_refresh_bucket_across_midnight(

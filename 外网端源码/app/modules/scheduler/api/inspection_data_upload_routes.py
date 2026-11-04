@@ -4,7 +4,10 @@ import copy
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.config.inspection_data_config import INSPECTION_DATA_UPLOAD_DEFAULTS, normalize_inspection_scheduler
+from app.config.inspection_data_config import INSPECTION_DATA_UPLOAD_DEFAULTS, INSPECTION_SOURCE_CONTRACTS, normalize_inspection_scheduler
+from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
+from app.modules.inspection_data.service.point_settings import PointSettingsConflict, inspection_target_options, load_or_restore_point_settings, save_point_group
+from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.scheduler.api._config_persistence import (
     persist_full_config,
     persist_scheduler_toggle,
@@ -19,6 +22,100 @@ ALLOWED_KEYS = set(INSPECTION_DATA_UPLOAD_DEFAULTS["scheduler"])
 
 def _payload(container, action=None):
     return {"ok": True, "action": action or {}, **container.inspection_data_upload_scheduler_status()}
+
+
+@router.get("/points")
+def inspection_point_settings(request: Request):
+    return {"ok": True, "settings": _read_point_settings(request.app.state.container.runtime_config)}
+
+
+def _read_point_settings(config):
+    try:
+        return load_or_restore_point_settings(config) or {}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"读取巡检测点配置失败：{exc}") from exc
+
+
+@router.put("/points")
+def update_inspection_point_settings(payload: dict, request: Request):
+    container = request.app.state.container
+    if container._configured_deployment_snapshot().get("role_mode") != "external":
+        raise HTTPException(status_code=409, detail="请在外网端设置巡检测点")
+    if not isinstance(payload.get("expected_group"), dict):
+        raise HTTPException(status_code=409, detail="请重新加载测点配置后再保存")
+    _read_point_settings(container.runtime_config)
+    try:
+        return save_point_group(container.runtime_config, building=payload.get("building"), family=payload.get("family"),
+                                points=payload.get("points", {}), remove=payload.get("remove", []),
+                                expected_group=payload["expected_group"])
+    except PointSettingsConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _point_building(building_code: str) -> str:
+    if building_code not in {"d", "e"}:
+        raise HTTPException(status_code=404, detail="仅 D、E 楼提供巡检测点管理")
+    return f"{building_code.upper()}楼"
+
+
+@router.get("/points/{building_code}")
+def building_inspection_point_settings(building_code: str, request: Request):
+    building = _point_building(building_code)
+    config = request.app.state.container.runtime_config
+    return {"ok": True, "building": building, "settings": _read_point_settings(config).get(building, {}),
+            "target_options": inspection_target_options(building)}
+
+
+@router.put("/points/{building_code}")
+def update_building_inspection_point_settings(building_code: str, payload: dict, request: Request):
+    building = _point_building(building_code)
+    container = request.app.state.container
+    if container._configured_deployment_snapshot().get("role_mode") != "external":
+        raise HTTPException(status_code=409, detail="请在外网端设置巡检测点")
+    if not isinstance(payload.get("expected_group"), dict) or set(payload) - {"family", "points", "remove", "expected_group", "targets"}:
+        raise HTTPException(status_code=400, detail="巡检测点配置格式无效")
+    _read_point_settings(container.runtime_config)
+    try:
+        result = save_point_group(container.runtime_config, building=building, family=payload.get("family"),
+                                  points=payload.get("points"), remove=payload.get("remove"), expected_group=payload["expected_group"],
+                                  targets=payload.get("targets"))
+    except PointSettingsConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**result, "settings": result["settings"].get(building, {})}
+
+
+@router.get("/points/{building_code}/latest")
+def latest_building_inspection_points(building_code: str, request: Request):
+    building = _point_building(building_code)
+    config = request.app.state.container.runtime_config
+    bridge = InternalBridgeHttpClient.from_runtime_config(config)
+    if bridge is None:
+        raise HTTPException(status_code=503, detail="未配置内网桥接地址")
+    datasets = {}
+    try:
+        payload = bridge.get_latest_inspection_points(building=building)
+        if not payload.get("ok") or not isinstance(payload.get("datasets"), list):
+            raise ValueError("内网巡检测点响应无效")
+        for doc in payload["datasets"]:
+            family = doc.get("source_family") if isinstance(doc, dict) else None
+            if not isinstance(family, str) or family not in INSPECTION_SOURCE_CONTRACTS or doc.get("building") != building or family in datasets:
+                raise ValueError("内网巡检测点楼栋或专业不匹配")
+            bucket = doc.get("bucket_key", "")
+            if not isinstance(bucket, str):
+                raise ValueError("内网巡检测点时段无效")
+            InspectionDataUploadService._validate_dataset(doc, bucket[:10], bucket)
+            rows = InspectionDataUploadService._point_detail_rows(doc, INSPECTION_SOURCE_CONTRACTS[family]["discipline"], {})
+            datasets[family] = {"sample_time": doc["value_time"], "points": [
+                {"id": row["测点ID"], "name": row["测点名称"], "path": row["测点路径"], "value": row["测点值"]}
+                for row in rows if row["测点ID"]
+            ]}
+    except (RuntimeError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "building": building, "datasets": datasets}
 
 
 @router.get("/status")

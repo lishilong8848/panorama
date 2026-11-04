@@ -1,5 +1,6 @@
 import { createLogStreamController } from "./log_stream.js";
 import { createDashboardActions } from "./dashboard_actions.js";
+import { createInspectionPointSettingsUi } from "./inspection_point_settings_ui.js";
 import { createDateHandoverActions } from "./date_handover_actions.js";
 import { createRuntimeActions } from "./runtime_actions.js";
 import { createUiLocalActions } from "./ui_local_actions.js";
@@ -7,6 +8,7 @@ import { createAppState } from "./app_state.js";
 import { registerAppLifecycle } from "./app_lifecycle.js";
 import { APP_TEMPLATE } from "./app_template.js";
 import { isHandoverReviewPath, mountHandoverReviewApp } from "./handover_review_app.js";
+import { isInspectionPointsPage, mountInspectionPointsPage } from "./inspection_points_page.js";
 import { clone } from "./config_helpers.js";
 import { createHandoverDashboardUiHelpers } from "./handover_dashboard_ui_helpers.js";
 import { createRuntimeTaskUiHelpers } from "./runtime_task_ui_helpers.js";
@@ -67,12 +69,16 @@ import {
 } from "./runtime_status_formatters.js";
 
 const { createApp, onMounted, onBeforeUnmount, computed, watch, ref, nextTick } = Vue;
-if (isHandoverReviewPath(window.location.pathname)) {
+if (isInspectionPointsPage(window.location.pathname)) {
+  mountInspectionPointsPage(Vue);
+  finishAppBoot();
+} else if (isHandoverReviewPath(window.location.pathname)) {
   mountHandoverReviewApp(Vue);
   finishAppBoot();
 } else {
 createApp({
   setup() {
+    const inspectionPointSettingsUi = createInspectionPointSettingsUi(ref);
     const state = createAppState(Vue);
     const {
       health,
@@ -1701,6 +1707,7 @@ createApp({
     }
 
     return {
+      ...inspectionPointSettingsUi,
       health,
       config,
       currentView,

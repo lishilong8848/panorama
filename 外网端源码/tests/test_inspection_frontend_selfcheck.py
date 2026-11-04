@@ -55,13 +55,15 @@ def test_actual_app_setup_exports_and_template_compile(directory):
         'saveInspectionDataUploadSchedulerQuickConfig', 'addInspectionDataUploadRunTime',
         'actionKeyInspectionDataUploadRun', 'actionKeyInspectionDataUploadSchedulerStart',
         'actionKeyInspectionDataUploadSchedulerStop', 'actionKeyInspectionDataUploadSchedulerSave',
+        'inspectionPointEditor', 'showInspectionPointGroup', 'toggleInspectionPointEditor', 'saveInspectionPointGroup',
       ]) assert.notEqual(bindings[key], undefined, key);
       const {DASHBOARD_INSPECTION_DATA_UPLOAD_SECTION: section} = await import('./dashboard_template_sections/dashboard_inspection_data_upload_section.js');
       assert.equal(typeof Vue.compile(section), 'function');
       for (const phrase of ['source_family', 'inspection_data_family', 'executor_bound', '资源锁', '验证源文件与字段']) {
         assert.equal(section.includes(phrase), false, phrase);
       }
-      assert.ok(section.includes('仅检查文件内容'));
+      assert.ok(section.includes('仅检查接口数据'));
+      assert.ok(section.includes('查询测点 ID / 备注'));
       bindings.currentJob.value = {feature: 'inspection_data_upload', status: 'success', result: {
         dry_run: true, buildings: ['D楼', 'E楼'], results: {}, planned_count: 979, uploaded_count: 0, source_file_count: 4,
       }};
@@ -134,12 +136,40 @@ def test_default_config_and_roundtrip():
     ''')
 
 
+def test_point_editor_saves_ids_notes_and_removals_to_external_api():
+    run_node(ROOT / "web/frontend/src", r'''
+      const assert = (await import('node:assert/strict')).default;
+      globalThis.window = globalThis;
+      const calls = [];
+      globalThis.fetch = async (url, options) => {
+        calls.push([url, options.method, options.body ? JSON.parse(options.body) : null]);
+        return { ok: true, json: async () => options.method === 'PUT'
+          ? { settings: {}, synced: false, message: '内网待同步' }
+          : { settings: {'D楼': {electrical_inspection_family: {points: {'7_0_1':'原备注'}, remove: ['7_0_2']}}} } };
+      };
+      const {createInspectionPointSettingsUi} = await import('./inspection_point_settings_ui.js');
+      const ui = createInspectionPointSettingsUi(value => ({value}));
+      await ui.toggleInspectionPointEditor();
+      const editor = ui.inspectionPointEditor.value;
+      assert.ok(editor.loaded);
+      editor.points = '7_0_1 | 复测备注';
+      editor.remove = '7_0_2\n7_0_3';
+      await ui.saveInspectionPointGroup();
+      assert.deepEqual(calls[1], ['/api/scheduler/inspection-data-upload/points', 'PUT', {
+        building: 'D楼', family: 'electrical_inspection_family', points: {'7_0_1':'复测备注'}, remove:['7_0_2','7_0_3'],
+        expected_group: {points: {'7_0_1':'原备注'}, remove:['7_0_2']},
+      }]);
+      assert.equal(editor.status, '内网待同步');
+    ''')
+
+
 def test_both_frontend_builds_match_source():
     source = ROOT / "web/frontend/src"
     files = ["app.js", "app_state.js", "app_action_keys.js", "app_dashboard_template.js", "api_client.js",
              "config_runtime_convert.js", "config_runtime_defaults.js", "dashboard_job_actions.js",
              "dashboard_scheduler_actions.js", "dashboard_menu_config.js", "runtime_health_config_actions.js",
              "scheduler_remembered_watchers.js", "scheduler_ui_helpers.js",
+             "inspection_point_settings_ui.js",
              "dashboard_template_sections/dashboard_inspection_data_upload_section.js"]
     for name in files:
         expected = (source / name).read_bytes()

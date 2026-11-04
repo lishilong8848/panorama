@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import json
+import math
 import re
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -11,6 +13,99 @@ import openpyxl
 Worksheet = openpyxl.worksheet.worksheet.Worksheet
 
 
+def validate_business_date(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError("业务日期格式错误，必须为YYYY-MM-DD")
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("业务日期无效，必须为有效的YYYY-MM-DD日期") from exc
+    return value
+
+
+def _unique_json_object(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("月报源JSON包含重复字段")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("月报源JSON包含无效数字")
+
+
+def load_monthly_json_source(
+    file_path: str,
+    *,
+    expected_building: str | None,
+    expected_business_date: str | None,
+) -> Tuple[openpyxl.Workbook, str, str]:
+    try:
+        with Path(file_path).open("r", encoding="utf-8-sig") as source:
+            payload = json.load(source, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("月报源JSON格式无效") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("月报源JSON顶层必须是对象")
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise ValueError("月报源JSON schema_version必须为1")
+    if payload.get("source_family") != "monthly_report_family":
+        raise ValueError("月报源JSON来源不匹配")
+
+    building = payload.get("building")
+    if not isinstance(building, str) or not building.strip() or building != building.strip():
+        raise ValueError("月报源JSON楼栋无效")
+    if expected_building is not None and building != expected_building:
+        raise ValueError("月报源JSON楼栋与指定楼栋不匹配")
+
+    business_date = validate_business_date(payload.get("business_date"))
+    if expected_business_date is not None:
+        if business_date != validate_business_date(expected_business_date):
+            raise ValueError("月报源JSON业务日期与指定日期不匹配")
+
+    sheets = payload.get("sheets")
+    if not isinstance(sheets, list) or not sheets:
+        raise ValueError("月报源JSON缺少工作表")
+    for index, sheet in enumerate(sheets, 1):
+        if (
+            not isinstance(sheet, dict)
+            or not isinstance(sheet.get("name"), str)
+            or not sheet["name"].strip()
+            or not isinstance(sheet.get("rows"), list)
+        ):
+            raise ValueError(f"月报源JSON第{index}个工作表无效")
+        for row in sheet["rows"]:
+            if not isinstance(row, list):
+                raise ValueError(f"月报源JSON第{index}个工作表的行必须是一维数组")
+            for cell in row:
+                if not isinstance(cell, (str, int, float, bool, type(None))):
+                    raise ValueError(f"月报源JSON第{index}个工作表包含非标量单元格")
+                if isinstance(cell, (int, float)) and not isinstance(cell, bool):
+                    try:
+                        finite = math.isfinite(cell)
+                    except OverflowError:
+                        finite = False
+                    if not finite:
+                        raise ValueError("月报源JSON包含无效数字")
+
+    if not sheets[0]["rows"]:
+        raise ValueError("月报源JSON第一个工作表为空")
+    workbook = openpyxl.Workbook()
+    try:
+        worksheet = workbook.active
+        for row_index, row in enumerate(sheets[0]["rows"], 1):
+            for col_index, value in enumerate(row, 1):
+                if value is not None:
+                    worksheet.cell(row_index, col_index, value)
+    except Exception:
+        workbook.close()
+        raise
+    return workbook, building, business_date
+
+
 def _parse_header_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)
@@ -20,6 +115,12 @@ def _parse_header_datetime(value: Any) -> datetime | None:
     if not text:
         return None
     normalized = text.replace("/", "-")
+    if "T" in normalized:
+        try:
+            parsed = datetime.fromisoformat(normalized)
+            return parsed if parsed.tzinfo is None else None
+        except ValueError:
+            return None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H", "%Y-%m-%d"):
         try:
             return datetime.strptime(normalized, fmt)
@@ -44,10 +145,7 @@ def _business_day_data_columns(
             parsed_by_col[col] = parsed
     business_date_text = str(business_date or "").strip()
     if business_date_text:
-        try:
-            start_dt = datetime.strptime(business_date_text, "%Y-%m-%d")
-        except ValueError as exc:
-            raise ValueError(f"业务日期格式错误，必须为YYYY-MM-DD: {business_date_text}") from exc
+        start_dt = datetime.strptime(validate_business_date(business_date_text), "%Y-%m-%d")
         boundary_dt = start_dt + timedelta(days=1)
         available_datetimes = set(parsed_by_col.values())
         missing_boundaries = [
@@ -68,6 +166,36 @@ def _business_day_data_columns(
     boundary_dt = datetime.combine(start_dt.date() + timedelta(days=1), time.min)
     filtered = [col for col in columns if parsed_by_col.get(col) is None or parsed_by_col[col] <= boundary_dt]
     return filtered or columns
+
+
+def validate_monthly_json_columns(
+    ws: Worksheet,
+    *,
+    header_row: int,
+    data_start_col: int,
+    data_end_col: int,
+    business_date: str,
+) -> List[int]:
+    columns = _business_day_data_columns(
+        ws,
+        header_row=header_row,
+        data_start_col=data_start_col,
+        data_end_col=data_end_col,
+        business_date=business_date,
+    )
+    parsed_headers = [_parse_header_datetime(ws.cell(header_row, col).value) for col in range(data_start_col, data_end_col + 1)]
+    if any(value is None for value in parsed_headers):
+        raise ValueError("月报源JSON存在无法识别的时间列")
+    if len(set(parsed_headers)) != len(parsed_headers):
+        raise ValueError("月报源JSON存在重复时间列")
+    start_dt = datetime.strptime(validate_business_date(business_date), "%Y-%m-%d")
+    available_datetimes = set(parsed_headers)
+    missing_hours = [start_dt + timedelta(hours=hour) for hour in range(25)
+                     if start_dt + timedelta(hours=hour) not in available_datetimes]
+    if missing_hours:
+        missing_text = ", ".join(value.strftime("%Y-%m-%d %H:%M") for value in missing_hours)
+        raise ValueError(f"月报源JSON缺少业务日整点时间列: {missing_text}")
+    return columns
 
 
 def apply_building_source_overrides(
@@ -228,6 +356,9 @@ def extract_row_sources(
 
 
 __all__ = [
+    "load_monthly_json_source",
+    "validate_business_date",
+    "validate_monthly_json_columns",
     "locate_stat_columns",
     "extract_month",
     "extract_building",

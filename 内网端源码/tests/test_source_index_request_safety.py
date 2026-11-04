@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -78,3 +79,56 @@ def test_deferred_missing_update_keeps_new_file_registered_in_same_second(monkey
     latest = store.list_source_cache_entries()[0]
     assert latest["relative_path"] == "new.xlsx"
     assert latest["status"] == "ready"
+
+
+@pytest.mark.parametrize(("family", "suffix", "accepted"), [
+    ("monthly_report_family", ".xlsx", False),
+    ("monthly_report_family", ".json", True),
+    ("handover_log_family", ".xlsx", False),
+    ("top5_monthly_report_family", ".xlsx", True),
+    ("pue_confirmation_family", ".xlsx", True),
+    ("utility_feeder_deviation_family", ".xlsx", True),
+])
+def test_index_returns_only_current_source_format(monkeypatch, tmp_path, family, suffix, accepted):
+    source = tmp_path / ("source" + suffix)
+    source.write_bytes(b"source")
+    entry = {"source_family": family, "file_path": str(source), "status": "ready"}
+    runner = InternalBridgeHttpTaskRunner(runtime_service=SimpleNamespace(shared_bridge_root=str(tmp_path)))
+    monkeypatch.setattr(runner, "_get_store", lambda: object())
+    monkeypatch.setattr(runner, "_list_source_cache_entries_fast", lambda *a, **kw: [entry])
+    monkeypatch.setattr(runner, "_merge_main_source_cache_entries", lambda entries, **kw: entries)
+    recovery = Mock()
+    monkeypatch.setattr(runner, "_start_source_index_recovery_if_needed", recovery)
+
+    rows = runner.list_source_index(source_family=family, building="A楼")
+    assert bool(rows) is accepted
+    assert recovery.call_args.args[0] == rows
+    assert source.read_bytes() == b"source"
+
+
+@pytest.mark.parametrize("case", ["empty", "wrong_building", "wrong_date", "valid"])
+def test_background_recovery_validates_json_before_ready(tmp_path, case):
+    path = tmp_path / "source.json"
+    payload = {"schema_version": 1, "source_family": "monthly_report_family", "building": "A楼",
+               "business_date": "2026-10-29", "query_start": "2026-10-29 00:00:00",
+               "query_end": "2026-10-30 01:00:00", "sheets": [
+                   {"name": "sheet1", "rows": [[], [None, None, None, None, "2026-10-29 00:00:00"],
+                                                 [], [None, "房间", "设备", "电度", 0]]}]}
+    if case == "wrong_building":
+        payload["building"] = "B楼"
+    if case == "wrong_date":
+        payload["business_date"] = "2026-10-28"
+    path.write_text("" if case == "empty" else json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    index = SimpleNamespace(upsert_entry=Mock(side_effect=lambda entry: entry))
+    cache = SimpleNamespace(
+        _candidate_existing_latest_paths=lambda **kw: [{"relative_path": "source.json", "bucket_kind": "daily",
+                                                        "bucket_key": "2026-10-29", "duty_date": "2026-10-29"}],
+        _resolve_relative_path_under_shared_root=lambda _: path,
+        store=SimpleNamespace(_source_cache_index_store=index),
+    )
+    runner = InternalBridgeHttpTaskRunner(runtime_service=SimpleNamespace())
+    result = runner._recover_exact_existing_source_file_to_index(
+        main_cache=cache, source_family="monthly_report_family", building="A楼", bucket_key="2026-10-29",
+    )
+    assert bool(result) is (case == "valid")
+    assert index.upsert_entry.call_count == (1 if case == "valid" else 0)

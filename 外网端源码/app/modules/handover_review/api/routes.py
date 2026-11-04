@@ -4147,6 +4147,25 @@ async def handover_review_page(building_code: str, request: Request):
     )
 
 
+@router.get("/handover/review/{building_code}/inspection-points")
+async def handover_review_inspection_points_page(building_code: str, request: Request):
+    from app.bootstrap.app_factory import _is_lan_console_client
+
+    if building_code not in {"d", "e"}:
+        raise HTTPException(status_code=404, detail="仅 D、E 楼提供巡检测点管理")
+    if not _is_lan_console_client(request):
+        raise HTTPException(status_code=403, detail="请在管理局域网内访问巡检测点")
+    return await handover_review_page(building_code, request)
+
+
+@router.get("/api/handover/review/{building_code}/inspection-access")
+def handover_review_inspection_access(building_code: str, request: Request):
+    from app.bootstrap.app_factory import _is_lan_console_client
+
+    return JSONResponse({"allowed": building_code in {"d", "e"} and _is_lan_console_client(request)},
+                        headers={"Cache-Control": "no-store"})
+
+
 @router.get("/api/handover/review/station-h/status")
 @_dedicated_review_endpoint
 def handover_review_station_h_status(

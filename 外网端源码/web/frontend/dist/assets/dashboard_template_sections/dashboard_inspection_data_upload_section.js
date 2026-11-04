@@ -12,13 +12,13 @@ export const DASHBOARD_INSPECTION_DATA_UPLOAD_SECTION = `        <section class=
                 </div>
                 <div class="config-form-grid config-form-grid-compact">
                   <div class="form-row">
-                    <label class="label" for="inspection-source-date">源文件日期</label>
+                    <label class="label" for="inspection-source-date">巡检日期</label>
                     <input id="inspection-source-date" type="date" v-model="inspectionDataUploadDate" />
                   </div>
                   <div class="form-row">
                     <label style="display:flex;align-items:center;gap:8px;">
                       <input type="checkbox" v-model="inspectionDataUploadDryRun" />
-                      <span>仅检查文件内容</span>
+                      <span>仅检查接口数据</span>
                     </label>
                   </div>
                 </div>
@@ -26,8 +26,25 @@ export const DASHBOARD_INSPECTION_DATA_UPLOAD_SECTION = `        <section class=
                   <button class="btn btn-primary"
                     :disabled="!canRun || isActionLocked(actionKeyInspectionDataUploadRun)"
                     @click="runInspectionDataUpload">
-                    {{ isActionLocked(actionKeyInspectionDataUploadRun) ? '提交中...' : (inspectionDataUploadDryRun ? '检查文件' : '上传巡检数据') }}
+                    {{ isActionLocked(actionKeyInspectionDataUploadRun) ? '提交中...' : (inspectionDataUploadDryRun ? '检查数据' : '上传巡检数据') }}
                   </button>
+                  <button class="btn btn-ghost" :disabled="inspectionPointEditor.busy" @click="toggleInspectionPointEditor">测点配置</button>
+                </div>
+                <div v-if="inspectionPointEditor.open" class="form-row">
+                  <div class="config-form-grid config-form-grid-compact">
+                    <label><span>楼栋</span><select v-model="inspectionPointEditor.building" :disabled="inspectionPointEditor.busy" @change="showInspectionPointGroup">
+                      <option>D楼</option><option>E楼</option>
+                    </select></label>
+                    <label><span>专业</span><select v-model="inspectionPointEditor.family" :disabled="inspectionPointEditor.busy" @change="showInspectionPointGroup">
+                      <option value="electrical_inspection_family">电气</option><option value="hvac_inspection_family">暖通</option>
+                    </select></label>
+                    <label><span>查询测点 ID / 备注</span><textarea rows="5" v-model="inspectionPointEditor.points" placeholder="测点ID | 备注" :disabled="!inspectionPointEditor.loaded || inspectionPointEditor.busy"></textarea></label>
+                    <label><span>排除测点 ID</span><textarea rows="5" v-model="inspectionPointEditor.remove" :disabled="!inspectionPointEditor.loaded || inspectionPointEditor.busy"></textarea></label>
+                  </div>
+                  <div class="btn-line">
+                    <button class="btn btn-primary" :disabled="!inspectionPointEditor.loaded || inspectionPointEditor.busy" @click="saveInspectionPointGroup">{{ inspectionPointEditor.busy ? '处理中…' : '保存测点设置' }}</button>
+                  </div>
+                  <div v-if="inspectionPointEditor.status" role="status" class="hint" :class="{'tone-warn': inspectionPointEditor.error}">{{ inspectionPointEditor.status }}</div>
                 </div>
               </article>
               <article class="task-block task-block-compact dashboard-module-status-card">
@@ -37,24 +54,25 @@ export const DASHBOARD_INSPECTION_DATA_UPLOAD_SECTION = `        <section class=
                 </div>
                 <div class="status-metric-grid status-metric-grid-compact">
                   <div class="status-metric">
-                    <div class="status-metric-label">{{ getInspectionDataUploadResult().dry_run ? '检查设备数' : '上传记录' }}</div>
+                    <div class="status-metric-label">{{ getInspectionDataUploadResult().dry_run ? '待上传记录' : '上传记录' }}</div>
                     <strong class="status-metric-value">{{ (getInspectionDataUploadResult().dry_run ? getInspectionDataUploadResult().planned_count : getInspectionDataUploadResult().uploaded_count) || 0 }}</strong>
                   </div>
                   <div class="status-metric">
-                    <div class="status-metric-label">源文件数</div>
+                    <div class="status-metric-label">数据组数</div>
                     <strong class="status-metric-value">{{ getInspectionDataUploadResult().source_file_count || 0 }}</strong>
                   </div>
                 </div>
-                <div class="hint">源文件日期：{{ getInspectionDataUploadResult().source_date || '-' }}</div>
+                <div class="hint">巡检日期：{{ getInspectionDataUploadResult().source_date || '-' }}</div>
                 <div v-for="building in (getInspectionDataUploadResult().buildings || [])" :key="building" class="form-row">
                   <strong>{{ building }}</strong>
                   <div class="hint" v-for="source in (getInspectionDataUploadResult().results?.[building]?.sources || {})" :key="source.report_name">
                     {{ source.report_name }}：{{ source.source_time || '未提供' }}
                   </div>
                   <div class="hint">上传记录：{{ (getInspectionDataUploadResult().results?.[building] || {}).uploaded_count || 0 }}</div>
+                  <div class="hint">测点明细：{{ (getInspectionDataUploadResult().results?.[building] || {}).point_count || 0 }}</div>
                   <div class="hint" v-if="(getInspectionDataUploadResult().results?.[building] || {}).missing_devices">缺测设备：{{ getInspectionDataUploadResult().results[building].missing_devices }}</div>
                 </div>
-                <div class="hint" v-if="getInspectionDataUploadResult().dry_run">仅检查文件内容，未上传</div>
+                <div class="hint" v-if="getInspectionDataUploadResult().dry_run">仅检查接口数据，未上传</div>
               </article>
               </div>
               <article class="task-block task-block-compact dashboard-module-status-card">

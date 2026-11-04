@@ -68,6 +68,7 @@ from app.shared.utils.atomic_file import (
 from app.shared.utils.artifact_naming import source_bucket_segment
 from app.shared.utils.cached_json_file import save_cached_json
 from app.shared.utils.file_utils import normalize_windows_path_text
+from app.shared.utils.report_source_json import REPORT_JSON_FAMILIES
 from handover_log_module.service.day_metric_standalone_upload_service import DayMetricStandaloneUploadService
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.repository.excel_reader import load_rows
@@ -1580,6 +1581,12 @@ class SharedBridgeRuntimeService:
         internal side must report verification; local paths can still be checked
         directly without scanning directories.
         """
+        source_family = str(item.get("source_family", "") or "").strip()
+        file_hint = str(item.get("relative_path", "") or item.get("file_path", "") or "").strip()
+        if source_family in REPORT_JSON_FAMILIES and not file_hint.lower().endswith(".json"):
+            item["file_verified"] = False
+            item["file_verification_skipped_reason"] = "source_format_changed"
+            return False
         if bool(item.get("file_verified", False)) is True:
             return True
         file_path = str(item.get("file_path", "") or "").strip()
@@ -2027,10 +2034,15 @@ class SharedBridgeRuntimeService:
                     if not status_filter_all and item_status != status_text:
                         continue
                     if item_status == "ready" and not self._ensure_http_source_index_entry_file_verified(item):
+                        reason = (
+                            "源文件格式已切换为 JSON"
+                            if item.get("file_verification_skipped_reason") == "source_format_changed"
+                            else "文件不可访问"
+                        )
                         self._emit_http_bridge_issue_log(
                             "读取源文件索引",
                             RuntimeError(
-                                "source-index ready 条目文件不可访问，已忽略: "
+                                f"source-index ready 条目{reason}，已忽略: "
                                 f"family={source_family or '-'}, building={building or '-'}"
                             ),
                         )
@@ -6038,8 +6050,15 @@ class SharedBridgeRuntimeService:
             validator = getattr(self._source_cache_service, "_validate_handover_source_file", None)
             if callable(validator):
                 validator(path)
+                if path.suffix.lower() == ".json":
+                    from app.shared.utils.report_source_json import validate_report_source_json
+                    validate_report_source_json(path, expected_family="handover_log_family", expected_building=building)
                 return
-        validate_excel_workbook_file(path)
+        if path.suffix.lower() == ".json":
+            from app.shared.utils.report_source_json import validate_report_source_json
+            validate_report_source_json(path, expected_family="handover_log_family", expected_building=building)
+        else:
+            validate_excel_workbook_file(path)
         cfg = load_handover_config(self.runtime_config)
         parsing_cfg = cfg.get("parsing", {}) if isinstance(cfg.get("parsing", {}), dict) else {}
         normalize_cfg = cfg.get("normalize", {}) if isinstance(cfg.get("normalize", {}), dict) else {}
@@ -6047,6 +6066,8 @@ class SharedBridgeRuntimeService:
             str(path),
             parsing_cfg=copy.deepcopy(parsing_cfg),
             normalize_cfg=copy.deepcopy(normalize_cfg),
+            expected_building=building,
+            expected_source_family="handover_log_family",
         )
         if not rows:
             raise ValueError(
@@ -6490,6 +6511,15 @@ class SharedBridgeRuntimeService:
             / "manifest.json"
         )
 
+    @staticmethod
+    def _validate_handover_artifact(path: Path, *, building: str, family: str) -> None:
+        if path.suffix.lower() == ".json":
+            from app.shared.utils.report_source_json import validate_report_source_json
+
+            validate_report_source_json(path, expected_family=family, expected_building=building)
+        else:
+            validate_excel_workbook_file(path)
+
     def _copy_handover_source_artifact(self, *, task_id: str, building: str, source_file: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
         if not self._store:
             raise RuntimeError("共享桥接存储尚未初始化")
@@ -6501,7 +6531,7 @@ class SharedBridgeRuntimeService:
         atomic_copy_file(
             source_path,
             target_path,
-            validator=validate_excel_workbook_file,
+            validator=lambda path: self._validate_handover_artifact(path, building=building, family="handover_log_family"),
             temp_suffix=".downloading",
             allow_overwrite_fallback=False,
         )
@@ -6538,7 +6568,7 @@ class SharedBridgeRuntimeService:
         atomic_copy_file(
             source_path,
             target_path,
-            validator=validate_excel_workbook_file,
+            validator=lambda path: self._validate_handover_artifact(path, building=building, family="handover_capacity_report_family"),
             temp_suffix=".downloading",
             allow_overwrite_fallback=False,
         )
@@ -6634,7 +6664,7 @@ class SharedBridgeRuntimeService:
         atomic_copy_file(
             source_path,
             target_path,
-            validator=validate_excel_workbook_file,
+            validator=lambda path: self._validate_handover_artifact(path, building=building, family="handover_log_family"),
             temp_suffix=".downloading",
             allow_overwrite_fallback=False,
         )

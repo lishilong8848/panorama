@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import time
 import threading
@@ -11,11 +10,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-import openpyxl
 import pytest
 
 from app.config.config_adapter import adapt_runtime_config, ensure_v3_config
-from app.config.inspection_data_config import INSPECTION_FAMILY_LABELS, INSPECTION_REPORT_TEMPLATES
+from app.config.inspection_data_config import INSPECTION_FAMILY_LABELS, INSPECTION_REPORT_TEMPLATES, inspection_hour_bucket
 from app.modules.internal_bridge_http.service.internal_bridge_http_runner import InternalBridgeHttpTaskRunner
 from app.modules.shared_bridge.api.routes import _LATEST_REFRESHABLE_SOURCE_FAMILIES
 from app.modules.shared_bridge.service.internal_download_browser_pool import InternalDownloadBrowserPool
@@ -37,7 +35,7 @@ from handover_log_module.service.handover_download_service import HandoverDownlo
 from handover_log_module.service import handover_download_service
 
 
-BUCKET = "2026-10-27 09"
+BUCKET = "2026-10-27 08"
 ROOT = Path(__file__).resolve().parents[1]
 FILL_METHODS = {
     FAMILY_ELECTRICAL_INSPECTION: "fill_electrical_inspection_latest",
@@ -70,20 +68,28 @@ def cache(tmp_path):
     )
 
 
-def workbook(path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    book = openpyxl.Workbook()
-    book.active.append(["巡检数据", 1])
-    book.save(path)
-    book.close()
-    return path
+def dataset(family, building="D楼", bucket=BUCKET):
+    end = datetime.strptime(bucket, "%Y-%m-%d %H") + timedelta(minutes=20)
+    return {
+        "schema_version": 1, "building": building, "source_family": family, "bucket_key": bucket,
+        "report_name": INSPECTION_REPORT_TEMPLATES[family], "query_start": f"{bucket}:00:00",
+        "query_end": end.strftime("%Y-%m-%d %H:%M:%S"), "value_time": f"{bucket}:00:00",
+        "rows": [[f"{building}位置", "设备", "测点", "1"]],
+    }
 
 
 def artifact(family, building="D楼", bucket=BUCKET):
     return build_source_artifact_path(
         source_family=family, building=building,
-        suffix=".xlsx", bucket_kind="latest", bucket_key=bucket,
+        suffix=".json", bucket_kind="latest", bucket_key=bucket,
     )
+
+
+def write_snapshot(cache, family, building="D楼", bucket=BUCKET):
+    path = cache.shared_root / artifact(family, building, bucket).relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dataset(family, building, bucket), ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 def test_config_defaults_template_and_runtime_preserve_feature(family):
@@ -119,7 +125,7 @@ def test_internal_config_toggle_is_preserved_and_does_not_change_other_features(
 def test_hourly_name_and_api_contract(family, cache):
     label = INSPECTION_FAMILY_LABELS[family]
     assert artifact(family=family).relative_path.as_posix() == (
-        f"{label}/202610/20261027--09/20261027--09--{label}--D楼.xlsx"
+        f"{label}/202610/20261027--08/20261027--08--{label}--D楼.json"
     )
     assert _LATEST_REFRESHABLE_SOURCE_FAMILIES[family] == INSPECTION_FAMILY_LABELS[family]
     target = cache._resolve_latest_refresh_target(source_family=family, target_bucket_key=BUCKET)
@@ -144,26 +150,17 @@ def test_de_only_does_not_change_other_family_buildings(family, cache):
     assert family not in [s[0] for s in cache._current_hour_source_steps(bucket_key=BUCKET, branch_bucket_key="")]
 
 
-def test_inspection_config_overrides_scale_and_omits_sheet(family, tmp_path, monkeypatch):
-    config = {"download": {"sheet_name": "配置", "scale_label": "小时"}, "inspection_data": {"enabled": True, "download": {"skip_query_conditions": True, "template_name": "巡检数据表"}}}
-    before = copy.deepcopy(config)
-    calls = []
-    def run(service, **kwargs):
-        calls.append((service.config["download"], kwargs, service._download_browser_pool))
-        return {"success_files": []}
-    monkeypatch.setattr(HandoverDownloadService, "run", run)
-    pool = object()
-    service = HandoverDownloadService(config, download_browser_pool=pool, business_root_override=tmp_path)
-    service.run_inspection_data_only(building="D楼", source_family=family)
-    cfg, args, actual_pool = calls[0]
-    assert cfg["template_name"] == INSPECTION_REPORT_TEMPLATES[family]
-    assert cfg["skip_query_conditions"] is False
-    assert cfg["sheet_name"] == ""
-    assert cfg["scale_label"] == "5分钟" and cfg["lookback_minutes"] == 20
-    assert cfg["export_button_text"] == "原样导出"
-    assert args["switch_network"] is args["reuse_cached"] is False
-    assert actual_pool is pool
-    assert config == before
+def test_inspection_direct_api_without_browser_pool(family, monkeypatch):
+    collect = Mock(return_value=dataset(family))
+    monkeypatch.setattr(handover_download_service, "query_inspection_report", collect)
+    site = {"building": "D楼", "enabled": True}
+    config = {"inspection_data": {"enabled": True}, "sites": [site]}
+    pool = SimpleNamespace(submit_building_job=Mock(side_effect=AssertionError("browser pool used")))
+    service = HandoverDownloadService(config, download_browser_pool=pool)
+    assert service.run_inspection_data_only(building="D楼", source_family=family) == dataset(family)
+    collect.assert_called_once_with(site, building="D楼", source_family=family, config=config)
+    pool.submit_building_job.assert_not_called()
+    assert HandoverDownloadService(config).run_inspection_data_only(building="D楼", source_family=family) == dataset(family)
     with pytest.raises(ValueError):
         service.run_inspection_data_only(building="A楼", source_family=family)
 
@@ -218,7 +215,7 @@ def test_inspection_query_does_not_touch_configuration_sheet(family, monkeypatch
 
 
 def test_existing_canonical_file_recovered_and_other_hour_not_reused(family, cache):
-    path = workbook(cache.shared_root / artifact(family=family).relative_path)
+    path = write_snapshot(cache, family)
     result = inspection_fill(cache, family)(building="D楼", bucket_key=BUCKET, emit_log=lambda _: None)
     assert Path(result["file_path"]) == path
     rows = cache.store.list_source_cache_entries(source_family=family, bucket_kind="latest", duty_date="2026-10-27")
@@ -230,23 +227,102 @@ def test_existing_canonical_file_recovered_and_other_hour_not_reused(family, cac
 
 
 def test_fill_uses_pool_atomic_store_and_latest_index(family, cache, tmp_path, monkeypatch):
-    source = workbook(tmp_path / "incoming.xlsx")
     pool = object()
     cache.download_browser_pool = pool
     seen = []
     def fake_download(service, **kwargs):
         seen.append((service._download_browser_pool, kwargs))
-        return {"success_files": [{"building": "E楼", "file_path": str(source)}]}
+        return dataset(family, building="E楼")
     monkeypatch.setattr(HandoverDownloadService, "run_inspection_data_only", fake_download)
     result = inspection_fill(cache, family)(building="E楼", bucket_key=BUCKET, emit_log=lambda _: None)
     assert seen[0][0] is pool
     assert result["bucket_kind"] == "latest" and result["bucket_key"] == BUCKET
     assert result["duty_date"] == "2026-10-27"
-    assert (cache.shared_root / result["relative_path"]).read_bytes() == source.read_bytes()
+    assert json.loads((cache.shared_root / result["relative_path"]).read_text(encoding="utf-8")) == dataset(family, building="E楼")
     inspection_fill(cache, family)(building="E楼", bucket_key=BUCKET, emit_log=lambda _: None)
     assert len(seen) == 1
     entries = cache.store._source_cache_index_store.list_entries(source_family=family, building="E楼", status="ready")
     assert len(entries) == 1 and entries[0]["bucket_key"] == BUCKET
+
+
+def test_inspection_http_returns_same_bucket_json_and_ignores_legacy_xlsx(cache):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.modules.internal_bridge_http.api.routes import router
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(
+        runtime_config={"internal_bridge_http": {"enabled": True}},
+        shared_bridge_service=SimpleNamespace(_source_cache_service=cache),
+    )
+    for building in ("D楼", "E楼"):
+        for family in INSPECTION_REPORT_TEMPLATES:
+            write_snapshot(cache, family, building)
+            cache._register_existing_latest_file_if_present(source_family=family, building=building, bucket_key=BUCKET)
+    # An older Excel entry in a newer bucket cannot be delivered as API data.
+    legacy = cache.shared_root / "legacy.xlsx"
+    legacy.write_bytes(b"legacy")
+    cache.store.upsert_source_cache_entry(
+        source_family=FAMILY_HVAC_INSPECTION, building="E楼", bucket_kind="latest", bucket_key="2026-10-27 10",
+        duty_date=BUCKET[:10], relative_path=legacy.name, status="ready",
+    )
+    with TestClient(app) as client:
+        url = "/api/internal-bridge/inspection/snapshot"
+        response = client.get(url, params={"source_date": BUCKET[:10]})
+        assert response.status_code == 200
+        assert response.json()["bucket_key"] == BUCKET
+        assert len(response.json()["datasets"]) == 4
+        assert client.get(url, params={"source_date": BUCKET[:10], "bucket_key": "2026-10-27 10"}).json()["datasets"] == []
+        assert client.get(url, params={"source_date": BUCKET[:10], "bucket_key": "2026-10-27 11"}).status_code == 400
+        app.state.container.runtime_config["internal_bridge_http"]["allowed_client_ips"] = ["192.0.2.10"]
+        assert client.get(url, params={"source_date": BUCKET[:10]}).status_code == 403
+
+
+def test_external_inspection_rule_sync_persists_and_invalidates_current_snapshot(cache, tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.modules.internal_bridge_http.api.routes import router
+
+    cache.runtime_config['paths'] = {'runtime_state_root': str(tmp_path/'state')}
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(runtime_config={'internal_bridge_http': {'enabled': True}},
+                                          shared_bridge_service=SimpleNamespace(_source_cache_service=cache))
+    family = FAMILY_ELECTRICAL_INSPECTION
+    current = inspection_hour_bucket()
+    write_snapshot(cache, family, bucket=current)
+    assert cache._register_existing_latest_file_if_present(source_family=family, building='D楼', bucket_key=current)
+    rules = {'D楼': {family: {'add': ['7_0_1'], 'remove': ['7_0_2'], 'baseline': ['7_0_2']}}}
+    path = cache.shared_root / artifact(family, 'D楼', current).relative_path
+    doc = dataset(family, 'D楼', current)
+    doc['point_ids'] = ['7_0_2']
+    path.write_text(json.dumps(doc, ensure_ascii=False), encoding='utf-8')
+    with TestClient(app) as client:
+        response = client.put('/api/internal-bridge/inspection/point-rules', json=rules)
+        assert response.status_code == 200 and response.json()['point_overrides'] == rules
+        assert json.loads((tmp_path/'state'/'inspection_remote_point_rules.json').read_text(encoding='utf-8')) == rules
+        stale = client.get('/api/internal-bridge/inspection/snapshot', params={'source_date': current[:10], 'bucket_key': current})
+        assert stale.json()['datasets'] == []
+        latest = client.get('/api/internal-bridge/inspection/latest-points', params={'building': 'D楼'})
+        assert latest.json()['datasets'][0]['point_ids'] == ['7_0_2']
+        assert client.get('/api/internal-bridge/inspection/latest-points', params={'building': 'E楼'}).json()['datasets'] == []
+        assert client.get('/api/internal-bridge/inspection/latest-points', params={'building': 'A楼'}).status_code == 400
+        assert cache._register_existing_latest_file_if_present(source_family=family, building='D楼', bucket_key=current) is None
+        rejected = client.put('/api/internal-bridge/inspection/point-rules', json={'A楼': rules['D楼']})
+        assert rejected.status_code == 400 and cache._inspection_point_rules() == rules
+        rejected = client.put('/api/internal-bridge/inspection/point-rules', json={
+            'D楼': {family: {'add': [], 'remove': ['7_0_2'], 'baseline': ['7_0_2']}},
+        })
+        assert rejected.status_code == 400 and cache._inspection_point_rules() == rules
+        url = '/api/internal-bridge/inspection/point-rules'
+        assert client.put(url, json={'point_overrides': rules, 'revision': 20}).json()['revision'] == 20
+        assert client.put(url, json={'point_overrides': rules, 'revision': 20}).status_code == 200
+        assert client.put(url, json={'point_overrides': {}, 'revision': 19}).status_code == 409
+        assert client.put(url, json={'point_overrides': {}, 'revision': 20}).status_code == 409
+        assert client.put(url, json={}).status_code == 409
+        assert client.put(url, json={'point_overrides': {}, 'revision': None}).status_code == 400
+        assert cache._inspection_point_rule_snapshot() == (rules, 20)
 
 
 def test_failed_download_isolated_and_retries_only_failed_family(family, cache, monkeypatch):
@@ -322,6 +398,25 @@ def test_report_failure_does_not_rebuild_browser_or_hold_lock(family, monkeypatc
     asyncio.run(run())
 
 
+def test_inspection_uses_ready_browser_without_login_probe(monkeypatch):
+    async def run():
+        pool = InternalDownloadBrowserPool({})
+        pool._locks["D楼"] = asyncio.Lock()
+        pool._update_slot("D楼", login_state="ready")
+        page = object()
+        collect = AsyncMock(return_value={"rows": [["位置", "设备", "测点", "1"]]})
+        monkeypatch.setattr(pool, "_ensure_page", AsyncMock(return_value=page))
+        monkeypatch.setattr(pool, "_mark_slot_recycle_pending_if_needed", Mock())
+        monkeypatch.setattr(pool, "_recycle_slot_if_needed", AsyncMock())
+        monkeypatch.setattr(pool, "_fail_if_login_not_ready", AsyncMock())
+        login = AsyncMock(side_effect=AssertionError("ready inspection page must not log in again"))
+        monkeypatch.setattr(pool, "_ensure_logged_in", login)
+        assert await pool._run_building_job("D楼", collect, owner="inspection_data_source") == collect.return_value
+        collect.assert_awaited_once_with(page)
+        login.assert_not_awaited()
+    asyncio.run(run())
+
+
 def test_cancelled_inspection_never_downloads(family, cache, monkeypatch):
     download = Mock(side_effect=AssertionError("cancelled"))
     monkeypatch.setattr(HandoverDownloadService, "run_inspection_data_only", download)
@@ -350,7 +445,7 @@ def test_light_summary_and_details_only_show_de(family, cache):
 
 
 def test_http_index_date_query_only_exposes_existing_ready_file(family, cache, monkeypatch):
-    path = workbook(cache.shared_root / artifact(family=family).relative_path)
+    path = write_snapshot(cache, family)
     inspection_fill(cache, family)(building="D楼", bucket_key=BUCKET, emit_log=lambda _: None)
     runner = InternalBridgeHttpTaskRunner(runtime_service=SimpleNamespace(shared_bridge_root=str(cache.shared_root)))
     monkeypatch.setattr(runner, "_get_store", lambda: cache.store)
@@ -369,8 +464,8 @@ def test_http_index_date_query_only_exposes_existing_ready_file(family, cache, m
 
 
 def test_date_index_recovery_keeps_actual_newest_hour(family, cache, monkeypatch):
-    workbook(cache.shared_root / artifact(family=family, bucket="2026-10-27 08").relative_path)
-    workbook(cache.shared_root / artifact(family=family, bucket="2026-10-27 11").relative_path)
+    write_snapshot(cache, family, bucket="2026-10-27 08")
+    write_snapshot(cache, family, bucket="2026-10-27 10")
     runner = InternalBridgeHttpTaskRunner(runtime_service=SimpleNamespace(
         shared_bridge_root=str(cache.shared_root), _source_cache_service=cache,
     ))
@@ -381,7 +476,7 @@ def test_date_index_recovery_keeps_actual_newest_hour(family, cache, monkeypatch
     )
     assert len(rows) == 1
     assert rows[0]["bucket_kind"] == "latest"
-    assert rows[0]["bucket_key"] == "2026-10-27 11"
+    assert rows[0]["bucket_key"] == "2026-10-27 10"
     assert rows[0]["duty_date"] == "2026-10-27"
     assert cache._candidate_existing_latest_paths(
         source_family=family, building="D楼", bucket_key="2026-10-27",
@@ -389,11 +484,8 @@ def test_date_index_recovery_keeps_actual_newest_hour(family, cache, monkeypatch
 
 
 def test_failed_atomic_save_never_publishes_ready(family, cache, tmp_path, monkeypatch):
-    source = workbook(tmp_path / "incoming.xlsx")
     cache.download_browser_pool = object()
-    monkeypatch.setattr(HandoverDownloadService, "run_inspection_data_only", lambda *args, **kwargs: {
-        "success_files": [{"file_path": str(source)}],
-    })
+    monkeypatch.setattr(HandoverDownloadService, "run_inspection_data_only", lambda *args, **kwargs: dataset(family))
     cache_file = cache._cache_file_compat
     monkeypatch.setattr(cache, "_cache_file_compat", Mock(side_effect=OSError("disk full")))
     result = cache._refresh_family_bucket(
@@ -402,7 +494,6 @@ def test_failed_atomic_save_never_publishes_ready(family, cache, tmp_path, monke
     )
     assert result["failed_buildings"] == ["D楼"]
     assert cache.store.list_source_cache_entries(source_family=family, status="ready") == []
-    assert source.is_file()
     failed = cache.store.list_source_cache_entries(source_family=family)
     assert len(failed) == 1
     monkeypatch.setattr(cache, "_cache_file_compat", cache_file)
@@ -447,12 +538,22 @@ def test_scheduler_startup_and_regular_hour_include_inspection(family, cache, mo
     pipeline = Mock(return_value={})
     monkeypatch.setattr(cache, "_run_latest_source_steps_by_building", pipeline)
     monkeypatch.setattr(cache, "_ensure_dirs", Mock())
-    for name in ["_run_monthly_report_file_if_due", "_run_top5_monthly_report_file_if_due", "_run_alarm_bucket_if_due", "_run_chiller_mode_switch_if_due", "_run_temperature_humidity_file_if_due", "_run_daily_source_files_if_due"]:
+    for name in ["_run_monthly_report_file_if_due", "_run_top5_monthly_report_file_if_due", "_run_alarm_bucket_if_due", "_run_chiller_mode_switch_if_due", "_run_temperature_humidity_file_if_due", "_run_daily_source_files_if_due", "_run_energy_report_files_if_due"]:
         monkeypatch.setattr(cache, name, Mock())
     monkeypatch.setattr(cache._stop_event, "wait", lambda _: cache._stop_event.set())
     cache._loop()
+    for thread in list(cache._scheduled_refresh_threads.values()):
+        thread.join(timeout=5)
     pipeline.assert_called_once()
     assert family in [s[0] for s in pipeline.call_args.kwargs["steps"]]
+
+
+def test_inspection_schedule_reuses_even_hour_bucket(family, cache):
+    assert inspection_hour_bucket(datetime(2026, 10, 27, 9, 59)) == BUCKET
+    assert inspection_hour_bucket(datetime(2026, 10, 27, 10)) == "2026-10-27 10"
+    steps = cache._current_hour_source_steps(bucket_key="2026-10-27 09", branch_bucket_key="")
+    assert {key for name, key, _ in steps if name == family} == {BUCKET}
+    assert {key for name, key, _ in steps if name == FAMILY_HANDOVER_LOG} == {"2026-10-27 09"}
 
 
 def test_exact_report_names_and_no_fuzzy_monthly_regression(family):
@@ -470,26 +571,19 @@ def test_exact_report_names_and_no_fuzzy_monthly_regression(family):
     assert len(download_gateway.DownloadGateway._report_template_selectors("交接班日志")) == 7
 
 
-def test_actual_query_window_uses_now_not_hour_bucket(family, tmp_path, monkeypatch):
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 10, 30, 10, 7, 23)
+def test_first_api_sample_does_not_use_later_values():
+    from handover_log_module.repository.inspection_report_api import _first_sample
 
-    monkeypatch.setattr(handover_download_service, "datetime", Clock)
-    batch = Mock(return_value=[])
-    monkeypatch.setattr(handover_download_service, "download_handover_xlsx_batch", batch)
-    monkeypatch.setattr(handover_download_service, "set_runtime_config", Mock())
-    service = HandoverDownloadService({"inspection_data": {"enabled": True}}, business_root_override=tmp_path)
-    service.run_inspection_data_only(building="D楼", source_family=family, emit_log=lambda _: None)
-    args = batch.call_args.kwargs
-    assert args["start_time"] == "2026-10-30 09:47:23"
-    assert args["end_time"] == "2026-10-30 10:07:23"
-    assert args["scale_label"] == "5分钟"
-    assert args["template_name"] == INSPECTION_REPORT_TEMPLATES[family]
-    assert args["sheet_name"] == ""
-    runtime = handover_download_service.set_runtime_config.call_args.args[0]
-    assert runtime["handover_log"]["download"]["skip_query_conditions"] is False
+    grid = [
+        ["", "", "", "", "2026-10-30 09:50:00", "2026-10-30 09:55:00"],
+        ["", "位置", "设备", "启停状态", "0", "1"],
+        ["", "位置", "设备", "温度", "", "99"],
+    ]
+    stamp, rows = _first_sample(grid, datetime(2026, 10, 30, 9, 47), datetime(2026, 10, 30, 10, 7))
+    assert stamp == "2026-10-30 09:50:00"
+    assert rows == [["位置", "设备", "启停状态", "0"], ["位置", "设备", "温度", ""]]
+    with pytest.raises(ValueError, match="查询窗口"):
+        _first_sample(grid, datetime(2026, 10, 30, 10), datetime(2026, 10, 30, 10, 20))
 
 
 @pytest.mark.parametrize("feature", [{}, {"enabled": False}, {"enabled": "false"}])
@@ -539,7 +633,7 @@ def test_legacy_combined_family_is_not_a_new_source(family, cache, monkeypatch):
 
 def test_one_ready_file_never_covers_other_family(family, cache, monkeypatch):
     other = next(item for item in INSPECTION_REPORT_TEMPLATES if item != family)
-    workbook(cache.shared_root / artifact(family=family).relative_path)
+    write_snapshot(cache, family)
     first = inspection_fill(cache, family)(building="D楼", bucket_key=BUCKET, emit_log=lambda _: None)
     query = dict(source_family=other, building="D楼", bucket_kind="latest", bucket_key=BUCKET)
     assert cache._get_ready_entry(**query) is None
@@ -554,7 +648,7 @@ def test_one_ready_file_never_covers_other_family(family, cache, monkeypatch):
     assert runner._recover_source_index_from_existing_files_if_needed(
         [], source_family=other, building="D楼", bucket_kind="latest", duty_date=BUCKET[:10],
     ) == []
-    workbook(cache.shared_root / artifact(family=other).relative_path)
+    write_snapshot(cache, other)
     second = inspection_fill(cache, other)(building="D楼", bucket_key=BUCKET, emit_log=lambda _: None)
     assert first["relative_path"] != second["relative_path"]
     entry_ids = set()
@@ -565,26 +659,19 @@ def test_one_ready_file_never_covers_other_family(family, cache, monkeypatch):
     assert len(entry_ids) == 2
 
 
-def test_hourly_families_run_serially_per_building(cache, tmp_path, monkeypatch):
+def test_hourly_families_run_concurrently_per_building(cache, tmp_path, monkeypatch):
     cache.download_browser_pool = object()
-    sources = {family: workbook(tmp_path / f"{family}.xlsx") for family in INSPECTION_REPORT_TEMPLATES}
-    active = set()
+    barrier = threading.Barrier(4, timeout=5)
     lock = threading.Lock()
     seen = {building: [] for building in ["D楼", "E楼"]}
     roots = {}
 
     def download(service, *, building, source_family, emit_log):
         with lock:
-            assert building not in active
-            active.add(building)
             seen[building].append(source_family)
             roots[(building, source_family)] = service._business_root_override
-        try:
-            time.sleep(0.02)
-            return {"success_files": [{"file_path": str(sources[source_family])}]}
-        finally:
-            with lock:
-                active.remove(building)
+        barrier.wait()
+        return dataset(source_family, building)
 
     monkeypatch.setattr(HandoverDownloadService, "run_inspection_data_only", download)
     steps = [step for step in cache._current_hour_source_steps(bucket_key=BUCKET, branch_bucket_key="") if step[0] in INSPECTION_REPORT_TEMPLATES]
@@ -592,7 +679,7 @@ def test_hourly_families_run_serially_per_building(cache, tmp_path, monkeypatch)
     assert result["failed_units"] == []
     assert len(result["completed_units"]) == 4
     assert len(set(roots.values())) == 4
-    assert all(families == list(INSPECTION_REPORT_TEMPLATES) for families in seen.values())
+    assert all(set(families) == set(INSPECTION_REPORT_TEMPLATES) for families in seen.values())
     cache._run_latest_source_steps_by_building(steps=steps, force_retry_failed=False)
     assert all(len(families) == 2 for families in seen.values())
 
@@ -601,7 +688,6 @@ def test_failure_does_not_block_other_and_retry_missing_only(family, cache, tmp_
     other = next(item for item in INSPECTION_REPORT_TEMPLATES if item != family)
     cache.download_browser_pool = object()
     cache._current_hour_bucket = BUCKET
-    source = workbook(tmp_path / "incoming.xlsx")
     calls = []
     failing = True
 
@@ -609,7 +695,7 @@ def test_failure_does_not_block_other_and_retry_missing_only(family, cache, tmp_
         calls.append(source_family)
         if source_family == family and failing:
             raise RuntimeError("report unavailable")
-        return {"success_files": [{"file_path": str(source)}]}
+        return dataset(source_family, building)
 
     monkeypatch.setattr(HandoverDownloadService, "run_inspection_data_only", download)
     steps = [(item, BUCKET, inspection_fill(cache, item)) for item in [family, other]]
@@ -674,8 +760,7 @@ def test_stale_inspection_refresh_recovers_without_restarting_active_job(family,
     )
     if active:
         cache._active_latest_downloads[(family, "D楼", "latest", BUCKET)] = old
-    source = workbook(tmp_path / "incoming.xlsx")
-    download = Mock(return_value={"success_files": [{"file_path": str(source)}]})
+    download = Mock(return_value=dataset(family))
     monkeypatch.setattr(HandoverDownloadService, "run_inspection_data_only", download)
     cache.download_browser_pool = object()
     cache._refresh_family_bucket(

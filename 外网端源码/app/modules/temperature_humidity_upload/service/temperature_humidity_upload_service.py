@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import time
 from collections import OrderedDict
@@ -83,7 +84,10 @@ def _number(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, (int, float)):
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError:
+            return None
         return number if math.isfinite(number) else None
     text = str(value).strip().replace(",", "")
     for suffix in ("℃", "%", "°C", "C"):
@@ -104,6 +108,19 @@ def _running_status(value: Any) -> str:
     if number == 0:
         return "关闭"
     return ""
+
+
+def _json_object_with_unique_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"JSON 存在重复字段: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"JSON 包含无效数字: {value}")
 
 
 class TemperatureHumidityUploadService:
@@ -227,7 +244,7 @@ class TemperatureHumidityUploadService:
             if not file_path:
                 return None
             candidate = Path(file_path)
-        if candidate.suffix.lower() not in {".xlsx", ".xlsm"}:
+        if candidate.suffix.lower() not in {".xlsx", ".xlsm", ".json"}:
             return None
         try:
             if not candidate.is_file() or candidate.stat().st_size <= 0:
@@ -305,6 +322,8 @@ class TemperatureHumidityUploadService:
                 if entry.get("file_verified") is False:
                     continue
                 path = self._entry_file(entry)
+                if path is not None and path.suffix.lower() == ".json" and source_family != SOURCE_FAMILY:
+                    continue
                 if path is not None:
                     candidates.append((self._entry_sort_key(entry), path))
             if candidates:
@@ -381,24 +400,85 @@ class TemperatureHumidityUploadService:
         return selected
 
     @staticmethod
-    def parse_workbook(file_path: Path | str, *, building: str) -> Dict[str, Any]:
-        source_path = Path(file_path)
-        workbook = load_workbook(source_path, data_only=True, read_only=True)
+    def _json_sheet(source_path: Path, *, building: str, source_date: str = "") -> Tuple[str, List[List[Any]]]:
+        if source_path.stat().st_size > 128 * 1024 * 1024:
+            raise ValueError(f"{building} 空调温湿度源文件 JSON 超过大小限制")
         try:
-            if not workbook.sheetnames:
-                raise ValueError(f"{building} 空调温湿度源文件没有工作表")
-            sheet = workbook[workbook.sheetnames[0]]
-            reset_dimensions = getattr(sheet, "reset_dimensions", None)
-            if callable(reset_dimensions):
-                reset_dimensions()
+            with source_path.open("r", encoding="utf-8-sig") as source:
+                payload = json.load(
+                    source,
+                    object_pairs_hook=_json_object_with_unique_keys,
+                    parse_constant=_reject_json_constant,
+                )
+        except ValueError as exc:
+            raise ValueError(f"{building} 空调温湿度源文件 JSON 格式无效: {exc}") from exc
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"{building} 空调温湿度源文件 JSON 顶层必须为对象")
+        if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+            raise ValueError(f"{building} 空调温湿度源文件 JSON 版本无效")
+        if payload.get("source_family") != SOURCE_FAMILY:
+            raise ValueError(f"{building} 空调温湿度源文件 JSON 来源不匹配")
+        if not isinstance(building, str) or not building.strip() or payload.get("building") != building:
+            raise ValueError(f"{building} 空调温湿度源文件 JSON 楼栋不匹配")
+        if source_date and payload.get("business_date") != source_date:
+            raise ValueError(f"{building} 空调温湿度源文件 JSON 业务日期不匹配")
+        if source_date:
+            try:
+                query_end = datetime.strptime(payload["query_end"], "%Y-%m-%d %H:%M:%S")
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(f"{building} 空调温湿度源文件 JSON 查询结束时间无效") from None
+            if query_end.strftime("%Y-%m-%d") != source_date:
+                raise ValueError(f"{building} 空调温湿度源文件 JSON 查询时间与业务日期不匹配")
+
+        sheets = payload.get("sheets")
+        if not isinstance(sheets, list) or not sheets:
+            raise ValueError(f"{building} 空调温湿度源文件 JSON 工作表列表无效")
+        for sheet_index, sheet in enumerate(sheets, start=1):
+            if (
+                not isinstance(sheet, dict)
+                or not isinstance(sheet.get("name"), str)
+                or not sheet["name"].strip()
+                or not isinstance(sheet.get("rows"), list)
+            ):
+                raise ValueError(f"{building} 空调温湿度源文件 JSON 第{sheet_index}个工作表无效")
+            for row_index, row in enumerate(sheet["rows"], start=1):
+                if not isinstance(row, list) or any(
+                    isinstance(cell, (dict, list))
+                    or (isinstance(cell, float) and not math.isfinite(cell))
+                    for cell in row
+                ):
+                    raise ValueError(
+                        f"{building} 空调温湿度源文件 JSON 第{sheet_index}个工作表"
+                        f"第{row_index}行不是有效的一维数组"
+                    )
+        return sheets[0]["name"], sheets[0]["rows"]
+
+    @staticmethod
+    def parse_workbook(file_path: Path | str, *, building: str, source_date: str = "") -> Dict[str, Any]:
+        source_path = Path(file_path)
+        workbook = None
+        try:
+            if source_path.suffix.lower() == ".json":
+                sheet_name, source_rows = TemperatureHumidityUploadService._json_sheet(
+                    source_path, building=building, source_date=source_date
+                )
+                sheet_rows = (row[2:5] for row in source_rows)
+            else:
+                workbook = load_workbook(source_path, data_only=True, read_only=True)
+                if not workbook.sheetnames:
+                    raise ValueError(f"{building} 空调温湿度源文件没有工作表")
+                sheet = workbook[workbook.sheetnames[0]]
+                reset_dimensions = getattr(sheet, "reset_dimensions", None)
+                if callable(reset_dimensions):
+                    reset_dimensions()
+                sheet_name = sheet.title
+                sheet_rows = sheet.iter_rows(min_col=3, max_col=5, values_only=True)
 
             temperature_rows: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
             status_rows: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
             current_temperature_position = ""
-            for row_index, values in enumerate(
-                sheet.iter_rows(min_col=3, max_col=5, values_only=True),
-                start=1,
-            ):
+            for row_index, values in enumerate(sheet_rows, start=1):
                 column_c = _text(values[0] if len(values) > 0 else None)
                 column_d = _text(values[1] if len(values) > 1 else None)
                 column_e = values[2] if len(values) > 2 else None
@@ -459,14 +539,15 @@ class TemperatureHumidityUploadService:
             return {
                 "building": building,
                 "file_path": str(source_path),
-                "sheet_name": sheet.title,
+                "sheet_name": sheet_name,
                 "rows": rows,
                 "temperature_location_count": len(temperature_rows),
                 "status_location_count": len(status_rows),
                 "unparsed_status_count": 0,
             }
         finally:
-            workbook.close()
+            if workbook is not None:
+                workbook.close()
 
     @staticmethod
     def _validate_target_fields(
@@ -620,7 +701,7 @@ class TemperatureHumidityUploadService:
         parsed_results: List[Dict[str, Any]] = []
         all_rows: List[Dict[str, Any]] = []
         for building in buildings:
-            parsed = self.parse_workbook(source_files[building], building=building)
+            parsed = self.parse_workbook(source_files[building], building=building, source_date=date_text)
             parsed_results.append(parsed)
             all_rows.extend(parsed["rows"])
             log(

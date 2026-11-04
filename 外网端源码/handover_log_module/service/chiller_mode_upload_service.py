@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import math
 import re
 import time
 from datetime import datetime
@@ -488,6 +490,57 @@ class ChillerModeUploadService:
         normalized = re.sub(r"\s+", "", str(point or "").strip())
         return bool(normalized and "冷机" in normalized and "模式" in normalized)
 
+    @classmethod
+    def _json_source_rows(cls, path: Path, *, building: str) -> List[List[Any]]:
+        def unique_object(pairs: List[tuple[str, Any]]) -> Dict[str, Any]:
+            result: Dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"JSON 存在重复字段: {key}")
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"JSON 存在无效数字: {value}")
+
+        try:
+            with path.open("r", encoding="utf-8-sig") as source:
+                payload = json.load(source, object_pairs_hook=unique_object, parse_constant=reject_constant)
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError(f"制冷模式源文件 JSON 格式无效: {exc}") from exc
+
+        if not isinstance(payload, dict):
+            raise ValueError("制冷模式源文件 JSON 顶层必须为对象")
+        if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+            raise ValueError("制冷模式源文件 JSON 版本无效")
+        if payload.get("source_family") != cls.SOURCE_FAMILY:
+            raise ValueError("制冷模式源文件 JSON 来源不匹配")
+        if not isinstance(building, str) or not building.strip() or payload.get("building") != building:
+            raise ValueError("制冷模式源文件 JSON 楼栋不匹配")
+
+        sheets = payload.get("sheets")
+        if not isinstance(sheets, list) or not sheets:
+            raise ValueError("制冷模式源文件 JSON 工作表列表无效")
+        for sheet_index, sheet in enumerate(sheets, start=1):
+            if (
+                not isinstance(sheet, dict)
+                or not isinstance(sheet.get("name"), str)
+                or not sheet["name"].strip()
+                or not isinstance(sheet.get("rows"), list)
+            ):
+                raise ValueError(f"制冷模式源文件 JSON 第{sheet_index}个工作表无效")
+            for row_index, row in enumerate(sheet["rows"], start=1):
+                if not isinstance(row, list) or any(
+                    isinstance(cell, (dict, list))
+                    or (isinstance(cell, float) and not math.isfinite(cell))
+                    for cell in row
+                ):
+                    raise ValueError(
+                        f"制冷模式源文件 JSON 第{sheet_index}个工作表"
+                        f"第{row_index}行不是有效的一维数组"
+                    )
+        return sheets[0]["rows"]
+
     def _parse_source_file(
         self,
         *,
@@ -502,21 +555,26 @@ class ChillerModeUploadService:
 
         fields = cfg.get("fields", {}) if isinstance(cfg.get("fields", {}), dict) else {}
         mode_map = cfg.get("mode_value_map", {}) if isinstance(cfg.get("mode_value_map", {}), dict) else {}
-        workbook = load_workbook(path, data_only=True, read_only=False)
+        workbook = None
         try:
-            worksheet = workbook.worksheets[0]
+            if path.suffix.lower() == ".json":
+                source_rows = (row[2:5] for row in self._json_source_rows(path, building=building))
+            else:
+                workbook = load_workbook(path, data_only=True, read_only=False)
+                worksheet = workbook.worksheets[0]
+                source_rows = worksheet.iter_rows(min_col=3, max_col=5, values_only=True)
             rows: List[Dict[str, Any]] = []
             skipped_rows = 0
             controller_last = ""
             mode_count = 0
 
-            for row_index in range(1, worksheet.max_row + 1):
-                controller_raw = self._text(worksheet.cell(row=row_index, column=3).value)
+            for values in source_rows:
+                controller_raw = self._text(values[0] if len(values) > 0 else None)
                 if controller_raw:
                     controller_last = controller_raw
                 controller = controller_raw or controller_last
-                point = self._text(worksheet.cell(row=row_index, column=4).value)
-                value_raw = worksheet.cell(row=row_index, column=5).value
+                point = self._text(values[1] if len(values) > 1 else None)
+                value_raw = values[2] if len(values) > 2 else None
                 if not controller and not point and value_raw in (None, ""):
                     continue
                 if self._is_header_row(controller, point, value_raw):
@@ -554,10 +612,11 @@ class ChillerModeUploadService:
                 "skipped_rows": skipped_rows,
             }
         finally:
-            try:
-                workbook.close()
-            except Exception:  # noqa: BLE001
-                pass
+            if workbook is not None:
+                try:
+                    workbook.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def continue_from_source_units(
         self,

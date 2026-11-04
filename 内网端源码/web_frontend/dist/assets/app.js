@@ -7,6 +7,8 @@ const SOURCE_FAMILIES = [
   ["electrical_inspection_family", "电气巡检源文件"],
   ["hvac_inspection_family", "暖通巡检源文件"],
   ["monthly_report_family", "全景平台月报源文件"],
+  ["pue_confirmation_family", "PUE确认表源文件"],
+  ["utility_feeder_deviation_family", "市电及馈线偏差（无市电进线）源文件"],
   ["top5_monthly_report_family", "TOP5月报源文件"],
   ["branch_power_family", "支路功率源文件"],
   ["branch_current_family", "支路电流源文件"],
@@ -850,7 +852,7 @@ function renderConfig() {
         </div>
         <label class="checkbox-cell">
           <input name="inspectionEnabled" type="checkbox" ${inspectionEnabled ? "checked" : ""} />
-          <span>D/E楼电气、暖通巡检采集（每小时）</span>
+          <span>D/E楼电气、暖通巡检采集（每两小时）</span>
         </label>
         <h3>五楼内网页面</h3>
         <div class="site-table">

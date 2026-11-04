@@ -80,6 +80,7 @@ def test_event_cache_record_not_found_is_carried_once_then_removed(tmp_path):
 def test_day_metric_create_failure_keeps_old_records():
     service = DayMetricBitableExportService({})
     cfg = service._defaults()
+    service._resolve_target = lambda _cfg: {"table_id": "test_table"}  # type: ignore[method-assign]
 
     class Client:
         def __init__(self):
@@ -132,6 +133,7 @@ def test_day_metric_create_failure_keeps_old_records():
 def test_day_metric_create_then_delete_old_records():
     service = DayMetricBitableExportService({})
     cfg = service._defaults()
+    service._resolve_target = lambda _cfg: {"table_id": "test_table"}  # type: ignore[method-assign]
 
     class Client:
         def __init__(self):
@@ -214,7 +216,7 @@ def test_http_source_index_uses_short_cache_and_coalesces_requests():
                             "building": query["building"],
                             "bucket_kind": "daily",
                             "bucket_key": query["bucket_or_date"],
-                            "relative_path": f"支路功率源文件/202606/20260609--整日/{query['building']}.xlsx",
+                            "relative_path": f"支路功率源文件/202606/20260609--整日/{query['building']}.json",
                             "status": "ready",
                             "file_verified": True,
                         }
@@ -282,7 +284,7 @@ def test_http_source_index_rejects_unc_ready_entry_without_file_verified():
                             "building": "A楼",
                             "bucket_kind": "daily",
                             "bucket_key": "2026-06-09",
-                            "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.xlsx",
+                            "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.json",
                             "status": "ready",
                         }
                     ],
@@ -326,7 +328,7 @@ def test_http_source_index_accepts_unc_ready_entry_with_internal_file_verified()
                             "building": "A楼",
                             "bucket_kind": "daily",
                             "bucket_key": "2026-06-09",
-                            "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.xlsx",
+                            "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.json",
                             "status": "ready",
                             "file_verified": True,
                         }
@@ -344,6 +346,17 @@ def test_http_source_index_accepts_unc_ready_entry_with_internal_file_verified()
 
     assert rows and len(rows) == 1
     assert rows[0]["file_verified"] is True
+
+
+def test_http_source_index_does_not_reuse_old_excel_mirror_after_json_migration():
+    service = object.__new__(SharedBridgeRuntimeService)
+    old = {"source_family": "branch_power_family", "relative_path": "支路功率源文件/A楼.xlsx", "file_verified": True}
+    current = {"source_family": "branch_power_family", "relative_path": "支路功率源文件/A楼.json", "file_verified": True}
+    retained = {"source_family": "top5_monthly_report_family", "relative_path": "月报源文件/A楼.xlsx", "file_verified": True}
+    assert not service._ensure_http_source_index_entry_file_verified(old)
+    assert old["file_verification_skipped_reason"] == "source_format_changed"
+    assert service._ensure_http_source_index_entry_file_verified(current)
+    assert service._ensure_http_source_index_entry_file_verified(retained)
 
 
 def test_branch_scheduler_file_ready_requires_verified_unc_and_existing_local_file(tmp_path):
@@ -393,7 +406,7 @@ def test_http_source_index_queue_busy_uses_mirror_without_global_cooldown():
                     "building": "A楼",
                     "bucket_kind": "daily",
                     "bucket_key": "2026-06-09",
-                    "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.xlsx",
+                    "relative_path": r"支路功率源文件\202606\20260609--整日\A楼.json",
                     "status": "ready",
                     "file_verified": True,
                     "mirrored_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -467,7 +480,7 @@ def test_http_source_index_rejects_stale_verified_mirror():
                 "building": "A楼",
                 "bucket_kind": "daily",
                 "bucket_key": "2026-06-09",
-                "relative_path": "stale.xlsx",
+                "relative_path": "stale.json",
                 "status": "ready",
                 "file_verified": True,
                 "mirrored_at": "2026-01-01 00:00:00",
@@ -502,8 +515,8 @@ def test_source_index_mirror_keeps_day_and_night_entries_separate(tmp_path):
             "duty_shift": "day",
             "building": "A楼",
             "status": "ready",
-            "relative_path": "day.xlsx",
-            "file_path": r"\\server\share\day.xlsx",
+            "relative_path": "day.json",
+            "file_path": r"\\server\share\day.json",
             "file_verified": True,
         },
         {
@@ -513,8 +526,8 @@ def test_source_index_mirror_keeps_day_and_night_entries_separate(tmp_path):
             "duty_shift": "night",
             "building": "A楼",
             "status": "ready",
-            "relative_path": "night.xlsx",
-            "file_path": r"\\server\share\night.xlsx",
+            "relative_path": "night.json",
+            "file_path": r"\\server\share\night.json",
             "file_verified": True,
         },
     ])
@@ -548,5 +561,5 @@ def test_source_index_mirror_keeps_day_and_night_entries_separate(tmp_path):
         limit_per_building=20,
     )
 
-    assert [row["relative_path"] for row in day_rows] == ["day.xlsx"]
-    assert [row["relative_path"] for row in night_rows] == ["night.xlsx"]
+    assert [row["relative_path"] for row in day_rows] == ["day.json"]
+    assert [row["relative_path"] for row in night_rows] == ["night.json"]

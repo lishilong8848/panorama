@@ -3201,6 +3201,7 @@ class SharedBridgeRuntimeService:
         source_family: str,
         building: str,
         target_bucket_key: str = "",
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         if self._source_cache_service is None:
             return {"accepted": False, "running": False, "reason": "disabled"}
@@ -3208,6 +3209,7 @@ class SharedBridgeRuntimeService:
             source_family=source_family,
             building=building,
             target_bucket_key=target_bucket_key,
+            **({"force_refresh": True} if force_refresh else {}),
         )
 
     def delete_manual_alarm_source_cache_files(self) -> Dict[str, Any]:
@@ -3572,6 +3574,11 @@ class SharedBridgeRuntimeService:
         return False
 
     def _validate_day_metric_source_file(self, *, path: Path, duty_date: str = "", building: str = "") -> None:
+        if path.suffix.lower() == ".json":
+            from app.shared.utils.report_source_json import validate_report_source_json
+
+            validate_report_source_json(path, expected_family="handover_log_family", expected_building=building)
+            return
         if self._source_cache_service is not None:
             validator = getattr(self._source_cache_service, "_validate_handover_source_file", None)
             if callable(validator):
@@ -4025,6 +4032,15 @@ class SharedBridgeRuntimeService:
             / "manifest.json"
         )
 
+    @staticmethod
+    def _validate_handover_artifact(path: Path, *, building: str, family: str) -> None:
+        if path.suffix.lower() == ".json":
+            from app.shared.utils.report_source_json import validate_report_source_json
+
+            validate_report_source_json(path, expected_family=family, expected_building=building)
+        else:
+            validate_excel_workbook_file(path)
+
     def _copy_handover_source_artifact(self, *, task_id: str, building: str, source_file: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
         if not self._store:
             raise RuntimeError("共享桥接存储尚未初始化")
@@ -4036,7 +4052,7 @@ class SharedBridgeRuntimeService:
         atomic_copy_file(
             source_path,
             target_path,
-            validator=validate_excel_workbook_file,
+            validator=lambda path: self._validate_handover_artifact(path, building=building, family="handover_log_family"),
             temp_suffix=".downloading",
             allow_overwrite_fallback=False,
         )
@@ -4074,7 +4090,7 @@ class SharedBridgeRuntimeService:
         atomic_copy_file(
             source_path,
             target_path,
-            validator=validate_excel_workbook_file,
+            validator=lambda path: self._validate_handover_artifact(path, building=building, family="handover_capacity_report_family"),
             temp_suffix=".downloading",
             allow_overwrite_fallback=False,
         )
@@ -4172,7 +4188,7 @@ class SharedBridgeRuntimeService:
         atomic_copy_file(
             source_path,
             target_path,
-            validator=validate_excel_workbook_file,
+            validator=lambda path: self._validate_handover_artifact(path, building=building, family="handover_log_family"),
             temp_suffix=".downloading",
             allow_overwrite_fallback=False,
         )

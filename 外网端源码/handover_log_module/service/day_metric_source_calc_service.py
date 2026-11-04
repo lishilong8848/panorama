@@ -180,6 +180,8 @@ class DayMetricSourceCalcService:
             data_file=data_file,
             parsing_cfg=_dict(effective_config.get("parsing")),
             normalize_cfg=_dict(effective_config.get("normalize")),
+            expected_building=building,
+            expected_source_family="handover_log_family",
         )
         if not self._has_effective_e_value(rows):
             raise ValueError(

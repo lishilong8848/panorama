@@ -113,6 +113,34 @@ export async function getConfigApi() {
   return apiJsonWithTimeout(`/api/config?_t=${Date.now()}`, {}, 8000);
 }
 
+export function getInspectionPointSettingsApi() {
+  return apiJsonWithTimeout("/api/scheduler/inspection-data-upload/points", {}, 8000);
+}
+
+export function putInspectionPointSettingsApi(payload) {
+  return apiJsonWithTimeout("/api/scheduler/inspection-data-upload/points", {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  }, 45000);
+}
+
+export function getBuildingInspectionPointSettingsApi(building, options = {}) {
+  return apiJsonWithTimeout(`/api/scheduler/inspection-data-upload/points/${encodeURIComponent(building)}`, { cache: "no-store", ...options }, 8000);
+}
+
+export function getBuildingInspectionLatestPointsApi(building, options = {}) {
+  return apiJsonWithTimeout(`/api/scheduler/inspection-data-upload/points/${encodeURIComponent(building)}/latest`, { cache: "no-store", ...options }, 20000);
+}
+
+export function getHandoverInspectionAccessApi(building) {
+  return apiJsonWithTimeout(`/api/handover/review/${encodeURIComponent(building)}/inspection-access`, { cache: "no-store" }, 5000);
+}
+
+export function putBuildingInspectionPointSettingsApi(building, payload) {
+  return apiJsonWithTimeout(`/api/scheduler/inspection-data-upload/points/${encodeURIComponent(building)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  }, 45000);
+}
+
 export async function putConfigApi(v3Config) {
   return apiJson("/api/config", {
     method: "PUT",

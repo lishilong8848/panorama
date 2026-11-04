@@ -1,16 +1,32 @@
 ﻿from __future__ import annotations
 
 import copy
+import concurrent.futures
+import json
+import time
+import uuid
+from calendar import monthrange
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES
+from app.config.energy_report_download_config import (
+    FAMILY_PUE_CONFIRMATION,
+    FAMILY_UTILITY_FEEDER_DEVIATION,
+    FEEDER_DEVIATION_TEMPLATES,
+    PUE_CONFIRMATION_TEMPLATES,
+    energy_report_period,
+)
+from app.modules.shared_bridge.service.report_api_query import query_report_json
+from app.shared.utils.atomic_file import atomic_write_text
+from app.shared.utils.report_source_json import validate_report_source_json
 
 from handover_log_module.repository.download_gateway import (
     download_handover_xlsx_batch,
     set_runtime_config,
 )
+from handover_log_module.repository.inspection_report_api import query_inspection_report
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
 
 
@@ -56,20 +72,47 @@ class HandoverDownloadService:
             raise ValueError("巡检源文件采集未启用")
         if building not in {"D楼", "E楼"}:
             raise ValueError("巡检数据源文件仅支持D楼、E楼")
+        site = next((item for item in self._download_sites()
+                     if str(item.get("building", "")).strip() == building and bool(item.get("enabled", True))), None)
+        if site is None:
+            raise ValueError("楼栋站点未配置或未启用")
+        result = query_inspection_report(site, building=building, source_family=source_family, config=self.config)
+        emit_log(f"[巡检接口] {building}/{INSPECTION_REPORT_TEMPLATES[source_family]} 测点={len(result['rows'])}")
+        return result
+
+    def run_energy_report_only(
+        self, *, source_family: str, building: str, period: str, emit_log: Callable[[str], None] = print,
+    ) -> Dict[str, Any]:
+        period = energy_report_period(source_family, period)
+        if source_family == FAMILY_PUE_CONFIRMATION:
+            template_name = PUE_CONFIRMATION_TEMPLATES[building]
+            time_format = "%Y-%m"
+            start = end = period
+            scale_label = ""
+        elif source_family == FAMILY_UTILITY_FEEDER_DEVIATION:
+            template_name = FEEDER_DEVIATION_TEMPLATES[building]
+            time_format = "%Y-%m-%d %H:%M:%S"
+            month_start = datetime.strptime(period, "%Y-%m")
+            start = month_start.strftime(time_format)
+            month_days = monthrange(month_start.year, month_start.month)[1]
+            end = (month_start + timedelta(days=month_days)).strftime(time_format)
+            scale_label = "小时"
+        else:
+            raise ValueError("不支持的能耗报表类型")
         download_cfg = copy.deepcopy(self.config.get("download", {}))
-        download_cfg.update(self.config.get("inspection_data", {}).get("download", {}))
         download_cfg.update(
-            template_name=INSPECTION_REPORT_TEMPLATES[source_family],
+            template_name=template_name,
+            time_format=time_format,
             sheet_name="",
-            scale_label="5分钟",
-            lookback_minutes=20,
+            scale_label=scale_label,
             skip_query_conditions=False,
             report_kind=source_family,
             export_button_text="原样导出",
             menu_path=["报表报告", "数据查询", "即时报表"],
         )
         return self._clone_with_download_config(download_cfg).run(
-            buildings=[building], switch_network=False, reuse_cached=False, emit_log=emit_log,
+            buildings=[building], start_time=start, end_time=end,
+            switch_network=False, reuse_cached=False, emit_log=emit_log,
         )
 
     def _capacity_download_config(self, *, template_name_override: str | None = None) -> Dict[str, Any]:
@@ -87,6 +130,7 @@ class HandoverDownloadService:
             else {}
         )
         base_cfg.update(copy.deepcopy(capacity_download_cfg))
+        base_cfg["report_kind"] = "capacity"
         template_name = str(template_name_override or base_cfg.get("template_name", "")).strip()
         if template_name:
             base_cfg["template_name"] = template_name
@@ -442,6 +486,7 @@ class HandoverDownloadService:
         end_time: str | None = None,
         switch_network: bool = True,
         reuse_cached: bool = True,
+        business_date: str = "",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cloned_service = self._clone_with_download_config(self._branch_power_download_config())
@@ -451,6 +496,7 @@ class HandoverDownloadService:
             end_time=end_time,
             switch_network=switch_network,
             reuse_cached=reuse_cached,
+            source_business_date=business_date,
             emit_log=emit_log,
         )
         result["report_kind"] = "branch_power"
@@ -463,6 +509,7 @@ class HandoverDownloadService:
         end_time: str | None = None,
         switch_network: bool = True,
         reuse_cached: bool = True,
+        business_date: str = "",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cloned_service = self._clone_with_download_config(self._branch_current_download_config())
@@ -472,6 +519,7 @@ class HandoverDownloadService:
             end_time=end_time,
             switch_network=switch_network,
             reuse_cached=reuse_cached,
+            source_business_date=business_date,
             emit_log=emit_log,
         )
         result["report_kind"] = "branch_current"
@@ -484,6 +532,7 @@ class HandoverDownloadService:
         end_time: str | None = None,
         switch_network: bool = True,
         reuse_cached: bool = True,
+        business_date: str = "",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         target_buildings = buildings[:] if buildings else self._enabled_buildings()
@@ -515,6 +564,7 @@ class HandoverDownloadService:
                 end_time=end_time,
                 switch_network=bool(switch_network and not switched),
                 reuse_cached=reuse_cached,
+                source_business_date=business_date,
                 emit_log=emit_log,
             )
             switched = bool(switched or cloned_service.did_switch_internal_this_run)
@@ -551,6 +601,7 @@ class HandoverDownloadService:
         end_time: str | None = None,
         switch_network: bool = True,
         reuse_cached: bool = True,
+        business_date: str = "",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cloned_service = self._clone_with_download_config(self._building_full_cabinet_power_download_config())
@@ -560,6 +611,7 @@ class HandoverDownloadService:
             end_time=end_time,
             switch_network=switch_network,
             reuse_cached=reuse_cached,
+            source_business_date=business_date,
             emit_log=emit_log,
         )
         result["report_kind"] = "building_full_cabinet_power"
@@ -572,6 +624,7 @@ class HandoverDownloadService:
         end_time: str | None = None,
         switch_network: bool = True,
         reuse_cached: bool = True,
+        business_date: str = "",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cloned_service = self._clone_with_download_config(
@@ -583,6 +636,7 @@ class HandoverDownloadService:
             end_time=end_time,
             switch_network=switch_network,
             reuse_cached=reuse_cached,
+            source_business_date=business_date,
             emit_log=emit_log,
         )
         result["report_kind"] = "air_conditioner_temperature_humidity"
@@ -763,6 +817,94 @@ class HandoverDownloadService:
     def switch_external_after_download(self, emit_log: Callable[[str], None]) -> None:
         return None
 
+    def _run_report_api(
+        self, *, buildings: List[str], family: str, template_name: str,
+        start_time: str, end_time: str, scale_label: str, sheet_name: str,
+        duty_date: str | None, duty_shift: str | None, is_shift_window: bool,
+        source_business_date: str, reuse_cached: bool, emit_log: Callable[[str], None],
+    ) -> Dict[str, Any]:
+        download_cfg = self.config.get("download", {})
+        max_attempts = max(1, _as_int(download_cfg.get("max_retries", 2), 2))
+        retry_wait = max(0, _as_int(download_cfg.get("retry_wait_sec", 2), 2))
+        sites = self._download_sites()
+        save_dir = self._source_file_cache_service.download_cache_root()
+        save_dir.mkdir(parents=True, exist_ok=True)
+        daily_families = {
+            "branch_power_family", "branch_current_family", "branch_switch_family",
+            "building_full_cabinet_power_family", "air_conditioner_temperature_humidity_family",
+        }
+        business_date = str(source_business_date or "").strip()
+        if family in daily_families and not business_date:
+            start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+            end_dt = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+            if family == "air_conditioner_temperature_humidity_family":
+                business_date = end_dt.strftime("%Y-%m-%d")
+            elif start_dt.hour == 23 and start_dt.minute >= 50:
+                business_date = (start_dt + timedelta(minutes=10)).strftime("%Y-%m-%d")
+            else:
+                business_date = start_dt.strftime("%Y-%m-%d")
+        def collect(building: str) -> Dict[str, Any]:
+            site = next((item for item in sites if str(item.get("building", "")).strip() == building and bool(item.get("enabled", True))), None)
+            if site is None:
+                return {"building": building, "success": False, "file_path": "", "error": "楼栋站点未配置或未启用"}
+            identity = self._source_file_cache_service.build_download_identity(
+                building=building, template_name=template_name, duty_date=duty_date or "",
+                duty_shift=duty_shift or "", start_time=start_time, end_time=end_time,
+                scale_label=scale_label, sheet_name=sheet_name,
+            )
+            if reuse_cached:
+                cached = self._source_file_cache_service.lookup_downloaded_source(identity=identity)
+                if cached and Path(cached).suffix.lower() == ".json":
+                    try:
+                        validate_report_source_json(cached, expected_family=family, expected_building=building, expected_business_date=business_date)
+                    except (OSError, ValueError):
+                        pass
+                    else:
+                        return {"building": building, "success": True, "file_path": cached, "reused_cached_source": True}
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    payload = query_report_json(
+                        site, source_family=family, report_name=template_name,
+                        query_start=start_time, query_end=end_time, scale_label=scale_label,
+                        sheet_name=sheet_name, business_date=business_date,
+                    )
+                    target = save_dir / f"{building}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.json"
+                    atomic_write_text(
+                        target, json.dumps(payload, ensure_ascii=False, allow_nan=False), encoding="utf-8",
+                        validator=lambda path: validate_report_source_json(
+                            path, expected_family=family, expected_building=building,
+                            expected_business_date=business_date,
+                        ),
+                        allow_overwrite_fallback=False,
+                    )
+                    registered = self._source_file_cache_service.register_downloaded_source(
+                        identity=identity, file_path=str(target), emit_log=emit_log,
+                    )
+                    emit_log(f"[动环报表API][{building}] 获取成功: family={family}, rows={len(payload['sheets'][0]['rows'])}")
+                    return {"building": building, "success": True, "file_path": registered or str(target)}
+                except Exception as exc:  # noqa: BLE001
+                    if attempt == max_attempts:
+                        emit_log(f"[动环报表API][{building}] 获取失败: family={family}, error={exc}")
+                        return {"building": building, "success": False, "file_path": "", "error": str(exc)}
+                    else:
+                        emit_log(f"[动环报表API][{building}] 获取失败，准备重试: family={family}, attempt={attempt}/{max_attempts}")
+                        if retry_wait:
+                            time.sleep(retry_wait)
+            raise RuntimeError("动环报表接口采集未执行")  # pragma: no cover
+
+        unique_buildings = list(dict.fromkeys(buildings))
+        if unique_buildings:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(unique_buildings)), thread_name_prefix="handover-report-api") as executor:
+                results = list(executor.map(collect, unique_buildings))
+        else:
+            results = []
+        return {
+            "start_time": start_time, "end_time": end_time, "duty_date": duty_date,
+            "duty_shift": duty_shift, "is_shift_window": is_shift_window, "sheet_name": sheet_name,
+            "results": results, "success_files": [item for item in results if item.get("success")],
+            "failed": [item for item in results if not item.get("success")],
+        }
+
     def run(
         self,
         buildings: List[str] | None = None,
@@ -772,6 +914,7 @@ class HandoverDownloadService:
         duty_shift: str | None = None,
         switch_network: bool = True,
         reuse_cached: bool = True,
+        source_business_date: str = "",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         self.did_switch_internal_this_run = False
@@ -806,8 +949,28 @@ class HandoverDownloadService:
             is_shift_window = bool(time_range.get("is_shift_window", False))
         if not template_name:
             raise ValueError("配置错误: handover_log.download.template_name 不能为空")
-        if not scale_label and not skip_query_conditions:
+        if not scale_label and not skip_query_conditions and report_kind != FAMILY_PUE_CONFIRMATION:
             raise ValueError("配置错误: handover_log.download.scale_label 不能为空")
+
+        api_families = {
+            "": "handover_log_family",
+            "capacity": "handover_capacity_report_family",
+            "branch_power": "branch_power_family",
+            "branch_current": "branch_current_family",
+            "branch_switch": "branch_switch_family",
+            "building_full_cabinet_power": "building_full_cabinet_power_family",
+            "air_conditioner_temperature_humidity": "air_conditioner_temperature_humidity_family",
+            "chiller_mode_switch": "chiller_mode_switch_family",
+        }
+        family = api_families.get(report_kind)
+        if family:
+            return self._run_report_api(
+                buildings=target_buildings, family=family, template_name=template_name,
+                start_time=start_time, end_time=end_time_text, scale_label=scale_label,
+                sheet_name=sheet_name, duty_date=duty_date_text, duty_shift=duty_shift_text,
+                is_shift_window=is_shift_window, source_business_date=source_business_date,
+                reuse_cached=reuse_cached, emit_log=emit_log,
+            )
 
         query_result_timeout_ms = _as_int(download_cfg.get("query_result_timeout_ms", 20000), 20000)
         download_event_timeout_ms = _as_int(download_cfg.get("download_event_timeout_ms", 120000), 120000)

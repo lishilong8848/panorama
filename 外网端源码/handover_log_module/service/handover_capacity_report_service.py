@@ -635,11 +635,13 @@ class HandoverCapacityReportService:
     def _raw_value_text(value: Any) -> str:
         return _text(value)
 
-    def _load_capacity_rows(self, source_file: str) -> List[Any]:
+    def _load_capacity_rows(self, source_file: str, *, building: str = "") -> List[Any]:
         return load_rows(
             source_file,
             self._parsing_cfg(),
             self.config.get("normalize", {}) if isinstance(self.config.get("normalize", {}), dict) else {},
+            expected_building=building,
+            expected_source_family="handover_capacity_report_family",
         )
 
     def _extract_oil_values(self, rows: List[Any]) -> Dict[str, str]:
@@ -2866,7 +2868,7 @@ class HandoverCapacityReportService:
             sheet_name=handover_sheet_name,
         )
         handover_cells.update(self._capacity_room_cells_from_defaults(building=building_text, emit_log=emit_log))
-        capacity_rows = self._load_capacity_rows(capacity_source_file)
+        capacity_rows = self._load_capacity_rows(capacity_source_file, building=building_text)
         oil_current = self._extract_current_oil_display_values(
             building=building_text,
             rows=capacity_rows,

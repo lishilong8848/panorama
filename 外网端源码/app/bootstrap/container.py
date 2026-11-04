@@ -175,6 +175,7 @@ class AppContainer:
     system_screenshot_demand_poller: SystemScreenshotDemandPoller | None = None
     temperature_humidity_upload_scheduler: ApschedulerSchedulerFacade | None = None
     inspection_data_upload_scheduler: InspectionDataScheduler | None = None
+    energy_report_upload_scheduler: ApschedulerSchedulerFacade | None = None
     temperature_humidity_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     top5_power_report_scheduler: ApschedulerSchedulerFacade | None = None
     top5_power_report_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
@@ -726,6 +727,8 @@ class AppContainer:
         )
 
     def _submit_inspection_data_upload(self, slot: str):
+        from app.config.inspection_data_config import inspection_hour_bucket
+
         if slot[:10] != datetime.now().strftime("%Y-%m-%d"):
             raise ValueError("巡检快照不补传历史调度日期")
         if self._configured_deployment_snapshot().get("role_mode") != "external":
@@ -734,7 +737,10 @@ class AppContainer:
             raise ValueError("巡检数据处理模块已关闭")
         job = self.job_service.start_worker_job(
             name=f"巡检数据处理 {slot}", worker_handler="inspection_data_upload",
-            worker_payload={"source_date": slot[:10], "dry_run": False},
+            worker_payload={
+                "source_date": slot[:10], "dry_run": False,
+                "source_bucket_key": inspection_hour_bucket(datetime.fromisoformat(slot)),
+            },
             resource_keys=["inspection_data_upload:global"], priority="scheduler",
             feature="inspection_data_upload", dedupe_key="inspection_data_upload",
             submitted_by="scheduler",
@@ -808,6 +814,57 @@ class AppContainer:
         payload.update(executor_bound=callable(self._submit_inspection_data_upload),
                        callback_name="_submit_inspection_data_upload")
         return self._record_scheduler_runtime_snapshot("inspection_data_upload", "inspection_data_upload", payload)
+
+    def _submit_energy_report_upload(self, source: str) -> tuple[bool, str]:
+        from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
+        from app.modules.report_pipeline.service.energy_report_upload_service import (
+            FEATURE, EnergyReportUploadService, pending_periods,
+        )
+
+        if self._configured_deployment_snapshot().get("role_mode") != "external":
+            return False, "skip:disabled"
+        if self.runtime_config.get("energy_report_upload", {}).get("enabled", True) is not True:
+            return False, "skip:disabled"
+        periods = pending_periods(self.runtime_config, datetime.now())
+        if not periods:
+            return False, "skip:already_not_due_or_completed"
+        try:
+            require_feishu_auth_settings(self.runtime_config)
+        except ValueError:
+            self.add_system_log("[月度能耗报表上传] 等待配置中心填写飞书鉴权")
+            return False, "skip:disabled"
+        service = EnergyReportUploadService(self.runtime_config)
+        for period in periods:
+            try:
+                service.source_paths(period, request_missing=True, log=self.add_system_log)
+            except (OSError, RuntimeError, ValueError) as exc:
+                self.add_system_log(f"[月度能耗报表上传] 等待内网源文件 {period}: {exc}")
+                continue
+            job = self.job_service.start_worker_job(
+                name=f"月度能耗报表上传 {period}", worker_handler=FEATURE,
+                worker_payload={"period": period}, resource_keys=[FEATURE], priority="scheduler",
+                feature=FEATURE, dedupe_key=f"{FEATURE}:{period}", submitted_by="scheduler",
+            )
+            return True, job.job_id
+        return False, "skip:source_not_ready"
+
+    def start_energy_report_upload_scheduler(self) -> None:
+        if self.energy_report_upload_scheduler is None:
+            self.energy_report_upload_scheduler = ApschedulerSchedulerFacade(
+                scheduler_key="energy_report_upload", feature="energy_report_upload",
+                scheduler_cfg={"enabled": True, "interval_minutes": 5},
+                runtime_state_root=self._runtime_state_root_text(), emit_log=self.add_system_log,
+                run_callback=self._submit_energy_report_upload,
+                is_busy=self._job_busy_for_feature_prefixes("energy_report_upload"),
+                orchestrator=self.ensure_scheduler_orchestrator(), schedule_kind="interval",
+                source_name="月度能耗报表上传",
+            )
+        self.energy_report_upload_scheduler.start()
+
+    def stop_energy_report_upload_scheduler(self, source: str = "关闭自动") -> Dict[str, Any]:
+        if self.energy_report_upload_scheduler:
+            return self.energy_report_upload_scheduler.stop()
+        return {"stopped": False, "reason": "not_initialized"}
 
     def _build_temperature_humidity_upload_scheduler(self) -> ApschedulerSchedulerFacade:
         upload_cfg = self.runtime_config.get("temperature_humidity_upload", {})
@@ -2119,6 +2176,8 @@ class AppContainer:
             f"callback={self.temperature_humidity_upload_scheduler_executor_name()}"
         )
         self.rebuild_inspection_data_upload_scheduler(source=source)
+        if role_mode == "external" and self.runtime_config.get("energy_report_upload", {}).get("enabled", True):
+            self.start_energy_report_upload_scheduler()
         temperature_humidity_status = self.temperature_humidity_upload_scheduler_status()
         if role_mode == "internal":
             self.add_system_log("[空调温湿度上传调度] 当前为内网端，启动时不自动开启")
@@ -2420,6 +2479,7 @@ class AppContainer:
                     failed_cancellations.append({"job_id": job_text, "error": str(exc)})
 
         stop_actions = (
+            ("energy_report_upload_scheduler", self.stop_energy_report_upload_scheduler),
             ("inspection_data_upload_scheduler", self.stop_inspection_data_upload_scheduler),
             ("scheduler", self.stop_scheduler),
             ("handover_scheduler", self.stop_handover_scheduler),

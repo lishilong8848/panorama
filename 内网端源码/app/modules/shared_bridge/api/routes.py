@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.config.config_adapter import normalize_role_mode
+from app.config.energy_report_download_config import ENERGY_REPORT_LABELS, energy_report_period
 from app.modules.report_pipeline.service.job_panel_presenter import (
     build_job_panel_summary,
     build_bridge_tasks_summary,
@@ -73,6 +74,7 @@ _BRIDGE_ERROR_TEXTS = {
 }
 
 _LATEST_REFRESHABLE_SOURCE_FAMILIES = {
+    **ENERGY_REPORT_LABELS,
     "electrical_inspection_family": "电气巡检源文件",
     "hvac_inspection_family": "暖通巡检源文件",
     "handover_log_family": "交接班日志源文件",
@@ -113,6 +115,7 @@ def _internal_summary_has_runtime_signal(payload: Any) -> bool:
         }:
             return True
     for key in (
+        *ENERGY_REPORT_LABELS,
         "handover_log_family",
         "electrical_inspection_family",
         "hvac_inspection_family",
@@ -168,6 +171,7 @@ def _wrap_internal_light_snapshot(snapshot: Any) -> Dict[str, Any]:
     if isinstance(raw.get("internal_source_cache"), dict):
         return raw
     family_keys = (
+        *ENERGY_REPORT_LABELS,
         "handover_log_family",
         "electrical_inspection_family",
         "hvac_inspection_family",
@@ -1076,6 +1080,7 @@ def bridge_source_cache_refresh_building_latest(
     request: Request,
     source_family: str = Query("", description="共享文件 family"),
     building: str = Query("", description="楼栋名称"),
+    period: str = Query("", description="能耗报表月份 YYYY-MM"),
 ) -> Dict[str, Any]:
     if _deployment_role_mode(request) != "internal":
         raise HTTPException(status_code=409, detail="当前仅内网端允许手动触发单楼共享文件拉取")
@@ -1091,9 +1096,16 @@ def bridge_source_cache_refresh_building_latest(
     service = getattr(container, "shared_bridge_service", None)
     if service is None:
         raise HTTPException(status_code=409, detail="共享桥接服务未初始化")
+    target = {}
+    if period.strip():
+        if normalized_family not in ENERGY_REPORT_LABELS:
+            raise HTTPException(status_code=400, detail="该文件类型不支持 period 参数")
+        try:
+            target["target_bucket_key"] = energy_report_period(normalized_family, period.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="报表月份格式错误，请使用 YYYY-MM") from exc
     result = service.start_building_latest_source_cache_refresh(
-        source_family=normalized_family,
-        building=building_text,
+        source_family=normalized_family, building=building_text, **target,
     )
     reason = str(result.get("reason", "") or "").strip()
     family_label = _LATEST_REFRESHABLE_SOURCE_FAMILIES.get(normalized_family, normalized_family)

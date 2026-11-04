@@ -27,12 +27,14 @@ def run_with_config(
     file_glob_template = str(input_cfg.get("file_glob_template", "{building}_*.xlsx")).strip() or "{building}_*.xlsx"
 
     if not excel_dir.exists():
-        raise FileNotFoundError(f"Excel目录不存在: {excel_dir}")
+        raise FileNotFoundError(f"月报源文件目录不存在: {excel_dir}")
 
     building_to_file = discover_latest_files(excel_dir, buildings, file_glob_template)
     for building in buildings:
         if building not in building_to_file:
-            emit_log(f"[{building}] 未找到 xlsx 文件，已保留楼栋配置并跳过。")
+            emit_log(f"[{building}] 未找到 JSON 源文件，已保留楼栋配置并跳过。")
+    if not building_to_file:
+        raise FileNotFoundError(f"月报源文件目录中没有可用的 JSON 文件: {excel_dir}")
     return build_results_from_mapping(config, building_to_file)
 
 
@@ -54,8 +56,8 @@ def run_with_explicit_files(
         path_obj = Path(file_path)
         if not path_obj.exists():
             raise FileNotFoundError(f"[{building}] 文件不存在: {file_path}")
-        if path_obj.suffix.lower() != ".xlsx":
-            raise ValueError(f"[{building}] 仅支持 xlsx 文件: {file_path}")
+        if path_obj.suffix.lower() not in {".xlsx", ".json"}:
+            raise ValueError(f"[{building}] 仅支持 xlsx 或 JSON 文件: {file_path}")
         normalized[building] = path_obj
 
     results = build_results_from_mapping(config, normalized)
@@ -97,8 +99,8 @@ def run_with_explicit_file_items(
         path_obj = Path(file_path)
         if not path_obj.exists():
             raise FileNotFoundError(f"file_items 第{idx}项文件不存在: {file_path}")
-        if path_obj.suffix.lower() != ".xlsx":
-            raise ValueError(f"file_items 第{idx}项仅支持 xlsx 文件: {file_path}")
+        if path_obj.suffix.lower() not in {".xlsx", ".json"}:
+            raise ValueError(f"file_items 第{idx}项仅支持 xlsx 或 JSON 文件: {file_path}")
 
         normalized_item = {
             "building": building,

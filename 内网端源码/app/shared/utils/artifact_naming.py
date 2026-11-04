@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from app.config.energy_report_download_config import ENERGY_REPORT_LABELS, energy_report_period
 from app.config.inspection_data_config import (
     FAMILY_ELECTRICAL_INSPECTION,
     FAMILY_HVAC_INSPECTION,
@@ -25,6 +26,7 @@ FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY = "air_conditioner_temperature_humid
 FAMILY_CHILLER_MODE_SWITCH = "chiller_mode_switch_family"
 
 SOURCE_TYPE_FOLDERS = {
+    **ENERGY_REPORT_LABELS,
     **INSPECTION_FAMILY_LABELS,
     FAMILY_HANDOVER_LOG: "交接班日志源文件",
     FAMILY_HANDOVER_CAPACITY_REPORT: "交接班容量报表源文件",
@@ -146,6 +148,9 @@ def source_bucket_segment(
 ) -> str:
     normalized_family = str(source_family or "").strip()
     normalized_kind = str(bucket_kind or "").strip().lower() or "latest"
+    if normalized_family in ENERGY_REPORT_LABELS:
+        period = energy_report_period(normalized_family, str(bucket_key or "").strip(), now=now)
+        return f"{period.replace('-', '')}--月报"
     duty_digits = "".join(ch for ch in str(duty_date or "").strip() if ch.isdigit())[:8]
     if normalized_family in {FAMILY_MONTHLY_REPORT, FAMILY_TOP5_MONTHLY_REPORT} and len(duty_digits) == 8:
         # 月报源文件按“业务日期”统一落盘，latest 与历史补采共用同一套日期目录和文件名。

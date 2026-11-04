@@ -7,11 +7,15 @@ import mimetypes
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 from uuid import uuid4
+
+from PIL import Image, UnidentifiedImageError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     SiteConfig,
@@ -615,43 +619,82 @@ def _css_id_selector(value: str) -> str:
     return "#" + re.sub(r"([ #.;?+*~':\"!^$[\]()=>|/@])", r"\\\1", text)
 
 
-async def _click_target_and_capture(page: Any, target: ScreenshotTarget, path: Path, args: argparse.Namespace) -> None:
+def _validate_capture_image(page: Any, path: Path) -> None:
+    url = str(getattr(page, "url", "") or "").lower()
+    if url.startswith(("chrome-error:", "edge-error:", "about:neterror")):
+        raise RuntimeError("系统图页面打开失败，未保存截图")
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise RuntimeError(f"截图文件为空: {path}")
+    try:
+        with Image.open(path) as image:
+            if image.format != "PNG":
+                raise RuntimeError("截图文件不是有效的 PNG 图片")
+            image.load()
+            if image.mode in ("RGBA", "LA") and image.getchannel("A").getextrema() == (0, 0):
+                raise RuntimeError("截图内容完全透明")
+            if image.mode in ("RGB", "RGBA"):
+                extrema = image.getextrema()[:3]
+            elif image.mode in ("L", "LA"):
+                extrema = (image.getchannel("L").getextrema(),)
+            else:
+                with image.convert("RGB") as rgb:
+                    extrema = rgb.getextrema()
+            if all(low == high for low, high in extrema):
+                raise RuntimeError("截图内容为空白")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise RuntimeError("截图文件无效或不完整") from exc
+
+
+async def _click_target_and_capture(
+    page: Any,
+    target: ScreenshotTarget,
+    path: Path,
+    args: argparse.Namespace,
+    emit_log: Callable[[str], None] | None = None,
+) -> None:
     async def _click_first(label: str, span_id: str, texts: Tuple[str, ...]) -> None:
-        frames = list(getattr(page, "frames", []) or [])
-        if page.main_frame not in frames:
-            frames.insert(0, page.main_frame)
+        selectors: list[tuple[str, str]] = []
+        if span_id:
+            selector = _css_id_selector(span_id)
+            if selector:
+                selectors.append((f"id={span_id}", selector))
+        for text in texts:
+            if text:
+                selectors.append((f"text={text}", f"text={text}"))
+        last_error: Exception | None = None
+        last_desc = ""
+        frames: list[Any] = []
+        deadline = time.monotonic() + max(1.0, int(args.menu_timeout_ms) / 1000.0)
+        while True:
+            _raise_if_capture_cancelled(args)
+            frames = list(getattr(page, "frames", []) or [])
+            if page.main_frame not in frames:
+                frames.insert(0, page.main_frame)
+            for desc, selector in selectors:
+                for frame in frames:
+                    try:
+                        last_desc = desc
+                        locator = frame.locator(selector).first
+                        if not await locator.is_visible(timeout=min(int(args.action_timeout_ms), 1000)):
+                            continue
+                        await locator.evaluate(
+                            """element => {
+                                element.scrollIntoView({ block: "center", inline: "center" });
+                                element.click();
+                            }""",
+                            timeout=args.action_timeout_ms,
+                        )
+                        return
+                    except Exception as exc:
+                        last_error = exc
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.25, remaining))
         frame_labels = [
             str(getattr(frame, "url", "") or getattr(frame, "name", "") or f"frame-{index}")[-120:]
             for index, frame in enumerate(frames)
         ]
-        locators: list[tuple[str, Any]] = []
-        if span_id:
-            selector = _css_id_selector(span_id)
-            if selector:
-                for frame in frames:
-                    locators.append((f"id={span_id}", frame.locator(selector).first))
-        for text in texts:
-            if text:
-                for frame in frames:
-                    locators.append((f"text={text}", frame.locator(f"text={text}").first))
-        last_error: Exception | None = None
-        last_desc = ""
-        locator_timeout = max(1000, min(int(args.menu_timeout_ms), 3000))
-        for desc, locator in locators:
-            try:
-                last_desc = desc
-                await locator.wait_for(state="visible", timeout=locator_timeout)
-                await locator.evaluate(
-                    """element => {
-                        element.scrollIntoView({ block: "center", inline: "center" });
-                        element.click();
-                    }""",
-                    timeout=args.action_timeout_ms,
-                )
-                last_error = None
-                return
-            except Exception as exc:
-                last_error = exc
         raise RuntimeError(
             f"未找到系统入口: {label}，frames={len(frames)}, 尝试={last_desc or '-'}, "
             f"frame_urls={frame_labels[:8]}，{last_error}"
@@ -671,9 +714,15 @@ async def _click_target_and_capture(page: Any, target: ScreenshotTarget, path: P
             await asyncio.sleep(max(0.5, float(args.settle_sec)))
         await asyncio.sleep(max(0.0, float(args.settle_sec)))
     path.parent.mkdir(parents=True, exist_ok=True)
-    await page.screenshot(path=str(path), full_page=bool(args.full_page))
-    if not path.exists() or path.stat().st_size <= 0:
-        raise RuntimeError(f"截图文件为空: {path}")
+    try:
+        await page.screenshot(path=str(path), full_page=bool(args.full_page))
+    except (PlaywrightTimeoutError, TimeoutError):
+        _raise_if_capture_cancelled(args)
+        path.unlink(missing_ok=True)
+        if emit_log is not None:
+            emit_log(f"[系统截图采集] 截图超时，保持当前页面并重试: {target.label}")
+        await page.screenshot(path=str(path), full_page=bool(args.full_page), animations="disabled", timeout=90000)
+    _validate_capture_image(page, path)
 
 
 async def _capture_building_targets(
@@ -700,7 +749,7 @@ async def _capture_building_targets(
         file_path = output_dir / site.building / file_name
         temp_path = file_path.with_name(f".{file_path.stem}.{getattr(args, 'batch_id', '')}.tmp.png")
         try:
-            await _click_target_and_capture(page, target, temp_path, args)
+            await _click_target_and_capture(page, target, temp_path, args, emit_log)
             _raise_if_capture_cancelled(args)
             os.replace(temp_path, file_path)
         finally:

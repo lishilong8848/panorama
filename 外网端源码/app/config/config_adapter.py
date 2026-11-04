@@ -773,6 +773,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "day_metric_upload": copy.deepcopy(day_metric_upload),
         "branch_power_upload": copy.deepcopy(branch_power_upload),
         "alarm_rule_export_upload": copy.deepcopy(alarm_rule_export_upload),
+        "energy_report_upload": copy.deepcopy(_dict(features.get("energy_report_upload"))),
         "temperature_humidity_upload": copy.deepcopy(temperature_humidity_upload),
         "inspection_data_upload": copy.deepcopy(features["inspection_data_upload"]),
         "system_screenshot_upload": copy.deepcopy(system_screenshot_upload),

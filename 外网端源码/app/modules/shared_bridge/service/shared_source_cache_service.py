@@ -1894,7 +1894,12 @@ class SharedSourceCacheService:
         return digest.hexdigest()
 
     def _validate_handover_source_file(self, path: Path) -> None:
-        validate_excel_workbook_file(path)
+        if path.suffix.lower() == ".json":
+            from app.shared.utils.report_source_json import validate_report_source_json
+
+            validate_report_source_json(path, expected_family=FAMILY_HANDOVER_LOG)
+        else:
+            validate_excel_workbook_file(path)
         cfg = load_handover_config(self.runtime_config)
         parsing_cfg = cfg.get("parsing", {}) if isinstance(cfg.get("parsing", {}), dict) else {}
         normalize_cfg = cfg.get("normalize", {}) if isinstance(cfg.get("normalize", {}), dict) else {}
@@ -1902,6 +1907,7 @@ class SharedSourceCacheService:
             str(path),
             parsing_cfg=copy.deepcopy(parsing_cfg),
             normalize_cfg=copy.deepcopy(normalize_cfg),
+            expected_source_family=FAMILY_HANDOVER_LOG,
         )
         if not rows:
             raise ValueError(f"交接班源文件无有效数据行: {path}")
@@ -1916,6 +1922,11 @@ class SharedSourceCacheService:
         normalized_family = self._normalize_source_family(source_family)
         suffix = str(path.suffix or "").strip().lower()
         if suffix == ".json":
+            from app.shared.utils.report_source_json import REPORT_JSON_FAMILIES, validate_report_source_json
+
+            if normalized_family in REPORT_JSON_FAMILIES:
+                validate_report_source_json(path, expected_family=normalized_family)
+                return
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("告警 JSON 文件顶层必须是对象")

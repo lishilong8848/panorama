@@ -53,6 +53,24 @@ def test_upload_attachment_forwards_explicit_timeout(tmp_path, monkeypatch):
     assert client.upload_attachment(str(source_file), timeout=120) == "file-token"
     assert captured["timeout"] == 120
     assert captured["content"] == b"xlsx"
+    assert captured["mime_type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def test_upload_json_source_attachment_uses_json_mime_type(tmp_path, monkeypatch):
+    source_file = tmp_path / "source.json"
+    source_file.write_bytes(b'{"source_family":"monthly_report_family"}')
+    client = object.__new__(FeishuBitableClient)
+    captured = {}
+
+    def fake_upload_attachment_bytes(**kwargs):
+        captured.update(kwargs)
+        return "file-token"
+
+    monkeypatch.setattr(client, "upload_attachment_bytes", fake_upload_attachment_bytes)
+
+    assert client.upload_attachment(str(source_file), timeout=120) == "file-token"
+    assert captured["mime_type"] == "application/json"
+    assert captured["content"] == source_file.read_bytes()
 
 
 def test_source_attachment_uses_dedicated_upload_timeout(tmp_path, monkeypatch):

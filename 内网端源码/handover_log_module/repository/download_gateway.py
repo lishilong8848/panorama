@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES
+from app.config.energy_report_download_config import ENERGY_REPORT_TEMPLATES, PUE_CONFIRMATION_TEMPLATES
 
 from pipeline_utils import configure_playwright_environment
 
@@ -191,7 +192,7 @@ class DownloadGateway:
     @staticmethod
     def _report_template_selectors(name: str) -> List[str]:
         name_literal = _xpath_literal(name)
-        if name in INSPECTION_REPORT_TEMPLATES.values() or name == "全景平台月报":
+        if name in ENERGY_REPORT_TEMPLATES or name in INSPECTION_REPORT_TEMPLATES.values() or name == "全景平台月报":
             return [
                 "xpath=//div[contains(concat(' ', normalize-space(@class), ' '), "
                 f"' showTemplate ') and normalize-space(@title)={name_literal}]",
@@ -1035,6 +1036,7 @@ class DownloadGateway:
         try:
             report_text = f"{template_name or ''} {sheet_name or ''}"
             is_chiller_mode_switch = "制冷单元模式切换参数" in report_text
+            month_only = template_name in PUE_CONFIRMATION_TEMPLATES.values()
             is_building_full_cabinet_power = self._is_building_full_cabinet_power_download(
                 template_name=template_name,
                 sheet_name=sheet_name,
@@ -1048,6 +1050,7 @@ class DownloadGateway:
                 or is_building_full_cabinet_power
                 or is_air_conditioner_temperature_humidity
                 or template_name in INSPECTION_REPORT_TEMPLATES.values()
+                or template_name in ENERGY_REPORT_TEMPLATES
             )
             await self._fill_text_input_by_widget_or_label(
                 frame2,
@@ -1056,12 +1059,13 @@ class DownloadGateway:
                 timeout_ms=start_end_visible_timeout_ms,
             )
 
-            await self._fill_text_input_by_widget_or_label(
-                frame2,
-                label_text="结束时间",
-                value=end_time,
-                timeout_ms=start_end_visible_timeout_ms,
-            )
+            if not month_only:
+                await self._fill_text_input_by_widget_or_label(
+                    frame2,
+                    label_text="结束时间",
+                    value=end_time,
+                    timeout_ms=start_end_visible_timeout_ms,
+                )
 
             if needs_sheet_name:
                 await self._fill_optional_sheet_name(
@@ -1076,7 +1080,7 @@ class DownloadGateway:
                     value=scale_label,
                     timeout_ms=start_end_visible_timeout_ms,
                 )
-            else:
+            elif not month_only:
                 await self._select_combo_by_widget_or_label(
                     frame2,
                     label_text="查询刻度",
@@ -1146,7 +1150,9 @@ class DownloadGateway:
             f" state={last_state if isinstance(last_state, dict) else {}}",
         )
 
-    async def _wait_query_ready(self, frame2, timeout_ms: int, *, allow_initial_blank_ms: int = 0) -> None:
+    async def _wait_query_ready(
+        self, frame2, timeout_ms: int, *, allow_initial_blank_ms: int = 0, require_loading_finished: bool = False,
+    ) -> None:
         min_rows = max(1, _as_int(self.handover_cfg.get("query_ready_min_rows", 8), 8))
         min_cells = max(1, _as_int(self.handover_cfg.get("query_ready_min_cells", 40), 40))
         effective_timeout_ms = 180000
@@ -1179,7 +1185,9 @@ class DownloadGateway:
                 )
             except Exception as exc:  # noqa: BLE001
                 raise StepError("查询", f"读取查询状态失败: {exc}") from exc
-            if bool(last_state.get("dataReady", False)):
+            if bool(last_state.get("dataReady", False)) and (
+                not require_loading_finished or not bool(last_state.get("loading", False))
+            ):
                 return
             if bool(last_state.get("loading", False)):
                 await asyncio.sleep(0.2)
@@ -1471,8 +1479,11 @@ class DownloadGateway:
                         lambda: self._wait_query_ready(
                             frame2,
                             timeout_ms=query_wait_timeout_ms,
+                            require_loading_finished=template_name in ENERGY_REPORT_TEMPLATES,
                             allow_initial_blank_ms=(
-                                query_wait_timeout_ms if template_name in INSPECTION_REPORT_TEMPLATES.values()
+                                query_wait_timeout_ms if (
+                                    template_name in INSPECTION_REPORT_TEMPLATES.values() or template_name in ENERGY_REPORT_TEMPLATES
+                                )
                                 else (60000 if is_top5_monthly_report else 0)
                             ),
                         ),

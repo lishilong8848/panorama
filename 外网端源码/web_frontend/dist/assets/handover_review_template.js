@@ -7,6 +7,7 @@
           <p class="review-subtitle">{{ sessionSummary }}</p>
         </div>
         <div class="review-header-actions">
+          <a v-if="inspectionPointsUrl" class="btn btn-secondary btn-mini" :href="inspectionPointsUrl" target="_blank" rel="noopener">巡检测点</a>
           <button v-if="showRefreshAction" class="btn btn-secondary btn-mini" @click="refreshData" :disabled="refreshActionVm.disabled" :title="refreshActionVm.disabledReason || ''">
             {{ refreshActionVm.text }}
           </button>

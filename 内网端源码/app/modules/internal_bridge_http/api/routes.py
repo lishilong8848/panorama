@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
+from app.config.inspection_data_config import InspectionPointRevisionConflict
 
 from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     list_alarm_rule_export_files,
@@ -188,6 +189,56 @@ def create_alarm_event_window_query_task(
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _inspection_cache(request: Request):
+    _require_enabled_and_authorized(request)
+    service = getattr(getattr(request.app.state, "container", None), "shared_bridge_service", None)
+    cache = getattr(service, "_source_cache_service", None)
+    if cache is None:
+        raise HTTPException(status_code=503, detail="巡检接口缓存未初始化")
+    return cache
+
+
+@router.put("/inspection/point-rules")
+def put_inspection_point_rules(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    cache = _inspection_cache(request)
+    try:
+        if set(payload) == {"point_overrides", "revision"}:
+            revision = payload["revision"]
+            if type(revision) is not int or revision <= 0:
+                raise ValueError("巡检测点配置版本必须为正整数")
+            return {"ok": True, "point_overrides": cache.set_inspection_point_rules(payload["point_overrides"], revision=revision),
+                    "revision": revision}
+        return {"ok": True, "point_overrides": cache.set_inspection_point_rules(payload)}
+    except InspectionPointRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/inspection/snapshot")
+def get_inspection_snapshot(request: Request, source_date: str, bucket_key: str = "") -> Dict[str, Any]:
+    cache = _inspection_cache(request)
+    try:
+        return cache.read_inspection_snapshot(source_date=source_date, bucket_key=bucket_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/inspection/latest-points")
+def get_latest_inspection_points(request: Request, building: str) -> Dict[str, Any]:
+    cache = _inspection_cache(request)
+    try:
+        return cache.read_latest_inspection_points(building=building)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/tasks")
@@ -427,11 +478,15 @@ def refresh_internal_latest_source_cache(
     source_family = str(payload.get("source_family", "") or "") if isinstance(payload, dict) else ""
     buildings = payload.get("buildings", []) if isinstance(payload, dict) else []
     target_bucket_key = str(payload.get("target_bucket_key", "") or "") if isinstance(payload, dict) else ""
+    force_refresh = payload.get("force_refresh", False)
     try:
+        if not isinstance(force_refresh, bool):
+            raise ValueError("force_refresh 必须为布尔值")
         return _runner(request).refresh_latest_source_cache(
             source_family=source_family,
             buildings=buildings if isinstance(buildings, list) else [],
             target_bucket_key=target_bucket_key,
+            **({"force_refresh": True} if force_refresh else {}),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

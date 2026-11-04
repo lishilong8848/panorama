@@ -1,7 +1,7 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import openpyxl
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -87,6 +87,26 @@ def test_legacy_combined_inspection_not_refreshable(client):
     refresh.assert_not_called()
 
 
+@pytest.mark.parametrize(("family", "period", "status_code"), [
+    ("pue_confirmation_family", "2026-10", 200),
+    ("utility_feeder_deviation_family", "2026-10", 200),
+    ("pue_confirmation_family", "2026-11-02", 400),
+    ("utility_feeder_deviation_family", "2026-11-02", 400),
+])
+def test_energy_report_refresh_period(client, family, period, status_code):
+    http, refresh = client
+    refresh.return_value = {"accepted": True, "running": True, "bucket_key": period}
+    response = http.post("/api/bridge/source-cache/refresh-building-latest", params={
+        "source_family": family, "building": "E楼", "period": period,
+    })
+    assert response.status_code == status_code
+    if status_code == 200:
+        assert response.json()["bucket_key"] == period
+        refresh.assert_called_once_with(source_family=family, building="E楼", target_bucket_key=period)
+    else:
+        refresh.assert_not_called()
+
+
 def test_monthly_ready_requires_actual_file_and_exact_business_date(tmp_path):
     root = tmp_path / "shared"
     root.mkdir()
@@ -98,11 +118,16 @@ def test_monthly_ready_requires_actual_file_and_exact_business_date(tmp_path):
         "internal_source_cache": {"enabled": True},
         "internal_source_sites": [{"building": "E楼", "enabled": True}],
     }, store=store, emit_log=lambda _: None)
-    source = tmp_path / "monthly.xlsx"
-    book = openpyxl.Workbook()
-    book.active.append(["monthly", 1])
-    book.save(source)
-    book.close()
+    source = tmp_path / "monthly.json"
+    source.write_text(json.dumps({
+        "schema_version": 1, "source_family": "monthly_report_family", "building": "E楼",
+        "business_date": "2026-10-29", "query_start": "2026-10-28 23:50:00",
+        "query_end": "2026-10-30 01:20:00", "requested_point_count": 1,
+        "returned_point_count": 1, "sheets": [{"name": "sheet1", "rows": [
+            [], [None, None, None, None, "2026-10-29 00:00:00"], [],
+            [None, "房间", "设备", "总电度", "1"],
+        ]}],
+    }, ensure_ascii=False), encoding="utf-8")
     entry = cache.store_existing_source_file(
         source_family="monthly_report_family", building="E楼", bucket_kind="latest",
         bucket_key="2026-10-29", duty_date="2026-10-29", duty_shift="",
@@ -113,6 +138,29 @@ def test_monthly_ready_requires_actual_file_and_exact_business_date(tmp_path):
     )
     assert result["reason"] == "already_ready"
     assert result["accepted"] is False and result["running"] is False
+    bad_source = tmp_path / "wrong-building.json"
+    bad_payload = json.loads(source.read_text(encoding="utf-8"))
+    bad_payload["building"] = "A楼"
+    bad_source.write_text(json.dumps(bad_payload, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="楼栋不匹配"):
+        cache.store_existing_source_file(
+            source_family="monthly_report_family", building="E楼", bucket_kind="latest",
+            bucket_key="2026-10-29", duty_date="2026-10-29", duty_shift="",
+            source_path=bad_source, metadata={"upload_date": "2026-10-29"},
+        )
+    bad_payload["building"] = "E楼"
+    bad_payload["business_date"] = "2026-10-28"
+    bad_source.write_text(json.dumps(bad_payload, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="业务日期不匹配"):
+        cache.store_existing_source_file(
+            source_family="monthly_report_family", building="E楼", bucket_kind="latest",
+            bucket_key="2026-10-29", duty_date="2026-10-29", duty_shift="",
+            source_path=bad_source, metadata={"upload_date": "2026-10-29"},
+        )
+    assert cache._resolve_entry_file_path(entry).is_file()
+    assert cache.start_building_latest_refresh(
+        source_family="monthly_report_family", building="E楼", target_bucket_key="2026-10-29",
+    )["reason"] == "already_ready"
     assert cache._existing_latest_refresh_result(
         source_family="monthly_report_family", building="E楼", bucket_key="2026-10-28",
         allow_directory_scan=False,

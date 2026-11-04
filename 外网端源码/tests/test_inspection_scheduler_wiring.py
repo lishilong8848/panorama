@@ -242,11 +242,14 @@ def test_worker_passes_contract_and_cancellation(fake_inspection_service):
     checks = []
     runtime = SimpleNamespace(raise_if_cancelled=lambda: checks.append(True))
     log = lambda line: None
-    result = HANDLER_REGISTRY["inspection_data_upload"]({}, {"source_date": "2026-10-27", "dry_run": True}, log, runtime)
+    result = HANDLER_REGISTRY["inspection_data_upload"](
+        {}, {"source_date": "2026-10-27", "source_bucket_key": "2026-10-27 10", "dry_run": True}, log, runtime,
+    )
     assert result["status"] == "success"
     assert len(checks) == 2
     assert fake_inspection_service[0] == {
-        "source_date": "2026-10-27", "dry_run": True, "log": log, "check_cancel": runtime.raise_if_cancelled,
+        "source_date": "2026-10-27", "source_bucket_key": "2026-10-27 10",
+        "dry_run": True, "log": log, "check_cancel": runtime.raise_if_cancelled,
     }
 
 
@@ -269,6 +272,7 @@ def test_manual_and_scheduler_use_global_resource_and_dedupe(fake_inspection_ser
     for date in ["2026-10-26", "2026-10-27"]:
         routes.job_inspection_data_upload_run(request, {"source_date": date, "dry_run": True})
     AppContainer._submit_inspection_data_upload(container, "2026-10-27 01:10:00")
+    assert captured[-1]["worker_payload"]["source_bucket_key"] == "2026-10-27 00"
     for call in captured:
         assert "inspection_data_upload:global" in call["resource_keys"]
         assert call["dedupe_key"] == "inspection_data_upload"

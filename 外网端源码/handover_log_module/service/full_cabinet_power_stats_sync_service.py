@@ -1,15 +1,133 @@
 from __future__ import annotations
 
+import json
+import math
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, Iterator, List
 
 import openpyxl
 
+from app.shared.utils.artifact_naming import FAMILY_BUILDING_FULL_CABINET_POWER
 from handover_log_module.service.power_alert_sync_service import PowerAlertSyncService, _PowerAlertTable
+
+
+def _json_object_with_unique_keys(pairs: List[tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"重复字段: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"无效数值: {value}")
+
+
+def _validate_json_power_value(value: Any, *, location: str) -> None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return
+    try:
+        if isinstance(value, bool):
+            raise ValueError("boolean")
+        number = float(str(value).strip().replace(",", "").replace("，", ""))
+        if not math.isfinite(number):
+            raise ValueError("non-finite")
+    except (ValueError, OverflowError):
+        raise RuntimeError(f"{location} 功率不是有效数字，未上传") from None
+
+
+class _JsonMetricSheet:
+    def __init__(self, rows: List[List[Any]]) -> None:
+        self._rows = rows
+        self._max_column = max((len(row) for row in rows), default=0)
+
+    def iter_rows(
+        self,
+        *,
+        min_row: int = 1,
+        max_row: int | None = None,
+        max_col: int | None = None,
+        values_only: bool = False,
+    ) -> Iterator[tuple[Any, ...]]:
+        if not values_only:
+            raise ValueError("JSON 工作表只支持读取单元格值")
+        last_row = max_row if max_row is not None else len(self._rows)
+        column_count = max_col or self._max_column
+        for index in range(min_row - 1, last_row):
+            row = self._rows[index] if index < len(self._rows) else []
+            yield tuple(row[:column_count]) + (None,) * max(0, column_count - len(row))
+
+
+def _sheet_header_value(sheet: Any, value: Any) -> Any:
+    if (
+        isinstance(sheet, _JsonMetricSheet)
+        and isinstance(value, str)
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?", value)
+    ):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+    return value
+
+
+@contextmanager
+def _open_metric_source_sheet(
+    file_path: Path, *, building: str | None, source_family: str | None
+) -> Iterator[Any]:
+    if file_path.suffix.lower() != ".json":
+        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            sheet = workbook.active
+            if hasattr(sheet, "reset_dimensions"):
+                sheet.reset_dimensions()
+            yield sheet
+        finally:
+            workbook.close()
+        return
+
+    try:
+        with file_path.open("r", encoding="utf-8-sig") as source:
+            payload = json.load(
+                source,
+                object_pairs_hook=_json_object_with_unique_keys,
+                parse_constant=_reject_json_constant,
+            )
+    except ValueError as exc:
+        raise ValueError(f"{file_path.name} JSON 格式无效: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"{file_path.name} JSON 顶层必须为对象")
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise ValueError(f"{file_path.name} JSON schema_version 无效")
+    if not isinstance(building, str) or not building.strip() or payload.get("building") != building:
+        raise ValueError(f"{file_path.name} JSON 楼栋不匹配: {building}")
+    if not isinstance(source_family, str) or not source_family or payload.get("source_family") != source_family:
+        raise ValueError(f"{file_path.name} JSON 来源不匹配: {source_family}")
+    sheets = payload.get("sheets")
+    if not isinstance(sheets, list) or not sheets:
+        raise ValueError(f"{file_path.name} JSON 工作表列表无效")
+    for sheet_index, sheet in enumerate(sheets, start=1):
+        if (
+            not isinstance(sheet, dict)
+            or not isinstance(sheet.get("name"), str)
+            or not sheet["name"].strip()
+            or not isinstance(sheet.get("rows"), list)
+        ):
+            raise ValueError(f"{file_path.name} JSON 第{sheet_index}个工作表无效")
+        for row_index, row in enumerate(sheet["rows"], start=1):
+            if not isinstance(row, list) or any(
+                isinstance(cell, (dict, list)) or (isinstance(cell, float) and not math.isfinite(cell))
+                for cell in row
+            ):
+                raise ValueError(f"{file_path.name} JSON 第{sheet_index}个工作表第{row_index}行无效")
+    yield _JsonMetricSheet(sheets[0]["rows"])
 
 
 @dataclass(frozen=True)
@@ -75,7 +193,9 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
             start=1,
         ):
             values = tuple(row or ())
-            parsed_count = sum(1 for value in values if self._parse_header_datetime(value) is not None)
+            parsed_count = sum(
+                1 for value in values if self._parse_header_datetime(_sheet_header_value(sheet, value)) is not None
+            )
             if parsed_count > best_count:
                 best_count = parsed_count
                 best_row_index = row_index
@@ -92,7 +212,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         }
         hour_columns: Dict[int, int] = {}
         for index, value in enumerate(header, start=1):
-            parsed = self._parse_header_datetime(value)
+            parsed = self._parse_header_datetime(_sheet_header_value(sheet, value))
             if parsed is None:
                 continue
             normalized = parsed.replace(minute=0, second=0, microsecond=0)
@@ -115,11 +235,9 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         building: str,
         business_date: str,
     ) -> Dict[str, List[Any]]:
-        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-        try:
-            sheet = workbook.active
-            if hasattr(sheet, "reset_dimensions"):
-                sheet.reset_dimensions()
+        with _open_metric_source_sheet(
+            file_path, building=building, source_family=FAMILY_BUILDING_FULL_CABINET_POWER
+        ) as sheet:
             header_row_index, hour_columns = self._resolve_hour_columns(sheet, business_date=business_date)
             cabinet_rows: List[_CabinetMetricRow] = []
             line_head_rows: List[_LineHeadMetricRow] = []
@@ -138,10 +256,18 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                     current_group_text = group_text
                 if not current_group_text or not item_text:
                     continue
-                powers = [
-                    self._number_or_zero(row[column_index - 1] if len(row) >= column_index else None)
-                    for _hour, column_index in sorted(hour_columns.items())
-                ]
+                def read_powers() -> List[float]:
+                    powers = []
+                    for hour, column_index in sorted(hour_columns.items()):
+                        value = row[column_index - 1] if len(row) >= column_index else None
+                        if file_path.suffix.lower() == ".json":
+                            _validate_json_power_value(
+                                value,
+                                location=f"{file_path.name} 第{row_index}行测点 {current_group_text}/{item_text} {hour:02d}:00",
+                            )
+                        powers.append(self._number_or_zero(value))
+                    return powers
+
                 room_code = self._extract_room_code(current_room_text, current_group_text)
                 if not room_code:
                     raise RuntimeError(f"{file_path.name} 第{row_index}行无法识别房间编码")
@@ -155,7 +281,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                             room_short=room_code,
                             cabinet_col=item_cabinet_match.group("cabinet")[0].upper(),
                             cabinet_no=item_cabinet_match.group("cabinet")[1:].zfill(2),
-                            powers=powers,
+                            powers=read_powers(),
                             source_file=str(file_path),
                         )
                     )
@@ -169,7 +295,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                             room_short=parsed_line.get("room_short", room_code),
                             line_raw=current_group_text,
                             line=parsed_line,
-                            powers=powers,
+                            powers=read_powers(),
                             source_file=str(file_path),
                         )
                     )
@@ -183,7 +309,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                             room_code=room_code,
                             room_short=row_line_group.group("room"),
                             row_col=row_line_item.group("col").upper(),
-                            powers=powers,
+                            powers=read_powers(),
                             source_file=str(file_path),
                         )
                     )
@@ -206,7 +332,7 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                                 room_code=room_code,
                                 room_short=room_code,
                                 row_col=col,
-                                powers=powers,
+                                powers=read_powers(),
                                 source_file=str(file_path),
                             )
                         )
@@ -215,8 +341,6 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
                 "line_head": line_head_rows,
                 "row_line": row_line_rows,
             }
-        finally:
-            workbook.close()
 
     def _build_detail_index(self, detail_records: List[Dict[str, Any]]) -> Dict[tuple[str, str, str], List[Dict[str, Any]]]:
         output: Dict[tuple[str, str, str], List[Dict[str, Any]]] = {}
@@ -279,7 +403,13 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
         text = text.replace(current_day, previous_day)
         if current_month != previous_month:
             text = text.replace(current_month, previous_month)
-        return Path(text)
+        candidate = Path(text)
+        if file_path.suffix.lower() == ".json" and not candidate.exists():
+            for suffix in (".xlsx", ".xlsm"):
+                legacy_candidate = candidate.with_suffix(suffix)
+                if legacy_candidate.exists():
+                    return legacy_candidate
+        return candidate
 
     def _cabinet_object_key(self, row: _CabinetMetricRow) -> str:
         return self._power_alert_object_key(row.building, row.room_code, f"{row.cabinet_col}{row.cabinet_no}")
@@ -627,6 +757,9 @@ class FullCabinetPowerStatsSyncService(PowerAlertSyncService):
             building = self._text(item.get("building"))
             source_files = item.get("source_files", {}) if isinstance(item.get("source_files", {}), dict) else {}
             file_path = self._text(item.get("full_cabinet_power_file") or source_files.get("full_cabinet_power_file"))
+            metadata = item.get("metadata", {}) if isinstance(item.get("metadata", {}), dict) else {}
+            if not file_path and self._text(item.get("source_family") or metadata.get("family")) == FAMILY_BUILDING_FULL_CABINET_POWER:
+                file_path = self._text(item.get("source_file") or item.get("file_path"))
             if building and file_path and building not in building_file_map:
                 building_file_map[building] = Path(file_path)
         if not building_file_map:

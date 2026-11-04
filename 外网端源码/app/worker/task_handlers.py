@@ -693,6 +693,16 @@ def handle_alarm_rule_export_upload(
         raise
 
 
+def handle_energy_report_upload(config, payload, emit_log, runtime=None):
+    from app.modules.report_pipeline.service.energy_report_upload_service import EnergyReportUploadService
+
+    check_cancel = runtime.raise_if_cancelled if runtime is not None else (lambda: None)
+    check_cancel()
+    return EnergyReportUploadService(config).run(
+        str(payload.get("period") or ""), log=emit_log, check_cancel=check_cancel,
+    )
+
+
 def handle_system_screenshot_upload(
     config: Dict[str, Any],
     payload: Dict[str, Any],
@@ -740,6 +750,7 @@ def handle_inspection_data_upload(
         raise ValueError("dry_run 必须是布尔值")
     result = InspectionDataUploadService(config).run(
         source_date=payload.get("source_date") or None,
+        source_bucket_key=str(payload.get("source_bucket_key") or ""),
         log=emit_log,
         check_cancel=check_cancel,
         dry_run=dry_run,
@@ -1368,6 +1379,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "top5_over_power_attachment": handle_top5_over_power_attachment,
     "monthly_power_alert_report": handle_monthly_power_alert_report,
     "alarm_rule_export_upload": handle_alarm_rule_export_upload,
+    "energy_report_upload": handle_energy_report_upload,
     "system_screenshot_upload": handle_system_screenshot_upload,
     "temperature_humidity_upload": handle_temperature_humidity_upload,
     "inspection_data_upload": handle_inspection_data_upload,

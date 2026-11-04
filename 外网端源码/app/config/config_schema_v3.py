@@ -1429,6 +1429,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             },
         },
         "inspection_data_upload": copy.deepcopy(INSPECTION_DATA_UPLOAD_DEFAULTS),
+        "energy_report_upload": {"enabled": True},
         "temperature_humidity_upload": {
             "enabled": True,
             "source_family": "air_conditioner_temperature_humidity_family",

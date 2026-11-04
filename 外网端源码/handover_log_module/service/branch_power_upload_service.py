@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import os
 import re
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List
-
-import openpyxl
 
 from app.config.config_adapter import normalize_role_mode
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
@@ -18,8 +21,76 @@ from app.shared.utils.artifact_naming import (
 )
 from handover_log_module.service.full_cabinet_power_stats_sync_service import (
     FullCabinetPowerStatsSyncService,
+    _open_metric_source_sheet,
+    _sheet_header_value,
+    _validate_json_power_value,
 )
 from handover_log_module.service.power_alert_sync_service import PowerAlertSyncService
+
+
+_MAIN_TABLE_THREAD_LOCK = threading.Lock()
+
+
+@contextmanager
+def _main_table_write_guard(timeout_sec: float = 3600.0):
+    deadline = time.monotonic() + timeout_sec
+    if not _MAIN_TABLE_THREAD_LOCK.acquire(timeout=max(0.0, timeout_sec)):
+        raise RuntimeError("支路主表正在由其他任务更新，等待超时")
+    fd = None
+    locked = False
+    try:
+        lock_path = Path(tempfile.gettempdir()) / "panorama_branch_power_main_table.lock"
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"0")
+        while True:
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError as exc:
+                if exc.errno not in {11, 13, 35, 36} and getattr(exc, "winerror", None) not in {32, 33, 36}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("支路主表正在由其他进程更新，等待超时") from exc
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        yield
+    finally:
+        try:
+            if fd is not None:
+                try:
+                    if locked:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        if os.name == "nt":
+                            import msvcrt
+                            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+        finally:
+            _MAIN_TABLE_THREAD_LOCK.release()
+
+
+def _guard_branch_pipeline(func):
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        emit_log = kwargs.get("emit_log")
+        if callable(emit_log):
+            try:
+                emit_log("[支路功率上传] 等待支路主表及统计表处理资源")
+            except Exception:  # noqa: BLE001
+                pass
+        with _main_table_write_guard():
+            return func(*args, **kwargs)
+    return wrapped
 
 
 @dataclass(frozen=True)
@@ -152,27 +223,23 @@ class BranchPowerUploadService:
         return None
 
     @classmethod
-    def _detect_header_bucket_keys(cls, file_path: Path) -> List[str]:
+    def _detect_header_bucket_keys(
+        cls, file_path: Path, *, building: str | None = None, source_family: str | None = None
+    ) -> List[str]:
         try:
-            workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            with _open_metric_source_sheet(file_path, building=building, source_family=source_family) as sheet:
+                header = cls._detect_header_row_values(sheet)
+                detected: List[str] = []
+                for value in header:
+                    parsed = cls._parse_header_datetime(_sheet_header_value(sheet, value))
+                    if parsed is None:
+                        continue
+                    normalized = parsed.strftime("%Y-%m-%d %H")
+                    if normalized not in detected:
+                        detected.append(normalized)
+                return detected
         except OSError:
             return []
-        try:
-            sheet = workbook.active
-            if hasattr(sheet, "reset_dimensions"):
-                sheet.reset_dimensions()
-            header = cls._detect_header_row_values(sheet)
-            detected: List[str] = []
-            for value in header:
-                parsed = cls._parse_header_datetime(value)
-                if parsed is None:
-                    continue
-                normalized = parsed.strftime("%Y-%m-%d %H")
-                if normalized not in detected:
-                    detected.append(normalized)
-            return detected
-        finally:
-            workbook.close()
 
     def _resolve_hour_columns(
         self,
@@ -188,7 +255,7 @@ class BranchPowerUploadService:
         }
         parsed_header: Dict[datetime, int] = {}
         for index, value in enumerate(header, start=1):
-            parsed = self._parse_header_datetime(value)
+            parsed = self._parse_header_datetime(_sheet_header_value(sheet, value))
             if parsed is not None and parsed not in parsed_header:
                 parsed_header[parsed] = index
         columns: Dict[str, int] = {}
@@ -217,13 +284,11 @@ class BranchPowerUploadService:
         file_path: Path,
         data_bucket_dts: List[datetime],
         metric_label: str,
+        building: str,
+        source_family: str,
     ) -> Dict[str, List[_MetricRow]]:
         rows_by_bucket = {item.strftime("%Y-%m-%d %H"): [] for item in data_bucket_dts}
-        workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-        try:
-            sheet = workbook.active
-            if hasattr(sheet, "reset_dimensions"):
-                sheet.reset_dimensions()
+        with _open_metric_source_sheet(file_path, building=building, source_family=source_family) as sheet:
             hour_columns = self._resolve_hour_columns(
                 sheet,
                 data_bucket_dts=data_bucket_dts,
@@ -242,6 +307,11 @@ class BranchPowerUploadService:
                         continue
                     if not room or not machine_row or not point:
                         raise RuntimeError(f"{file_path.name} 第{index}行缺少包间/机列/测点")
+                    raw_value = row[value_index] if len(row) > value_index else None
+                    if file_path.suffix.lower() == ".json" and source_family == self.FAMILY_POWER:
+                        _validate_json_power_value(
+                            raw_value, location=f"{file_path.name} 第{index}行测点 {point} {bucket_key}:00"
+                        )
                     value = self._metric_cell_value_or_zero(row, value_index)
                     rows_by_bucket[bucket_key].append(
                         _MetricRow(
@@ -252,8 +322,6 @@ class BranchPowerUploadService:
                             value=value,
                         )
                     )
-        finally:
-            workbook.close()
         return rows_by_bucket
 
     @classmethod
@@ -262,7 +330,9 @@ class BranchPowerUploadService:
         best_count = -1
         for row in sheet.iter_rows(min_row=1, max_row=max(1, int(scan_rows or 4)), values_only=True):
             values = tuple(row or ())
-            parsed_count = sum(1 for value in values if cls._parse_header_datetime(value) is not None)
+            parsed_count = sum(
+                1 for value in values if cls._parse_header_datetime(_sheet_header_value(sheet, value)) is not None
+            )
             if parsed_count > best_count:
                 best_count = parsed_count
                 best_header = values
@@ -384,6 +454,7 @@ class BranchPowerUploadService:
         target_bucket_keys: List[str],
         building: str,
         label: str,
+        source_family: str,
     ) -> Path:
         unique: List[Path] = []
         seen: set[str] = set()
@@ -401,7 +472,7 @@ class BranchPowerUploadService:
         target_set = set(target_bucket_keys)
         scored: List[tuple[int, int, Path, List[str]]] = []
         for path in unique:
-            detected = self._detect_header_bucket_keys(path)
+            detected = self._detect_header_bucket_keys(path, building=building, source_family=source_family)
             coverage = len(target_set.intersection(detected))
             covers_all = 1 if target_set and target_set.issubset(set(detected)) else 0
             scored.append((covers_all, coverage, path, detected))
@@ -469,6 +540,7 @@ class BranchPowerUploadService:
                 target_bucket_keys=target_bucket_keys,
                 building=building,
                 label="支路功率源文件",
+                source_family=self.FAMILY_POWER,
             )
             current_candidates = payload.get("current_files", []) if isinstance(payload.get("current_files", []), list) else []
             switch_candidates = payload.get("switch_files", []) if isinstance(payload.get("switch_files", []), list) else []
@@ -477,12 +549,14 @@ class BranchPowerUploadService:
                 target_bucket_keys=target_bucket_keys,
                 building=building,
                 label="支路电流源文件",
+                source_family=self.FAMILY_CURRENT,
             )
             switch_file = self._choose_range_source_file(
                 switch_candidates,
                 target_bucket_keys=target_bucket_keys,
                 building=building,
                 label="支路开关源文件",
+                source_family=self.FAMILY_SWITCH,
             )
             full_cabinet_power_file = self._choose_range_source_file(
                 payload.get("full_cabinet_power_files", [])
@@ -491,6 +565,7 @@ class BranchPowerUploadService:
                 target_bucket_keys=target_bucket_keys,
                 building=building,
                 label="楼栋全机柜功率源文件",
+                source_family=self.FAMILY_BUILDING_FULL_CABINET_POWER,
             )
             bundles.append(
                 _SourceBundle(
@@ -531,16 +606,22 @@ class BranchPowerUploadService:
             file_path=bundle.power_file,
             data_bucket_dts=data_bucket_dts,
             metric_label="功率",
+            building=building,
+            source_family=self.FAMILY_POWER,
         )
         current_rows_by_hour = self._load_metric_rows_by_hour(
             file_path=bundle.current_file,
             data_bucket_dts=data_bucket_dts,
             metric_label="电流",
+            building=building,
+            source_family=self.FAMILY_CURRENT,
         )
         switch_rows_by_hour = self._load_metric_rows_by_hour(
             file_path=bundle.switch_file,
             data_bucket_dts=data_bucket_dts,
             metric_label="开关状态",
+            building=building,
+            source_family=self.FAMILY_SWITCH,
         )
         output: Dict[str, List[Dict[str, Any]]] = {}
         failures: Dict[str, str] = {}
@@ -630,6 +711,7 @@ class BranchPowerUploadService:
             "building_rows": row_count_by_building,
         }
 
+    @_guard_branch_pipeline
     def upload_day_from_source_files(
         self,
         *,
@@ -735,6 +817,18 @@ class BranchPowerUploadService:
         if not records:
             raise RuntimeError(f"支路整日源文件没有解析出可上传记录 business_date={resolved_business_date}")
 
+        # Validate cabinet JSON before any main or alert table can be replaced.
+        for bundle in bundles:
+            cabinet_file = Path(bundle.full_cabinet_power_file)
+            if cabinet_file.suffix.lower() == ".json":
+                parsed_cabinet = FullCabinetPowerStatsSyncService(self.config)._parse_metric_file(
+                    file_path=cabinet_file,
+                    building=bundle.building,
+                    business_date=resolved_business_date,
+                )
+                if not any(parsed_cabinet.values()):
+                    raise RuntimeError(f"{cabinet_file.name} 未解析出任何全机柜统计测点，未上传")
+
         client = self._client(emit_log) if upload_main_table else None
         upload_fields = self._target_fields_from_bitable(client, emit_log) if client is not None else self._upload_fields()
         validation = self._validate_daily_direct_records(
@@ -774,27 +868,7 @@ class BranchPowerUploadService:
         if upload_main_table:
             if client is None:
                 client = self._client(emit_log)
-            clear_start = time.perf_counter()
-            self._emit(
-                emit_log,
-                f"[支路功率上传] 整日直传清空目标多维表开始 table_id={self.TABLE_ID}, list_fields={self.FIELD_BUILDING}",
-            )
-            deleted = client.clear_table(
-                self.TABLE_ID,
-                list_field_names=[self.FIELD_BUILDING],
-                progress_callback=self._progress_logger(emit_log, label="整日直传清空目标表", total=1),
-            )
-            self._emit(
-                emit_log,
-                f"[支路功率上传] 整日直传清空目标多维表完成 deleted={deleted}, elapsed_ms={self._elapsed_ms(clear_start)}",
-            )
-
-            self._emit(emit_log, f"[支路功率上传] 整日直传批量上传开始 records={len(upload_records)}")
-            client.batch_create_records(
-                self.TABLE_ID,
-                upload_records,
-                progress_callback=self._progress_logger(emit_log, label="整日直传上传", total=len(upload_records)),
-            )
+            deleted = self._replace_main_table(client, upload_records, emit_log)
             self._emit(
                 emit_log,
                 f"[支路功率上传] 整日直传批量上传完成 business_date={resolved_business_date}, "
@@ -855,7 +929,10 @@ class BranchPowerUploadService:
                 )
         full_cabinet_power_alert_sync = FullCabinetPowerStatsSyncService(self.config).sync_from_source_units(
             report_date=resolved_business_date,
-            source_units=units,
+            source_units=[
+                {"building": bundle.building, "full_cabinet_power_file": str(bundle.full_cabinet_power_file)}
+                for bundle in bundles
+            ],
             detail_records=upload_records,
             emit_log=emit_log,
         )
@@ -904,6 +981,65 @@ class BranchPowerUploadService:
             "elapsed_ms": elapsed_ms,
             "power_alert_sync": power_alert_sync,
         }
+
+    def _replace_main_table(
+        self, client: FeishuBitableClient, upload_records: List[Dict[str, Any]], emit_log: Callable[[str], None],
+    ) -> int:
+        old_ids = client.list_record_ids(self.TABLE_ID, field_names=[self.FIELD_BUILDING], require_complete=True)
+        old_set = set(old_ids)
+        self._emit(emit_log, f"[支路功率上传] 已取得旧记录快照 count={len(old_ids)}")
+        self._emit(emit_log, f"[支路功率上传] 整日直传批量上传开始 records={len(upload_records)}")
+        try:
+            responses = client.batch_create_records(
+                self.TABLE_ID, upload_records,
+                progress_callback=self._progress_logger(emit_log, label="整日直传上传", total=len(upload_records)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"支路主表新记录上传失败，旧记录未删除: {exc}") from exc
+        new_ids: List[str] = []
+        for response in responses if isinstance(responses, list) else []:
+            data = response.get("data") if isinstance(response, dict) else None
+            items = data.get("records") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                raise RuntimeError("支路主表新记录响应不完整，旧记录未删除")
+            for item in items:
+                record_id = str(item.get("record_id", "") or "").strip() if isinstance(item, dict) else ""
+                if not record_id:
+                    raise RuntimeError("支路主表新记录缺少 ID，旧记录未删除")
+                new_ids.append(record_id)
+        new_set = set(new_ids)
+        if len(new_ids) != len(upload_records) or len(new_set) != len(new_ids) or old_set.intersection(new_set):
+            raise RuntimeError(f"支路主表新记录确认不完整，旧记录未删除: expected={len(upload_records)}, confirmed={len(new_ids)}")
+        for attempt in range(1, 4):
+            visible_ids = set(client.list_record_ids(self.TABLE_ID, field_names=[self.FIELD_BUILDING], require_complete=True))
+            if visible_ids - old_set - new_set:
+                raise RuntimeError("支路主表检测到其他程序并发写入，旧记录未删除；请先检查，重新执行会替换当前全部记录")
+            if new_set.issubset(visible_ids) and old_set.issubset(visible_ids):
+                break
+            if attempt < 3:
+                time.sleep(2)
+        else:
+            raise RuntimeError("支路主表写入后未能确认全部新旧记录，旧记录未删除")
+        deleted = 0
+        if old_ids:
+            try:
+                deleted = client.batch_delete_records(
+                    self.TABLE_ID, old_ids,
+                    progress_callback=self._progress_logger(emit_log, label="整日直传删除旧记录", total=len(old_ids)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"支路主表新记录已上传，但旧记录删除失败，可重跑清理: {exc}") from exc
+        for attempt in range(1, 4):
+            visible_ids = set(client.list_record_ids(self.TABLE_ID, field_names=[self.FIELD_BUILDING], require_complete=True))
+            if visible_ids - old_set - new_set:
+                raise RuntimeError("支路主表替换期间检测到其他程序写入，冲突记录已保留；请先检查，重新执行会替换当前全部记录")
+            if visible_ids == new_set:
+                break
+            if attempt < 3:
+                time.sleep(2)
+        else:
+            raise RuntimeError("支路主表替换后校验不完整，新记录已保留，请重试清理旧记录")
+        return deleted
 
     @classmethod
     def _row_key(cls, row: Dict[str, Any]) -> tuple[str, str, str, str, str]:
