@@ -24,6 +24,7 @@ from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     _goto_with_retries,
     _resolve_browser_executable,
 )
+from app.modules.shared_bridge.service.internal_download_browser_pool import BuildingBrowserBusyError
 from app.shared.runtime.building_browser_locks import (
     acquire_building_browser_lock,
     release_building_browser_lock,
@@ -799,6 +800,7 @@ async def _capture_with_browser_pool(
     async def capture_building(building: str, building_targets: list[ScreenshotTarget]) -> list[Dict[str, Any]]:
         site = site_by_building[building]
         records: list[Dict[str, Any]] = []
+        busy_waits = 0
         for target in building_targets:
             _raise_if_capture_cancelled(args)
             async def runner(page: Any, _target: ScreenshotTarget = target) -> list[Dict[str, Any]]:
@@ -810,16 +812,26 @@ async def _capture_with_browser_pool(
                         hour_text=hour_text, emit_log=emit_log,
                     ), timeout=120,
                 )
-            future = submit(building, runner, owner="system_screenshot_capture")
-            wrapped = asyncio.wrap_future(future)
-            try:
-                while not wrapped.done():
-                    _raise_if_capture_cancelled(args)
-                    await asyncio.wait({wrapped}, timeout=0.5)
-                records.extend(await wrapped)
-            except BaseException:
-                future.cancel()
-                raise
+            while True:
+                _raise_if_capture_cancelled(args)
+                future = submit(building, runner, owner="system_screenshot_capture")
+                wrapped = asyncio.wrap_future(future)
+                try:
+                    while not wrapped.done():
+                        _raise_if_capture_cancelled(args)
+                        await asyncio.wait({wrapped}, timeout=0.5)
+                    records.extend(await wrapped)
+                    break
+                except BuildingBrowserBusyError as exc:
+                    future.cancel()
+                    busy_waits += 1
+                    if busy_waits >= 6:
+                        raise
+                    emit_log(f"[系统截图采集][{building}] 页面暂忙，保留当前批次继续等待 ({busy_waits}/6): {exc}")
+                    await asyncio.sleep(1)
+                except BaseException:
+                    future.cancel()
+                    raise
         return records
 
     buildings = list(plan_by_building)
@@ -861,12 +873,16 @@ async def _capture_with_dedicated_browsers(
 
     async def _capture_one_building(p: Any, building: str, building_targets: list[ScreenshotTarget]) -> list[Dict[str, Any]]:
         site = site_by_building[building]
-        resource_acquired = await asyncio.to_thread(
-            acquire_building_browser_lock,
-            site.building,
-            owner="system_screenshot_capture",
-            timeout_sec=float(args.browser_resource_wait_sec),
-        )
+        resource_acquired = False
+        deadline = time.monotonic() + max(0.0, float(args.browser_resource_wait_sec))
+        while not resource_acquired:
+            _raise_if_capture_cancelled(args)
+            resource_acquired = acquire_building_browser_lock(
+                site.building, owner="system_screenshot_capture", timeout_sec=0,
+            )
+            if resource_acquired or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.1)
         if not resource_acquired:
             raise RuntimeError(f"{site.building} 浏览器资源正在被其他任务占用，等待超时")
         try:

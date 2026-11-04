@@ -227,6 +227,15 @@ class RuntimeStatusCoordinator:
         if any(keyword in raw for keyword in _EVENT_TRIGGER_KEYWORDS):
             self.request_refresh(reason="log")
 
+    def peek_scope_snapshot(self, scope: str) -> Dict[str, Any] | None:
+        # Cache entries are replaced as a whole; never wait for SQLite or a writer here.
+        entry = self._scope_cache.get(str(scope or "").strip())
+        return copy.deepcopy(entry) if isinstance(entry, dict) else None
+
+    def peek_building_snapshot(self, building: str) -> Dict[str, Any] | None:
+        entry = self._building_cache.get(str(building or "").strip())
+        return copy.deepcopy(entry) if isinstance(entry, dict) else None
+
     def read_scope_snapshot(self, scope: str) -> Dict[str, Any] | None:
         scope_text = str(scope or "").strip()
         if not scope_text:
@@ -238,7 +247,9 @@ class RuntimeStatusCoordinator:
         snapshot = self._store.read_scope_snapshot(scope_text)
         if isinstance(snapshot, dict) and snapshot:
             with self._snapshot_cache_lock:
-                self._scope_cache[scope_text] = copy.deepcopy(snapshot)
+                if scope_text not in self._scope_cache:
+                    self._scope_cache[scope_text] = copy.deepcopy(snapshot)
+                return copy.deepcopy(self._scope_cache[scope_text])
         return snapshot
 
     def read_building_snapshot(self, building: str) -> Dict[str, Any] | None:
@@ -252,7 +263,9 @@ class RuntimeStatusCoordinator:
         snapshot = self._store.read_building_snapshot(building_text)
         if isinstance(snapshot, dict) and snapshot:
             with self._snapshot_cache_lock:
-                self._building_cache[building_text] = copy.deepcopy(snapshot)
+                if building_text not in self._building_cache:
+                    self._building_cache[building_text] = copy.deepcopy(snapshot)
+                return copy.deepcopy(self._building_cache[building_text])
         return snapshot
 
     def refresh_now(self) -> None:
@@ -312,6 +325,7 @@ class RuntimeStatusCoordinator:
 
     def _run_internal_refresh_loop(self) -> None:
         next_run = time.monotonic()
+        next_error_log = 0.0
         interval_sec = min(2.0, self._refresh_interval_sec)
         while not self._stop_event.is_set():
             timeout = max(0.0, next_run - time.monotonic())
@@ -323,7 +337,15 @@ class RuntimeStatusCoordinator:
             if now < next_run:
                 continue
             self._internal_refresh_requested = False
-            self._refresh_internal_runtime_snapshots()
+            try:
+                self._refresh_internal_runtime_snapshots()
+            except Exception as exc:  # noqa: BLE001
+                if callable(self._emit_log) and time.monotonic() >= next_error_log:
+                    next_error_log = time.monotonic() + 60.0
+                    try:
+                        self._emit_log(f"[运行状态] 刷新楼栋状态快照失败: {exc}")
+                    except Exception:
+                        pass
             next_run = time.monotonic() + interval_sec
 
     def _refresh_all_snapshots(self) -> None:

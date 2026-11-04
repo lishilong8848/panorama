@@ -11,6 +11,7 @@ from pathlib import Path
 
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
+from app.modules.inspection_data.service.point_status import normalize_status_rules
 from app.shared.utils.atomic_file import atomic_write_text
 
 
@@ -92,6 +93,9 @@ def load_or_restore_point_settings(config):
                 _validate_effective_count(group["baseline"], group["points"], group["remove"])
                 if "targets" in group:
                     group["targets"] = _normalize_targets(building, group["points"], group["targets"])
+                if "status_rules" in group:
+                    group["status_rules"] = normalize_status_rules(
+                        group["status_rules"], (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
             _validate_target_collisions(groups)
         _save_settings(config, settings)
         return settings
@@ -268,7 +272,7 @@ def retry_pending_point_config(config):
             _sync_cloud_config(config, settings, buildings)
 
 
-def save_point_group(config, *, building, family, points, remove, expected_group=None, targets=None):
+def save_point_group(config, *, building, family, points, remove, expected_group=None, targets=None, status_rules=None):
     if not isinstance(building, str) or not isinstance(family, str) or building not in {"D楼", "E楼"} or family not in INSPECTION_SOURCE_CONTRACTS:
         raise ValueError("巡检测点只支持 D/E 楼的电气和暖通")
     if not isinstance(points, dict) or not isinstance(remove, list) or len(points) > 1000 or len(remove) > 1000:
@@ -289,12 +293,17 @@ def save_point_group(config, *, building, family, points, remove, expected_group
         if targets is None:
             targets = {i: target for i, target in groups.get(family, {}).get("targets", {}).items() if i in points}
         targets = _normalize_targets(building, points, targets)
+        active_ids = (set(current.get("baseline", {})) | set(points)) - set(remove)
+        if status_rules is None:
+            status_rules = {i: rule for i, rule in current.get("status_rules", {}).items() if i in active_ids}
+        status_rules = normalize_status_rules(status_rules, active_ids)
         if "baseline" in current:
             _validate_effective_count(current["baseline"], points, remove)
         if points or remove or "baseline" in current:
             _validate_target_collisions({**groups, family: {"targets": targets}})
             groups[family] = {"points": {i: note.strip() for i, note in sorted(points.items())},
-                              "remove": sorted(set(remove)), **({"targets": targets} if targets else {})}
+                              "remove": sorted(set(remove)), **({"targets": targets} if targets else {}),
+                              **({"status_rules": status_rules} if status_rules else {})}
             if "baseline" in current:
                 groups[family]["baseline"] = current["baseline"]
         else:

@@ -371,7 +371,12 @@ function summaryCards() {
   const pool = summary.pool || {};
   const cache = summary.source_cache || {};
   const queue = summary.queue || {};
+  const pending = summary.runtime_available === false && summary.reason_code === "snapshot_pending";
+  const staleMessage = summary.snapshot_stale
+    ? (summary.snapshot_updated_at ? `状态更新延迟，显示 ${summary.snapshot_updated_at} 的数据` : "状态正在准备，请稍候")
+    : "";
   return `
+    ${staleMessage ? `<p class="global-message" role="status">${escapeHtml(staleMessage)}</p>` : ""}
     <section class="card-grid">
       <div class="metric-card">
         <span>运行角色</span>
@@ -380,7 +385,7 @@ function summaryCards() {
       </div>
       <div class="metric-card">
         <span>共享桥接</span>
-        <strong>${summary.bridge_enabled ? "已启用" : "未启用"}</strong>
+        <strong>${pending ? "等待状态" : (summary.bridge_enabled ? "已启用" : "未启用")}</strong>
         <small>${escapeHtml(summary.last_error || summary.agent_status || "等待后端状态")}</small>
       </div>
       <div class="metric-card">
@@ -390,7 +395,7 @@ function summaryCards() {
       </div>
       <div class="metric-card">
         <span>共享目录</span>
-        <strong>${cache.enabled ? "已启用" : "未启用"}</strong>
+        <strong>${pending ? "等待状态" : (cache.enabled ? "已启用" : "未启用")}</strong>
         <small>${escapeHtml(cache.cache_root || "-")}</small>
       </div>
       <div class="metric-card">

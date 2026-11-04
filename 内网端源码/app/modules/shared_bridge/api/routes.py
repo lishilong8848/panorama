@@ -225,6 +225,34 @@ def _read_live_internal_building_status(service: Any, *, building: str, building
     )
 
 
+def _peek_runtime_snapshot(coordinator: Any, method: str, key: str) -> Dict[str, Any] | None:
+    reader = getattr(coordinator, method, None)
+    if not callable(reader):
+        return None
+    try:
+        snapshot = reader(key)
+    except Exception:
+        return None
+    return snapshot if isinstance(snapshot, dict) and isinstance(snapshot.get("payload"), dict) else None
+
+
+def _runtime_snapshot_age(snapshot: Dict[str, Any] | None) -> float | None:
+    try:
+        updated = datetime.strptime(str((snapshot or {}).get("updated_at", "")), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+    return (datetime.now() - updated).total_seconds()
+
+
+def _request_runtime_refresh(coordinator: Any, reason: str) -> None:
+    try:
+        refresh = getattr(coordinator, "request_internal_runtime_refresh", None)
+        if callable(refresh):
+            refresh(reason=reason)
+    except Exception:
+        pass
+
+
 
 def _deployment_role_mode(request: Request) -> str:
     container = request.app.state.container
@@ -669,23 +697,17 @@ def bridge_health(request: Request) -> Dict[str, Any]:
 
 
 @router.get("/api/bridge/internal-runtime-status")
-def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
+async def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
     role_mode = _deployment_role_mode(request)
     container = request.app.state.container
-    service = getattr(container, "shared_bridge_service", None)
     coordinator = getattr(container, "runtime_status_coordinator", None)
 
     def _attach_display(summary_payload: Dict[str, Any]) -> Dict[str, Any]:
         summary = copy.deepcopy(summary_payload if isinstance(summary_payload, dict) else {})
         task_summary: Dict[str, Any] = {}
-        if coordinator is not None and callable(getattr(coordinator, "read_scope_snapshot", None)):
-            try:
-                job_snapshot = coordinator.read_scope_snapshot("job_panel_dashboard_summary")
-                payload = job_snapshot.get("payload") if isinstance(job_snapshot, dict) else None
-                if isinstance(payload, dict):
-                    task_summary = payload
-            except Exception:
-                task_summary = {}
+        job_snapshot = _peek_runtime_snapshot(coordinator, "peek_scope_snapshot", "job_panel_dashboard_summary")
+        if job_snapshot is not None:
+            task_summary = job_snapshot["payload"]
         summary["display"] = present_internal_runtime_display(
             summary,
             task_overview=(
@@ -702,56 +724,22 @@ def bridge_internal_runtime_status(request: Request) -> Dict[str, Any]:
         summary["reason_code"] = "role_mismatch"
         return {"ok": True, "summary": _attach_display(summary)}
 
-    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
-        live_payload = _read_live_internal_summary(service)
-        if isinstance(live_payload, dict) and _internal_summary_has_runtime_signal(live_payload):
-            try:
-                refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
-                if callable(refresher):
-                    refresher(reason="internal_runtime_summary_route_live")
-            except Exception:
-                pass
-            return {"ok": True, "summary": _attach_display(live_payload)}
-        snapshot = coordinator.read_scope_snapshot("internal_runtime_summary")
-        payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
-        if isinstance(payload, dict):
-            if not _internal_summary_has_runtime_signal(payload):
-                if isinstance(live_payload, dict) and _internal_summary_has_runtime_signal(live_payload):
-                    try:
-                        refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
-                        if callable(refresher):
-                            refresher(reason="internal_runtime_summary_route_live_repair")
-                    except Exception:
-                        pass
-                    return {"ok": True, "summary": _attach_display(live_payload)}
-            return {"ok": True, "summary": _attach_display(payload)}
-        try:
-            refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
-            if callable(refresher):
-                refresher(reason="internal_runtime_summary_route")
-            else:
-                coordinator.request_refresh(reason="internal_runtime_summary_route")
-        except Exception:
-            pass
-        return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
-
-    live_payload = _read_live_internal_summary(service)
-    if isinstance(live_payload, dict):
-        try:
-            if coordinator is not None and callable(getattr(coordinator, "request_internal_runtime_refresh", None)):
-                coordinator.request_internal_runtime_refresh(reason="internal_runtime_summary_route")
-        except Exception:
-            pass
-        return {"ok": True, "summary": _attach_display(live_payload)}
-
-    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
-        return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
-
-    return {"ok": True, "summary": _attach_display(build_empty_internal_runtime_summary(role_mode="internal"))}
+    snapshot = _peek_runtime_snapshot(coordinator, "peek_scope_snapshot", "internal_runtime_summary")
+    age = _runtime_snapshot_age(snapshot)
+    stale = age is None or age < -5 or age > 30
+    if stale:
+        _request_runtime_refresh(coordinator, "internal_runtime_summary_stale")
+    summary = copy.deepcopy(snapshot["payload"]) if snapshot else build_empty_internal_runtime_summary(role_mode="internal")
+    summary["snapshot_stale"] = stale
+    summary["snapshot_updated_at"] = str(snapshot.get("updated_at", "")) if snapshot else ""
+    if not snapshot:
+        summary["runtime_available"] = False
+        summary["reason_code"] = "snapshot_pending"
+    return {"ok": True, "summary": _attach_display(summary)}
 
 
 @router.get("/api/bridge/internal-runtime-status/buildings/{building_code}")
-def bridge_internal_runtime_status_building(
+async def bridge_internal_runtime_status_building(
     building_code: str,
     request: Request,
     include_raw: bool = False,
@@ -759,7 +747,6 @@ def bridge_internal_runtime_status_building(
     role_mode = _deployment_role_mode(request)
     normalized_code, building = _normalize_internal_runtime_building(building_code)
     container = request.app.state.container
-    service = getattr(container, "shared_bridge_service", None)
     coordinator = getattr(container, "runtime_status_coordinator", None)
 
     def _slim_action(payload: Any, *, label: str = "") -> Dict[str, Any]:
@@ -879,6 +866,8 @@ def bridge_internal_runtime_status_building(
             "building_code": str(status.get("building_code", "") or normalized_code).strip(),
             "runtime_available": bool(status.get("runtime_available", True)),
             "reason_code": str(status.get("reason_code", "") or "").strip(),
+            "snapshot_stale": bool(status.get("snapshot_stale", False)),
+            "snapshot_updated_at": str(status.get("snapshot_updated_at", "") or "").strip(),
             "display": _slim_display(display),
         }
 
@@ -891,76 +880,20 @@ def bridge_internal_runtime_status_building(
         status["reason_code"] = "role_mismatch"
         return {"ok": True, "status": _attach_display(status)}
 
-    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
-        live_payload = _read_live_internal_building_status(service, building=building, building_code=normalized_code)
-        if isinstance(live_payload, dict) and _internal_building_status_has_runtime_signal(live_payload):
-            try:
-                refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
-                if callable(refresher):
-                    refresher(reason=f"internal_runtime_building_route_live:{building}")
-            except Exception:
-                pass
-            return {"ok": True, "status": _attach_display(live_payload)}
-        snapshot = coordinator.read_building_snapshot(building)
-        payload = snapshot.get("payload") if isinstance(snapshot, dict) else None
-        if isinstance(payload, dict):
-            if not _internal_building_status_has_runtime_signal(payload):
-                if isinstance(live_payload, dict) and _internal_building_status_has_runtime_signal(live_payload):
-                    try:
-                        refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
-                        if callable(refresher):
-                            refresher(reason=f"internal_runtime_building_route_live_repair:{building}")
-                    except Exception:
-                        pass
-                    return {"ok": True, "status": _attach_display(live_payload)}
-            return {"ok": True, "status": _attach_display(payload)}
-        try:
-            refresher = getattr(coordinator, "request_internal_runtime_refresh", None)
-            if callable(refresher):
-                refresher(reason=f"internal_runtime_building_route:{building}")
-            else:
-                coordinator.request_refresh(reason=f"internal_runtime_building_route:{building}")
-        except Exception:
-            pass
-        return {
-            "ok": True,
-            "status": _attach_display(
-                build_empty_internal_runtime_building_status(
-                    building=building,
-                    building_code=normalized_code,
-                )
-            ),
-        }
-
-    live_payload = _read_live_internal_building_status(service, building=building, building_code=normalized_code)
-    if isinstance(live_payload, dict):
-        try:
-            if coordinator is not None and callable(getattr(coordinator, "request_internal_runtime_refresh", None)):
-                coordinator.request_internal_runtime_refresh(reason=f"internal_runtime_building_route:{building}")
-        except Exception:
-            pass
-        return {"ok": True, "status": _attach_display(live_payload)}
-
-    if coordinator is not None and callable(getattr(coordinator, "is_running", None)) and coordinator.is_running():
-        return {
-            "ok": True,
-            "status": _attach_display(
-                build_empty_internal_runtime_building_status(
-                    building=building,
-                    building_code=normalized_code,
-                )
-            ),
-        }
-
-    return {
-        "ok": True,
-        "status": _attach_display(
-            build_empty_internal_runtime_building_status(
-                building=building,
-                building_code=normalized_code,
-            )
-        ),
-    }
+    snapshot = _peek_runtime_snapshot(coordinator, "peek_building_snapshot", building)
+    age = _runtime_snapshot_age(snapshot)
+    stale = age is None or age < -5 or age > 30
+    if stale:
+        _request_runtime_refresh(coordinator, f"internal_runtime_building_stale:{building}")
+    status = copy.deepcopy(snapshot["payload"]) if snapshot else build_empty_internal_runtime_building_status(
+        building=building, building_code=normalized_code,
+    )
+    status["snapshot_stale"] = stale
+    status["snapshot_updated_at"] = str(snapshot.get("updated_at", "")) if snapshot else ""
+    if not snapshot:
+        status["runtime_available"] = False
+        status["reason_code"] = "snapshot_pending"
+    return {"ok": True, "status": _attach_display(status)}
 
 
 @router.post("/api/bridge/shared-root/self-check")

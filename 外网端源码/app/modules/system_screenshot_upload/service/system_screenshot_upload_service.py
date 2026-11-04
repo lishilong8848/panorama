@@ -337,9 +337,12 @@ class SystemScreenshotUploadService:
         if not targets:
             raise RuntimeError("系统截图上传目标为空")
         expected_buildings = self._expected_buildings(cfg)
+        expected_pairs = {(building, target["key"]) for building in expected_buildings for target in targets}
         wait_timeout = max(1.0, float(cfg.get("wait_capture_timeout_sec", 180) or 180))
         poll_sec = max(1.0, float(cfg.get("wait_capture_poll_sec", 5) or 5))
-        deadline = time.monotonic() + wait_timeout
+        started_waiting = time.monotonic()
+        deadline = started_waiting + wait_timeout
+        hard_deadline = started_waiting + max(wait_timeout, 1800.0)
 
         internal = self._make_internal_client()
         should_trigger = bool(cfg.get("trigger_internal_capture", True)) if trigger_internal_capture is None else bool(trigger_internal_capture)
@@ -376,6 +379,7 @@ class SystemScreenshotUploadService:
         last_wait_log_at = 0.0
         last_missing: List[str] = []
         retriggered_after_join = False
+        progress_pairs: set[tuple[str, str]] = set()
         while True:
             check_cancelled()
             listing = internal.list_system_screenshot_files(capture_date=date_text)
@@ -410,6 +414,11 @@ class SystemScreenshotUploadService:
                 for target in targets
                 if (building, target["key"]) not in by_pair
             ]
+            new_pairs = (set(by_pair) & expected_pairs) - progress_pairs
+            if new_pairs:
+                progress_pairs.update(new_pairs)
+                if capture_batch_id and batch.get("batch_id") == capture_batch_id and batch.get("status") == "running":
+                    deadline = min(hard_deadline, time.monotonic() + wait_timeout)
             if not missing or time.monotonic() >= deadline:
                 break
             if capture_batch_id and batch.get("batch_id") == capture_batch_id:
@@ -426,6 +435,7 @@ class SystemScreenshotUploadService:
                         **({"request_id": capture_request_id} if capture_request_id else {}),
                     )
                     capture_batch_id = str(trigger_result.get("batch_id", "") or "")
+                    progress_pairs.clear()
                     continue
             wait_reason = "等待最新截图完成" if fresh_since is not None else "等待内网端截图完成"
             should_log = missing != last_missing or time.monotonic() - last_wait_log_at >= 60

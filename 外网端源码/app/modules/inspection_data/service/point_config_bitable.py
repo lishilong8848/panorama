@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
+from app.modules.inspection_data.service.point_status import STATUS_FIELDS, normalize_status_rules
 
 
 POINT_CONFIG_TABLES = {"D楼": "tblU0q6LvNjpMIN1", "E楼": "tblrUhk1NAmTg1a2"}
@@ -8,6 +11,7 @@ _FIELD_TYPES = {
     "专业": 1, "测点ID": 1, "测点名称": 1, "测点路径": 1, "基线测点": 7, "启用": 7,
     "测点备注": 1, "目标巡检表": 1, "目标工作表": 1, "目标单元格": 1,
     **dict.fromkeys(INSPECTION_ROUND_FIELDS.values(), 1),
+    "测点类型": 1, **dict.fromkeys(STATUS_FIELDS.values(), 1),
 }
 
 
@@ -47,6 +51,11 @@ def _expected_rows(groups):
                 "目标巡检表": target.get("workbook", ""), "目标工作表": target.get("sheet", ""),
                 "目标单元格": target.get("cell", ""),
             }
+            status = group.get("status_rules", {}).get(point_id, {})
+            desired[discipline, point_id].update({"测点类型": status.get("type", ""), **{
+                field: json.dumps(status.get(key, []), ensure_ascii=False, separators=(",", ":")) if status else ""
+                for key, field in STATUS_FIELDS.items()
+            }})
             if "round_cells" in target:
                 desired[discipline, point_id].update({field: target["round_cells"].get(key, "")
                                                        for key, field in INSPECTION_ROUND_FIELDS.items()})
@@ -85,6 +94,15 @@ def read_point_config_bitable(config, *, client=None):
             if any(rounds.values()):
                 target["round_cells"] = rounds
             note = _text(fields.get("测点备注"))
+            kind = _text(fields.get("测点类型"))
+            encoded = {key: _text(fields.get(field)) for key, field in STATUS_FIELDS.items()}
+            if kind or any(encoded.values()):
+                try:
+                    rule = {"type": kind, **{key: json.loads(value) if value else [] for key, value in encoded.items()}}
+                    normalized = normalize_status_rules({point_id: rule}, {point_id})
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"{building} 测点 {point_id} 状态规则无效") from exc
+                group.setdefault("status_rules", {}).update(normalized)
             if point_id not in group["baseline"] or note or any(target.values()):
                 group["points"][point_id] = note
             if any(target.values()):

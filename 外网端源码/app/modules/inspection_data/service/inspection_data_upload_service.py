@@ -48,7 +48,9 @@ DIESEL_PARALLEL_FIELDS = {
     "电池电压_V": "蓄电池电压(V)",
     "冷却液温度_℃": "冷却液水温(℃)",
 }
-POINT_DETAIL_TYPES = {"记录类型": 3, "测点ID": 1, "测点名称": 1, "测点路径": 1, "测点值": 1, "采样时间": 5, "测点备注": 1}
+POINT_DETAIL_TYPES = {"记录类型": 3, "测点ID": 1, "测点名称": 1, "测点路径": 1, "测点值": 1, "测点原始值": 1,
+                      "测点类型": 1, "状态正常值": 1, "状态异常值": 1, "状态未运行值": 1, "状态判定": 1,
+                      "采样时间": 5, "测点备注": 1}
 POINT_TARGET_FIELDS = {"workbook": "目标巡检表", "sheet": "目标工作表", "cell": "目标单元格"}
 POINT_DETAIL_TYPES.update(dict.fromkeys(POINT_TARGET_FIELDS.values(), 1))
 POINT_DETAIL_TYPES.update(dict.fromkeys(INSPECTION_ROUND_FIELDS.values(), 1))
@@ -533,7 +535,9 @@ class InspectionDataUploadService:
         return end
 
     @staticmethod
-    def _point_detail_rows(entry: dict, discipline: str, notes: dict, targets: dict | None = None) -> list[dict]:
+    def _point_detail_rows(entry: dict, discipline: str, notes: dict, targets: dict | None = None,
+                           status_rules: dict | None = None) -> list[dict]:
+        from app.modules.inspection_data.service.point_status import status_fields
         rows = []
         position = device = ""
         sample_time = int(datetime.strptime(entry["value_time"], "%Y-%m-%d %H:%M:%S")
@@ -556,6 +560,8 @@ class InspectionDataUploadService:
                 "设备编号": device, "巡检表单": entry["report_name"], "测点名称": _text(metric),
                 "测点ID": point_id, "测点路径": " / ".join(filter(None, (position, device, _text(metric)))),
                 "测点值": f"{_round_measurement(numeric):.2f}" if numeric is not None else _text(raw),
+                "测点原始值": "" if raw is None else str(raw),
+                **status_fields((status_rules or {}).get(point_id), raw),
                 "测点备注": notes.get(point_id, ""),
                 **{field: target[key] for key, field in POINT_TARGET_FIELDS.items() if key in target},
                 **{field: target.get("round_cells", {}).get(key, "")
@@ -699,7 +705,8 @@ class InspectionDataUploadService:
                 cancel()
                 entry = sources[building][family]
                 group = (point_settings or {}).get(building, {}).get(family, {})
-                point_rows = self._point_detail_rows(entry, contract["discipline"], group.get("points", {}), group.get("targets", {}))
+                point_rows = self._point_detail_rows(entry, contract["discipline"], group.get("points", {}),
+                                                     group.get("targets", {}), group.get("status_rules", {}))
                 added_ids = set(entry.get("point_overrides", {}).get("add", []))
                 p = self.parse_samples(
                     entry["rows"], building=building, value_time=entry["value_time"],

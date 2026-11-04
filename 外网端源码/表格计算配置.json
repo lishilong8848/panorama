@@ -254,7 +254,7 @@
         "enabled": true,
         "auto_start_in_gui": true,
         "morning_time": "02:00:00",
-        "afternoon_time": "12:00:00",
+        "afternoon_time": "16:00:00",
         "cloud_catchup_enabled": true,
         "cloud_catchup_morning_time": "08:00:00",
         "cloud_catchup_afternoon_time": "17:30:00",

@@ -124,12 +124,12 @@ class EnergyReportUploadService:
     def client(self) -> FeishuBitableClient:
         if self.bitable is None:
             auth = require_feishu_auth_settings(self.config)
-            target = BitableTargetResolver(**auth).resolve_token_pair_preview(
-                configured_app_token=TARGET_TOKEN, table_id=TABLE_ID,
-            )
-            app_token = target.get("operation_app_token")
-            if not app_token:
-                raise RuntimeError(f"月度能耗报表目标不可用: {target.get('message') or TABLE_ID}")
+            target = BitableTargetResolver(**auth).resolve({
+                "wiki_url": f"https://vnet.feishu.cn/wiki/{TARGET_TOKEN}?table={TABLE_ID}",
+            })
+            app_token = str(target.get("app_token") or "").strip()
+            if target.get("wiki_obj_type") != "bitable" or not app_token or app_token == TARGET_TOKEN:
+                raise RuntimeError("月度能耗报表目标不是有效的知识库多维表，未上传附件")
             self.bitable = FeishuBitableClient(
                 **auth, app_token=app_token, calc_table_id=TABLE_ID, attachment_table_id=TABLE_ID,
                 date_text_to_timestamp_ms_fn=lambda **_: 0,

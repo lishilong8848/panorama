@@ -8,6 +8,30 @@ import pytest
 from app.modules.report_pipeline.service import energy_report_upload_service as module
 
 
+def test_wiki_target_uses_underlying_bitable_token_for_attachment(monkeypatch):
+    resolver = Mock()
+    resolver.resolve.return_value = {"app_token": "base-object-token", "wiki_obj_type": "bitable"}
+    monkeypatch.setattr(module, "require_feishu_auth_settings", lambda _config: {"app_id": "test", "app_secret": "test"})
+    monkeypatch.setattr(module, "BitableTargetResolver", lambda **_auth: resolver)
+    factory = Mock()
+    monkeypatch.setattr(module, "FeishuBitableClient", factory)
+    module.EnergyReportUploadService({}).client()
+    assert resolver.resolve.call_args.args[0]["wiki_url"].endswith(f"/wiki/{module.TARGET_TOKEN}?table={module.TABLE_ID}")
+    assert factory.call_args.kwargs["app_token"] == "base-object-token"
+
+
+def test_wiki_target_rejects_invalid_or_unresolved_object(monkeypatch):
+    resolver = Mock()
+    resolver.resolve.return_value = {"app_token": module.TARGET_TOKEN, "wiki_obj_type": "bitable"}
+    monkeypatch.setattr(module, "require_feishu_auth_settings", lambda _config: {"app_id": "test", "app_secret": "test"})
+    monkeypatch.setattr(module, "BitableTargetResolver", lambda **_auth: resolver)
+    factory = Mock()
+    monkeypatch.setattr(module, "FeishuBitableClient", factory)
+    with pytest.raises(RuntimeError, match="未上传附件"):
+        module.EnergyReportUploadService({}).client()
+    factory.assert_not_called()
+
+
 @pytest.fixture
 def clients(tmp_path):
     fields = [{"field_name": "文本", "type": 1, "is_primary": True}]

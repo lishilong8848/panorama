@@ -50,6 +50,10 @@ class BuildingPausedError(RuntimeError):
         super().__init__(self.reason)
 
 
+class BuildingBrowserBusyError(RuntimeError):
+    pass
+
+
 class InternalDownloadBrowserPool:
     BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
     MAX_RECOVERY_ATTEMPTS = 3
@@ -61,6 +65,7 @@ class InternalDownloadBrowserPool:
     RECYCLE_AFTER_AGE_SEC = 12 * 60 * 60
     RECYCLE_AFTER_JOB_COUNT = 100
     BUILDING_RESOURCE_LOCK_TIMEOUT_SEC = 300.0
+    SCREENSHOT_RESOURCE_LOCK_TIMEOUT_SEC = 60.0
     BROWSER_CREATE_TIMEOUT_SEC = 60.0
 
     def __init__(
@@ -1329,29 +1334,53 @@ class InternalDownloadBrowserPool:
 
     @asynccontextmanager
     async def _building_job_lock(self, building: str, owner: str):
+        page_lock = self._locks.get(building)
+        if page_lock is None:
+            raise RuntimeError(f"楼栋浏览器锁未初始化: {building}")
         task = asyncio.current_task()
         self._job_tasks.add(task)
         is_screenshot = owner == "system_screenshot_capture"
         if not is_screenshot:
             self._source_job_waiters[building] = self._source_job_waiters.get(building, 0) + 1
         acquired = False
+        page_lock_acquired = False
         try:
-            deadline = time.monotonic() + self.BUILDING_RESOURCE_LOCK_TIMEOUT_SEC
+            timeout = self.SCREENSHOT_RESOURCE_LOCK_TIMEOUT_SEC if is_screenshot else self.BUILDING_RESOURCE_LOCK_TIMEOUT_SEC
+            deadline = time.monotonic() + timeout
             while not acquired:
                 if self._stopping:
                     raise asyncio.CancelledError()
-                # Nonblocking acquisition avoids a cancelled thread acquiring a lock later.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    owner_info = building_browser_lock_snapshot().get("owners", {}).get(building, {})
+                    owner_label = str(owner_info.get("owner", "") or "无已登记持有者")
+                    slot = self._slot_snapshot(building)
+                    raise BuildingBrowserBusyError(
+                        f"{building} 浏览器资源等待超时: 全局持有者={owner_label}, "
+                        f"页面任务={slot.get('current_task') or '-'}, "
+                        f"页面锁={'占用' if page_lock.locked() else '空闲'}, "
+                        f"源文件等待数={self._source_job_waiters.get(building, 0)}"
+                    )
+                # Do not hold the global lock while waiting for login or page recovery.
                 if not is_screenshot or not self._source_job_waiters.get(building, 0):
-                    acquired = acquire_building_browser_lock(building, owner=owner, timeout_sec=0)
+                    try:
+                        await asyncio.wait_for(page_lock.acquire(), timeout=min(0.2, remaining))
+                        page_lock_acquired = True
+                    except asyncio.TimeoutError:
+                        continue
+                    if not is_screenshot or not self._source_job_waiters.get(building, 0):
+                        acquired = acquire_building_browser_lock(building, owner=owner, timeout_sec=0)
+                    if not acquired:
+                        page_lock.release()
+                        page_lock_acquired = False
                 if not acquired:
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError(f"{building} 浏览器资源正在被其他任务占用，等待超时")
                     await asyncio.sleep(0.1)
-            async with self._locks[building]:
-                yield
+            yield
         finally:
             if acquired:
                 release_building_browser_lock(building)
+            if page_lock_acquired:
+                page_lock.release()
             if not is_screenshot:
                 count = self._source_job_waiters.get(building, 1) - 1
                 if count:

@@ -12,6 +12,10 @@ from app.modules.feishu.service.feishu_auth_resolver import current_feishu_confi
 from app.modules.feishu.service.feishu_token_manager import feishu_token_manager
 
 
+class _FeishuReadDataNotReady(RuntimeError):
+    pass
+
+
 class FeishuImFileMessageClient:
     UPLOAD_FILE_URL = "https://open.feishu.cn/open-apis/im/v1/files"
     UPLOAD_IMAGE_URL = "https://open.feishu.cn/open-apis/im/v1/images"
@@ -121,6 +125,36 @@ class FeishuImFileMessageClient:
         headers: Optional[Dict[str, str]] = None,
         content_type_json: bool = False,
     ) -> Dict[str, Any]:
+        is_bitable_read = method.upper() == "GET" and url.startswith("https://open.feishu.cn/open-apis/bitable/v1/")
+        attempts = 4 if is_bitable_read else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._request_json_with_auth_retry_once(
+                    method, url, params=params, payload=payload, data=data, files=files,
+                    headers=headers, content_type_json=content_type_json,
+                )
+            except _FeishuReadDataNotReady as exc:
+                if attempt >= attempts:
+                    if attempts > 1:
+                        raise _FeishuReadDataNotReady(
+                            f"飞书多维表数据暂未就绪，已重试{attempts}次: {exc}"
+                        ) from exc
+                    raise
+                time.sleep(min(8.0, max(1.0, self.request_retry_interval_sec) * attempt))
+        raise RuntimeError("飞书接口读取失败")
+
+    def _request_json_with_auth_retry_once(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        content_type_json: bool = False,
+    ) -> Dict[str, Any]:
         for auth_attempt in range(2):
             token = self.refresh_token(force=auth_attempt > 0)
             request_payload = payload
@@ -173,7 +207,10 @@ class FeishuImFileMessageClient:
                     continue
                 detail = self._extract_http_error_detail(response)
                 if detail:
-                    raise RuntimeError(f"飞书接口调用失败: status={response.status_code}, detail={detail}") from exc
+                    message = f"飞书接口调用失败: status={response.status_code}, detail={detail}"
+                    if method.upper() == "GET" and str(error_body.get("code", "")) == "1254607":
+                        raise _FeishuReadDataNotReady(message) from exc
+                    raise RuntimeError(message) from exc
                 raise
             body = response.json()
             if body.get("code") == 0:
@@ -181,6 +218,8 @@ class FeishuImFileMessageClient:
             if auth_attempt == 0 and self._is_token_invalid_code(body.get("code")):
                 self.invalidate_token()
                 continue
+            if method.upper() == "GET" and str(body.get("code", "")) == "1254607":
+                raise _FeishuReadDataNotReady(f"飞书接口调用失败: {body}")
             raise RuntimeError(f"飞书接口调用失败: {body}")
         raise RuntimeError("飞书接口调用失败: 鉴权重试后仍失败")
 

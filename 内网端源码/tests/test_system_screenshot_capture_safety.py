@@ -90,6 +90,46 @@ def test_pool_submits_one_target_at_a_time(tmp_path, monkeypatch):
     assert owners == ["system_screenshot_capture"] * 3
 
 
+def test_busy_pool_retries_same_target_in_same_batch(tmp_path, monkeypatch):
+    target = module._normalize_targets()[:1]
+    submitted = []
+    seen_batches = []
+
+    async def capture_targets(**kwargs):
+        seen_batches.append(kwargs["args"].batch_id)
+        return [{"target_key": kwargs["building_targets"][0].key}]
+
+    monkeypatch.setattr(module, "_capture_building_targets", capture_targets)
+
+    async def run():
+        tasks = []
+
+        def submit(building, runner, *, owner):
+            submitted.append((building, owner))
+            future = concurrent.futures.Future()
+            if len(submitted) == 1:
+                future.set_exception(module.BuildingBrowserBusyError("页面繁忙"))
+            else:
+                async def complete():
+                    future.set_result(await runner(object()))
+                tasks.append(asyncio.create_task(complete()))
+            return future
+
+        monkeypatch.setattr(module, "get_internal_download_browser_pool", lambda: SimpleNamespace(submit_building_job=submit, is_running=lambda: True))
+        result = await module._capture_with_browser_pool(
+            plan_by_building={"A楼": target}, site_by_building={"A楼": object()},
+            args=SimpleNamespace(cancel_event=threading.Event(), batch_id="batch-1"),
+            state_path=tmp_path / "state.json", download_root_path=tmp_path,
+            output_dir=tmp_path, compact_date="20261104", hour_text="", emit_log=lambda _: None,
+        )
+        await asyncio.gather(*tasks)
+        return result
+
+    assert len(asyncio.run(run())) == 1
+    assert submitted == [("A楼", "system_screenshot_capture")] * 2
+    assert seen_batches == ["batch-1"]
+
+
 def test_failed_capture_releases_batch_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "run_system_screenshot_capture", Mock(side_effect=RuntimeError("capture failed")))
     container = SimpleNamespace(_system_screenshot_capture_run_lock=threading.Lock())

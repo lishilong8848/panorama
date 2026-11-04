@@ -88,6 +88,29 @@ def test_recent_image_from_wrong_batch_is_not_uploaded(monkeypatch):
     assert len(internal.triggered) == 1
 
 
+def test_running_batch_progress_extends_idle_timeout(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    internal, bitable = FakeInternal(), FakeBitable()
+    calls = [0]
+
+    def listing(**_kwargs):
+        calls[0] += 1
+        return {"files": internal.files[:calls[0] * 10],
+                "capture_batch": {"batch_id": "batch-current", "status": "running"}}
+
+    internal.list_system_screenshot_files = listing
+    service = module.SystemScreenshotUploadService(
+        {"system_screenshot_upload": {"wait_capture_timeout_sec": 1, "wait_capture_poll_sec": 1}},
+        internal_client=internal, bitable_client_factory=lambda _: bitable,
+    )
+    result = service.run(capture_date="2026-10-06", internal_capture_force=True)
+    assert clock[0] >= 2
+    assert result["uploaded_count"] == 30
+    assert len(internal.triggered) == 1
+
+
 def test_cancellation_during_wait_cancels_exact_internal_batch():
     internal, bitable = FakeInternal(), FakeBitable()
     cancelled = [False]

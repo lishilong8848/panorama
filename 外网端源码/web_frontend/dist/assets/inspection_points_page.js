@@ -15,6 +15,10 @@ const ROUND_FIELDS = [
   { key: "night_1", label: "夜1位置" }, { key: "night_2", label: "夜2位置" },
 ];
 const COLD_SHEET = "暖通冷机系统巡检表";
+const STATUS_FIELDS = [
+  { key: "normal", label: "正常（√）原始值" }, { key: "abnormal", label: "异常（×）原始值" },
+  { key: "not_running", label: "未运行（△）原始值" },
+];
 const emptyRoundCells = () => Object.fromEntries(ROUND_FIELDS.map(item => [item.key, ""]));
 const PAGE_SIZE = 30;
 
@@ -58,6 +62,16 @@ const TEMPLATE = `
         <label class="review-field"><span class="review-field-label">测点备注</span>
           <input class="review-input" v-model="draft.note" :disabled="saving" maxlength="500" />
         </label>
+        <label class="review-field"><span class="review-field-label">目标单元格类型</span>
+          <select class="review-input" v-model="draft.status.type" :disabled="saving">
+            <option value="">未设置</option><option value="直接填充">直接填充</option><option value="状态">运行状态</option>
+          </select>
+        </label>
+        <template v-if="draft.status.type === '状态'">
+          <label v-for="item in statusFields" :key="item.key" class="review-field"><span class="review-field-label">{{ item.label }}</span>
+            <textarea class="review-input" v-model="draft.status[item.key]" :disabled="saving" rows="2" placeholder="每行填写一个原始值"></textarea>
+          </label>
+        </template>
         <label class="review-field"><span class="review-field-label">目标巡检表</span>
           <select class="review-input" v-model="draft.target.workbook" :disabled="saving" @change="draft.target.sheet = ''; draft.target.cell = ''; draft.target.round_cells = emptyRoundCells()">
             <option value="">不指定</option><option v-for="book in Object.keys(targetOptions)" :key="book" :value="book">{{ book }}</option>
@@ -89,7 +103,7 @@ const TEMPLATE = `
             <small v-if="row.path">{{ row.path }}</small>
           </div>
           <div class="inspection-point-note">{{ row.note || '—' }}<small v-if="row.target">{{ row.target.workbook }} · {{ row.target.sheet }} · {{ formatTarget(row.target) }}</small></div>
-          <div class="inspection-point-value"><strong>{{ row.value || '—' }}</strong><small>{{ row.sampleTime || '暂无采样' }}</small></div>
+          <div class="inspection-point-value"><strong>{{ row.displayValue || '—' }}</strong><small v-if="row.status">{{ row.status }}</small><small>{{ row.sampleTime || '暂无采样' }}</small></div>
           <div class="inspection-point-actions">
             <button v-if="!row.excluded" class="btn btn-secondary btn-mini" type="button" :disabled="!settingsReady || saving" @click="editPoint(row)">修改</button>
             <button v-if="!row.excluded" class="btn btn-ghost btn-mini" type="button" :disabled="!settingsReady || saving" @click="setExcluded(row, true)">删除</button>
@@ -144,9 +158,16 @@ export function mountInspectionPointsPage(Vue) {
           if (!byId.has(id)) byId.set(id, { id });
         }
         const q = keyword.value.trim().toLowerCase();
-        return [...byId.values()].map(row => ({
-          ...row, note: group.value.points[row.id] || "", target: group.value.targets?.[row.id], excluded: group.value.remove.includes(row.id),
-        })).filter(row => !q || [row.id, row.name, row.path, row.note].some(value => String(value || "").toLowerCase().includes(q)));
+        return [...byId.values()].map(row => {
+          const rule = group.value.status_rules?.[row.id];
+          let status = "";
+          if (rule?.type === "状态") {
+            const raw = row.raw_value;
+            status = raw != null && raw !== "" ? (rule.normal?.includes(raw) ? "√" : rule.abnormal?.includes(raw) ? "×" : rule.not_running?.includes(raw) ? "△" : "待核对") : "待核对";
+          }
+          return { ...row, status, displayValue: rule?.type ? (row.raw_value ?? "") : row.value,
+            note: group.value.points[row.id] || "", target: group.value.targets?.[row.id], excluded: group.value.remove.includes(row.id) };
+        }).filter(row => !q || [row.id, row.name, row.path, row.note].some(value => String(value || "").toLowerCase().includes(q)));
       });
       const pageCount = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / PAGE_SIZE)));
       const pageRows = computed(() => filteredRows.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE));
@@ -189,7 +210,9 @@ export function mountInspectionPointsPage(Vue) {
       }
       function editPoint(row) {
         if (draft.value && !window.confirm("放弃未保存的测点修改？")) return;
+        const rule = group.value.status_rules?.[row?.id] || {};
         draft.value = { id: row?.id || "", note: row?.note || "", originalId: row?.id || "",
+          status: { type: rule.type === "数值" ? "直接填充" : (rule.type || ""), ...Object.fromEntries(STATUS_FIELDS.map(item => [item.key, (rule[item.key] || []).join("\n")])) },
           target: { workbook: "", sheet: "", cell: "", ...row?.target,
             round_cells: { ...emptyRoundCells(), ...row?.target?.round_cells } } };
         message.value = "";
@@ -201,14 +224,14 @@ export function mountInspectionPointsPage(Vue) {
         if (positions.length) return ROUND_FIELDS.filter(item => cells[item.key]).map(item => `${item.label} ${cells[item.key]}`).join(" · ");
         return target.cell ? `历史位置 ${target.cell}` : "未设置位置";
       }
-      async function persist(points, remove, targets) {
+      async function persist(points, remove, targets, statusRules) {
         if (!settingsReady.value || saving.value || settingsBusy.value) return false;
         saving.value = true;
         message.value = "";
         settingsError.value = "";
         try {
           const response = await putBuildingInspectionPointSettingsApi(code, {
-            family: family.value, points, remove, targets, expected_group: group.value,
+            family: family.value, points, remove, targets, status_rules: statusRules, expected_group: group.value,
           });
           settings.value = response.settings;
           message.value = response.message;
@@ -234,17 +257,24 @@ export function mountInspectionPointsPage(Vue) {
           return;
         }
         const points = { ...group.value.points }, targets = { ...group.value.targets };
+        const statusRules = { ...group.value.status_rules };
         const remove = group.value.remove.filter(id => id !== row.id);
         if (row.originalId && row.id !== row.originalId) {
           if (Object.hasOwn(points, row.id)) { settingsError.value = "目标测点已有设置，请直接修改该测点"; return; }
           delete points[row.originalId];
           delete targets[row.originalId];
+          delete statusRules[row.originalId];
           if (!remove.includes(row.originalId)) remove.push(row.originalId);
         }
         points[row.id] = row.note;
+        if (row.status.type) {
+          const rule = { type: row.status.type };
+          for (const item of STATUS_FIELDS) rule[item.key] = row.status.type === "状态" ? row.status[item.key].split(/\r?\n/).filter(value => value !== "") : [];
+          statusRules[row.id] = rule;
+        } else delete statusRules[row.id];
         if (row.target.workbook) targets[row.id] = { ...row.target, round_cells: roundCells };
         else delete targets[row.id];
-        if (await persist(points, remove, targets)) {
+        if (await persist(points, remove, targets, statusRules)) {
           draft.value = null;
         }
       }
@@ -252,11 +282,12 @@ export function mountInspectionPointsPage(Vue) {
         if (excluded && !window.confirm(`停止查询 ${row.name || row.id}？`)) return;
         const points = { ...group.value.points };
         const targets = { ...group.value.targets };
-        if (excluded) { delete points[row.id]; delete targets[row.id]; }
+        const statusRules = { ...group.value.status_rules };
+        if (excluded) { delete points[row.id]; delete targets[row.id]; delete statusRules[row.id]; }
         else if (group.value.baseline && !Object.hasOwn(group.value.baseline, row.id)) points[row.id] = "";
         const remove = group.value.remove.filter(id => id !== row.id);
         if (excluded) remove.push(row.id);
-        if (await persist(points, remove, targets) && draft.value?.id === row.id) draft.value = null;
+        if (await persist(points, remove, targets, statusRules) && draft.value?.id === row.id) draft.value = null;
       }
       function returnToReview(event) {
         if (saving.value || (draft.value && !window.confirm("放弃未保存的测点修改？"))) { event.preventDefault(); return; }
@@ -269,7 +300,7 @@ export function mountInspectionPointsPage(Vue) {
       onMounted(() => { void loadSettings(); void loadLatest(); });
       onBeforeUnmount(() => controller.abort());
       return { building, families: FAMILIES, family, keyword, page, pageCount, pageRows, filteredRows, sampleTime,
-        roundFields: ROUND_FIELDS, coldSheet: COLD_SHEET, emptyRoundCells, formatTarget,
+        roundFields: ROUND_FIELDS, statusFields: STATUS_FIELDS, coldSheet: COLD_SHEET, emptyRoundCells, formatTarget,
         draft, targetOptions, settingsReady, settingsBusy, latestBusy, saving, settingsError, latestError, message, returnUrl,
         loadSettings, loadLatest, selectFamily, editPoint, saveDraft, setExcluded, returnToReview };
     },

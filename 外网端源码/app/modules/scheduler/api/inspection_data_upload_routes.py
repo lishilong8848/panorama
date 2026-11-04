@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.config.inspection_data_config import INSPECTION_DATA_UPLOAD_DEFAULTS, INSPECTION_SOURCE_CONTRACTS, normalize_inspection_scheduler
 from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
-from app.modules.inspection_data.service.point_settings import PointSettingsConflict, inspection_target_options, load_or_restore_point_settings, save_point_group
+from app.modules.inspection_data.service.point_settings import PointSettingsConflict, inspection_target_options, load_or_restore_point_settings, load_point_settings, save_point_group
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.scheduler.api._config_persistence import (
     persist_full_config,
@@ -47,7 +47,7 @@ def update_inspection_point_settings(payload: dict, request: Request):
     try:
         return save_point_group(container.runtime_config, building=payload.get("building"), family=payload.get("family"),
                                 points=payload.get("points", {}), remove=payload.get("remove", []),
-                                expected_group=payload["expected_group"])
+                                expected_group=payload["expected_group"], status_rules=payload.get("status_rules"))
     except PointSettingsConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
@@ -74,13 +74,13 @@ def update_building_inspection_point_settings(building_code: str, payload: dict,
     container = request.app.state.container
     if container._configured_deployment_snapshot().get("role_mode") != "external":
         raise HTTPException(status_code=409, detail="请在外网端设置巡检测点")
-    if not isinstance(payload.get("expected_group"), dict) or set(payload) - {"family", "points", "remove", "expected_group", "targets"}:
+    if not isinstance(payload.get("expected_group"), dict) or set(payload) - {"family", "points", "remove", "expected_group", "targets", "status_rules"}:
         raise HTTPException(status_code=400, detail="巡检测点配置格式无效")
     _read_point_settings(container.runtime_config)
     try:
         result = save_point_group(container.runtime_config, building=building, family=payload.get("family"),
                                   points=payload.get("points"), remove=payload.get("remove"), expected_group=payload["expected_group"],
-                                  targets=payload.get("targets"))
+                                  targets=payload.get("targets"), status_rules=payload.get("status_rules"))
     except PointSettingsConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
@@ -96,6 +96,7 @@ def latest_building_inspection_points(building_code: str, request: Request):
     if bridge is None:
         raise HTTPException(status_code=503, detail="未配置内网桥接地址")
     datasets = {}
+    settings = (load_point_settings(config) or {}).get(building, {})
     try:
         payload = bridge.get_latest_inspection_points(building=building)
         if not payload.get("ok") or not isinstance(payload.get("datasets"), list):
@@ -108,9 +109,12 @@ def latest_building_inspection_points(building_code: str, request: Request):
             if not isinstance(bucket, str):
                 raise ValueError("内网巡检测点时段无效")
             InspectionDataUploadService._validate_dataset(doc, bucket[:10], bucket)
-            rows = InspectionDataUploadService._point_detail_rows(doc, INSPECTION_SOURCE_CONTRACTS[family]["discipline"], {})
+            rows = InspectionDataUploadService._point_detail_rows(
+                doc, INSPECTION_SOURCE_CONTRACTS[family]["discipline"], {},
+                status_rules=settings.get(family, {}).get("status_rules", {}))
             datasets[family] = {"sample_time": doc["value_time"], "points": [
-                {"id": row["测点ID"], "name": row["测点名称"], "path": row["测点路径"], "value": row["测点值"]}
+                {"id": row["测点ID"], "name": row["测点名称"], "path": row["测点路径"], "value": row["测点值"],
+                 "raw_value": row["测点原始值"], "status": row.get("状态判定", "")}
                 for row in rows if row["测点ID"]
             ]}
     except (RuntimeError, ValueError, TypeError) as exc:
