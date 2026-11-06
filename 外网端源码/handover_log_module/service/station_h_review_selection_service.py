@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import ast
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -71,7 +72,22 @@ def split_station_h_people(value: Any) -> List[str]:
                 raw = after
             elif after:
                 raw = after
-        parts = [item.strip() for item in re.split(r"[、,/，；;\s]+", raw) if item.strip()]
+        parsed = None
+        if raw.startswith("[") and raw.endswith("]"):
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, TypeError):
+                # Only comma-delimited Python lists: adjacent quoted strings
+                # would otherwise be silently concatenated by literal_eval.
+                if "," in raw:
+                    try:
+                        parsed = ast.literal_eval(raw)
+                    except (ValueError, SyntaxError):
+                        pass
+        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+            parts = split_station_h_people(parsed)
+        else:
+            parts = [item.strip().strip("[]'\"") for item in re.split(r"[、,/，；;\s]+", raw) if item.strip()]
     seen: set[str] = set()
     output: list[str] = []
     for name in parts:
@@ -99,7 +115,7 @@ def _matches_station_h_name(candidate: Any, expected_name: str) -> bool:
 
 def station_h_long_day_text(names: Sequence[Any] | Any) -> str:
     selected = split_station_h_people(names)
-    return f"常白岗：{' '.join(selected) if selected else '/'}"
+    return f"常白岗：{'、'.join(selected) if selected else '/'}"
 
 
 def station_h_is_long_day_person(name: Any) -> bool:
