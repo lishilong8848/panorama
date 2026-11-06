@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 _SLOTS = threading.BoundedSemaphore(5)
+_SLOT_WAIT_TIMEOUT_SEC = 60
 
 
 @contextmanager
@@ -62,6 +63,11 @@ def guard_generation(method):
             date, shift = date or inferred_date, shift or inferred_shift
         date = datetime.strptime(date, "%Y-%m-%d").date().isoformat()
         kwargs.update(building=building, duty_date=date, duty_shift=shift)
-        with generation_lock(building, date, shift), _SLOTS:
-            return method(self, **kwargs)
+        with generation_lock(building, date, shift):
+            if not _SLOTS.acquire(timeout=_SLOT_WAIT_TIMEOUT_SEC):
+                raise TimeoutError(f"{building} {date}/{shift} 生成资源繁忙，等待{_SLOT_WAIT_TIMEOUT_SEC}秒超时；本次未生成，请稍后重试")
+            try:
+                return method(self, **kwargs)
+            finally:
+                _SLOTS.release()
     return generate

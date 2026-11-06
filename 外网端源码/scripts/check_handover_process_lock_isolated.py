@@ -42,6 +42,27 @@ def main():
             child.communicate(timeout=5)
             with guard.generation_lock("A楼", "2026-11-06", "day"):
                 pass
+            guard._SLOT_WAIT_TIMEOUT_SEC = 0.01
+            class FakeGenerator:
+                @guard.guard_generation
+                def run(self, **kwargs):
+                    return kwargs["building"]
+            generator = FakeGenerator()
+            for _ in range(5):
+                assert guard._SLOTS.acquire(blocking=False)
+            try:
+                try:
+                    generator.run(building="A楼", duty_date="2026-11-06", duty_shift="day")
+                    raise AssertionError("saturated semaphore did not time out")
+                except TimeoutError:
+                    pass
+                with guard.generation_lock("A楼", "2026-11-06", "day"):
+                    pass
+            finally:
+                for _ in range(5):
+                    guard._SLOTS.release()
+            assert generator.run(building="A楼", duty_date="2026-11-06", duty_shift="day") == "A楼"
+            print("PASS: slot timeout releases session lock; subsequent generation succeeds")
             print("PASS: duplicate blocked; different building/shift allowed; crashed owner releases lock")
         finally:
             if child.poll() is None:
