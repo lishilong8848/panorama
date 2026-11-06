@@ -47,7 +47,8 @@ def update_inspection_point_settings(payload: dict, request: Request):
     try:
         return save_point_group(container.runtime_config, building=payload.get("building"), family=payload.get("family"),
                                 points=payload.get("points", {}), remove=payload.get("remove", []),
-                                expected_group=payload["expected_group"], status_rules=payload.get("status_rules"))
+                                expected_group=payload["expected_group"], status_rules=payload.get("status_rules"),
+                                explicitly_enabled=payload.get("explicitly_enabled"), explicitly_disabled=payload.get("explicitly_disabled"))
     except PointSettingsConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
@@ -74,13 +75,14 @@ def update_building_inspection_point_settings(building_code: str, payload: dict,
     container = request.app.state.container
     if container._configured_deployment_snapshot().get("role_mode") != "external":
         raise HTTPException(status_code=409, detail="请在外网端设置巡检测点")
-    if not isinstance(payload.get("expected_group"), dict) or set(payload) - {"family", "points", "remove", "expected_group", "targets", "status_rules"}:
+    if not isinstance(payload.get("expected_group"), dict) or set(payload) - {"family", "points", "remove", "expected_group", "targets", "status_rules", "explicitly_enabled", "explicitly_disabled"}:
         raise HTTPException(status_code=400, detail="巡检测点配置格式无效")
     _read_point_settings(container.runtime_config)
     try:
         result = save_point_group(container.runtime_config, building=building, family=payload.get("family"),
                                   points=payload.get("points"), remove=payload.get("remove"), expected_group=payload["expected_group"],
-                                  targets=payload.get("targets"), status_rules=payload.get("status_rules"))
+                                  targets=payload.get("targets"), status_rules=payload.get("status_rules"),
+                                  explicitly_enabled=payload.get("explicitly_enabled"), explicitly_disabled=payload.get("explicitly_disabled"))
     except PointSettingsConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:

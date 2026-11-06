@@ -7,6 +7,7 @@ from app.modules.inspection_data.service.point_status import STATUS_FIELDS, norm
 
 
 POINT_CONFIG_TABLES = {"D楼": "tblU0q6LvNjpMIN1", "E楼": "tblrUhk1NAmTg1a2"}
+EXPLICIT_ENABLE_FIELD = "用户主动启用"
 _FIELD_TYPES = {
     "专业": 1, "测点ID": 1, "测点名称": 1, "测点路径": 1, "基线测点": 7, "启用": 7,
     "测点备注": 1, "目标巡检表": 1, "目标工作表": 1, "目标单元格": 1,
@@ -36,7 +37,7 @@ def _index(records):
     return rows, blank_ids
 
 
-def _expected_rows(groups):
+def _expected_rows(groups, *, include_explicit_enable=False):
     desired = {}
     for family, group in groups.items():
         discipline = INSPECTION_SOURCE_CONTRACTS[family]["discipline"]
@@ -51,6 +52,11 @@ def _expected_rows(groups):
                 "目标巡检表": target.get("workbook", ""), "目标工作表": target.get("sheet", ""),
                 "目标单元格": target.get("cell", ""),
             }
+            if include_explicit_enable:
+                if point_id in group.get("explicitly_enabled", ()) and point_id not in remove:
+                    desired[discipline, point_id][EXPLICIT_ENABLE_FIELD] = True
+                elif point_id in remove or point_id in group.get("explicitly_disabled", ()):
+                    desired[discipline, point_id][EXPLICIT_ENABLE_FIELD] = False
             status = group.get("status_rules", {}).get(point_id, {})
             desired[discipline, point_id].update({"测点类型": status.get("type", ""), **{
                 field: json.dumps(status.get(key, []), ensure_ascii=False, separators=(",", ":")) if status else ""
@@ -88,6 +94,8 @@ def read_point_config_bitable(config, *, client=None):
             if fields.get("启用") is not True:
                 group["remove"].append(point_id)
                 continue
+            if fields.get(EXPLICIT_ENABLE_FIELD) is True:
+                group.setdefault("explicitly_enabled", []).append(point_id)
             target = {key: _text(fields.get(field)) for key, field in
                       (("workbook", "目标巡检表"), ("sheet", "目标工作表"), ("cell", "目标单元格"))}
             rounds = {key: _text(fields.get(field)) for key, field in INSPECTION_ROUND_FIELDS.items()}
@@ -126,12 +134,18 @@ def sync_point_config_bitable(config, settings, *, buildings=None, initialize=Fa
         table = POINT_CONFIG_TABLES[building]
         definitions = client.list_fields(table)
         existing = {f["field_name"]: f["type"] for f in definitions}
+        explicit_type = existing.get(EXPLICIT_ENABLE_FIELD)
+        if explicit_type is not None and explicit_type != 7:
+            raise ValueError(f"{building} 飞书配置表的{EXPLICIT_ENABLE_FIELD}必须是复选框")
+        if explicit_type is None and any(group.get("explicitly_enabled") or group.get("explicitly_disabled")
+                                         for group in settings.get(building, {}).values()):
+            raise ValueError(f"{building} 飞书配置表缺少复选框字段{EXPLICIT_ENABLE_FIELD}，主动启用待同步")
         primary = next((f["field_name"] for f in definitions if f.get("is_primary") and f["type"] == 1), "")
         missing = {k: t for k, t in _FIELD_TYPES.items() if k not in existing}
         if not primary or any(existing.get(k, t) != t for k, t in _FIELD_TYPES.items()) or (missing and not initialize):
             raise ValueError(f"{building} 飞书巡检测点配置表字段不匹配")
         current, blank = _index(client.list_records(table, max_records=0))
-        desired = _expected_rows(settings.get(building, {}))
+        desired = _expected_rows(settings.get(building, {}), include_explicit_enable=explicit_type == 7)
         if not desired:
             raise ValueError(f"{building} 没有可保存的测点配置")
         plans[building] = (table, primary, missing, current, blank, desired)

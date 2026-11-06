@@ -923,6 +923,26 @@ def test_cold_room_accepts_one_fixed_cell_only():
         }})
 
 
+@pytest.mark.parametrize('legacy_first', [True, False])
+def test_legacy_target_collides_with_another_points_round(legacy_first):
+    from app.modules.inspection_data.service import point_settings
+
+    legacy = {'workbook': 'book', 'sheet': 'sheet', 'cell': 'B6'}
+    rounds = {'workbook': 'book', 'sheet': 'sheet', 'cell': '',
+              'round_cells': {'day_1': 'B6', 'day_2': 'B7', 'night_1': 'B8', 'night_2': 'B9'}}
+    groups = [('electrical', {'targets': {'7_0_1': legacy}}), ('hvac', {'targets': {'7_0_2': rounds}})]
+    with pytest.raises(ValueError, match='已分配.*B6'):
+        point_settings._validate_target_collisions(dict(groups if legacy_first else reversed(groups)))
+
+
+def test_fixed_round_cell_for_one_point_is_not_a_collision():
+    from app.modules.inspection_data.service import point_settings
+
+    fixed = {'workbook': 'book', 'sheet': '暖通冷机系统巡检表', 'cell': 'C8',
+             'round_cells': dict.fromkeys(('day_1', 'day_2', 'night_1', 'night_2'), 'C8')}
+    point_settings._validate_target_collisions({'hvac': {'targets': {'7_0_1': fixed}}})
+
+
 def test_round_targets_sync_without_promoting_or_clearing_legacy():
     from app.modules.inspection_data.service import point_config_bitable
 

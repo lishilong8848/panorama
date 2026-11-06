@@ -159,15 +159,14 @@ def _normalize_targets(building, points, targets):
 
 def _validate_target_collisions(groups):
     occupied = {}
-    legacy = {}
     for family, group in groups.items():
         for point_id, target in group.get("targets", {}).items():
             owner = (family, point_id)
             if not any(target.get("round_cells", {}).values()) and target.get("cell"):
                 key = (target["workbook"], target["sheet"], target["cell"])
-                if key in legacy and legacy[key] != owner:
+                if key in occupied and occupied[key] != owner:
                     raise ValueError(f"目标单元格已分配给其他测点：{target['sheet']}!{target['cell']}")
-                legacy[key] = owner
+                occupied[key] = owner
             for cell in set(target.get("round_cells", {}).values()) - {""}:
                 key = (target["workbook"], target["sheet"], cell)
                 if key in occupied and occupied[key] != owner:
@@ -272,7 +271,8 @@ def retry_pending_point_config(config):
             _sync_cloud_config(config, settings, buildings)
 
 
-def save_point_group(config, *, building, family, points, remove, expected_group=None, targets=None, status_rules=None):
+def save_point_group(config, *, building, family, points, remove, expected_group=None, targets=None, status_rules=None,
+                     explicitly_enabled=None, explicitly_disabled=None):
     if not isinstance(building, str) or not isinstance(family, str) or building not in {"D楼", "E楼"} or family not in INSPECTION_SOURCE_CONTRACTS:
         raise ValueError("巡检测点只支持 D/E 楼的电气和暖通")
     if not isinstance(points, dict) or not isinstance(remove, list) or len(points) > 1000 or len(remove) > 1000:
@@ -294,6 +294,18 @@ def save_point_group(config, *, building, family, points, remove, expected_group
             targets = {i: target for i, target in groups.get(family, {}).get("targets", {}).items() if i in points}
         targets = _normalize_targets(building, points, targets)
         active_ids = (set(current.get("baseline", {})) | set(points)) - set(remove)
+        if explicitly_enabled is None:
+            explicitly_enabled = [i for i in current.get("explicitly_enabled", []) if i in active_ids]
+        if (not isinstance(explicitly_enabled, list) or len(explicitly_enabled) > 2000
+                or any(not isinstance(i, str) or i not in active_ids for i in explicitly_enabled)):
+            raise ValueError("主动启用的测点必须是当前有效测点")
+        known_ids = active_ids | set(remove)
+        if explicitly_disabled is None:
+            explicitly_disabled = [i for i in current.get("explicitly_disabled", []) if i in known_ids]
+        if (not isinstance(explicitly_disabled, list) or len(explicitly_disabled) > 2000
+                or any(not isinstance(i, str) or i not in known_ids for i in explicitly_disabled)
+                or set(explicitly_enabled) & set(explicitly_disabled)):
+            raise ValueError("主动启用标记无效")
         if status_rules is None:
             status_rules = {i: rule for i, rule in current.get("status_rules", {}).items() if i in active_ids}
         status_rules = normalize_status_rules(status_rules, active_ids)
@@ -303,7 +315,9 @@ def save_point_group(config, *, building, family, points, remove, expected_group
             _validate_target_collisions({**groups, family: {"targets": targets}})
             groups[family] = {"points": {i: note.strip() for i, note in sorted(points.items())},
                               "remove": sorted(set(remove)), **({"targets": targets} if targets else {}),
-                              **({"status_rules": status_rules} if status_rules else {})}
+                              **({"status_rules": status_rules} if status_rules else {}),
+                              **({"explicitly_enabled": sorted(set(explicitly_enabled))} if explicitly_enabled else {}),
+                              **({"explicitly_disabled": sorted(set(explicitly_disabled))} if explicitly_disabled else {})}
             if "baseline" in current:
                 groups[family]["baseline"] = current["baseline"]
         else:

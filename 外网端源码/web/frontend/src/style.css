@@ -2777,7 +2777,11 @@ button:disabled,
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
 }
 .inspection-points-search { flex: 1 1 240px; min-width: 0; }
+.inspection-points-filter { flex: 0 1 145px; min-width: 0; }
+.inspection-points-pagination.btn-line > .btn { width: auto; min-width: 36px; }
+.inspection-point-note .inspection-point-incomplete { color: #a14300; font-weight: 600; }
 .inspection-points-summary { color: #475569; font-size: 13px; }
+.inspection-status-hint { grid-column: 1 / -1; margin: 0; }
 .inspection-point-form {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: end; gap: 10px; border: 1px solid #cfe0f5; background: #f8fbff; border-radius: 8px; padding: 12px;
