@@ -109,7 +109,20 @@
       "scheduler": {
         "enabled": true,
         "auto_start_in_gui": true,
-        "run_times": ["00:05:00", "02:05:00", "04:05:00", "06:05:00", "08:05:00", "10:05:00", "12:05:00", "14:05:00", "16:05:00", "18:05:00", "20:05:00", "22:05:00"],
+        "run_times": [
+          "00:05:00",
+          "02:05:00",
+          "04:05:00",
+          "06:05:00",
+          "08:05:00",
+          "10:05:00",
+          "12:05:00",
+          "14:05:00",
+          "16:05:00",
+          "18:05:00",
+          "20:05:00",
+          "22:05:00"
+        ],
         "catch_up_if_missed": false,
         "retry_failed_in_same_period": true
       }
@@ -1373,7 +1386,7 @@
                 "cells": {
                   "B": "对讲机",
                   "C": "E-112值班室",
-                  "E": "9",
+                  "E": "8",
                   "F": "否",
                   "G": "无"
                 }
@@ -1403,104 +1416,104 @@
           "110站": [
             {
               "note": "lsl",
-              "enabled": true,
-              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd"
+              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
+              "enabled": true
             },
             {
               "note": "m",
-              "enabled": false,
-              "open_id": "ou_cee45ea48df99def799710e782f5434c"
+              "open_id": "ou_cee45ea48df99def799710e782f5434c",
+              "enabled": false
             },
             {
               "note": "110",
-              "enabled": true,
-              "open_id": "ou_ca8103bc15b06b448ab94958d5cfef43"
+              "open_id": "ou_ca8103bc15b06b448ab94958d5cfef43",
+              "enabled": true
             }
           ],
           "H楼": [],
           "A楼": [
             {
               "note": "李世龙A",
-              "enabled": true,
-              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd"
+              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
+              "enabled": true
             },
             {
               "note": "A",
-              "enabled": true,
-              "open_id": "ou_822759df685e2807d538fb9cf5465465"
+              "open_id": "ou_822759df685e2807d538fb9cf5465465",
+              "enabled": true
             },
             {
               "note": "M",
-              "enabled": false,
-              "open_id": "ou_cee45ea48df99def799710e782f5434c"
+              "open_id": "ou_cee45ea48df99def799710e782f5434c",
+              "enabled": false
             }
           ],
           "B楼": [
             {
               "note": "李世龙B",
-              "enabled": true,
-              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd"
+              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
+              "enabled": true
             },
             {
               "note": "B",
-              "enabled": true,
-              "open_id": "ou_ac4e1a554a6cabab4d8eea7e3956bec3"
+              "open_id": "ou_ac4e1a554a6cabab4d8eea7e3956bec3",
+              "enabled": true
             },
             {
               "note": "m",
-              "enabled": false,
-              "open_id": "ou_cee45ea48df99def799710e782f5434c"
+              "open_id": "ou_cee45ea48df99def799710e782f5434c",
+              "enabled": false
             }
           ],
           "C楼": [
             {
               "note": "李世龙C",
-              "enabled": true,
-              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd"
+              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
+              "enabled": true
             },
             {
               "note": "C",
-              "enabled": true,
-              "open_id": "ou_f2879fa04399d43bff26f92616678b6d"
+              "open_id": "ou_f2879fa04399d43bff26f92616678b6d",
+              "enabled": true
             },
             {
               "note": "m",
-              "enabled": false,
-              "open_id": "ou_cee45ea48df99def799710e782f5434c"
+              "open_id": "ou_cee45ea48df99def799710e782f5434c",
+              "enabled": false
             }
           ],
           "D楼": [
             {
               "note": "李世龙D",
-              "enabled": true,
-              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd"
+              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
+              "enabled": true
             },
             {
               "note": "D",
-              "enabled": true,
-              "open_id": "ou_18396043dc393fafd3b7f43f0e284396"
+              "open_id": "ou_18396043dc393fafd3b7f43f0e284396",
+              "enabled": true
             },
             {
               "note": "m",
-              "enabled": false,
-              "open_id": "ou_cee45ea48df99def799710e782f5434c"
+              "open_id": "ou_cee45ea48df99def799710e782f5434c",
+              "enabled": false
             }
           ],
           "E楼": [
             {
               "note": "李世龙E",
-              "enabled": true,
-              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd"
+              "open_id": "ou_083f6c32c2cd3da8ccfd62d800e742fd",
+              "enabled": true
             },
             {
               "note": "E",
-              "enabled": true,
-              "open_id": "ou_fb53efe356466339f4f3cc22f2c7f9fb"
+              "open_id": "ou_fb53efe356466339f4f3cc22f2c7f9fb",
+              "enabled": true
             },
             {
               "note": "m",
-              "enabled": false,
-              "open_id": "ou_cee45ea48df99def799710e782f5434c"
+              "open_id": "ou_cee45ea48df99def799710e782f5434c",
+              "enabled": false
             }
           ]
         }

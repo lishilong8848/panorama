@@ -1,13 +1,13 @@
 ﻿{
-  "revision": 17,
-  "updated_at": "2026-10-20T15:28:02+08:00",
+  "revision": 18,
+  "updated_at": "2026-11-04T17:12:57+08:00",
   "data": {
     "enabled": true,
     "scheduler": {
       "enabled": true,
       "auto_start_in_gui": true,
       "morning_time": "02:00:00",
-      "afternoon_time": "12:00:00",
+      "afternoon_time": "16:00:00",
       "cloud_catchup_enabled": true,
       "cloud_catchup_morning_time": "08:00:00",
       "cloud_catchup_afternoon_time": "17:30:00",
@@ -376,16 +376,16 @@
         "retry_failed_on_next_tick": true,
         "state_file": "top5_power_report_scheduler_state.json"
       },
-      "notification": {
-        "enabled": true,
-        "chat_id": "oc_3bc648b9b761f24a65366a9b04b32eb2",
-        "receive_id_type": "chat_id",
-        "table_url": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblkh6YCMYtS8nHa"
-      },
       "monthly_power_alert_report": {
         "enabled": true,
         "file_name_pattern": "EA118机柜超功耗告警统计{month}月份_{timestamp}.xlsx",
         "output_dir": "D:\\QLDownload\\月度超功率统计表"
+      },
+      "notification": {
+        "chat_id": "oc_3bc648b9b761f24a65366a9b04b32eb2",
+        "enabled": true,
+        "receive_id_type": "chat_id",
+        "table_url": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblkh6YCMYtS8nHa"
       },
       "over_power_attachment": {
         "app_token": "MliKbC3fXa8PXrsndKscmxjdn1g",
@@ -464,6 +464,10 @@
         "night_anchor": "18:00:00",
         "night_default_end_next_day": "08:00:00"
       }
+    },
+    "training_management_section": {
+      "enabled": true,
+      "api_key": "hbQJ1O9lHgNpgS6L-FXbHO2jcQ_J49tVUEJI9G8sCIE"
     },
     "exercise_management_section": {
       "enabled": true,
