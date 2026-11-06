@@ -4,7 +4,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+import copy
 import re
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
@@ -66,6 +69,8 @@ def _followup_reason_text(value: Any) -> str:
 
 
 _ATTENTION_HANDOVER_SECTION_NAME = "三、注意事项交接"
+_GENERATION_SLOTS = threading.BoundedSemaphore(5)
+_GENERATION_LOCKS = {building: threading.Lock() for building in ("A楼", "B楼", "C楼", "D楼", "E楼")}
 _ATTENTION_HANDOVER_DEFAULT_ITEMS = (
     "各班根据室外湿球温度及时调整制冷单元模式",
     "各班的重要事件和注意项交接在交接班记录保存四个班",
@@ -93,6 +98,36 @@ class HandoverQueryContext:
 
 
 class HandoverOrchestrator:
+    def _run_building_jobs(self, jobs, emit_log):
+        def generate(job):
+            building = job["building"]
+            lock = _GENERATION_LOCKS.get(building, threading.Lock())
+            with lock, _GENERATION_SLOTS:
+                started = time.monotonic()
+                emit_log(f"[交接班][并行生成] 开始 building={building}")
+                try:
+                    worker = HandoverOrchestrator(copy.deepcopy(self.config))
+                    args = copy.deepcopy({key: value for key, value in job.items() if key != "emit_log"})
+                    return worker.run_from_existing_file(**args, emit_log=emit_log)
+                finally:
+                    emit_log(f"[交接班][并行生成] 结束 building={building}, elapsed_sec={time.monotonic() - started:.1f}")
+
+        if not jobs:
+            return
+        with ThreadPoolExecutor(max_workers=min(5, len(jobs)), thread_name_prefix="handover-generate") as executor:
+            futures = [(job, executor.submit(generate, job)) for job in jobs]
+            # Preserve the original result order; workers execute concurrently.
+            for job, future in futures:
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    emit_log(f"[交接班][并行生成] 失败 building={job['building']}: {exc}")
+                    failed = RunSummary(mode="from_existing_file")
+                    failed.results.append(BuildingResult(building=job["building"], data_file=job["data_file"], success=False, errors=[str(exc)]))
+                    failed.failed_count = 1
+                    result = failed.to_dict()
+                yield job["building"], job["data_file"], result
+
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self._download_service = HandoverDownloadService(config)
@@ -1808,6 +1843,7 @@ class HandoverOrchestrator:
                 )
                 self._merge_shared_outdoor_cells_into_prebuilt(prebuilt_fixed, shared_outdoor_cells)
 
+        generation_jobs = []
         for building, data_file in normalized_files:
             try:
                 fixed_cell_values: Dict[str, str] | None = None
@@ -1817,7 +1853,7 @@ class HandoverOrchestrator:
                 prebuilt = prebuilt_fixed.get(building)
                 if prebuilt is not None:
                     fixed_cell_values, date_ref_override, assignment, alarm_summary_payload = prebuilt
-                one = self.run_from_existing_file(
+                generation_jobs.append(dict(
                     building=building,
                     data_file=data_file,
                     end_time=end_time or prebuilt_end_time or None,
@@ -1841,7 +1877,7 @@ class HandoverOrchestrator:
                     source_mode="from_file",
                     auto_send_review_link=auto_send_review_link,
                     emit_log=emit_log,
-                )
+                ))
             except Exception as exc:  # noqa: BLE001
                 result = BuildingResult(building=building, data_file=data_file, success=False, errors=[str(exc)])
                 summary.results.append(result)
@@ -1850,6 +1886,7 @@ class HandoverOrchestrator:
                 emit_log(f"[交接班][已有数据表批量] building={building} 处理失败: {exc}")
                 continue
 
+        for building, data_file, one in self._run_building_jobs(generation_jobs, emit_log):
             for row in one.get("results", []):
                 result = BuildingResult(
                     building=str(row.get("building", building)),
@@ -2112,6 +2149,7 @@ class HandoverOrchestrator:
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班][云表预建] 批次状态登记失败: {exc}")
 
+            generation_jobs = []
             for item in success_items:
                 building = str(item.get("building", "")).strip()
                 data_file = str(item.get("file_path", "")).strip()
@@ -2141,7 +2179,7 @@ class HandoverOrchestrator:
                             alarm_document_cache=alarm_document_cache,
                         )
 
-                one = self.run_from_existing_file(
+                generation_jobs.append(dict(
                     building=building,
                     data_file=data_file,
                     end_time=summary.end_time or end_time,
@@ -2165,7 +2203,8 @@ class HandoverOrchestrator:
                     capacity_source_file=capacity_success_map.get(building),
                     source_mode="from_download",
                     emit_log=emit_log,
-                )
+                ))
+            for building, data_file, one in self._run_building_jobs(generation_jobs, emit_log):
                 one_results = one.get("results", [])
                 for row in one_results:
                     result = BuildingResult(

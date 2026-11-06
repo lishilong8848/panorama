@@ -724,6 +724,12 @@ class CapacityReportImageRenderQueue:
         self._condition = threading.Condition()
         self._next_ticket = 0
         self._serving_ticket = 0
+        self._abandoned_tickets: set[int] = set()
+
+    def _skip_abandoned(self) -> None:
+        while self._serving_ticket in self._abandoned_tickets:
+            self._abandoned_tickets.remove(self._serving_ticket)
+            self._serving_ticket += 1
 
     @contextmanager
     def acquire(
@@ -738,25 +744,32 @@ class CapacityReportImageRenderQueue:
             ticket = self._next_ticket
             self._next_ticket += 1
             pending_before = max(0, ticket - self._serving_ticket)
-            emit_log(
-                "[交接班][容量表图片发送] 进入容量表截图队列 "
-                f"{context}, ticket={ticket}, pending_before={pending_before}"
-            )
-            while ticket != self._serving_ticket:
-                remaining = timeout_sec - (time.monotonic() - started)
-                if remaining <= 0:
-                    raise TimeoutError("容量图片截图繁忙，请稍后重试")
-                self._condition.wait(timeout=remaining)
+            try:
+                emit_log(
+                    "[交接班][容量表图片发送] 进入容量表截图队列 "
+                    f"{context}, ticket={ticket}, pending_before={pending_before}"
+                )
+                while ticket != self._serving_ticket:
+                    remaining = timeout_sec - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise TimeoutError("容量图片截图繁忙，请稍后重试")
+                    self._condition.wait(timeout=remaining)
+            except BaseException:
+                self._abandoned_tickets.add(ticket)
+                self._skip_abandoned()
+                self._condition.notify_all()
+                raise
         wait_ms = int((time.monotonic() - started) * 1000)
-        emit_log(
-            "[交接班][容量表图片发送] 已获取容量表截图队列 "
-            f"{context}, ticket={ticket}, wait_ms={wait_ms}"
-        )
         try:
+            emit_log(
+                "[交接班][容量表图片发送] 已获取容量表截图队列 "
+                f"{context}, ticket={ticket}, wait_ms={wait_ms}"
+            )
             yield {"ticket": ticket, "wait_ms": wait_ms}
         finally:
             with self._condition:
                 self._serving_ticket += 1
+                self._skip_abandoned()
                 self._condition.notify_all()
             emit_log(
                 "[交接班][容量表图片发送] 已释放容量表截图队列 "
