@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import copy
 import re
-import threading
 import time
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
@@ -29,6 +28,7 @@ from handover_log_module.service.event_category_payload_builder import EventCate
 from handover_log_module.service.exercise_management_payload_builder import ExerciseManagementPayloadBuilder
 from handover_log_module.service.training_management_payload_builder import TrainingManagementPayloadBuilder
 from handover_log_module.service.handover_download_service import HandoverDownloadService
+from handover_log_module.service.handover_generation_guard import guard_generation
 from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
 from handover_log_module.service.handover_cabinet_shift_record_bitable_export_service import (
@@ -69,8 +69,6 @@ def _followup_reason_text(value: Any) -> str:
 
 
 _ATTENTION_HANDOVER_SECTION_NAME = "三、注意事项交接"
-_GENERATION_SLOTS = threading.BoundedSemaphore(5)
-_GENERATION_LOCKS = {building: threading.Lock() for building in ("A楼", "B楼", "C楼", "D楼", "E楼")}
 _ATTENTION_HANDOVER_DEFAULT_ITEMS = (
     "各班根据室外湿球温度及时调整制冷单元模式",
     "各班的重要事件和注意项交接在交接班记录保存四个班",
@@ -101,16 +99,14 @@ class HandoverOrchestrator:
     def _run_building_jobs(self, jobs, emit_log):
         def generate(job):
             building = job["building"]
-            lock = _GENERATION_LOCKS.get(building, threading.Lock())
-            with lock, _GENERATION_SLOTS:
-                started = time.monotonic()
-                emit_log(f"[交接班][并行生成] 开始 building={building}")
-                try:
-                    worker = HandoverOrchestrator(copy.deepcopy(self.config))
-                    args = copy.deepcopy({key: value for key, value in job.items() if key != "emit_log"})
-                    return worker.run_from_existing_file(**args, emit_log=emit_log)
-                finally:
-                    emit_log(f"[交接班][并行生成] 结束 building={building}, elapsed_sec={time.monotonic() - started:.1f}")
+            started = time.monotonic()
+            emit_log(f"[交接班][并行生成] 开始 building={building}")
+            try:
+                worker = HandoverOrchestrator(copy.deepcopy(self.config))
+                args = copy.deepcopy({key: value for key, value in job.items() if key != "emit_log"})
+                return worker.run_from_existing_file(**args, emit_log=emit_log)
+            finally:
+                emit_log(f"[交接班][并行生成] 结束 building={building}, elapsed_sec={time.monotonic() - started:.1f}")
 
         if not jobs:
             return
@@ -1035,6 +1031,7 @@ class HandoverOrchestrator:
                 error=str(exc),
             )
 
+    @guard_generation
     def run_from_existing_file(
         self,
         *,
