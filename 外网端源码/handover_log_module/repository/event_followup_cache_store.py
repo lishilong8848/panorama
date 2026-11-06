@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import wraps
 import threading
 from copy import deepcopy
 from datetime import datetime
@@ -11,6 +12,14 @@ from pipeline_utils import get_app_dir
 
 
 _STATE_REPOSITORY = SchedulerStateRepository()
+
+
+def _locked_state_update(method):
+    @wraps(method)
+    def update(self, *args, **kwargs):
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+    return update
 
 
 def _now_text() -> str:
@@ -133,6 +142,7 @@ class EventFollowupCacheStore:
             rows.append(dict(payload))
         return rows
 
+    @_locked_state_update
     def update_building_pending(
         self,
         *,
@@ -230,6 +240,7 @@ class EventFollowupCacheStore:
         meta = payload.get("meta", {})
         return dict(meta) if isinstance(meta, dict) else {}
 
+    @_locked_state_update
     def purge_feishu_cache_namespace(
         self,
         *,
@@ -272,6 +283,7 @@ class EventFollowupCacheStore:
             return self.save_state(state)
         return self._normalize_state(state)
 
+    @_locked_state_update
     def set_feishu_cached_records(
         self,
         *,

@@ -3,10 +3,11 @@ import ast
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 import threading
 import time
-from typing import Callable, Dict, Iterator
+from typing import Any, Callable, Dict, Iterator, List
 
 
 def load_node(path, name, namespace):
@@ -83,6 +84,37 @@ def main():
     assert [row[0] for row in results] == [job["building"] for job in jobs]
     assert results[2][2]["failed_count"] == 1
     assert results[4][2]["building"] == "E楼"
+    cache_path = root.parent / "repository" / "event_followup_cache_store.py"
+    tree = ast.parse(cache_path.read_text(encoding="utf-8-sig"))
+    decorator = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_locked_state_update")
+    cache_class = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "EventFollowupCacheStore")
+    cache_class.body = [n for n in cache_class.body if isinstance(n, ast.FunctionDef) and n.name in {"update_building_pending", "_cache_key"}]
+    namespace.update(wraps=wraps, Any=Any, List=List, _now_text=lambda: "isolated")
+    exec(compile(ast.Module(body=[decorator, cache_class], type_ignores=[]), str(cache_path), "exec"), namespace)
+    state = {"pending_by_id": {}}
+    state_lock = threading.RLock()
+
+    def load():
+        snapshot = copy.deepcopy(state)
+        time.sleep(0.01)
+        return snapshot
+
+    def save(value):
+        state.clear()
+        state.update(value)
+        return value
+
+    def update_cache(building):
+        cache = namespace["EventFollowupCacheStore"]()
+        cache._state_lock = state_lock
+        cache.load_state, cache.save_state = load, save
+        return cache.update_building_pending(building=building, pending_rows=[{"record_id": "record"}],
+                                            max_pending=100, last_query_record_ids=[], max_last_query_ids=100)
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        list(executor.map(update_cache, [job["building"] for job in jobs]))
+    assert len(state["pending_by_id"]) == 5
+    print("PASS: concurrent building cache updates retain all five buildings")
     print("PASS: five workers overlap; snapshots isolated; one failure isolated; queue recovers after timeout/error")
 
 
