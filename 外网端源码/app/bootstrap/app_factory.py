@@ -1694,6 +1694,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     feature="handover_cache_latest",
                     resource_key="shared_bridge:handover",
                     run_func=_run_from_cache,
+                    dedupe_key=f"handover:scheduler:{slot}:{duty_date}:{duty_shift}",
                 )
                 detail = (
                     "已提交交接班共享文件继续处理任务 "

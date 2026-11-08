@@ -79,11 +79,17 @@ def main():
     instance.config = {}
     shared = []
     jobs = [{"building": b, "data_file": "unused", "shared": shared} for b in ("A楼", "B楼", "C楼", "D楼", "E楼")]
-    results = list(instance._run_building_jobs(jobs, lambda _: None))
+    results = list(instance._run_building_jobs(jobs + [dict(jobs[-1])], lambda _: None))
     assert len(seen) == 5 and shared == []
     assert [row[0] for row in results] == [job["building"] for job in jobs]
     assert results[2][2]["failed_count"] == 1
     assert results[4][2]["building"] == "E楼"
+    try:
+        list(instance._run_building_jobs([jobs[0], {**jobs[0], "data_file": "different"}], lambda _: None))
+        raise AssertionError("conflicting building sources accepted")
+    except ValueError as exc:
+        assert "不同源文件" in str(exc)
+    print("PASS: duplicate E entry runs once; conflicting sources rejected before generation")
     cache_path = root.parent / "repository" / "event_followup_cache_store.py"
     tree = ast.parse(cache_path.read_text(encoding="utf-8-sig"))
     decorator = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_locked_state_update")

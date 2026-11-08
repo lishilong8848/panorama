@@ -97,6 +97,18 @@ class HandoverQueryContext:
 
 class HandoverOrchestrator:
     def _run_building_jobs(self, jobs, emit_log):
+        unique_jobs = {}
+        for job in jobs:
+            key = (job["building"], job.get("duty_date"), job.get("duty_shift"))
+            previous = unique_jobs.get(key)
+            if previous is not None:
+                if (previous["data_file"], previous.get("capacity_source_file")) != (job["data_file"], job.get("capacity_source_file")):
+                    raise ValueError(f"{job['building']} 同班次收到不同源文件，未启动重复生成，请检查源文件索引")
+                emit_log(f"[交接班][批次去重] 已合并重复楼栋条目 building={job['building']}, duty={key[1]}/{key[2]}")
+                continue
+            unique_jobs[key] = job
+        jobs = list(unique_jobs.values())
+
         def generate(job):
             building = job["building"]
             started = time.monotonic()
@@ -1727,6 +1739,12 @@ class HandoverOrchestrator:
             building_text = str(building or "").strip()
             data_file_text = str(data_file or "").strip()
             if not building_text or not data_file_text:
+                continue
+            existing_file = next((path for name, path in normalized_files if name == building_text), None)
+            if existing_file is not None:
+                if existing_file != data_file_text:
+                    raise ValueError(f"{building_text} 同批次存在不同交接班源文件，请检查源文件索引")
+                emit_log(f"[交接班][批次去重] 已合并重复源文件 building={building_text}")
                 continue
             normalized_files.append((building_text, data_file_text))
             if building_text not in selected_buildings:
