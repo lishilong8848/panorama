@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
+from app.modules.inspection_data.service.point_correction import CORRECTION_RULE_FIELD, normalize_correction_rules
 from app.modules.inspection_data.service.point_status import STATUS_FIELDS, normalize_status_rules
 
 
@@ -37,7 +38,7 @@ def _index(records):
     return rows, blank_ids
 
 
-def _expected_rows(groups, *, include_explicit_enable=False):
+def _expected_rows(groups, *, include_explicit_enable=False, include_corrections=False):
     desired = {}
     for family, group in groups.items():
         discipline = INSPECTION_SOURCE_CONTRACTS[family]["discipline"]
@@ -58,6 +59,9 @@ def _expected_rows(groups, *, include_explicit_enable=False):
                 elif point_id in remove or point_id in group.get("explicitly_disabled", ()):
                     desired[discipline, point_id][EXPLICIT_ENABLE_FIELD] = False
             status = group.get("status_rules", {}).get(point_id, {})
+            if include_corrections:
+                rules = group.get("correction_rules", {}).get(point_id)
+                desired[discipline, point_id][CORRECTION_RULE_FIELD] = json.dumps(rules, separators=(",", ":")) if rules else ""
             desired[discipline, point_id].update({"测点类型": status.get("type", ""), **{
                 field: json.dumps(status.get(key, []), ensure_ascii=False, separators=(",", ":")) if status else ""
                 for key, field in STATUS_FIELDS.items()
@@ -111,6 +115,13 @@ def read_point_config_bitable(config, *, client=None):
                 except (ValueError, TypeError, json.JSONDecodeError) as exc:
                     raise ValueError(f"{building} 测点 {point_id} 状态规则无效") from exc
                 group.setdefault("status_rules", {}).update(normalized)
+            correction = _text(fields.get(CORRECTION_RULE_FIELD))
+            if correction:
+                try:
+                    rules = normalize_correction_rules({point_id: json.loads(correction)}, {point_id})
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(f"{building} 测点 {point_id} 数值修正规则无效") from exc
+                group.setdefault("correction_rules", {}).update(rules)
             if point_id not in group["baseline"] or note or any(target.values()):
                 group["points"][point_id] = note
             if any(target.values()):
@@ -142,10 +153,17 @@ def sync_point_config_bitable(config, settings, *, buildings=None, initialize=Fa
             raise ValueError(f"{building} 飞书配置表缺少复选框字段{EXPLICIT_ENABLE_FIELD}，主动启用待同步")
         primary = next((f["field_name"] for f in definitions if f.get("is_primary") and f["type"] == 1), "")
         missing = {k: t for k, t in _FIELD_TYPES.items() if k not in existing}
+        has_corrections = any(group.get("correction_rules") for group in settings.get(building, {}).values())
+        correction_type = existing.get(CORRECTION_RULE_FIELD)
+        if correction_type not in (None, 1):
+            raise ValueError(f"{building} 飞书配置表的{CORRECTION_RULE_FIELD}必须是文本")
+        if has_corrections and correction_type is None:
+            missing[CORRECTION_RULE_FIELD] = 1
         if not primary or any(existing.get(k, t) != t for k, t in _FIELD_TYPES.items()) or (missing and not initialize):
             raise ValueError(f"{building} 飞书巡检测点配置表字段不匹配")
         current, blank = _index(client.list_records(table, max_records=0))
-        desired = _expected_rows(settings.get(building, {}), include_explicit_enable=explicit_type == 7)
+        desired = _expected_rows(settings.get(building, {}), include_explicit_enable=explicit_type == 7,
+                                 include_corrections=has_corrections or correction_type == 1)
         if not desired:
             raise ValueError(f"{building} 没有可保存的测点配置")
         plans[building] = (table, primary, missing, current, blank, desired)

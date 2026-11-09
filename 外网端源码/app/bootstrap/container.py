@@ -842,7 +842,7 @@ class AppContainer:
                 continue
             job = self.job_service.start_worker_job(
                 name=f"月度能耗报表上传 {period}", worker_handler=FEATURE,
-                worker_payload={"period": period}, resource_keys=[FEATURE], priority="scheduler",
+                worker_payload={"period": period}, resource_keys=["network:external", FEATURE], priority="scheduler",
                 feature=FEATURE, dedupe_key=f"{FEATURE}:{period}", submitted_by="scheduler",
             )
             return True, job.job_id

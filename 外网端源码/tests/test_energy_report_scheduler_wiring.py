@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 from app.bootstrap.container import AppContainer
 from app.modules.report_pipeline.service import energy_report_upload_service as module
+from app.modules.report_pipeline.service.job_service import JobService, JobState
 from app.worker.task_handlers import HANDLER_REGISTRY
 
 
@@ -34,6 +35,7 @@ def test_scheduler_does_not_submit_until_files_are_ready(monkeypatch, tmp_path):
     assert kwargs["worker_payload"] == {"period": "2026-10"}
     assert kwargs["worker_handler"] in HANDLER_REGISTRY
     assert kwargs["dedupe_key"] == "energy_report_upload:2026-10"
+    assert kwargs["resource_keys"] == ["network:external", module.FEATURE]
     probe.assert_called_with("2026-10", request_missing=True, log=container.add_system_log)
 
     monkeypatch.setattr(module, "completed", lambda *_: True)
@@ -54,3 +56,17 @@ def test_older_unready_month_does_not_block_ready_month(monkeypatch, tmp_path):
     assert AppContainer._submit_energy_report_upload(container, "测试") == (True, "test-id")
     assert [call.args[0] for call in probe.call_args_list] == ["2026-09", "2026-10"]
     assert jobs.start_worker_job.call_args.kwargs["worker_payload"] == {"period": "2026-10"}
+
+
+def test_energy_job_waits_for_external_network_then_can_start(monkeypatch):
+    service = JobService()
+    job = JobState(job_id="energy", name="月度能耗报表上传", resource_keys=["network:external", module.FEATURE])
+    state = {"mode": "internal_only", "internal_reachable": True, "external_reachable": False}
+    monkeypatch.setattr(service, "_get_current_network_state", lambda: dict(state))
+
+    unavailable = service._resource_unavailable_keys(job)
+    assert unavailable == ["network:external"]
+    assert "waiting:network_external_unreachable" in service._wait_reason_for_job(job, unavailable)
+
+    state.update(mode="external_only", internal_reachable=False, external_reachable=True)
+    assert service._resource_unavailable_keys(job) == []

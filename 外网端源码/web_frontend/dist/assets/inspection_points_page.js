@@ -21,6 +21,52 @@ const STATUS_FIELDS = [
 ];
 const emptyRoundCells = () => Object.fromEntries(ROUND_FIELDS.map(item => [item.key, ""]));
 const PAGE_SIZE = 30;
+const CORRECTION_FIELDS = [
+  { key: "min", label: "最小值", placeholder: "如 -1.5（含）" },
+  { key: "max", label: "最大值", placeholder: "如 8（含）" },
+  { key: "value", label: "替换值", placeholder: "如 0" },
+];
+// Server-aligned decimal string: optional sign, no trailing dot, no exponent.
+const CORRECTION_NUMBER = /^[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$/;
+const CORRECTION_TEXT_MAXLENGTH = 48;
+const CORRECTION_MAX_RULES = 20;
+const isFiniteDecimal = text => typeof text === "string" && text.length <= CORRECTION_TEXT_MAXLENGTH
+  && CORRECTION_NUMBER.test(text) && Number.isFinite(Number(text));
+function compareDecimalValue(text) {
+  const [whole, fraction = ""] = text.replace(/^[+-]/, "").split(".");
+  const magnitude = BigInt((whole || "0") + fraction.padEnd(CORRECTION_TEXT_MAXLENGTH, "0"));
+  return text.startsWith("-") ? -magnitude : magnitude;
+}
+const emptyCorrectionRows = () => [{ min: "", max: "", value: "" }];
+const isBlankCorrection = row => !String(row?.min ?? "").trim() && !String(row?.max ?? "").trim() && !String(row?.value ?? "").trim();
+const countCorrectionRules = rows => (rows || []).filter(row => !isBlankCorrection(row)).length;
+
+// Validates the draft rows; returns { rules: [{ min, max, value }] } with the
+// decimal strings exactly as entered, or { error }.
+function parseCorrectionRows(rows) {
+  const sources = (rows || []).map(row => ({
+    min: String(row?.min ?? "").trim(), max: String(row?.max ?? "").trim(), value: String(row?.value ?? "").trim(),
+  })).filter(row => !isBlankCorrection(row));
+  if (sources.length > CORRECTION_MAX_RULES) return { error: `数值修正规则最多 ${CORRECTION_MAX_RULES} 条` };
+  const ranges = [];
+  for (const [index, row] of sources.entries()) {
+    const number = index + 1;
+    if (!isFiniteDecimal(row.min)) return { error: `修正规则 ${number}：最小值须为非空有限小数字符串（最多 ${CORRECTION_TEXT_MAXLENGTH} 字符）` };
+    if (!isFiniteDecimal(row.max)) return { error: `修正规则 ${number}：最大值须为非空有限小数字符串（最多 ${CORRECTION_TEXT_MAXLENGTH} 字符）` };
+    if (!isFiniteDecimal(row.value)) return { error: `修正规则 ${number}：替换值须为非空有限小数字符串（最多 ${CORRECTION_TEXT_MAXLENGTH} 字符）` };
+    const min = compareDecimalValue(row.min), max = compareDecimalValue(row.max);
+    if (min > max) return { error: `修正规则 ${number}：最小值不能大于最大值` };
+    ranges.push({ min, max });
+  }
+  ranges.sort((a, b) => a.min < b.min ? -1 : a.min > b.min ? 1 : 0);
+  for (let i = 1; i < ranges.length; i++) {
+    if (ranges[i].min <= ranges[i - 1].max) {
+      return { error: `修正规则取值范围重叠（第 ${i} 与 ${i + 1} 个区间，含端点）` };
+    }
+  }
+  // Payload keeps the entered strings and row order; only `ranges` is numeric/sorted.
+  return { rules: sources.map(row => ({ min: row.min, max: row.max, value: row.value })) };
+}
 
 export function isInspectionPointsPage(pathname) {
   return ROUTE.test(pathname);
@@ -82,6 +128,27 @@ const TEMPLATE = `
             <textarea class="review-input" v-model="draft.status[item.key]" :disabled="saving" rows="2" placeholder="每行填写一个原始值"></textarea>
           </label>
         </template>
+        <div class="review-field inspection-correction-rules">
+          <span class="review-field-label">数值修正规则<span class="inspection-correction-count">{{ countCorrectionRules(draft.correctionRules) }} / {{ correctionMaxRules }} 条</span></span>
+          <p class="review-status-line review-status-info inspection-status-hint">原始读数保留不变；下次上传时按上述区间（含端点）使用修正后的有效值。</p>
+          <div v-for="(ruleRow, index) in draft.correctionRules" :key="index" class="inspection-correction-row">
+            <span class="inspection-correction-index" aria-hidden="true">{{ index + 1 }}</span>
+            <label v-for="field in correctionFields" :key="field.key" class="inspection-correction-field">
+              <span class="inspection-correction-label">{{ field.label }}</span>
+              <input class="review-input" type="text" inputmode="decimal" autocomplete="off" :placeholder="field.placeholder"
+                :maxlength="correctionTextMaxlength" v-model="ruleRow[field.key]" :disabled="saving"
+                :aria-label="'规则 ' + (index + 1) + ' ' + field.label" />
+            </label>
+            <button class="btn btn-ghost btn-mini" type="button" :disabled="saving || draft.correctionRules.length <= 1"
+              :aria-label="'删除规则 ' + (index + 1)" @click="removeCorrectionRule(index)">删除</button>
+          </div>
+          <div class="btn-line">
+            <button class="btn btn-secondary btn-mini" type="button"
+              :disabled="saving || correctionRowsFull(draft.correctionRules)" @click="addCorrectionRule">添加规则</button>
+            <button class="btn btn-secondary btn-mini" type="button" :disabled="saving || isEmptyCorrectionRules(draft.correctionRules)"
+              @click="clearCorrectionRules">清空规则</button>
+          </div>
+        </div>
         <label class="review-field"><span class="review-field-label">目标巡检表</span>
           <select class="review-input" v-model="draft.target.workbook" :disabled="saving" @change="draft.target.sheet = ''; draft.target.cell = ''; draft.target.round_cells = emptyRoundCells()">
             <option value="">不指定</option><option v-for="book in Object.keys(targetOptions)" :key="book" :value="book">{{ book }}</option>
@@ -112,8 +179,8 @@ const TEMPLATE = `
             <small>{{ row.id }}<template v-if="row.excluded"> · 已排除</template></small>
             <small v-if="row.path">{{ row.path }}</small>
           </div>
-          <div class="inspection-point-note">{{ row.note || '—' }}<small v-if="!row.excluded && !row.targetComplete" class="inspection-point-incomplete">位置待完善</small><small v-if="row.target">{{ row.target.workbook }} · {{ row.target.sheet }} · {{ formatTarget(row.target) }}</small></div>
-          <div class="inspection-point-value"><strong>{{ row.displayValue || '—' }}</strong><small v-if="row.status">{{ row.status }}</small><small>{{ row.sampleTime || '暂无采样' }}</small></div>
+          <div class="inspection-point-note">{{ row.note || '—' }}<small v-if="!row.excluded && !row.targetComplete" class="inspection-point-incomplete">位置待完善</small><span v-if="row.correctionCount" class="inspection-point-badge" :title="'已设置 ' + row.correctionCount + ' 条数值修正规则'">修正 {{ row.correctionCount }}</span><small v-if="row.target">{{ row.target.workbook }} · {{ row.target.sheet }} · {{ formatTarget(row.target) }}</small></div>
+          <div class="inspection-point-value"><strong>{{ row.displayValue || '—' }}</strong><small v-if="row.rawDisplay" :title="'原始读数 ' + row.rawDisplay">原始 {{ row.rawDisplay }} · 已修正</small><small v-if="row.status">{{ row.status }}</small><small>{{ row.sampleTime || '暂无采样' }}</small></div>
           <div class="inspection-point-actions">
             <button v-if="!row.excluded" class="btn btn-secondary btn-mini" type="button" :disabled="!settingsReady || saving" @click="editPoint(row)">修改</button>
             <button v-if="!row.excluded" class="btn btn-ghost btn-mini" type="button" :disabled="!settingsReady || saving" @click="setExcluded(row, true)">删除</button>
@@ -181,8 +248,12 @@ export function mountInspectionPointsPage(Vue) {
             status = raw != null && raw !== "" ? (rule.normal?.includes(raw) ? "√" : rule.abnormal?.includes(raw) ? "×" : rule.not_running?.includes(raw) ? "△" : "待核对") : "待核对";
           }
           const target = group.value.targets?.[row.id], excluded = group.value.remove.includes(row.id);
-          return { ...row, status, displayValue: rule?.type ? (row.raw_value ?? "") : row.value,
-            note: group.value.points[row.id] || "", target, excluded, targetComplete: isTargetComplete(target) };
+          const corrected = row.corrected_value, hasCorrected = corrected != null && corrected !== "";
+          const rawDisplay = rule?.type ? (row.raw_value ?? "") : row.value;
+          return { ...row, status, displayValue: hasCorrected ? corrected : rawDisplay,
+            rawDisplay: hasCorrected ? (row.raw_value ?? row.value ?? "") : "",
+            note: group.value.points[row.id] || "", target, excluded, targetComplete: isTargetComplete(target),
+            correctionCount: excluded ? 0 : countCorrectionRules(group.value.correction_rules?.[row.id]) };
         }).filter(row => (!q || [row.id, row.name, row.path, row.note].some(value => String(value || "").toLowerCase().includes(q)))
           && (positionFilter.value === "all" || (positionFilter.value === "excluded" ? row.excluded
             : !row.excluded && (positionFilter.value === "complete" ? row.targetComplete : !row.targetComplete))))
@@ -253,13 +324,34 @@ export function mountInspectionPointsPage(Vue) {
       function editPoint(row) {
         if (draft.value && !window.confirm("放弃未保存的测点修改？")) return;
         const rule = group.value.status_rules?.[row?.id] || {};
+        const correctionRules = (group.value.correction_rules?.[row?.id] || []).map(item => ({
+          min: String(item?.min ?? ""), max: String(item?.max ?? ""), value: String(item?.value ?? ""),
+        }));
         draft.value = { id: row?.id || "", note: row?.note || "", originalId: row?.id || "",
           explicitlyEnabled: (group.value.explicitly_enabled || []).includes(row?.id),
           originalExplicitlyEnabled: (group.value.explicitly_enabled || []).includes(row?.id),
           status: { type: rule.type === "数值" ? "直接填充" : (rule.type || ""), ...Object.fromEntries(STATUS_FIELDS.map(item => [item.key, (rule[item.key] || []).join("\n")])) },
+          correctionRules: correctionRules.length ? correctionRules : emptyCorrectionRows(),
           target: { workbook: "", sheet: "", cell: "", ...row?.target,
             round_cells: { ...emptyRoundCells(), ...row?.target?.round_cells } } };
         message.value = "";
+      }
+      function correctionRowsFull(rows) {
+        return (rows || []).length >= CORRECTION_MAX_RULES || countCorrectionRules(rows) >= CORRECTION_MAX_RULES;
+      }
+      function addCorrectionRule() {
+        if (!draft.value || correctionRowsFull(draft.value.correctionRules)) return;
+        draft.value.correctionRules.push({ min: "", max: "", value: "" });
+      }
+      function removeCorrectionRule(index) {
+        if (!draft.value || draft.value.correctionRules.length <= 1) return;
+        draft.value.correctionRules.splice(index, 1);
+      }
+      function clearCorrectionRules() {
+        if (draft.value) draft.value.correctionRules = emptyCorrectionRows();
+      }
+      function isEmptyCorrectionRules(rows) {
+        return countCorrectionRules(rows) === 0;
       }
       function formatTarget(target) {
         const cells = target.round_cells || {};
@@ -268,19 +360,20 @@ export function mountInspectionPointsPage(Vue) {
         if (positions.length) return ROUND_FIELDS.filter(item => cells[item.key]).map(item => `${item.label} ${cells[item.key]}`).join(" · ");
         return target.cell ? `历史位置 ${target.cell}` : "未设置位置";
       }
-      async function persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled) {
+      async function persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled, correctionRules) {
         if (!settingsReady.value || saving.value || settingsBusy.value) return false;
         saving.value = true;
         message.value = "";
         settingsError.value = "";
         try {
           const response = await putBuildingInspectionPointSettingsApi(code, {
-            family: family.value, points, remove, targets, status_rules: statusRules,
+            family: family.value, points, remove, targets, status_rules: statusRules, correction_rules: correctionRules,
             explicitly_enabled: explicitlyEnabled, explicitly_disabled: explicitlyDisabled, expected_group: group.value,
           });
           settings.value = response.settings;
           message.value = response.message;
           page.value = Math.min(page.value, pageCount.value);
+          void loadLatest();
           return true;
         } catch (error) {
           settingsError.value = error.message;
@@ -301,8 +394,10 @@ export function mountInspectionPointsPage(Vue) {
           settingsError.value = "请选择工作表并填写目标单元格";
           return;
         }
+        const parsed = parseCorrectionRows(row.correctionRules);
+        if (parsed.error) { settingsError.value = parsed.error; return; }
         const points = { ...group.value.points }, targets = { ...group.value.targets };
-        const statusRules = { ...group.value.status_rules };
+        const statusRules = { ...group.value.status_rules }, correctionRules = { ...(group.value.correction_rules || {}) };
         const explicitlyEnabled = (group.value.explicitly_enabled || []).filter(id => id !== row.id && id !== row.originalId);
         const explicitlyDisabled = (group.value.explicitly_disabled || []).filter(id => id !== row.id && id !== row.originalId);
         if (row.explicitlyEnabled) explicitlyEnabled.push(row.id);
@@ -314,6 +409,7 @@ export function mountInspectionPointsPage(Vue) {
           delete points[row.originalId];
           delete targets[row.originalId];
           delete statusRules[row.originalId];
+          delete correctionRules[row.originalId];
           if (!remove.includes(row.originalId)) remove.push(row.originalId);
         }
         points[row.id] = row.note;
@@ -324,7 +420,9 @@ export function mountInspectionPointsPage(Vue) {
         } else delete statusRules[row.id];
         if (row.target.workbook) targets[row.id] = { ...row.target, round_cells: roundCells };
         else delete targets[row.id];
-        if (await persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled)) {
+        if (parsed.rules.length) correctionRules[row.id] = parsed.rules;
+        else delete correctionRules[row.id];
+        if (await persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled, correctionRules)) {
           draft.value = null;
         }
       }
@@ -333,14 +431,15 @@ export function mountInspectionPointsPage(Vue) {
         const points = { ...group.value.points };
         const targets = { ...group.value.targets };
         const statusRules = { ...group.value.status_rules };
-        if (excluded) { delete points[row.id]; delete targets[row.id]; delete statusRules[row.id]; }
+        const correctionRules = { ...(group.value.correction_rules || {}) };
+        if (excluded) { delete points[row.id]; delete targets[row.id]; delete statusRules[row.id]; delete correctionRules[row.id]; }
         else if (group.value.baseline && !Object.hasOwn(group.value.baseline, row.id)) points[row.id] = "";
         const remove = group.value.remove.filter(id => id !== row.id);
         if (excluded) remove.push(row.id);
         const explicitlyEnabled = (group.value.explicitly_enabled || []).filter(id => !excluded || id !== row.id);
         const explicitlyDisabled = [...(group.value.explicitly_disabled || [])];
         if (excluded && (group.value.explicitly_enabled || []).includes(row.id) && !explicitlyDisabled.includes(row.id)) explicitlyDisabled.push(row.id);
-        if (await persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled) && draft.value?.id === row.id) draft.value = null;
+        if (await persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled, correctionRules) && draft.value?.id === row.id) draft.value = null;
       }
       function returnToReview(event) {
         if (saving.value || (draft.value && !window.confirm("放弃未保存的测点修改？"))) { event.preventDefault(); return; }
@@ -353,9 +452,12 @@ export function mountInspectionPointsPage(Vue) {
       onMounted(() => { void loadSettings(); void loadLatest(); });
       onBeforeUnmount(() => controller.abort());
       return { building, families: FAMILIES, family, keyword, positionFilter, page, pageCount, pageButtons, pageRows, filteredRows, sampleTime,
-        roundFields: ROUND_FIELDS, statusFields: STATUS_FIELDS, coldSheet: COLD_SHEET, emptyRoundCells, formatTarget,
+        roundFields: ROUND_FIELDS, statusFields: STATUS_FIELDS, correctionFields: CORRECTION_FIELDS,
+        correctionMaxRules: CORRECTION_MAX_RULES, correctionTextMaxlength: CORRECTION_TEXT_MAXLENGTH,
+        coldSheet: COLD_SHEET, emptyRoundCells, formatTarget,
         draft, targetOptions, settingsReady, settingsBusy, latestBusy, saving, settingsError, latestError, message, returnUrl,
-        loadSettings, loadLatest, selectFamily, editPoint, saveDraft, setExcluded, returnToReview };
+        loadSettings, loadLatest, selectFamily, editPoint, saveDraft, setExcluded, returnToReview,
+        addCorrectionRule, removeCorrectionRule, clearCorrectionRules, isEmptyCorrectionRules, countCorrectionRules, correctionRowsFull };
     },
   }).mount("#app");
 }

@@ -18,6 +18,7 @@ from app.config.inspection_data_config import INSPECTION_DATA_UPLOAD_DEFAULTS as
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS
 from app.config.inspection_data_config import INSPECTION_SOURCE_CONTRACTS as SOURCE_FAMILIES
 from app.config.inspection_data_config import inspection_hour_bucket
+from app.modules.inspection_data.service.point_correction import CORRECTED_VALUE_FIELD, corrected_samples
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
@@ -54,6 +55,7 @@ POINT_DETAIL_TYPES = {"记录类型": 3, "测点ID": 1, "测点名称": 1, "测�
 POINT_TARGET_FIELDS = {"workbook": "目标巡检表", "sheet": "目标工作表", "cell": "目标单元格"}
 POINT_DETAIL_TYPES.update(dict.fromkeys(POINT_TARGET_FIELDS.values(), 1))
 POINT_DETAIL_TYPES.update(dict.fromkeys(INSPECTION_ROUND_FIELDS.values(), 1))
+POINT_DETAIL_TYPES[CORRECTED_VALUE_FIELD] = 1
 INSPECTION_BATCH_PREFIX = "INSPECTION_BATCH_V1:"
 
 
@@ -395,7 +397,8 @@ class InspectionDataUploadService:
 
     @staticmethod
     def parse_samples(samples, *, building: str, catalog=None, value_time: str, allow_unmapped: bool = False,
-                      matched_rows: dict[tuple[int, str], list[int]] | None = None) -> dict[str, Any]:
+                      matched_rows: dict[tuple[int, str], list[int]] | None = None,
+                      corrections: dict[int, str] | None = None) -> dict[str, Any]:
         devices = [d for d in (load_catalog() if catalog is None else catalog) if d["building"] == building]
         if not devices:
             raise ValueError(f"不支持的巡检楼栋: {building}")
@@ -404,6 +407,8 @@ class InspectionDataUploadService:
             for name in _device_aliases(device):
                 by_device[name].append(i)
         readings: dict[int, dict[str, Any]] = defaultdict(dict)
+        corrected_fields = set()
+        corrections = corrections or {}
         diagnostics: list[str] = []
         valid_count = 0
         position = device_name = ""
@@ -411,6 +416,8 @@ class InspectionDataUploadService:
             if row_number > 100000:
                 raise ValueError("巡检源文件超过100000行，停止解析，未修改多维表")
             b, c, d, raw = values
+            if row_number - 1 in corrections:
+                raw = corrections[row_number - 1]
             explicit = set(re.findall(r"(?<![A-Za-z0-9])([A-E])(?:楼|栋|-\d{3})", _text(b) + " " + _text(c)))
             if explicit and explicit != {building[0]}:
                 raise ValueError(f"{building} 巡检源文件出现其他楼栋标识，第{row_number}行，未修改多维表")
@@ -480,6 +487,8 @@ class InspectionDataUploadService:
             if field in readings[i] and readings[i][field] != value:
                 raise ValueError(f"{building} 巡检源文件重复点位数值冲突: {device_name}/{field}，未修改多维表")
             readings[i][field] = value
+            if row_number - 1 in corrections:
+                corrected_fields.add((i, field))
             if field == "运行状态" and _on_off(raw):
                 readings[i]["启停状态"] = _on_off(raw)
             valid_count += 1
@@ -487,7 +496,7 @@ class InspectionDataUploadService:
             raise ValueError(f"{building} 巡检源文件没有可识别的有效测点，保留目标表原数据")
         rows = []
         for i, device in enumerate(devices):
-            values = {field: _round_measurement(value) if isinstance(value, float) else value
+            values = {field: _round_measurement(value) if isinstance(value, float) and (i, field) not in corrected_fields else value
                       for field, value in readings.get(i, {}).items()}
             missing = [p["field"] for p in device["points"] if p["field"] not in values]
             if "启停状态" not in values:
@@ -536,13 +545,14 @@ class InspectionDataUploadService:
 
     @staticmethod
     def _point_detail_rows(entry: dict, discipline: str, notes: dict, targets: dict | None = None,
-                           status_rules: dict | None = None) -> list[dict]:
+                           status_rules: dict | None = None, corrections: dict[int, str] | None = None) -> list[dict]:
         from app.modules.inspection_data.service.point_status import status_fields
         rows = []
         position = device = ""
         sample_time = int(datetime.strptime(entry["value_time"], "%Y-%m-%d %H:%M:%S")
                           .replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
         ids = entry.get("point_ids", [])
+        corrections = corrections or {}
         for i, (place, name, metric, raw) in enumerate(entry["rows"]):
             if _text(place) and _key(place) != _key(position):
                 position, device = _text(place), ""
@@ -552,16 +562,21 @@ class InspectionDataUploadService:
                 if ids:
                     raise ValueError(f"巡检接口测点 {ids[i]} 缺少设备或名称；未清空多维表")
                 continue
+            corrected = corrections.get(i)
             numeric = _numeric(raw, "")
+            value = f"{_round_measurement(numeric):.2f}" if numeric is not None else _text(raw)
+            if corrected is not None:
+                value = corrected
             point_id = ids[i] if ids else ""
             target = (targets or {}).get(point_id, {})
             rows.append({
                 "记录类型": "测点明细", "楼栋": entry["building"], "专业": discipline, "位置": position,
                 "设备编号": device, "巡检表单": entry["report_name"], "测点名称": _text(metric),
                 "测点ID": point_id, "测点路径": " / ".join(filter(None, (position, device, _text(metric)))),
-                "测点值": f"{_round_measurement(numeric):.2f}" if numeric is not None else _text(raw),
+                "测点值": value,
                 "测点原始值": "" if raw is None else str(raw),
-                **status_fields((status_rules or {}).get(point_id), raw),
+                **({CORRECTED_VALUE_FIELD: corrected} if corrected is not None else {}),
+                **status_fields((status_rules or {}).get(point_id), corrected if corrected is not None else raw),
                 "测点备注": notes.get(point_id, ""),
                 **{field: target[key] for key, field in POINT_TARGET_FIELDS.items() if key in target},
                 **{field: target.get("round_cells", {}).get(key, "")
@@ -705,11 +720,12 @@ class InspectionDataUploadService:
                 cancel()
                 entry = sources[building][family]
                 group = (point_settings or {}).get(building, {}).get(family, {})
+                corrections = corrected_samples(entry, group.get("correction_rules", {}))
                 point_rows = self._point_detail_rows(entry, contract["discipline"], group.get("points", {}),
-                                                     group.get("targets", {}), group.get("status_rules", {}))
+                                                     group.get("targets", {}), group.get("status_rules", {}), corrections)
                 added_ids = set(entry.get("point_overrides", {}).get("add", []))
                 p = self.parse_samples(
-                    entry["rows"], building=building, value_time=entry["value_time"],
+                    entry["rows"], building=building, value_time=entry["value_time"], corrections=corrections,
                     catalog=[d for d in catalog if d["discipline"] == contract["discipline"]],
                     allow_unmapped=bool(entry.get("requested_point_ids")
                                         and any(r["测点ID"] in added_ids and r["测点值"] for r in point_rows)),
@@ -728,7 +744,8 @@ class InspectionDataUploadService:
                     "source_time": entry["query_end"], "bucket_kind": "latest", "bucket_key": entry["bucket_key"],
                     **{key: value for key, value in p.items() if key != "rows"},
                 }
-                log(f"[巡检数据处理] {building}/{contract['report_name']} 设备={len(p['rows'])}, 有效测点={p['valid_points']}, 缺数据设备={p['missing_devices']}, 首个时刻={p['value_time']}")
+                log(f"[巡检数据处理] {building}/{contract['report_name']} 设备={len(p['rows'])}, 有效测点={p['valid_points']}, "
+                    f"数值修正={len(corrections)}, 缺数据设备={p['missing_devices']}, 首个时刻={p['value_time']}")
                 for item in p["diagnostics"][:10]:
                     log(f"[巡检数据处理] {building}/{contract['label']} {item}")
             parsed[building] = combined

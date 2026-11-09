@@ -11,6 +11,7 @@ from pathlib import Path
 
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
+from app.modules.inspection_data.service.point_correction import normalize_correction_rules
 from app.modules.inspection_data.service.point_status import normalize_status_rules
 from app.shared.utils.atomic_file import atomic_write_text
 
@@ -96,6 +97,9 @@ def load_or_restore_point_settings(config):
                 if "status_rules" in group:
                     group["status_rules"] = normalize_status_rules(
                         group["status_rules"], (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
+                if "correction_rules" in group:
+                    group["correction_rules"] = normalize_correction_rules(
+                        group["correction_rules"], (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
             _validate_target_collisions(groups)
         _save_settings(config, settings)
         return settings
@@ -272,7 +276,7 @@ def retry_pending_point_config(config):
 
 
 def save_point_group(config, *, building, family, points, remove, expected_group=None, targets=None, status_rules=None,
-                     explicitly_enabled=None, explicitly_disabled=None):
+                     explicitly_enabled=None, explicitly_disabled=None, correction_rules=None):
     if not isinstance(building, str) or not isinstance(family, str) or building not in {"D楼", "E楼"} or family not in INSPECTION_SOURCE_CONTRACTS:
         raise ValueError("巡检测点只支持 D/E 楼的电气和暖通")
     if not isinstance(points, dict) or not isinstance(remove, list) or len(points) > 1000 or len(remove) > 1000:
@@ -309,6 +313,9 @@ def save_point_group(config, *, building, family, points, remove, expected_group
         if status_rules is None:
             status_rules = {i: rule for i, rule in current.get("status_rules", {}).items() if i in active_ids}
         status_rules = normalize_status_rules(status_rules, active_ids)
+        if correction_rules is None:
+            correction_rules = {i: rules for i, rules in current.get("correction_rules", {}).items() if i in active_ids}
+        correction_rules = normalize_correction_rules(correction_rules, active_ids)
         if "baseline" in current:
             _validate_effective_count(current["baseline"], points, remove)
         if points or remove or "baseline" in current:
@@ -316,6 +323,7 @@ def save_point_group(config, *, building, family, points, remove, expected_group
             groups[family] = {"points": {i: note.strip() for i, note in sorted(points.items())},
                               "remove": sorted(set(remove)), **({"targets": targets} if targets else {}),
                               **({"status_rules": status_rules} if status_rules else {}),
+                              **({"correction_rules": correction_rules} if correction_rules else {}),
                               **({"explicitly_enabled": sorted(set(explicitly_enabled))} if explicitly_enabled else {}),
                               **({"explicitly_disabled": sorted(set(explicitly_disabled))} if explicitly_disabled else {})}
             if "baseline" in current:

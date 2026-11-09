@@ -63,6 +63,30 @@ def test_merged_rows_zero_and_missing_are_distinct(tmp_path):
     assert missing['数据完整性'] == '缺少源数据'
 
 
+def test_point_correction_uses_inclusive_ranges_and_keeps_raw_upload_values():
+    from app.modules.inspection_data.service.point_correction import corrected_samples, normalize_correction_rules
+
+    point = '7_0_1'
+    document = {'point_ids': [point, '7_0_2'], 'building': 'D楼', 'report_name': '电气巡检表',
+                'value_time': '2026-11-09 10:00:00',
+                'rows': [('电气系统西区', 'D-144-TR-101', 'L1温度(℃)', '2.5'),
+                         (None, None, 'L2温度(℃)', '2.5')]}
+    rules = normalize_correction_rules({point: [{'min': '1.00', 'max': '2.5', 'value': '0.125'}]}, {point})
+    corrections = corrected_samples(document, rules)
+    assert corrections == {0: '0.125'}
+    point_rows = InspectionDataUploadService._point_detail_rows(document, '电气', {}, corrections=corrections)
+    assert point_rows[0]['测点原始值'] == '2.5'
+    assert point_rows[0]['测点修正值'] == point_rows[0]['测点值'] == '0.125'
+    assert '测点修正值' not in point_rows[1] and point_rows[1]['测点值'] == '2.50'
+    parsed = InspectionDataUploadService.parse_samples(document['rows'], building='D楼',
+                                                        value_time=document['value_time'], corrections=corrections)
+    row = next(item for item in parsed['rows'] if item['设备编号'] == 'D-144-TR-101')
+    assert row['L1温度(℃)'] == 0.125 and row['L2温度(℃)'] == 2.5
+    assert document['rows'][0][3] == '2.5'
+    with pytest.raises(ValueError, match='不能重叠'):
+        normalize_correction_rules({point: [*rules[point], {'min': '2.5', 'max': '3', 'value': '0'}]}, {point})
+
+
 def test_equal_crah_names_need_room_context(tmp_path):
     p = source(tmp_path/'d.xlsx', [
         ['M1包间精密空调/北侧（240）','CRAH01','回风温度',26],

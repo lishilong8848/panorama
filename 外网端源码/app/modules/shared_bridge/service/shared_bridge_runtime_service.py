@@ -2630,8 +2630,10 @@ class SharedBridgeRuntimeService:
         *,
         selected_date: str,
         buildings: List[str] | None,
+        duty_shift: str = "",
     ) -> List[Dict[str, Any]]:
         date_text = str(selected_date or "").strip()
+        shift_text = str(duty_shift or "").strip().lower()
         requested_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
         requested_order = {building: index for index, building in enumerate(requested_buildings)}
         grouped: Dict[str, Dict[str, Any]] = {}
@@ -2647,8 +2649,13 @@ class SharedBridgeRuntimeService:
             if not file_path:
                 continue
             effective_date = cls._source_index_effective_date(raw)
-            if date_text and effective_date and effective_date != date_text:
+            if date_text and (effective_date or shift_text) and effective_date != date_text:
                 continue
+            if shift_text:
+                metadata = raw.get("metadata")
+                metadata_shift = metadata.get("duty_shift") if isinstance(metadata, dict) else ""
+                if str(raw.get("duty_shift") or metadata_shift or "").strip().lower() != shift_text:
+                    continue
             current = grouped.get(building)
             if current is None or cls._source_index_sort_key(raw) > cls._source_index_sort_key(current):
                 grouped[building] = raw
@@ -5284,7 +5291,9 @@ class SharedBridgeRuntimeService:
                 force_refresh=require_fresh,
             )
             if http_entries is not None:
-                return http_entries
+                return self._pick_latest_source_index_entries_for_date(
+                    http_entries, selected_date=duty_date, buildings=buildings, duty_shift=duty_shift,
+                )
         if self._http_bridge_forced():
             return []
         if self._source_cache_service is None:
@@ -5312,7 +5321,9 @@ class SharedBridgeRuntimeService:
                 force_refresh=require_fresh,
             )
             if http_entries is not None:
-                return http_entries
+                return self._pick_latest_source_index_entries_for_date(
+                    http_entries, selected_date=duty_date, buildings=buildings, duty_shift=duty_shift,
+                )
         if self._http_bridge_forced():
             return []
         if self._source_cache_service is None:

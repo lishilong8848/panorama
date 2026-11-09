@@ -84,13 +84,21 @@ class FeishuTokenManager:
 
     @staticmethod
     def _fetch_token(*, app_id: str, app_secret: str, timeout: int) -> str:
+        request_timeout = max(1, int(timeout or 30))
         try:
-            response = requests.post(
-                AUTH_URL,
-                json={"app_id": app_id, "app_secret": app_secret},
-                headers={"Content-Type": "application/json; charset=utf-8", "Connection": "close"},
-                timeout=max(1, int(timeout or 30)),
-            )
+            for attempt, attempt_timeout in enumerate((request_timeout, min(request_timeout, 5))):
+                try:
+                    response = requests.post(
+                        AUTH_URL,
+                        json={"app_id": app_id, "app_secret": app_secret},
+                        headers={"Content-Type": "application/json; charset=utf-8", "Connection": "close"},
+                        timeout=attempt_timeout,
+                    )
+                    break
+                except requests.exceptions.ConnectTimeout:
+                    if attempt:
+                        raise
+                    time.sleep(1)
             response.raise_for_status()
             payload: Dict[str, Any] = response.json()
         except Exception as exc:  # noqa: BLE001

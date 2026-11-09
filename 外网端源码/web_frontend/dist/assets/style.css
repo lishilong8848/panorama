@@ -2782,6 +2782,19 @@ button:disabled,
 .inspection-point-note .inspection-point-incomplete { color: #a14300; font-weight: 600; }
 .inspection-points-summary { color: #475569; font-size: 13px; }
 .inspection-status-hint { grid-column: 1 / -1; margin: 0; }
+.inspection-correction-rules { grid-column: 1 / -1; gap: 6px; }
+.inspection-correction-row { display: grid; grid-template-columns: auto repeat(3,minmax(0,1fr)) auto; align-items: end; gap: 6px; }
+.inspection-correction-field { display: grid; min-width: 0; gap: 3px; }
+.inspection-correction-field .review-input { min-width: 0; width: 100%; }
+.inspection-correction-label, .inspection-correction-count { font-size: 12px; }
+.inspection-correction-count { margin-inline-start: 6px; }
+.inspection-correction-index { align-self: center; font-variant-numeric: tabular-nums; }
+.inspection-point-badge { justify-self: start; padding: 1px 5px; background: #e8f0fe; color: #204c9b; font-size: 12px; border-radius: 3px; }
+@media (max-width: 520px) {
+  .inspection-correction-row { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .inspection-correction-index { display: none; }
+  .inspection-correction-row .btn { grid-column: 3; justify-self: end; width: auto; }
+}
 .inspection-point-form {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: end; gap: 10px; border: 1px solid #cfe0f5; background: #f8fbff; border-radius: 8px; padding: 12px;
