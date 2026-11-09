@@ -141,7 +141,7 @@ class StationHDutyFocusService:
         emit_log: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config if isinstance(config, dict) else {}
-        self.review_service = review_service or ReviewSessionService(self.config)
+        self.review_service = review_service or ReviewSessionService(self.config, initialize_generated_file_index=False)
         self.signature_service = signature_service or StationHSignatureService(self.config, emit_log=emit_log)
         self.chiller_focus_service = chiller_focus_service or ChillerModeFocusStateService(
             self.config,
@@ -221,10 +221,11 @@ class StationHDutyFocusService:
         except Exception:
             return ""
 
-    def build_auto_focus(self, *, duty_date: str, duty_shift: str, selection: Dict[str, Any]) -> Dict[str, Any]:
+    def build_auto_focus(self, *, duty_date: str, duty_shift: str, selection: Dict[str, Any], allow_remote: bool = True) -> Dict[str, Any]:
         batch_key = station_h_build_batch_key(duty_date, duty_shift)
         try:
-            chiller_state = self.chiller_focus_service.ensure_batch_state(batch_key)
+            chiller_state = (self.chiller_focus_service.ensure_batch_state(batch_key) if allow_remote
+                             else self.chiller_focus_service.get_batch_state(batch_key))
         except Exception as exc:  # noqa: BLE001
             chiller_state = {"buildings": {}, "refresh_error": str(exc)}
         chiller_buildings = (
@@ -463,10 +464,10 @@ class StationHDutyFocusService:
         normalized["shift"] = duty_shift
         return normalized
 
-    def build_status(self, *, duty_date: str, duty_shift: str, selection: Dict[str, Any], historical: bool = False) -> Dict[str, Any]:
+    def build_status(self, *, duty_date: str, duty_shift: str, selection: Dict[str, Any], historical: bool = False, allow_remote: bool = True) -> Dict[str, Any]:
         saved_focus = selection.get("duty_focus") if isinstance(selection, dict) else None
         fallback = ({"date_text": duty_date, "shift": duty_shift} if historical else
-                    self.build_auto_focus(duty_date=duty_date, duty_shift=duty_shift, selection=selection))
+                    self.build_auto_focus(duty_date=duty_date, duty_shift=duty_shift, selection=selection, allow_remote=allow_remote))
         focus = self.normalize_focus(saved_focus, fallback=fallback)
         saved_auto_source = saved_focus.get("auto_source", {}) if isinstance(saved_focus, dict) else {}
         saved_revision = _text(saved_auto_source.get("mode_revision")) if isinstance(saved_auto_source, dict) else ""
@@ -524,8 +525,8 @@ class StationHDutyFocusService:
                     required_names=required_names,
                     required_selection_ids=required_selection_ids,
                 )
-                if callable(ensure_directory) and not historical
-                else (directory if historical else self.signature_service.refresh_directory())
+                if callable(ensure_directory) and not historical and allow_remote
+                else (directory if historical or not allow_remote else self.signature_service.refresh_directory())
             )
         except Exception as exc:  # noqa: BLE001
             directory = dict(directory)

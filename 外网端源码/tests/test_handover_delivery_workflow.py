@@ -1,0 +1,266 @@
+from copy import deepcopy
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from handover_log_module.service import handover_delivery_workflow_service as workflow_module
+from handover_log_module.service.handover_attachment_store import HandoverAttachmentStore
+from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
+from handover_log_module.service.handover_attachment_delivery_service import HandoverAttachmentDeliveryService
+from handover_log_module.service import review_followup_trigger_service as followup_module
+
+
+BATCH = "2026-11-09|day"
+DATE, SHIFT = BATCH.split("|")
+FIELD = HandoverAttachmentStore.FIELD
+
+
+@pytest.fixture
+def bitable():
+    client = Mock()
+    client.list_fields.return_value = [{"field_name": FIELD, "type": 17}]
+    record = {"record_id": "recTest", "fields": {"日期": DATE, "班次": "白班"}}
+    records = []
+    known = {}
+
+    def create(**_):
+        records.append(record)
+        return [{"data": {"records": [deepcopy(record)]}}]
+
+    def upload(*, file_name, content, **_):
+        token = f"token:{file_name}:{content.hex()}"
+        known[token] = {"name": file_name, "file_token": token}
+        return token
+
+    def update(*, record_id, fields, **_):
+        assert record_id == record["record_id"]
+        fields = deepcopy(fields)
+        if FIELD in fields:
+            fields[FIELD] = [known[item["file_token"]] for item in fields[FIELD]]
+        record["fields"].update(fields)
+
+    client.batch_create_records.side_effect = create
+    client.list_records.side_effect = lambda **_: deepcopy(records)
+    client.get_record_by_id.side_effect = lambda **_: deepcopy(record)
+    client.upload_attachment_bytes.side_effect = upload
+    client.update_record.side_effect = update
+    client.batch_delete_records.side_effect = AssertionError("must not delete records")
+    return HandoverAttachmentStore({"daily_report_bitable_export": {"target": {
+        "app_token": "test-base", "table_id": "test-table",
+    }}}, client=client), client, record
+
+
+def test_attachment_update_replaces_only_same_deliverable_and_reuses_record(bitable, tmp_path):
+    store, client, record = bitable
+    local = tmp_path / "data.xlsx"
+    local.write_bytes(b"original")
+    created = store.ensure_record(DATE, SHIFT)
+    store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local, "H_handover.xlsx": local})
+    local.write_bytes(b"revised")
+    store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local})
+    assert store.ensure_record(DATE, SHIFT)["record_id"] == created["record_id"]
+    assert record["fields"]["交接班日报"]["link"] == created["record_url"]
+    assert {item["name"]: item["file_token"].split(":")[-1] for item in record["fields"][FIELD]} == {
+        "H_handover.xlsx": b"original".hex(), "A楼_handover.xlsx": b"revised".hex(),
+    }
+    client.batch_create_records.assert_called_once()
+    client.batch_delete_records.assert_not_called()
+
+
+def test_failed_transfer_or_stale_generation_never_updates_attachment_field(bitable, tmp_path):
+    store, client, record = bitable
+    local = tmp_path / "data.xlsx"
+    local.write_bytes(b"content")
+    store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local})
+    original = deepcopy(record)
+    client.update_record.reset_mock()
+    with pytest.raises(RuntimeError, match="旧版本"):
+        store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local}, is_current=lambda: False)
+    client.upload_attachment_bytes.side_effect = RuntimeError("simulated upload failure")
+    with pytest.raises(RuntimeError, match="simulated upload failure"):
+        store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local})
+    assert record == original
+    client.update_record.assert_not_called()
+
+
+def test_attachment_does_not_replace_record_moved_to_another_shift(bitable, tmp_path):
+    store, client, record = bitable
+    local = tmp_path / "data.xlsx"
+    local.write_bytes(b"content")
+    existing = store.ensure_record(DATE, SHIFT)
+    record["fields"]["班次"] = "夜班"
+    client.update_record.reset_mock()
+    with pytest.raises(RuntimeError, match="日期或班次已变化"):
+        store.upload_files(DATE, SHIFT, {"H_handover.xlsx": local}, expected_record_id=existing["record_id"])
+    client.update_record.assert_not_called()
+
+
+def test_requires_all_five_current_manifests_and_only_reuploads_changed_pair(tmp_path, monkeypatch, bitable):
+    store, client, record = bitable
+    workflow = object.__new__(workflow_module.HandoverDeliveryWorkflowService)
+    workflow.config = {}
+    workflow.state = HandoverDeliveryStateService({"paths": {"runtime_state_root": tmp_path}})
+    sessions = [{"building": building, "session_id": f"{building}|{BATCH}", "batch_key": BATCH,
+                 "revision": 1, "confirmed": True} for building in workflow.BUILDINGS]
+    workflow.review = SimpleNamespace(
+        list_batch_sessions=lambda _: sessions,
+        get_session_by_id=lambda target: next(s for s in sessions if s["session_id"] == target),
+        get_cloud_batch_fast=lambda _: {},
+        register_cloud_batch=Mock(), update_cloud_sheet_sync=Mock(),
+    )
+    monkeypatch.setattr(workflow_module, "HandoverAttachmentStore", lambda _: store)
+    artifacts = {}
+    for key in ("log", "capacity", "image", "text"):
+        path = tmp_path / key
+        path.write_bytes(key.encode())
+        artifacts[key] = str(path)
+
+    def ready(session, generation):
+        workflow.state.begin(session, generation)
+        workflow.state.update(session["session_id"], generation, status="ready",
+                              artifacts_ready=True, revision=session["revision"], paths=artifacts)
+
+    for row in sessions[:4]:
+        ready(row, "first")
+    assert workflow.publish_ready_batch(BATCH, lambda _: None)["missing_buildings"] == ["E楼"]
+    client.batch_create_records.assert_not_called()
+    ready(sessions[-1], "first")
+    assert len(workflow.publish_ready_batch(BATCH, lambda _: None)["uploaded_buildings"]) == 5
+    assert len(record["fields"][FIELD]) == 10
+    assert all(workflow.state.for_session(row)["status"] == "uploaded" for row in sessions)
+
+    sessions[0]["revision"] = 2
+    assert workflow.state.for_session(sessions[0])["status"] == "stale"
+    assert workflow.publish_ready_batch(BATCH, lambda _: None)["status"] == "pending"
+    ready(sessions[0], "second")
+    client.upload_attachment_bytes.reset_mock()
+    assert workflow.publish_ready_batch(BATCH, lambda _: None)["uploaded_buildings"] == ["A楼"]
+    assert client.upload_attachment_bytes.call_count == 2
+    assert len(record["fields"][FIELD]) == 10
+    client.batch_create_records.assert_called_once()
+
+
+@pytest.mark.parametrize("shift", ["day", "night"])
+def test_scheduled_confirmation_prepares_unconfirmed_buildings_before_publishing(monkeypatch, shift):
+    service = object.__new__(followup_module.ReviewFollowupTriggerService)
+    service.config = {}
+    service._cloud_sheet_sync_service = HandoverAttachmentDeliveryService({})
+    batch_key = f"{DATE}|{shift}"
+    rows = [{"building": building, "confirmed": False} for building in workflow_module.HandoverDeliveryWorkflowService.BUILDINGS]
+    service._review_service = SimpleNamespace(
+        list_batch_sessions=lambda key: rows if key == batch_key else [],
+        build_batch_key=lambda duty_date, duty_shift: f"{duty_date}|{duty_shift}",
+        mark_confirmed=Mock(side_effect=AssertionError("cannot confirm before artifact preparation")),
+    )
+    calls = []
+
+    def prepare(sessions, emit, *, confirm_unconfirmed):
+        assert sessions == rows and confirm_unconfirmed is True
+        calls.append("prepare")
+        return []
+
+    def publish(*, batch_key, emit_log):
+        assert batch_key == f"{DATE}|{shift}"
+        calls.append("publish")
+        return {"status": "ok", "record_url": "https://example.test/base?record=recTest"}
+
+    monkeypatch.setattr(followup_module, "HandoverDeliveryWorkflowService",
+                        lambda _: SimpleNamespace(prepare_sessions=prepare))
+    service.publish_attachment_delivery = publish
+    result = service.upload_pending_cloud_sheets_for_duty(duty_date=DATE, duty_shift=shift, emit_log=lambda _: None)
+    assert calls == ["prepare", "publish"]
+    assert result["cloud_sheet_sync"]["status"] == "ok"
+    service._review_service.mark_confirmed.assert_not_called()
+
+
+def test_prepared_download_requires_current_generation(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+    from app.modules.handover_review.api import routes
+
+    config = {"paths": {"runtime_state_root": tmp_path}}
+    session = {"building": "A楼", "session_id": f"A楼|{BATCH}", "batch_key": BATCH,
+               "revision": 2, "confirmed": True, "output_file": "审核日志.xlsx"}
+    state = HandoverDeliveryStateService(config)
+    state.begin(session, "new")
+    service = SimpleNamespace(config=config)
+    monkeypatch.setattr(routes, "_build_review_session_service", lambda _: service)
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda *_: "A楼")
+    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda *_, **__: session)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=object())))
+
+    with pytest.raises(HTTPException) as pending:
+        routes.handover_review_delivery_download("a", request, session["session_id"], "new")
+    assert pending.value.status_code == 409
+    artifacts = {}
+    for name in ("log", "capacity", "image", "text"):
+        path = tmp_path / name
+        path.write_bytes(b"prepared")
+        artifacts[name] = str(path)
+    state.update(session["session_id"], "new", status="ready", artifacts_ready=True, revision=2, paths=artifacts)
+    with pytest.raises(HTTPException) as stale:
+        routes.handover_review_delivery_download("a", request, session["session_id"], "old")
+    assert stale.value.status_code == 409
+    response = routes.handover_review_delivery_download("a", request, session["session_id"], "new")
+    assert Path(response.path) == Path(artifacts["log"])
+
+
+def test_batch_retry_migrates_legacy_success_instead_of_skipping(monkeypatch, tmp_path):
+    service = object.__new__(followup_module.ReviewFollowupTriggerService)
+    service.config = {"paths": {"runtime_state_root": tmp_path}}
+    service._cloud_sheet_sync_service = HandoverAttachmentDeliveryService(service.config)
+    rows = [{"building": "A楼", "session_id": f"A楼|{BATCH}", "confirmed": True, "revision": 3,
+             "cloud_sheet_sync": {"status": "success", "synced_revision": 3, "spreadsheet_token": "old_sheet"}}]
+    service._review_service = SimpleNamespace(
+        list_batch_sessions=lambda _: rows, get_batch_status=lambda _: {},
+        get_cloud_batch=lambda _: {"spreadsheet_token": "old_sheet", "spreadsheet_url": "https://example.test/sheets/old"},
+    )
+    prepare = Mock(return_value=[])
+    monkeypatch.setattr(followup_module, "HandoverDeliveryWorkflowService", lambda _: SimpleNamespace(prepare_sessions=prepare))
+    service.publish_attachment_delivery = Mock(return_value={"status": "pending", "missing_buildings": ["B楼"]})
+    emit = lambda _: None
+
+    summary = service._summarize_cloud_sheet_sync(batch_key=BATCH, sessions=rows)
+    assert summary["uploaded_buildings"] == [] and summary["spreadsheet_url"] == ""
+    result = service.retry_failed_cloud_sheet_in_batch(BATCH, emit)
+    prepare.assert_called_once_with(rows, emit)
+    assert result["status"] == "pending"
+
+
+def test_supplement_reuploads_after_building_generation_changes():
+    check = followup_module.ReviewFollowupTriggerService._station_h_sync_complete
+    state = {"status": "success", "spreadsheet_token": "bitable:rec", "source_signature": "old"}
+    assert check(state, "bitable:rec", "old")
+    assert not check(state, "bitable:rec", "new")
+
+
+def test_h_attachment_only_uses_completed_bitable_batch(bitable, tmp_path):
+    from PIL import Image
+
+    store, client, record = bitable
+    source = tmp_path / "local.xlsx"
+    source.write_bytes(b"mock prepared Excel")
+    result = store.upload_files(DATE, SHIFT, {
+        f"{building}_{role}.xlsx": source
+        for building in workflow_module.HandoverDeliveryWorkflowService.BUILDINGS
+        for role in ("handover", "capacity")
+    })
+    service = HandoverAttachmentDeliveryService(
+        {"cloud_sheet_sync": {"enabled": False}, "daily_report_bitable_export": {"enabled": True}},
+        store=store, output_root=tmp_path / "supplement",
+    )
+    image = tmp_path / "focus.png"
+    Image.new("RGB", (200, 300), "white").save(image)
+    meta = {"batch_key": BATCH, "spreadsheet_token": f"bitable:{result['record_id']}"}
+
+    sent = service.sync_station_h_sheet(
+        batch_meta=meta, cell_values={"B2": DATE, "F2": "白班"}, duty_focus_image_path=image,
+    )
+
+    assert sent["status"] == "success" and sent["duty_focus_image_synced"]
+    assert {item["name"] for item in record["fields"][FIELD]} >= {"H_handover.xlsx", "H_duty_focus.png"}
+    client.update_record.reset_mock()
+    rejected = service.sync_station_h_sheet(batch_meta={**meta, "spreadsheet_token": "old_sheet"}, cell_values={"B2": DATE})
+    assert rejected["status"] == "failed"
+    client.update_record.assert_not_called()

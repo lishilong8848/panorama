@@ -1499,52 +1499,6 @@ def _validate_handover_source_data_attachment_export(cfg: Dict[str, Any]) -> Non
             )
 
 
-def _validate_handover_cloud_sheet_sync(cfg: Dict[str, Any]) -> None:
-    handover = cfg.get("features", {}).get("handover_log", {})
-    if not isinstance(handover, dict):
-        return
-    sync_cfg = handover.get("cloud_sheet_sync", {})
-    if not isinstance(sync_cfg, dict):
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync 缺失或格式错误")
-
-    if not isinstance(sync_cfg.get("enabled", True), bool):
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.enabled 必须是布尔值")
-
-    root_wiki_url = str(sync_cfg.get("root_wiki_url", "") or "").strip()
-    if not root_wiki_url:
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.root_wiki_url 不能为空")
-    if not re.search(r"/wiki/([^/?#]+)", root_wiki_url, re.IGNORECASE):
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.root_wiki_url 无法解析 wiki token")
-
-    if not str(sync_cfg.get("template_node_token", "") or "").strip():
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.template_node_token 不能为空")
-    if not str(sync_cfg.get("source_sheet_name", "") or "").strip():
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.source_sheet_name 不能为空")
-
-    sync_mode = str(sync_cfg.get("sync_mode", "overwrite_named_sheet") or "").strip().lower()
-    if sync_mode == "rebuild_sheet":
-        sync_mode = "overwrite_named_sheet"
-    if sync_mode != "overwrite_named_sheet":
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.sync_mode 仅支持 overwrite_named_sheet")
-
-    sheet_names = sync_cfg.get("sheet_names", {})
-    if not isinstance(sheet_names, dict):
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.sheet_names 必须是对象")
-    for building in ("A楼", "B楼", "C楼", "D楼", "E楼"):
-        if not str(sheet_names.get(building, "") or "").strip():
-            raise ValueError(f"配置错误: features.handover_log.cloud_sheet_sync.sheet_names.{building} 不能为空")
-
-    request_cfg = sync_cfg.get("request", {})
-    if not isinstance(request_cfg, dict):
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.request 必须是对象")
-    if int(request_cfg.get("timeout_sec", 0)) <= 0:
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.request.timeout_sec 必须大于0")
-    if int(request_cfg.get("max_retries", -1)) < 0:
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.request.max_retries 必须大于等于0")
-    if float(request_cfg.get("retry_backoff_sec", -1)) < 0:
-        raise ValueError("配置错误: features.handover_log.cloud_sheet_sync.request.retry_backoff_sec 必须大于等于0")
-
-
 def _validate_handover_daily_report_bitable_export(cfg: Dict[str, Any]) -> None:
     handover = cfg.get("features", {}).get("handover_log", {})
     if not isinstance(handover, dict):
@@ -1991,7 +1945,6 @@ def validate_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _validate_branch_power_upload(normalized_v3)
     _validate_chiller_mode_upload(normalized_v3)
     _validate_handover_source_data_attachment_export(normalized_v3)
-    _validate_handover_cloud_sheet_sync(normalized_v3)
     _validate_handover_daily_report_bitable_export(normalized_v3)
     _validate_handover_cabinet_shift_record_bitable_export(normalized_v3)
     _validate_handover_review_ui(normalized_v3)

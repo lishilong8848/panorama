@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 import re
+import sqlite3
 from typing import Any, Dict, Iterable, List
 
 from app.shared.utils.artifact_naming import handover_log_output_patterns
@@ -775,16 +776,13 @@ class ReviewSessionService:
         }
 
     def _cloud_sync_enabled(self) -> bool:
-        cloud_cfg = self.config.get("cloud_sheet_sync", {})
+        cloud_cfg = self.config.get("daily_report_bitable_export", {})
         if not isinstance(cloud_cfg, dict):
             return True
         return bool(cloud_cfg.get("enabled", True))
 
     def _cloud_sheet_title_for_building(self, building: str) -> str:
-        cloud_cfg = self.config.get("cloud_sheet_sync", {})
-        names = cloud_cfg.get("sheet_names", {}) if isinstance(cloud_cfg, dict) and isinstance(cloud_cfg.get("sheet_names", {}), dict) else {}
-        title = str(names.get(str(building or "").strip(), "")).strip()
-        return title or str(building or "").strip()
+        return str(building or "").strip()
 
     def _build_pending_cloud_sync(
         self,
@@ -1448,7 +1446,7 @@ class ReviewSessionService:
         self._rebuild_batch_status(state)
         batch_status = state.get("review_batch_status", {})
         if isinstance(batch_status, dict) and isinstance(batch_status.get(key), dict):
-            return dict(batch_status[key])
+            return self._present_attachment_batch_status(batch_status[key])
         building_defs = self._building_defs()
         duty_date, duty_shift = self.parse_batch_key(key)
         return {
@@ -1494,7 +1492,7 @@ class ReviewSessionService:
         self._rebuild_batch_status(state)
         batch_status = state.get("review_batch_status", {})
         if isinstance(batch_status, dict) and isinstance(batch_status.get(key), dict):
-            return dict(batch_status[key])
+            return self._present_attachment_batch_status(batch_status[key])
         building_defs = self._building_defs()
         duty_date, duty_shift = self.parse_batch_key(key)
         return {
@@ -1520,6 +1518,25 @@ class ReviewSessionService:
             ],
         }
 
+    def _present_attachment_batch_status(self, status):
+        from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
+
+        state = HandoverDeliveryStateService(self.config, initialize=False)
+        try:
+            manifests = state.batch(status["batch_key"])
+        except (OSError, sqlite3.Error, ValueError):
+            manifests = {}
+        return {
+            **status,
+            "buildings": [
+                {**row, "cloud_sheet_sync": state.sync_view(
+                    state.for_session(row, row=manifests.get(row["building"], {})), row,
+                    enabled=self._cloud_sync_enabled(),
+                )}
+                for row in status["buildings"]
+            ],
+        }
+
     def get_batch_status_for_duty(self, duty_date: str, duty_shift: str) -> Dict[str, Any]:
         duty_date_text = str(duty_date or "").strip()
         duty_shift_text = str(duty_shift or "").strip().lower()
@@ -1531,6 +1548,12 @@ class ReviewSessionService:
         target_batch = str(batch_key or "").strip()
         if not target_batch:
             return []
+        getter = getattr(self._review_state_store, "list_sessions_for_batch", None)
+        if callable(getter):
+            try:
+                return [self._normalize_session(row) for row in getter(target_batch) if isinstance(row, dict)]
+            except Exception as exc:
+                _reraise_review_store_error(exc)
         return self.list_batch_sessions_many([target_batch]).get(target_batch, [])
 
     def list_batch_sessions_many(self, batch_keys: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
@@ -1851,6 +1874,13 @@ class ReviewSessionService:
         target_session_id = str(session_id or "").strip()
         if not target_session_id:
             return None
+        getter = getattr(self._review_state_store, "get_session_by_id", None)
+        if callable(getter):
+            try:
+                raw = getter(target_session_id)
+            except Exception as exc:
+                _reraise_review_store_error(exc)
+            return self._normalize_session(raw) if isinstance(raw, dict) else None
         state = self._load_state()
         sessions = state.get("review_sessions", {})
         if not isinstance(sessions, dict):
@@ -2758,10 +2788,10 @@ class ReviewSessionService:
 
         latest_batch_key = str(state.get("review_latest_batch_key", "") or "").strip()
         if latest_batch_key and isinstance(batch_status.get(latest_batch_key), dict):
-            return dict(batch_status[latest_batch_key])
+            return self._present_attachment_batch_status(batch_status[latest_batch_key])
         latest_batch_key = self._derive_latest_batch_key_from_state(state)
         if latest_batch_key and isinstance(batch_status.get(latest_batch_key), dict):
-            return dict(batch_status[latest_batch_key])
+            return self._present_attachment_batch_status(batch_status[latest_batch_key])
         return self.get_batch_status(latest_batch_key)
 
     def register_cloud_batch(
@@ -2795,6 +2825,8 @@ class ReviewSessionService:
         return dict(normalized)
 
     def get_cloud_batch(self, batch_key: str) -> Dict[str, Any] | None:
+        if callable(getattr(self._review_state_store, "get_cloud_batch", None)):
+            return self.get_cloud_batch_fast(batch_key)
         target_batch = str(batch_key or "").strip()
         if not target_batch:
             return None
@@ -3072,6 +3104,7 @@ class ReviewSessionService:
         confirmed: bool,
         base_revision: int,
         confirmed_by: str = "",
+        compare_and_set: bool = False,
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         building_name = str(building or "").strip()
         target_session_id = str(session_id or "").strip()
@@ -3091,15 +3124,26 @@ class ReviewSessionService:
         current_confirmed = bool(session.get("confirmed", False))
         cloud_state = self._normalize_cloud_sheet_sync(session.get("cloud_sheet_sync", {}))
         cloud_status = str(cloud_state.get("status", "")).strip().lower()
-        if current_confirmed != target_confirmed and cloud_status in {"uploading", "syncing"}:
-            raise ReviewSessionConflictError("当前楼栋云文档上传中，请等待上传完成后再操作确认状态")
+        if current_confirmed != target_confirmed and cloud_status in {"uploading", "syncing"} and str(
+            cloud_state.get("spreadsheet_token", "")
+        ).startswith("bitable:"):
+            raise ReviewSessionConflictError("当前楼栋附件正在上传，请等待完成后再操作确认状态")
 
         session["confirmed"] = target_confirmed
         session["confirmed_at"] = _now_text() if confirmed else ""
         session["confirmed_by"] = str(confirmed_by or "").strip() if confirmed else ""
         session["revision"] = current_revision + 1
         session["updated_at"] = _now_text()
-        self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
+        if compare_and_set:
+            updated = self._review_state_store.patch_session_if_revision(
+                target_session_id, current_revision,
+                {key: session[key] for key in ("confirmed", "confirmed_at", "confirmed_by", "revision")},
+            )
+            if not updated:
+                raise ReviewSessionConflictError("review session revision conflict")
+            session = self._normalize_session(updated)
+        else:
+            self._apply_review_state_changes(upsert_sessions=[session], latest_batch_key=session["batch_key"])
         return dict(session), self.get_batch_status(session["batch_key"])
 
     def confirm_all_in_batch(self, *, batch_key: str, confirmed_by: str = "") -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -3136,8 +3180,16 @@ class ReviewSessionService:
         self._apply_review_state_changes(upsert_sessions=updated_sessions, latest_batch_key=target_batch)
         return updated_sessions, self.get_batch_status(target_batch)
 
-    def update_cloud_sheet_sync(self, *, session_id: str, cloud_sheet_sync: Dict[str, Any]) -> Dict[str, Any]:
+    def update_cloud_sheet_sync(
+        self, *, session_id: str, cloud_sheet_sync: Dict[str, Any], expected_revision: int | None = None,
+    ) -> Dict[str, Any]:
         target_session_id = str(session_id or "").strip()
+        if expected_revision is not None:
+            session = self._review_state_store.patch_session_if_revision(
+                target_session_id, expected_revision,
+                {"cloud_sheet_sync": self._normalize_cloud_sheet_sync(cloud_sheet_sync)},
+            )
+            return self._normalize_session(session) if session else {}
         state = self._load_state()
         sessions = state.get("review_sessions", {})
         if not isinstance(sessions, dict) or target_session_id not in sessions:

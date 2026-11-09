@@ -372,7 +372,7 @@ def present_scheduler_overview_items(
                 handover_afternoon_summary,
                 handover_cloud_summary,
                 handover_display.get("summary_text", ""),
-                fallback="上午补跑夜班，下午执行白班；8点和17点30强制确认未确认楼栋并上传云文档",
+                fallback="上午补跑夜班，下午执行白班；8点和17点30强制确认未确认楼栋并上传班次附件",
             ),
             "parts": [
                 _overview_part(
@@ -390,14 +390,14 @@ def present_scheduler_overview_items(
                     result_text=_map_scheduler_trigger_text(handover_afternoon.get("last_trigger_result")),
                 ),
                 _overview_part(
-                    label="8点确认并上传",
+                    label="夜班确认并上传多维",
                     run_time_text=_text(handover_scheduler_cfg.get("cloud_catchup_morning_time")) or "08:00:00",
                     next_run_time=handover_cloud_morning.get("next_run_time"),
                     last_trigger_at=handover_cloud_morning.get("last_trigger_at"),
                     result_text=_map_scheduler_trigger_text(handover_cloud_morning.get("last_trigger_result")),
                 ),
                 _overview_part(
-                    label="17点30确认并上传",
+                    label="白班确认并上传多维",
                     run_time_text=_text(handover_scheduler_cfg.get("cloud_catchup_afternoon_time")) or "17:30:00",
                     next_run_time=handover_cloud_afternoon.get("next_run_time"),
                     last_trigger_at=handover_cloud_afternoon.get("last_trigger_at"),

@@ -270,7 +270,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 </div>
                 <div class="ops-focus-card">
                   <div class="ops-focus-card-label">执行条件</div>
-                  <div class="ops-focus-card-title">云文档链接生成后即可写入日报多维表</div>
+                  <div class="ops-focus-card-title">五楼成品齐全后汇总上传至班次多维记录</div>
                   <div class="ops-focus-card-meta">日报多维表记录只写入年度、日期、班次和交接班日报链接。</div>
                 </div>
                 <div class="handover-daily-report-meta">
@@ -290,7 +290,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                   </div>
                 </div>
                 <div class="form-row" style="margin-top:10px;">
-                  <label class="label">云文档链接</label>
+                  <label class="label">班次多维记录链接</label>
                   <a
                     v-if="handoverDailyReportSpreadsheetUrl"
                     class="handover-access-url"
@@ -298,7 +298,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                     target="_blank"
                     rel="noopener noreferrer"
                   >{{ handoverDailyReportSpreadsheetUrl }}</a>
-                  <div v-else class="readonly-inline-card">当前尚未记录云文档链接</div>
+                  <div v-else class="readonly-inline-card">当前尚未记录班次多维记录链接</div>
                 </div>
                 <div class="hint" v-if="handoverDailyReportExportVm.error">
                   {{ handoverDailyReportExportVm.error }}
@@ -342,7 +342,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                   </button>
                 </div>
                 <div class="hint" v-if="handoverReviewOverview.dutyText">
-                  本次上传云文档批次：{{ handoverReviewOverview.dutyText }}
+                  本次上传班次附件批次：{{ handoverReviewOverview.dutyText }}
                 </div>
                 <div class="hint">以下地址来自手工配置的审核页基地址，可直接发给局域网内对应楼栋、110站或H楼电脑访问。</div>
                 <div class="hint" v-if="health.handover.review_base_url_effective">
@@ -362,7 +362,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                       <span class="status-badge status-badge-soft" :class="'tone-' + row.tone">{{ row.text }}</span>
                     </div>
                     <div class="hint" style="margin-top:4px;">
-                      云表同步：
+                      附件上传：
                       <span class="status-badge status-badge-soft" :class="'tone-' + row.cloudSheetSyncTone">{{ row.cloudSheetSyncText }}</span>
                     </div>
                     <div class="hint" style="margin-top:4px;">
@@ -389,7 +389,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                       :href="row.cloudSheetUrl"
                       target="_blank"
                       rel="noopener noreferrer"
-                    >打开云文档</a>
+                    >打开多维记录</a>
                     <div class="btn-line" style="margin-top:8px;">
                       <button
                         class="btn btn-secondary"

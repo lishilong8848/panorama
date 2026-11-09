@@ -176,6 +176,7 @@ class HandoverXlsxWriteQueueService:
         *,
         tracked_cells: Dict[str, Any] | None = None,
         client_id: str = "",
+        use_saved_shared_110kv: bool = False,
     ) -> Dict[str, Any]:
         building = _text(session.get("building"))
         session_id = _text(session.get("session_id"))
@@ -186,6 +187,8 @@ class HandoverXlsxWriteQueueService:
             "session_id": session_id,
             "client_id": _text(client_id),
         }
+        if use_saved_shared_110kv:
+            payload["use_saved_shared_110kv"] = True
         if tracked_cells is not None:
             payload["tracked_cells"] = {
                 cell: _text((tracked_cells or {}).get(cell, ""))
@@ -344,15 +347,15 @@ class HandoverXlsxWriteQueueService:
                 cell: _text(tracked_cells.get(cell, ""))
                 for cell in HandoverCapacityReportService.tracked_cells()
             }
-        shared_state = self.review_service.get_substation_110kv_state(
-            batch_key=_text(session.get("batch_key")),
-            client_id=_text(payload.get("client_id")),
-        )
-        shared_110kv = (
-            shared_state.get("shared_blocks", {}).get("substation_110kv", {})
-            if isinstance(shared_state.get("shared_blocks", {}), dict)
-            else {}
-        )
+        batch_key = _text(session.get("batch_key"))
+        if payload.get("use_saved_shared_110kv"):
+            shared_110kv = self.review_service.get_saved_substation_110kv_block(batch_key=batch_key)
+        else:
+            shared_state = self.review_service.get_substation_110kv_state(
+                batch_key=batch_key, client_id=_text(payload.get("client_id")),
+            )
+            blocks = shared_state.get("shared_blocks", {})
+            shared_110kv = blocks.get("substation_110kv", {}) if isinstance(blocks, dict) else {}
         cooling_pump_pressures = (
             document.get("cooling_pump_pressures", {})
             if isinstance(document.get("cooling_pump_pressures", {}), dict)

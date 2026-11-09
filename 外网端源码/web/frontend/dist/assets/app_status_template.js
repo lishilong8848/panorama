@@ -244,7 +244,7 @@ export const STATUS_TEMPLATE = `<section v-if="isStatusView" class="status-page"
             </span>
           </div>
           <div class="hint" v-if="handoverReviewOverview.dutyText">
-            本次上传云文档批次：{{ handoverReviewOverview.dutyText }}
+            本次上传班次附件批次：{{ handoverReviewOverview.dutyText }}
           </div>
           <div class="hint" v-if="handoverFollowupProgress.statusText && handoverFollowupProgress.summaryText !== '已清空'">
             {{ handoverFollowupProgress.statusText }}：{{ handoverFollowupProgress.summaryText }}
@@ -306,7 +306,7 @@ export const STATUS_TEMPLATE = `<section v-if="isStatusView" class="status-page"
                 <span class="status-badge status-badge-soft" :class="'tone-' + row.tone">{{ row.text }}</span>
               </div>
               <div class="hint" style="margin:4px 0;">
-                云表同步：
+                附件上传：
                 <span class="status-badge status-badge-soft" :class="'tone-' + row.cloudSheetSyncTone">{{ row.cloudSheetSyncText }}</span>
               </div>
               <a
@@ -325,7 +325,7 @@ export const STATUS_TEMPLATE = `<section v-if="isStatusView" class="status-page"
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                打开云文档
+                打开多维记录
               </a>
               <div class="hint" v-if="row.cloudSheetError">{{ row.cloudSheetError }}</div>
               <a

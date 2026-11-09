@@ -1355,19 +1355,19 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             if slot == "cloud_catchup_morning":
                 duty_date = (datetime.now().date() - timedelta(days=1)).strftime("%Y-%m-%d")
                 duty_shift = "night"
-                slot_name = "8点"
+                slot_name = "夜班"
             else:
                 duty_date = datetime.now().date().strftime("%Y-%m-%d")
                 duty_shift = "day"
-                slot_name = "17点30"
+                slot_name = "白班"
             batch_key = f"{duty_date}|{duty_shift}"
 
             if role_mode == "internal":
-                container.add_system_log("[交接班][云文档补上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
+                container.add_system_log("[交接班][多维附件调度] 当前为内网端，调度跳过；请在外网端启用该调度")
                 return True, "internal_role_skip"
             if role_mode != "external":
-                detail = "当前未确认有效角色，无法执行交接班云文档补上传调度"
-                container.add_system_log(f"[交接班][云文档补上传调度] {detail}")
+                detail = "当前未确认有效角色，无法执行交接班多维附件调度"
+                container.add_system_log(f"[交接班][多维附件调度] {detail}")
                 return False, detail
 
             from handover_log_module.api.facade import load_handover_config
@@ -1395,7 +1395,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         for item in cloud_failed[:5]
                     )
                     raise RuntimeError(
-                        "交接班云文档补上传失败: "
+                        "交接班多维附件上传失败: "
                         f"cloud_status={cloud_status}, failed={len(cloud_failed)}"
                         + (f", detail={failed_text}" if failed_text else "")
                     )
@@ -1409,7 +1409,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         for item in failed_items[:5]
                     )
                     emit_log(
-                        "[交接班][云文档补上传调度] 云文档已处理，附加后续链路存在失败 "
+                        "[交接班][多维附件调度] 班次附件已处理，附加后续链路存在失败 "
                         f"status={status}, failed={len(failed_items)}"
                         + (f", detail={failed_text}" if failed_text else "")
                     )
@@ -1417,7 +1417,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
             try:
                 job = container.job_service.start_job(
-                    name=f"{source}-交接班定时确认并上传云文档（{slot_name}）",
+                    name=f"交接班定时确认并上传多维（{slot_name}）",
                     run_func=_run_cloud_catchup,
                     resource_keys=["network:external", f"handover_followup:{batch_key}", f"handover_batch:{batch_key}"],
                     priority="scheduler",
@@ -1428,8 +1428,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 notify.send_failure(stage=source, detail=str(exc), emit_log=container.add_system_log)
                 return False, str(exc)
-            detail = f"已提交交接班定时确认并上传云文档任务 job_id={job.job_id}, batch={batch_key}, slot={slot}"
-            container.add_system_log(f"[交接班][云文档补上传调度] {detail}")
+            detail = f"已提交交接班定时确认并上传多维任务 job_id={job.job_id}, batch={batch_key}, slot={slot}"
+            container.add_system_log(f"[交接班][多维附件调度] {detail}")
             return True, detail
 
         if slot in {"station_110_midnight", "station_110_noon"}:

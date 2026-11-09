@@ -322,7 +322,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     } else if (capacityImageSending.value) {
       localDisabledReason = "容量表图片正在发送，请稍候";
     } else if (retryingCloudSync.value || updatingHistoryCloudSync.value || cloudSyncBusy.value) {
-      localDisabledReason = "云表同步处理中，请稍候";
+      localDisabledReason = "附件上传处理中，请稍候";
     } else if (syncingRemoteRevision.value) {
       localDisabledReason = "正在同步最新审核内容，请稍候";
     } else if (needsRefresh?.value) {
@@ -334,7 +334,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
     }
     const actionVm = buildReviewActionVmBase({
       baseAction: base,
-      fallbackLabel: "确认并上传本楼云文档",
+      fallbackLabel: "确认并上传本楼班次附件",
       inFlight: confirming.value,
       inFlightText: "处理中...",
       disabled: Boolean(localDisabledReason),
@@ -379,7 +379,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   const retryCloudSyncActionVm = computed(() => {
     return buildReviewActionVmBase({
       baseAction: retryCloudSyncActionBase.value,
-      fallbackLabel: "重试云表上传",
+      fallbackLabel: "重试班次附件上传",
       inFlight: retryingCloudSync.value,
       inFlightText: "重试上传中...",
       disabled:
@@ -397,7 +397,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
   const updateHistoryCloudSyncActionVm = computed(() => {
     return buildReviewActionVmBase({
       baseAction: updateHistoryCloudSyncActionBase.value,
-      fallbackLabel: "更新云文档",
+      fallbackLabel: "更新多维附件",
       inFlight: updatingHistoryCloudSync.value,
       inFlightText: "更新中...",
       disabled:

@@ -1303,6 +1303,7 @@ class CapacityReportImageDeliveryService:
         cooling_pump_pressures: Dict[str, Any] | None = None,
         client_id: str = "",
         ensure_capacity_ready: Callable[[], Dict[str, Any]] | None = None,
+        prepared_artifacts: Dict[str, str] | None = None,
         manual_trigger: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
@@ -1385,6 +1386,22 @@ class CapacityReportImageDeliveryService:
                 attempt_at=attempt_at,
                 error="当前楼未配置启用且有效的审核接收人 open_id",
                 emit_log=emit_log,
+            )
+
+        if prepared_artifacts is not None:
+            try:
+                image_path = Path(prepared_artifacts["image"])
+                self._validate_rendered_image_content(image_path)
+                message_text = Path(prepared_artifacts["text"]).read_text(encoding="utf-8")
+                if not message_text.strip() or "审核链接：" in message_text or "/handover/review/" in message_text:
+                    raise ValueError("已生成的交接文本无效")
+            except (OSError, ValueError, RuntimeError) as exc:
+                return self._fail(
+                    session=current_session, delivery=delivery_state, attempt_at=attempt_at,
+                    error=f"读取已生成成品失败: {exc}", emit_log=emit_log,
+                )
+            return self._send_rendered_content(
+                current_session, delivery_state, attempt_at, image_path, message_text, recipients, emit_log,
             )
 
         message_text = self.summary_service.build_for_session(current_session, emit_log=emit_log)
@@ -1577,6 +1594,15 @@ class CapacityReportImageDeliveryService:
         }
         self._persist_delivery(session_id=session_id, delivery=delivery_state, emit_log=emit_log)
 
+        return self._send_rendered_content(
+            current_session, delivery_state, attempt_at, image_path, message_text, recipients, emit_log,
+        )
+
+    def _send_rendered_content(
+        self, current_session, delivery_state, attempt_at, image_path, message_text, recipients, emit_log,
+    ):
+        building_text = _text(current_session.get("building"))
+        session_id = _text(current_session.get("session_id"))
         try:
             client = self.link_service._build_feishu_client()
             emit_log(f"[交接班][容量表图片发送] 飞书图片上传开始 image={image_path}")

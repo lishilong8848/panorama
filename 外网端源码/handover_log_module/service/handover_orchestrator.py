@@ -29,7 +29,6 @@ from handover_log_module.service.exercise_management_payload_builder import Exer
 from handover_log_module.service.training_management_payload_builder import TrainingManagementPayloadBuilder
 from handover_log_module.service.handover_download_service import HandoverDownloadService
 from handover_log_module.service.handover_generation_guard import guard_generation
-from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
 from handover_log_module.service.handover_cabinet_shift_record_bitable_export_service import (
     HandoverCabinetShiftRecordBitableExportService,
@@ -139,7 +138,6 @@ class HandoverOrchestrator:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self._download_service = HandoverDownloadService(config)
-        self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(config)
         self._capacity_report_service = HandoverCapacityReportService(config)
         self._extract_service = HandoverExtractService(config)
         self._fill_service = HandoverFillService(config)
@@ -2008,7 +2006,6 @@ class HandoverOrchestrator:
                 return {**summary.to_dict(), "status": "skipped", "reason": "manual_regenerated",
                         "selected_buildings": [], "skipped_buildings": target_buildings}
         switched_external = False
-        cloud_batch_meta: Dict[str, Any] | None = None
 
         roster_prefetch: Dict[str, ShiftRosterAssignment] = {}
         if duty_date_text and duty_shift_text:
@@ -2155,35 +2152,6 @@ class HandoverOrchestrator:
                     switched_external = True
                 except Exception as exc:  # noqa: BLE001
                     emit_log(f"[交接班下载] 切换外网异常: {exc}")
-
-            cloud_sheet_sync_cfg = (
-                self.config.get("cloud_sheet_sync", {})
-                if isinstance(self.config.get("cloud_sheet_sync", {}), dict)
-                else {}
-            )
-            if success_items and duty_date_text and duty_shift_text and bool(cloud_sheet_sync_cfg.get("enabled", True)):
-                default_shift_text = "白班" if duty_shift_text == "day" else "夜班"
-                first_building = str(success_items[0].get("building", "")).strip()
-                first_fixed_values = prebuilt_fixed.get(first_building, ({}, None, None))[0] if first_building else {}
-                shift_text = self._find_cell_value_case_insensitive(first_fixed_values, "F2") or default_shift_text
-                duty_date_display = self._find_cell_value_case_insensitive(first_fixed_values, "B2") or format_duty_date_text(
-                    duty_date_text
-                )
-                cloud_batch_meta = self._cloud_sheet_sync_service.prepare_batch_spreadsheet(
-                    duty_date=duty_date_text,
-                    duty_date_text=duty_date_display,
-                    shift_text=shift_text,
-                    emit_log=emit_log,
-                )
-                try:
-                    self._review_session_service.register_cloud_batch(
-                        batch_key=self._review_session_service.build_batch_key(duty_date_text, duty_shift_text),
-                        duty_date=duty_date_text,
-                        duty_shift=duty_shift_text,
-                        cloud_batch=cloud_batch_meta,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    emit_log(f"[交接班][云表预建] 批次状态登记失败: {exc}")
 
             generation_jobs = []
             for item in success_items:

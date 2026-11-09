@@ -711,6 +711,21 @@ class ReviewSessionStateStore:
     def upsert_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
         return self.apply_changes(upsert_sessions=[session] if isinstance(session, dict) else [])
 
+    def patch_session_if_revision(self, session_id: str, revision: int, changes: Dict[str, Any]) -> Dict[str, Any] | None:
+        self.ensure_ready()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT payload_json FROM review_sessions WHERE session_id=?", (session_id,)).fetchone()
+            if row is None:
+                return None
+            session = json.loads(row[0])
+            if int(session.get("revision", 1) or 1) != revision:
+                return None
+            session.update(changes)
+            session["updated_at"] = _now_text()
+            self._upsert_session_row(conn, session)
+            return session
+
     def delete_session(self, session_id: str) -> Dict[str, Any]:
         return self.apply_changes(delete_session_ids=[session_id])
 

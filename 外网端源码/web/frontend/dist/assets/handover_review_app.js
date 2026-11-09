@@ -1,5 +1,6 @@
 import {
   buildHandoverReviewCapacityDownloadUrl,
+  buildHandoverReviewDeliveryDownloadUrl,
   buildHandoverReviewDownloadUrl,
   claimHandoverReview110kvLockApi,
   claimHandoverReviewLockApi,
@@ -35,6 +36,7 @@ import {
   saveHandoverReview110kvApi,
   saveHandoverReviewStationHApi,
   prepareHandoverReviewCapacityImageApi,
+  prepareHandoverReviewDeliveryApi,
   sendHandoverReviewCapacityImageApi,
   regenerateHandoverReviewApi,
   regenerateHandoverReviewFromFilesApi,
@@ -45,7 +47,13 @@ import {
 import { HANDOVER_REVIEW_TEMPLATE } from "./handover_review_template.js";
 import { createHandoverReviewDisplayUiHelpers } from "./handover_review_display_ui_helpers.js";
 import { createHandoverReviewDocumentEditHelpers } from "./handover_review_document_edit_helpers.js";
-import { createHandoverReviewActionHelpers } from "./handover_review_action_helpers.js";
+import {
+  createHandoverReviewActionHelpers,
+  emptyAttachmentDelivery,
+  normalizeAttachmentDelivery,
+  resolveAttachmentDeliveryGate,
+  resolveAttachmentDeliveryUi,
+} from "./handover_review_action_helpers.js";
 import { appendTrainingRows, TRAINING_COLUMNS } from "./handover_training_helpers.js";
 import { createMaintenanceRecurringHelpers } from "./handover_maintenance_recurring_helpers.js";
 
@@ -448,9 +456,9 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
         <div class="review-header-actions">
           <button class="btn btn-secondary btn-mini" @click="refreshStatus" :disabled="loading || parsing || uploading || retrying">刷新</button>
           <button class="btn btn-warning btn-mini" @click="retryCloudSync" :disabled="!canRetryCloudSync">
-            {{ retrying ? "正在重试..." : "重试写入110云文档" }}
+            {{ retrying ? "正在重试..." : "重试写入110班次附件多维记录" }}
           </button>
-          <a v-if="cloudUrl" class="btn btn-secondary btn-mini" :href="cloudUrl" target="_blank" rel="noopener noreferrer">打开云文档</a>
+          <a v-if="cloudUrl" class="btn btn-secondary btn-mini" :href="cloudUrl" target="_blank" rel="noopener noreferrer">打开班次附件多维记录</a>
         </div>
       </div>
       <div class="review-meta-row review-meta-row-rich">
@@ -479,13 +487,13 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
           <label class="review-field review-field-wide">
             <span class="review-field-label">110站 Excel</span>
             <input class="review-input" type="file" accept=".xlsx,.xlsm" :disabled="loading || parsing || uploading || retrying" @change="onFileChange" />
-            <small class="review-field-hint">第1个sheet写入云文档“110”页；白班取第2个sheet，夜班取第3个sheet的110KV数据回填各楼审核页。</small>
+            <small class="review-field-hint">第1个sheet写入班次附件多维记录“110”页；白班取第2个sheet，夜班取第3个sheet的110KV数据回填各楼审核页。</small>
           </label>
           <button class="btn btn-secondary btn-mini" @click="parseFile" :disabled="!selectedFile || parsing || uploading || retrying">
             {{ parsing ? "正在解析..." : "解析预览" }}
           </button>
           <button class="btn btn-primary btn-mini" @click="uploadFile" :disabled="!selectedFile || parsing || uploading || retrying">
-            {{ uploading ? "正在上传..." : "上传并写入云文档" }}
+            {{ uploading ? "正在上传..." : "上传并写入班次附件多维记录" }}
           </button>
         </div>
       </article>
@@ -567,7 +575,7 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
           <div class="review-card-head">
             <div>
               <h2>110主变多维识别结果</h2>
-              <p class="review-card-subtitle">跟随H楼云文档同步上传到110主变多维表；缺失项可在此修正后保存。</p>
+              <p class="review-card-subtitle">跟随H楼班次附件多维记录同步上传到110主变多维表；缺失项可在此修正后保存。</p>
             </div>
           </div>
           <div v-if="upload.main_transformer_parse_error" class="review-alert review-alert-warning">
@@ -717,7 +725,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           >{{ item.label || item.name }}</button>
         </div>
         <div v-else class="person-picker-hint">暂无候选人员，可直接输入姓名后保存。</div>
-        <small class="person-picker-hint">保存后写入H楼交接班云文档接班区域。</small>
+        <small class="person-picker-hint">保存后写入H楼交接班班次附件多维记录接班区域。</small>
       </article>
 
       <article class="review-card station-h-person-card station-h-person-card-wide">
@@ -1558,11 +1566,11 @@ function station110StatusText(status) {
 
 function station110CloudStatusText(status) {
   const normalized = String(status || "").trim().toLowerCase();
-  if (normalized === "success") return "云文档已同步";
-  if (normalized === "failed") return "云文档同步失败";
-  if (normalized === "pending") return "云文档待同步";
-  if (normalized === "skipped") return "云文档已跳过";
-  return "云文档未同步";
+  if (normalized === "success") return "班次附件多维记录已同步";
+  if (normalized === "failed") return "班次附件多维记录同步失败";
+  if (normalized === "pending") return "班次附件多维记录待同步";
+  if (normalized === "skipped") return "班次附件多维记录已跳过";
+  return "班次附件多维记录未同步";
 }
 
 function emptyDirtyRegions() {
@@ -1926,9 +1934,9 @@ function normalizeReviewDisplayState(raw = {}) {
       capacity_download: normalizeDisplayAction(actions.capacity_download, { allowed: false, visible: false, label: "下载交接班容量报表", tone: "neutral", variant: "secondary" }),
       capacity_image_send: normalizeDisplayAction(actions.capacity_image_send, { allowed: false, visible: false, label: "发送审核文本和容量表图片", tone: "neutral", variant: "secondary" }),
       regenerate: normalizeDisplayAction(actions.regenerate, { allowed: false, visible: false, label: "重新生成交接班及容量表", tone: "warning", variant: "warning" }),
-      confirm: normalizeDisplayAction(actions.confirm, { allowed: false, visible: false, label: "确认并上传本楼云文档", tone: "warning", variant: "warning" }),
-      retry_cloud_sync: normalizeDisplayAction(actions.retry_cloud_sync, { allowed: false, visible: false, label: "重试云表上传", tone: "warning", variant: "warning" }),
-      update_history_cloud_sync: normalizeDisplayAction(actions.update_history_cloud_sync, { allowed: false, visible: false, label: "更新云文档", tone: "warning", variant: "warning" }),
+      confirm: normalizeDisplayAction(actions.confirm, { allowed: false, visible: false, label: "生成成品并提交", tone: "warning", variant: "warning" }),
+      retry_cloud_sync: normalizeDisplayAction(actions.retry_cloud_sync, { allowed: false, visible: false, label: "重试班次附件多维记录", tone: "warning", variant: "warning" }),
+      update_history_cloud_sync: normalizeDisplayAction(actions.update_history_cloud_sync, { allowed: false, visible: false, label: "更新班次附件多维记录", tone: "warning", variant: "warning" }),
       return_to_latest: normalizeDisplayAction(actions.return_to_latest, { allowed: false, visible: false, label: "返回最新", tone: "neutral", variant: "secondary" }),
     },
   };
@@ -2216,12 +2224,12 @@ function mountHandover110StationApp(Vue) {
           } else {
             const cloudStatus = String(response?.upload?.cloud_sync?.status || "").trim().toLowerCase();
             if (cloudStatus === "success") {
-              statusText.value = "110站文件已上传，审核页数据和云文档均已同步。";
+              statusText.value = "110站文件已上传，审核页数据和班次附件多维记录均已同步。";
             } else if (cloudStatus === "failed") {
-              statusText.value = "110站文件已上传，审核页数据已回填，云文档同步失败，可重试。";
-              errorText.value = String(response?.upload?.cloud_sync?.error || "110站云文档同步失败");
+              statusText.value = "110站文件已上传，审核页数据已回填，班次附件多维记录同步失败，可重试。";
+              errorText.value = String(response?.upload?.cloud_sync?.error || "110站班次附件多维记录同步失败");
             } else {
-              statusText.value = "110站文件已上传，审核页数据已回填，云文档待同步。";
+              statusText.value = "110站文件已上传，审核页数据已回填，班次附件多维记录待同步。";
             }
           }
         } catch (error) {
@@ -2270,20 +2278,20 @@ function mountHandover110StationApp(Vue) {
       async function retryCloudSync() {
         retrying.value = true;
         errorText.value = "";
-        statusText.value = "正在重试110站云文档同步...";
+        statusText.value = "正在重试110站班次附件多维记录同步...";
         try {
           const response = await retryHandoverReview110StationCloudSyncApi({
             ...buildStation110ContextPayload(),
           });
           applyState(response, { forceParsedRows: true });
           if (response?.ok === false) {
-            errorText.value = String(response?.error || response?.upload?.cloud_sync?.error || "110站云文档同步失败");
+            errorText.value = String(response?.error || response?.upload?.cloud_sync?.error || "110站班次附件多维记录同步失败");
             statusText.value = "";
           } else {
-            statusText.value = "110站云文档同步完成。";
+            statusText.value = "110站班次附件多维记录同步完成。";
           }
         } catch (error) {
-          errorText.value = String(error?.message || error || "110站云文档同步失败");
+          errorText.value = String(error?.message || error || "110站班次附件多维记录同步失败");
           statusText.value = "";
         } finally {
           retrying.value = false;
@@ -3202,6 +3210,10 @@ export function mountHandoverReviewApp(Vue) {
       const capacityDownloading = ref(false);
       const capacityImageSending = ref(false);
       const regenerating = ref(false);
+      // This building's artifact job: the gate unlocks only for artifacts_ready plus its own generation_id.
+      const attachmentDelivery = ref(emptyAttachmentDelivery());
+      const attachmentGenerationId = ref("");
+      const preparingDelivery = ref(false);
       const uploadedHandoverSource = ref(null);
       const uploadedCapacitySource = ref(null);
       const confirming = ref(false);
@@ -3433,6 +3445,9 @@ export function mountHandoverReviewApp(Vue) {
         capacityDownloading,
         capacityImageSending,
         regenerating,
+        attachmentDelivery,
+        attachmentGenerationId,
+        preparingDelivery,
         confirming,
         retryingCloudSync,
         updatingHistoryCloudSync,
@@ -3450,6 +3465,40 @@ export function mountHandoverReviewApp(Vue) {
         emptyReviewCloudSheetVm,
         resolveReviewActionDisabledReasonStrict,
         shiftTextFromCode,
+      });
+      // Delivery gate for this building alone; the five-building upload gate is not part of it.
+      const attachmentDeliveryGate = computed(() => resolveAttachmentDeliveryGate(attachmentDelivery.value, {
+        expectedGenerationId: attachmentGenerationId.value,
+      }));
+      const attachmentDeliveryUi = computed(() => resolveAttachmentDeliveryUi(attachmentDelivery.value, {
+        expectedGenerationId: attachmentGenerationId.value,
+      }));
+      const attachmentDeliveryBadges = computed(() => {
+        const { gate } = attachmentDeliveryUi.value;
+        const badges = [
+          badgeVm(
+            attachmentDeliveryUi.value.text,
+            attachmentDeliveryUi.value.tone,
+            "soft",
+            gate.delivery.status === "uploaded" ? "check" : "dot",
+          ),
+        ];
+        if (gate.delivery.record_url) {
+          badges.push({
+            ...badgeVm("多维记录", "info", "soft", "link"),
+            href: gate.delivery.record_url,
+          });
+        }
+        return badges;
+      });
+      const attachmentDeliveryBusy = computed(() => Boolean(preparingDelivery.value || attachmentDeliveryGate.value.is_busy));
+      const showAttachmentDeliveryRetry = computed(() => attachmentDeliveryGate.value.show_retry);
+      const attachmentDeliveryRecordUrl = computed(() => attachmentDeliveryGate.value.delivery.record_url || "");
+      const attachmentDeliveryErrorText = computed(() => {
+        const { gate } = attachmentDeliveryUi.value;
+        if (gate.delivery.status === "failed" || gate.is_stale) return gate.reason || gate.delivery.error || "";
+        if (gate.delivery.upload_error) return `成品可下载，班次附件上传失败：${gate.delivery.upload_error}`;
+        return "";
       });
       const reviewPendingTitle = computed(() => sessionSummary.value || "当前班次");
       const reviewPendingMessage = computed(() => {
@@ -4016,6 +4065,14 @@ export function mountHandoverReviewApp(Vue) {
         }
         applySharedBlockPayload(payload || {});
         reviewDisplayState.value = normalizeReviewDisplayState(payload?.display_state || reviewDisplayState.value);
+        // First screen, status polling and prepare-delivery all carry attachment_delivery for this building.
+        if (Object.prototype.hasOwnProperty.call(payload || {}, "attachment_delivery")) {
+          const incoming = normalizeAttachmentDelivery(payload.attachment_delivery);
+          if (!preparingDelivery.value && incoming.generation_id !== attachmentGenerationId.value) {
+            attachmentGenerationId.value = incoming.generation_id;
+          }
+          attachmentDelivery.value = incoming;
+        }
         batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
           ? cloneDeep(payload.batch_status)
           : batchStatus.value;
@@ -5066,7 +5123,7 @@ export function mountHandoverReviewApp(Vue) {
 
       async function saveDocument(options = {}) {
         const { reason = "manual", allowSubstationFailure = false } = options || {};
-        if (saving.value || regenerating.value || confirming.value || capacityImageSending.value || documentHydrating.value || syncingRemoteRevision.value || !session.value) return false;
+        if (saving.value || regenerating.value || confirming.value || attachmentDeliveryBusy.value || capacityImageSending.value || documentHydrating.value || syncingRemoteRevision.value || !session.value) return false;
         if (staleRevisionConflict.value) {
           beginRemoteSaveRefresh();
           return false;
@@ -5242,6 +5299,9 @@ export function mountHandoverReviewApp(Vue) {
         capacityDownloading,
         capacityImageSending,
         regenerating,
+        attachmentDelivery,
+        attachmentGenerationId,
+        preparingDelivery,
         retryingCloudSync,
         updatingHistoryCloudSync,
         activeRouteSelection,
@@ -5284,11 +5344,13 @@ export function mountHandoverReviewApp(Vue) {
         retryHandoverReviewCloudSyncApi,
         updateHandoverReviewCloudSyncApi,
         prepareHandoverReviewCapacityImageApi,
+        prepareHandoverReviewDeliveryApi,
         sendHandoverReviewCapacityImageApi,
         regenerateHandoverReviewApi,
         regenerateHandoverReviewFromFilesApi,
         buildHandoverReviewDownloadUrl,
         buildHandoverReviewCapacityDownloadUrl,
+        buildHandoverReviewDeliveryDownloadUrl,
         triggerBrowserDownload,
       });
 
@@ -5298,7 +5360,7 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = "当前历史记录没有可下载的交接班日志文件";
           return;
         }
-        if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value || downloading.value) {
+        if (saving.value || regenerating.value || confirming.value || preparingDelivery.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value || downloading.value) {
           statusText.value = "请先等待当前保存或同步完成后再下载。";
           return;
         }
@@ -5337,7 +5399,7 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = "当前历史记录没有可下载的容量报表文件";
           return;
         }
-        if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
+        if (saving.value || regenerating.value || confirming.value || preparingDelivery.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
           statusText.value = "请先等待当前保存或同步完成后再下载。";
           return;
         }
@@ -5424,6 +5486,9 @@ export function mountHandoverReviewApp(Vue) {
         capacityDownloading,
         capacityImageSending,
         regenerating,
+        attachmentDelivery,
+        attachmentGenerationId,
+        preparingDelivery,
         uploadedHandoverSource,
         uploadedCapacitySource,
         confirming,
@@ -5501,6 +5566,13 @@ export function mountHandoverReviewApp(Vue) {
         engineerDirectoryError,
         reviewHeaderBadges,
         reviewStatusBanners,
+        attachmentDeliveryGate,
+        attachmentDeliveryUi,
+        attachmentDeliveryBadges,
+        attachmentDeliveryBusy,
+        showAttachmentDeliveryRetry,
+        attachmentDeliveryRecordUrl,
+        attachmentDeliveryErrorText,
         confirmActionVm,
         syncingRemoteRevision,
         onHistorySelectionChange,
@@ -5542,6 +5614,7 @@ export function mountHandoverReviewApp(Vue) {
         updateCapacityRoomInput,
         saveCurrentReview,
         toggleConfirm,
+        prepareAttachmentDelivery: toggleConfirm,
         retryCloudSheetSync: () => retryCloudSheetSync(getJobApi),
         downloadCurrentReviewFile,
         downloadCurrentCapacityReviewFile,

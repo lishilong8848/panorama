@@ -945,12 +945,12 @@ class ApschedulerHandoverSchedulerManager:
         }
         if bool(self._cfg.get("cloud_catchup_enabled", True)):
             specs["cloud_catchup_morning"] = (
-                "交接班定时确认并上传云文档（8点）",
+                "交接班定时确认并上传多维（夜班）",
                 self._cfg["cloud_catchup_morning_time"],
                 self._cfg["cloud_catchup_morning_state_file"],
             )
             specs["cloud_catchup_afternoon"] = (
-                "交接班定时确认并上传云文档（17点30）",
+                "交接班定时确认并上传多维（白班）",
                 self._cfg["cloud_catchup_afternoon_time"],
                 self._cfg["cloud_catchup_afternoon_state_file"],
             )

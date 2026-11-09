@@ -12,8 +12,8 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
         <div class="status-metric-value">{{ getActiveHandoverRuleRows().length }}</div>
       </div>
       <div class="status-metric-card compact">
-        <div class="status-metric-label">云文档同步</div>
-        <div class="status-metric-value">{{ config.handover_log.cloud_sheet_sync.enabled ? '已启用' : '未启用' }}</div>
+        <div class="status-metric-label">班次附件上传</div>
+        <div class="status-metric-value">{{ config.handover_log.daily_report_bitable_export.enabled ? '已启用' : '未启用' }}</div>
       </div>
     </div>
     <div class="config-quick-tab-grid">
@@ -445,24 +445,10 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
       </section>
 
       <section class="content-card config-panel-card config-subgroup-card">
-        <div class="section-title">云文档同步</div>
-          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.cloud_sheet_sync.enabled" /> 启用云文档同步</label></div>
-          <div class="form-row"><label class="label">根 Wiki URL</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.root_wiki_url" /></div>
-          <div class="form-row"><label class="label">模板 Node Token</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.template_node_token" /></div>
-          <div class="form-row"><label class="label">云表名称模板</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.spreadsheet_name_pattern" /></div>
-          <div class="form-row"><label class="label">源 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.source_sheet_name" /></div>
-          <div class="form-row">
-            <label class="label">当前楼栋</label>
-            <select :value="handoverConfigBuilding" @change="onHandoverConfigBuildingChange($event.target.value)">
-              <option v-for="opt in handoverConfigBuildingOptions" :key="'handover-cloud-' + opt.value" :value="opt.value">{{ opt.label }}</option>
-            </select>
-          </div>
-          <div class="form-row"><label class="label">当前楼栋 Sheet 名</label><input type="text" v-model="config.handover_log.cloud_sheet_sync.sheet_names[handoverConfigBuilding]" /></div>
-          <div class="form-row"><label class="label">请求超时（秒）</label><input type="number" v-model.number="config.handover_log.cloud_sheet_sync.request.timeout_sec" /></div>
-          <div class="form-row"><label class="label">重试次数</label><input type="number" v-model.number="config.handover_log.cloud_sheet_sync.request.max_retries" /></div>
-          <div class="form-row"><label class="label">重试退避（秒）</label><input type="number" step="0.5" v-model.number="config.handover_log.cloud_sheet_sync.request.retry_backoff_sec" /></div>
-          <div class="hint" style="margin-bottom:8px;">当前楼栋 Sheet 名按楼独立保存；不同楼可以并行修改，互不覆盖。</div>
-          <div class="hint" style="margin-bottom:8px;">采集端源表到达共享目录后，系统只会为当前日期班次预创建一份云电子表格，并确保存在 A-E 楼 5 个固定 Sheet。任一楼确认后，系统会把该楼本地交接班成品 Excel 的“交接班日志”页覆盖写入同名 Sheet。审核保存本身不会立即同步云表；若最终上传失败，可按楼重试，也可一键重试全部失败楼栋。</div>
+        <div class="section-title">交接班多维附件</div>
+          <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.daily_report_bitable_export.enabled" /> 启用班次附件上传</label></div>
+          <div class="form-row"><label class="label">多维 Base Token</label><input type="text" v-model.trim="config.handover_log.daily_report_bitable_export.target.app_token" /></div>
+          <div class="form-row"><label class="label">多维表 ID</label><input type="text" v-model.trim="config.handover_log.daily_report_bitable_export.target.table_id" /></div>
       </section>
 
       <section

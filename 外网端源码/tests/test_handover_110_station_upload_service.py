@@ -75,7 +75,11 @@ def test_110_status_reads_only_requested_batch_without_history_or_file_index(mon
                 "session_id": f"A楼|{batch_key}", "building": "A楼", "duty_date": day,
                 "duty_shift": shift, "batch_key": batch_key, "confirmed": status == "success",
             }],
-            upsert_cloud_batches=[{"batch_key": batch_key, "spreadsheet_url": f"https://example.com/{day}/{shift}"}],
+            upsert_cloud_batches=[{
+                "batch_key": batch_key,
+                "spreadsheet_token": "bitable:rec_current" if status == "success" else "legacy_sheet",
+                "spreadsheet_url": f"https://example.com/{day}/{shift}",
+            }],
         )
         service._save_state(batch_key, {"status": status})
 
@@ -107,7 +111,7 @@ def test_110_status_reads_only_requested_batch_without_history_or_file_index(mon
     assert history.status_code == 200
     assert history.json()["batch"]["batch_key"] == "2026-11-08|day"
     assert history.json()["upload"]["status"] == "parsed"
-    assert history.json()["cloud_batch"]["spreadsheet_url"] == "https://example.com/2026-11-08/day"
+    assert history.json()["cloud_batch"] == {}
     assert history.json()["batch_status"]["confirmed_count"] == 0
 
 
@@ -204,7 +208,8 @@ def test_manual_rows_preserve_numeric_zero_values():
     assert normalized[0]["power_kw"] == "0"
 
 
-def test_existing_successful_same_file_cloud_sync_is_idempotent(tmp_path):
+@pytest.mark.parametrize("token, expected_status", [("bitable:rec_test", "skipped"), ("sheet_token", "pending")])
+def test_only_successful_attachment_upload_is_idempotent(tmp_path, token, expected_status):
     source_path = tmp_path / "110.xlsx"
     source_path.write_bytes(b"content")
     service = object.__new__(Handover110StationUploadService)
@@ -216,24 +221,32 @@ def test_existing_successful_same_file_cloud_sync_is_idempotent(tmp_path):
         "cloud_sync": {
             "status": "success",
             "source_file": str(source_path),
-            "spreadsheet_token": "sheet_token",
+            "spreadsheet_token": token,
         },
     }
 
     class ReviewService:
         @staticmethod
         def get_cloud_batch(_batch_key):
-            return {"spreadsheet_token": "sheet_token"}
+            return {"spreadsheet_token": token}
 
     service._review_service = ReviewService()
     service._load_state = lambda _batch_key: state
-    service._sync_state_to_cloud = lambda **_kwargs: called.append(True)
+    def sync(**_kwargs):
+        called.append(True)
+        return {"cloud_sync": {"status": "pending", "reason": "waiting_for_buildings", "missing_buildings": ["A楼"]}}
+
+    service._sync_state_to_cloud = sync
 
     result = service.sync_existing_upload_to_cloud(
         batch_key="2026-07-13|day",
         emit_log=lambda _message: None,
     )
 
-    assert result["status"] == "skipped"
-    assert result["reason"] == "already_synced_same_source"
-    assert called == []
+    assert result["status"] == expected_status
+    if expected_status == "skipped":
+        assert result["reason"] == "already_synced_same_source"
+        assert called == []
+    else:
+        assert result["reason"] == "waiting_for_buildings"
+        assert called == [True]

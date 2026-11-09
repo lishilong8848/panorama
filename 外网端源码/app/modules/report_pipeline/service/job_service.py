@@ -2501,6 +2501,8 @@ class JobService:
                 "timestamp": timestamp,
             }
             with self._lock:
+                if stage.worker_handler == "inspection_data_upload" and payload["message"]:
+                    job.summary = stage.summary = payload["message"]
                 self._record_job_event(job, stage_id=stage_id, stream="stdout", event_type="progress", level="info", payload=payload)
                 self._persist_job_snapshot(job)
             return

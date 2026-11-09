@@ -980,6 +980,23 @@ export function buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, 
   });
 }
 
+export function buildHandoverReviewDeliveryDownloadUrl(buildingCode, sessionId, params = {}) {
+  return appendQuery(`/api/handover/review/${encodeURIComponent(buildingCode)}/delivery-download`, {
+    session_id: sessionId,
+    ...params,
+  });
+}
+
+export async function prepareHandoverReviewDeliveryApi(buildingCode, payload = {}) {
+  return apiJson(`/api/handover/review/${encodeURIComponent(buildingCode)}/prepare-delivery`, {
+    method: "POST",
+    body: JSON.stringify({
+      trigger_source: "prepare_delivery_button",
+      ...(payload || {}),
+    }),
+  });
+}
+
 export async function sendHandoverReviewCapacityImageApi(buildingCode, payload = {}) {
   return apiJson(`/api/handover/review/${buildingCode}/capacity-image/send`, {
     method: "POST",

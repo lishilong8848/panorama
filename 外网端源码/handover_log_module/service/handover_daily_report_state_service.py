@@ -111,7 +111,7 @@ class HandoverDailyReportStateService:
         elif error_code == "daily_report_url_field_invalid":
             error = "日报链接字段写入失败，请检查飞书多维表“交接班日报”字段类型。"
         elif error_code == "missing_spreadsheet_url":
-            error = "当前批次缺少云文档链接，无法重写日报记录。"
+            error = "当前班次尚未上传附件，暂无多维记录链接。"
         else:
             error = raw_detail
         if status == "success":
@@ -119,7 +119,7 @@ class HandoverDailyReportStateService:
         if status == "pending":
             return {"text": "日报多维待写入", "tone": "warning", "error": error}
         if status == "skipped_due_to_cloud_sync_not_ok":
-            return {"text": "等待本批次云文档全部成功", "tone": "neutral", "error": error}
+            return {"text": "等待五楼班次附件上传", "tone": "neutral", "error": error}
         if status == "failed":
             return {"text": "日报多维写入失败", "tone": "danger", "error": error}
         if status == "skipped":
@@ -127,14 +127,13 @@ class HandoverDailyReportStateService:
         return {"text": "日报多维未执行", "tone": "neutral", "error": error}
 
     def _present_daily_report_actions(self, *, export_state: Dict[str, Any]) -> Dict[str, Any]:
-        spreadsheet_url = str(export_state.get("spreadsheet_url", "") or "").strip()
-        rewrite_allowed = bool(spreadsheet_url)
+        rewrite_allowed = bool(self.handover_cfg.get("daily_report_bitable_export", {}).get("enabled", True))
         return {
             "rewrite_record": self._action_payload(
-                label="重新写入日报多维表",
+                label="重试班次附件上传",
                 allowed=rewrite_allowed,
-                disabled_reason="" if rewrite_allowed else "当前批次缺少云文档链接，无法重写日报记录。",
-                reason_code="" if rewrite_allowed else "missing_spreadsheet_url",
+                disabled_reason="" if rewrite_allowed else "班次附件上传未启用",
+                reason_code="" if rewrite_allowed else "disabled",
             ),
         }
 
@@ -183,8 +182,10 @@ class HandoverDailyReportStateService:
     ) -> Dict[str, Any]:
         batch_key = self.build_batch_key(duty_date, duty_shift)
         export_state = self.get_export_state(duty_date=duty_date, duty_shift=duty_shift)
-        if spreadsheet_url and not export_state.get("spreadsheet_url"):
-            export_state["spreadsheet_url"] = str(spreadsheet_url or "").strip()
+        current_url = str(spreadsheet_url or "").strip()
+        if export_state.get("spreadsheet_url") != current_url:
+            export_state = {**self._default_export_state(), "status": "success" if current_url else "idle",
+                            "record_url": current_url, "spreadsheet_url": current_url}
         return {
             "ok": True,
             "batch_key": batch_key,

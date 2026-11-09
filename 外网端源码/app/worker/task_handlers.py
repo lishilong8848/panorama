@@ -748,10 +748,21 @@ def handle_inspection_data_upload(
     dry_run = payload.get("dry_run", False)
     if not isinstance(dry_run, bool):
         raise ValueError("dry_run 必须是布尔值")
+
+    def inspection_log(message):
+        emit_log(message)
+        emit_event = getattr(runtime, "emit_event", None)
+        if callable(emit_event):
+            emit_event({
+                "type": "progress", "stage_id": getattr(runtime, "stage_id", "main"),
+                "message": str(message), "progress": 0,
+            })
+
+    inspection_log("[巡检数据处理] 正在核对测点配置和本时段内网数据")
     result = InspectionDataUploadService(config).run(
         source_date=payload.get("source_date") or None,
         source_bucket_key=str(payload.get("source_bucket_key") or ""),
-        log=emit_log,
+        log=inspection_log,
         check_cancel=check_cancel,
         dry_run=dry_run,
     )
@@ -1185,6 +1196,53 @@ def handle_handover_followup_continue(
         raise
 
 
+def handle_handover_prepare_delivery(config, payload, emit_log, runtime=None):
+    from handover_log_module.service.handover_delivery_workflow_service import HandoverDeliveryWorkflowService
+    from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
+
+    workflow = HandoverDeliveryWorkflowService(config)
+    if payload.get("reuse_artifacts"):
+        if runtime:
+            runtime.raise_if_cancelled()
+        session = workflow.review.get_session_by_id(payload["session_id"]) or {}
+        manifest = workflow.state.for_session(session) if session else {}
+        if not manifest.get("artifacts_ready") or manifest.get("generation_id") != payload["generation_id"]:
+            raise RuntimeError("交接班成品已变化，请重新生成")
+    else:
+        manifest = workflow.prepare(
+            payload["session_id"], payload["generation_id"], payload["expected_revision"], emit_log,
+            runtime=runtime, expected_document_revision=payload.get("document_revision"),
+        )
+    emit_log(f"[交接班][成品] 本楼文件、图片和文本已就绪 session={manifest['session_id']}")
+    followup = ReviewFollowupTriggerService(workflow.config)
+    result = followup.publish_attachment_delivery(
+        batch_key=manifest["batch_key"], emit_log=emit_log,
+    )
+    session = workflow.review.get_session_by_id(manifest["session_id"])
+    if session:
+        followup._run_session_followup_exports(
+            batch_key=manifest["batch_key"], sessions=[session], emit_log=emit_log,
+        )
+    return {
+        "status": "partial_failed" if result.get("status") in {"failed", "partial_failed"} else "success",
+        "error": result.get("error", ""),
+        "attachment_delivery": workflow.state.public(workflow.state.get(manifest["session_id"])),
+        "batch_upload": result,
+    }
+
+
+def handle_handover_refresh_station_h(config, payload, emit_log, runtime=None):
+    from handover_log_module.api.facade import load_handover_config
+    from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
+
+    if runtime:
+        runtime.raise_if_cancelled()
+    cfg = config if "_global_paths" in config else load_handover_config(config)
+    return ReviewFollowupTriggerService(cfg).publish_attachment_delivery(
+        batch_key=payload["batch_key"], emit_log=emit_log, refresh_h=True,
+    )
+
+
 def handle_handover_confirm_all(
     config: Dict[str, Any],
     payload: Dict[str, Any],
@@ -1198,19 +1256,20 @@ def handle_handover_confirm_all(
         runtime.raise_if_cancelled()
     service, _, _, followup = routes._build_review_services(container)
     emit_log(f"[交接班][审核一键全确认] 开始 batch={batch_key}")
-    updated_sessions, batch_status = service.confirm_all_in_batch(batch_key=batch_key)
+    from handover_log_module.service.handover_delivery_workflow_service import HandoverDeliveryWorkflowService
+
+    workflow = HandoverDeliveryWorkflowService(config)
+    failures = workflow.prepare_sessions(
+        service.list_batch_sessions(batch_key), emit_log, confirm_unconfirmed=True, runtime=runtime,
+    )
+    updated_sessions = service.list_batch_sessions(batch_key)
+    batch_status = service.get_batch_status(batch_key)
     emit_log(
         f"[交接班][审核一键全确认] batch={batch_key}, sessions={len(updated_sessions)}, all_confirmed={bool(batch_status.get('all_confirmed', False))}"
     )
-    try:
-        followup_result = routes._start_handover_followup_job_after_confirm(
-            container,
-            batch_key=batch_key,
-            submitted_by="confirm_all",
-        )
-    except Exception as exc:  # noqa: BLE001
-        emit_log(f"[交接班][确认后上传] 任务提交失败 batch={batch_key}, error={exc}")
-        followup_result = routes._build_followup_failure_result(followup, batch_key=batch_key, error=str(exc))
+    if runtime is not None:
+        runtime.raise_if_cancelled()
+    followup_result = followup.publish_attachment_delivery(batch_key=batch_key, emit_log=emit_log)
     emit_log(
         f"[交接班][确认后上传] batch={batch_key}, status={followup_result.get('status', '-')}, "
         f"uploaded={len(followup_result.get('uploaded_buildings', []))}, failed={len(followup_result.get('failed_buildings', []))}, "
@@ -1220,6 +1279,10 @@ def handle_handover_confirm_all(
     refreshed_sessions = service.list_batch_sessions(batch_key)
     return {
         "ok": True,
+        "status": "partial_failed" if failures else (
+            "success" if followup_result.get("status") == "ok" else followup_result.get("status", "failed")
+        ),
+        "error": "；".join(f"{item['building']}: {item['error']}" for item in failures) or followup_result.get("error", ""),
         "updated_sessions": refreshed_sessions or updated_sessions,
         "batch_status": refreshed_batch_status or routes._attach_followup_progress(followup, batch_status),
         "followup_result": followup_result,
@@ -1305,7 +1368,7 @@ def handle_handover_cloud_retry_single(
         result = followup.retry_cloud_sheet_for_building(building, emit_log=emit_log)
     session = result.get("session") if isinstance(result.get("session"), dict) else {}
     batch_status = result.get("batch_status") if isinstance(result.get("batch_status"), dict) else service.get_batch_status(target_batch_key)
-    emit_log(f"[交接班][云表重试] building={building}, batch={session.get('batch_key', '-')}, status={result.get('status', '-')}")
+    emit_log(f"[交接班][附件重试] building={building}, batch={session.get('batch_key', '-')}, status={result.get('status', '-')}")
     return {
         "ok": str(result.get("status", "")).strip().lower() in {"ok", "success"},
         "session": session,
@@ -1337,7 +1400,7 @@ def handle_handover_cloud_retry_batch(
         runtime.raise_if_cancelled()
     service, _, _, followup = routes._build_review_services(container)
     result = followup.retry_failed_cloud_sheet_in_batch(batch_key, emit_log=emit_log)
-    emit_log(f"[交接班][云表批量重试] batch={batch_key}, status={result.get('status', '-')}")
+    emit_log(f"[交接班][附件批量重试] batch={batch_key}, status={result.get('status', '-')}")
     batch_status = result.get("batch_status") if isinstance(result.get("batch_status"), dict) else service.get_batch_status(batch_key)
     updated_sessions = result.get("updated_sessions") if isinstance(result.get("updated_sessions"), list) else service.list_batch_sessions(batch_key)
     status = str(result.get("status", "")).strip().lower()
@@ -1406,6 +1469,8 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "day_metric_retry_unit": handle_day_metric_retry_unit,
     "day_metric_retry_failed": handle_day_metric_retry_failed,
     "handover_followup_continue": handle_handover_followup_continue,
+    "handover_prepare_delivery": handle_handover_prepare_delivery,
+    "handover_refresh_station_h": handle_handover_refresh_station_h,
     "handover_confirm_all": handle_handover_confirm_all,
     "daily_report_record_rewrite": handle_daily_report_record_rewrite,
     "handover_cloud_retry_single": handle_handover_cloud_retry_single,

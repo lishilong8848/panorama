@@ -1060,83 +1060,6 @@ function validateAndNormalizeHandoverSourceDataAttachmentExport(payload) {
   return { ok: true };
 }
 
-function validateAndNormalizeHandoverCloudSheetSync(payload) {
-  payload.handover_log = payload.handover_log || {};
-  payload.handover_log.cloud_sheet_sync = payload.handover_log.cloud_sheet_sync || {};
-  const syncCfg = payload.handover_log.cloud_sheet_sync;
-  syncCfg.enabled = Boolean(syncCfg.enabled);
-  syncCfg.root_wiki_url = String(syncCfg.root_wiki_url || "").trim();
-  syncCfg.template_node_token = String(syncCfg.template_node_token || "").trim();
-  syncCfg.spreadsheet_name_pattern = String(syncCfg.spreadsheet_name_pattern || "").trim();
-  syncCfg.source_sheet_name = String(syncCfg.source_sheet_name || "").trim();
-  syncCfg.sync_mode =
-    String(syncCfg.sync_mode || "overwrite_named_sheet").trim().toLowerCase() || "overwrite_named_sheet";
-  if (syncCfg.sync_mode === "rebuild_sheet") {
-    syncCfg.sync_mode = "overwrite_named_sheet";
-  }
-  syncCfg.sheet_names =
-    syncCfg.sheet_names && typeof syncCfg.sheet_names === "object" && !Array.isArray(syncCfg.sheet_names)
-      ? syncCfg.sheet_names
-      : {};
-  syncCfg.copy =
-    syncCfg.copy && typeof syncCfg.copy === "object" && !Array.isArray(syncCfg.copy)
-      ? syncCfg.copy
-      : {};
-  syncCfg.request =
-    syncCfg.request && typeof syncCfg.request === "object" && !Array.isArray(syncCfg.request)
-      ? syncCfg.request
-      : {};
-
-  for (const building of ["A楼", "B楼", "C楼", "D楼", "E楼"]) {
-    syncCfg.sheet_names[building] = String(syncCfg.sheet_names[building] || "").trim();
-  }
-  for (const key of ["values", "formulas", "styles", "merges", "row_heights", "column_widths"]) {
-    syncCfg.copy[key] = Boolean(syncCfg.copy[key]);
-  }
-  syncCfg.request.timeout_sec = Number.parseInt(syncCfg.request.timeout_sec ?? 20, 10);
-  syncCfg.request.max_retries = Number.parseInt(syncCfg.request.max_retries ?? 3, 10);
-  syncCfg.request.retry_backoff_sec = Number.parseFloat(syncCfg.request.retry_backoff_sec ?? 2);
-
-  if (!syncCfg.root_wiki_url) {
-    return { ok: false, error: "交接班云文档同步根 wiki URL 不能为空" };
-  }
-  try {
-    const parsed = new URL(syncCfg.root_wiki_url);
-    if (!/^https?:$/i.test(parsed.protocol) || !String(parsed.pathname || "").includes("/wiki/")) {
-      return { ok: false, error: "交接班云文档同步根 wiki URL 格式错误" };
-    }
-  } catch (_err) {
-    return { ok: false, error: "交接班云文档同步根 wiki URL 格式错误" };
-  }
-  if (!syncCfg.template_node_token) {
-    return { ok: false, error: "交接班云文档同步模板 node token 不能为空" };
-  }
-  if (!syncCfg.spreadsheet_name_pattern) {
-    return { ok: false, error: "交接班云文档同步云表名称模板不能为空" };
-  }
-  if (!syncCfg.source_sheet_name) {
-    return { ok: false, error: "交接班云文档同步源 Sheet 名不能为空" };
-  }
-  if (syncCfg.sync_mode !== "overwrite_named_sheet") {
-    return { ok: false, error: "交接班云文档同步模式仅支持 overwrite_named_sheet" };
-  }
-  for (const building of ["A楼", "B楼", "C楼", "D楼", "E楼"]) {
-    if (!syncCfg.sheet_names[building]) {
-      return { ok: false, error: `交接班云文档同步 ${building} Sheet 名不能为空` };
-    }
-  }
-  if (!Number.isInteger(syncCfg.request.timeout_sec) || syncCfg.request.timeout_sec <= 0) {
-    return { ok: false, error: "交接班云文档同步超时时间必须大于0" };
-  }
-  if (!Number.isInteger(syncCfg.request.max_retries) || syncCfg.request.max_retries < 0) {
-    return { ok: false, error: "交接班云文档同步重试次数必须大于等于0" };
-  }
-  if (!Number.isFinite(syncCfg.request.retry_backoff_sec) || syncCfg.request.retry_backoff_sec < 0) {
-    return { ok: false, error: "交接班云文档同步重试退避秒数必须大于等于0" };
-  }
-  return { ok: true };
-}
-
 function validateAndNormalizeHandoverReviewUi(payload) {
   payload.handover_log = payload.handover_log || {};
   payload.handover_log.review_ui = payload.handover_log.review_ui || {};
@@ -1999,10 +1922,6 @@ export function prepareConfigPayloadForSave({
   const handoverSourceDataAttachmentValidation = validateAndNormalizeHandoverSourceDataAttachmentExport(payload);
   if (!handoverSourceDataAttachmentValidation.ok) {
     return handoverSourceDataAttachmentValidation;
-  }
-  const handoverCloudSheetSyncValidation = validateAndNormalizeHandoverCloudSheetSync(payload);
-  if (!handoverCloudSheetSyncValidation.ok) {
-    return handoverCloudSheetSyncValidation;
   }
   const handoverReviewUiValidation = validateAndNormalizeHandoverReviewUi(payload);
   if (!handoverReviewUiValidation.ok) {

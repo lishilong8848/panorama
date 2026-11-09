@@ -10,6 +10,7 @@ import inspect
 import json
 import re
 import secrets
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -45,6 +46,9 @@ from handover_log_module.service.handover_xlsx_write_queue_service import (
 from handover_log_module.service.capacity_report_image_delivery_service import CapacityReportImageDeliveryService
 from handover_log_module.service.chiller_mode_focus_state_service import ChillerModeFocusStateService
 from handover_log_module.service.handover_daily_report_state_service import HandoverDailyReportStateService
+from handover_log_module.service.handover_attachment_store import attachment_record_lock
+from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
+from handover_log_module.service.handover_delivery_workflow_service import HandoverDeliveryWorkflowService
 from handover_log_module.service.handover_110_station_upload_service import Handover110StationUploadService
 from handover_log_module.service.change_management_payload_builder import ChangeManagementPayloadBuilder
 from handover_log_module.service.event_category_payload_builder import EventCategoryPayloadBuilder
@@ -91,6 +95,7 @@ from handover_log_module.service.station_h_signature_service import (
 router = APIRouter(tags=["handover_review"])
 _REVIEW_DEFAULT_CONFIG_LOCK_GUARD = threading.Lock()
 _REVIEW_REGENERATE_SUBMIT_LOCK = threading.Lock()
+_REVIEW_DELIVERY_SUBMIT_LOCK = threading.Lock()
 _REVIEW_DEFAULT_CONFIG_LOCKS: dict[str, threading.RLock] = {}
 _REVIEW_DOCUMENT_CACHE_GUARD = threading.Lock()
 _REVIEW_DOCUMENT_CACHE: dict[str, dict[str, Any]] = {}
@@ -148,12 +153,13 @@ def _capacity_image_token_b64_decode(payload: str) -> bytes:
     return base64.urlsafe_b64decode((payload + padding).encode("ascii"))
 
 
-def _issue_capacity_image_send_token(*, building: str, session_id: str, client_id: str) -> str:
+def _issue_capacity_image_send_token(*, building: str, session_id: str, client_id: str, generation_id: str = "") -> str:
     issued_at = int(time.time())
     payload = {
         "building": str(building or "").strip(),
         "session_id": str(session_id or "").strip(),
         "client_id": str(client_id or "").strip(),
+        "generation_id": generation_id,
         "issued_at": issued_at,
         "nonce": secrets.token_urlsafe(16),
         "purpose": "capacity_image_send",
@@ -173,6 +179,7 @@ def _verify_capacity_image_send_token(
     building: str,
     session_id: str,
     client_id: str,
+    generation_id: str = "",
 ) -> str:
     token_text = str(token or "").strip()
     if not token_text or "." not in token_text:
@@ -198,6 +205,8 @@ def _verify_capacity_image_send_token(
         return "容量表图片发送确认令牌会话不匹配，请刷新审核页后点击按钮重试"
     if str(payload.get("client_id", "") or "").strip() != str(client_id or "").strip():
         return "容量表图片发送确认令牌终端不匹配，请刷新审核页后点击按钮重试"
+    if payload.get("generation_id", "") != generation_id:
+        return "交接班成品版本已更新，请重新点击发送"
     return ""
 _REVIEW_API_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="handover-review-api")
 _REVIEW_BOOTSTRAP_API_EXECUTOR = ThreadPoolExecutor(
@@ -213,6 +222,12 @@ _STATION_H_ROSTER_REFRESH_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="station-h-roster-refresh",
 )
 _REVIEW_SLOW_LOG_INTERVAL_SEC = 60.0
+_STATION_H_FOCUS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="station-h-focus-refresh")
+_STATION_H_FOCUS_LOCK = threading.Lock()
+_REVIEW_LOCK_EXECUTOR = ThreadPoolExecutor(max_workers=5, thread_name_prefix="review-edit-lock")
+_STATION_H_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="station-h-status")
+_STATION_H_FOCUS_FUTURE = None
+_STATION_H_FOCUS_REFRESH_AT = 0.0
 _REVIEW_SLOW_LOG_LOCK = threading.Lock()
 _REVIEW_SLOW_LOG_STATE: dict[str, dict[str, Any]] = {}
 
@@ -222,6 +237,9 @@ def shutdown_handover_review_api_executor() -> None:
     _REVIEW_BOOTSTRAP_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _STATION_110_STATUS_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _STATION_H_ROSTER_REFRESH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _STATION_H_FOCUS_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _REVIEW_LOCK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _STATION_H_STATUS_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 async def _run_review_api(func, *, executor):
@@ -309,6 +327,14 @@ def _dedicated_review_bootstrap_endpoint(func):
 
 def _dedicated_station_110_status_endpoint(func):
     return _dedicated_review_endpoint_with_executor(func, executor=_STATION_110_STATUS_EXECUTOR)
+
+
+def _dedicated_review_lock_endpoint(func):
+    return _dedicated_review_endpoint_with_executor(func, executor=_REVIEW_LOCK_EXECUTOR)
+
+
+def _dedicated_station_h_status_endpoint(func):
+    return _dedicated_review_endpoint_with_executor(func, executor=_STATION_H_STATUS_EXECUTOR)
 
 
 async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int, file_label: str = "110站文件") -> bytes:
@@ -824,6 +850,7 @@ def _load_existing_review_document_snapshot(
     document = state.get("document", {}) if isinstance(state.get("document", {}), dict) else {}
     resolved_session = _attach_excel_sync_from_store(container, payload)
     try:
+        resolved_session["session_revision"] = int(payload.get("revision", 0) or 0)
         resolved_session["revision"] = int(state.get("revision", resolved_session.get("revision", 0)) or 0)
     except Exception:  # noqa: BLE001
         pass
@@ -1111,7 +1138,7 @@ def _handover_cfg(container) -> Dict[str, Any]:
 
 def _build_review_services(container) -> tuple[ReviewSessionService, ReviewDocumentParser, ReviewDocumentWriter, ReviewFollowupTriggerService]:
     handover_cfg = _handover_cfg(container)
-    review_service = ReviewSessionService(handover_cfg)
+    review_service = ReviewSessionService(handover_cfg, initialize_generated_file_index=False)
     repository = getattr(container, "app_state_repository", None)
     if repository is not None:
         try:
@@ -1133,7 +1160,7 @@ def _build_review_session_service(container) -> ReviewSessionService:
     if _build_review_services is not _ORIGINAL_BUILD_REVIEW_SERVICES:
         service, _, _, _ = _build_review_services(container)
         return service
-    service = ReviewSessionService(_handover_cfg(container))
+    service = ReviewSessionService(_handover_cfg(container), initialize_generated_file_index=False)
     repository = getattr(container, "app_state_repository", None)
     if repository is not None:
         try:
@@ -1567,6 +1594,8 @@ def _maybe_start_handover_followup_job_after_review_save(
 ) -> Dict[str, Any]:
     if not isinstance(session, dict) or not bool(session.get("confirmed", False)):
         return {}
+    if session.get("building") in HandoverDeliveryWorkflowService.BUILDINGS:
+        return {}
     target_batch = str(session.get("batch_key", "") or "").strip()
     if not target_batch:
         return {}
@@ -1676,12 +1705,10 @@ def _load_daily_report_spreadsheet_url(
     duty_shift: str,
 ) -> str:
     batch_key = state_service.build_batch_key(duty_date, duty_shift)
-    export_state = state_service.get_export_state(duty_date=duty_date, duty_shift=duty_shift)
-    spreadsheet_url = str(export_state.get("spreadsheet_url", "")).strip()
-    if spreadsheet_url:
-        return spreadsheet_url
     cloud_batch = review_service.get_cloud_batch(batch_key) or {}
-    return str(cloud_batch.get("spreadsheet_url", "")).strip() if isinstance(cloud_batch, dict) else ""
+    if not str(cloud_batch.get("spreadsheet_token", "")).startswith("bitable:"):
+        return ""
+    return str(cloud_batch.get("spreadsheet_url", "")).strip()
 
 
 def _build_daily_report_context_payload(
@@ -1709,7 +1736,7 @@ def _daily_report_error_message(error_code: str, *, fallback: str = "") -> str:
     if code == "daily_report_url_field_invalid":
         return "日报链接字段写入失败，请检查飞书多维表“交接班日报”字段类型。"
     if code == "missing_spreadsheet_url":
-        return "当前批次缺少云文档链接，无法重写日报记录。"
+        return "当前班次尚未上传附件，暂无多维记录链接。"
     return str(fallback or "").strip() or "操作失败，请查看系统错误日志。"
 
 
@@ -2807,37 +2834,37 @@ def _present_review_cloud_sheet_state(raw: Any, *, revision: int = 0) -> Dict[st
         and synced_revision < current_revision
         and status in {"success", "pending_upload"}
     )
-    text = "云表未执行"
+    text = "附件未执行"
     tone = "neutral"
     reason_code = status or "idle"
     if status == "success" and cloud_revision_stale:
-        text = "云表内容已修改，待重新上传"
+        text = "附件内容已修改，待重新上传"
         tone = "warning"
         reason_code = "stale"
     elif status == "success":
-        text = "云表已同步"
+        text = "附件已同步"
         tone = "success"
     elif status in {"uploading", "syncing"}:
-        text = "云表上传中"
+        text = "附件上传中"
         tone = "info"
     elif status == "pending_upload":
-        text = "云表内容已修改，待重新上传" if cloud_revision_stale else "云表待最终上传"
+        text = "附件内容已修改，待重新上传" if cloud_revision_stale else "附件待最终上传"
         tone = "warning"
         reason_code = "stale_pending_upload" if cloud_revision_stale else reason_code
     elif status == "prepare_failed":
-        text = "云表预建失败"
+        text = "附件预建失败"
         tone = "danger"
     elif status == "failed":
-        text = "云表最终上传失败"
+        text = "附件最终上传失败"
         tone = "danger"
     elif status == "disabled":
-        text = "云表未启用"
+        text = "附件未启用"
         tone = "neutral"
     elif status == "skipped":
-        text = "云表未执行"
+        text = "附件未执行"
         tone = "neutral"
     elif attempted:
-        text = "云表已尝试同步"
+        text = "附件已尝试同步"
         tone = "info"
         reason_code = "attempted"
     return {
@@ -2858,8 +2885,8 @@ def _ensure_cloud_sheet_not_uploading_or_409(session: Dict[str, Any], *, action:
     if not isinstance(cloud_sync, dict):
         cloud_sync = {}
     status = str(cloud_sync.get("status", "") or "").strip().lower()
-    if status in {"uploading", "syncing"}:
-        raise HTTPException(status_code=409, detail=f"当前楼栋云文档上传中，请等待上传完成后再{action}")
+    if status in {"uploading", "syncing"} and str(cloud_sync.get("spreadsheet_token", "")).startswith("bitable:"):
+        raise HTTPException(status_code=409, detail=f"当前楼栋附件正在上传，请等待上传完成后再{action}")
 
 
 def _present_review_excel_sync_state(raw: Any) -> Dict[str, Any]:
@@ -3016,35 +3043,35 @@ def _build_review_confirm_feedback(
             text="等待当前楼栋确认",
             tone="info",
             reason_code="await_all_confirmed",
-            detail_text="当前楼栋尚未确认，确认后会上传当前楼栋云文档。",
+            detail_text="当前楼栋尚未确认，五楼成品齐全后会汇总上传附件。",
         )
     if followup_status == "queued":
         return _review_display_item(
             status="followup_queued",
-            text="已确认并提交本楼云文档上传",
+            text="已确认并提交本楼附件上传",
             tone="success",
             reason_code="followup_queued",
-            detail_text="当前楼栋确认完成，云文档上传将在后台继续执行。",
+            detail_text="当前楼栋确认完成，附件上传将在后台继续执行。",
         )
     if followup_status in {"ok", "success"}:
         return _review_display_item(
             status="followup_started",
-            text="已提交本楼云文档上传",
+            text="已提交本楼附件上传",
             tone="success",
             reason_code="followup_started",
-            detail_text="当前楼栋确认完成，已触发本楼云文档上传。",
+            detail_text="当前楼栋确认完成，已触发本楼附件上传。",
         )
     if cloud_status in {"ok", "success"}:
         return _review_display_item(
             status="single_building_retry_started",
-            text="已进入单楼云表重传",
+            text="已进入单楼附件重传",
             tone="success",
             reason_code="single_building_retry_started",
-            detail_text="当前楼栋确认完成，已触发当前楼栋云表重传。",
+            detail_text="当前楼栋确认完成，已触发当前楼栋附件重传。",
         )
     return _review_display_item(
         status="confirmed",
-        text="已确认本楼并提交云文档上传",
+        text="已确认本楼并提交附件上传",
         tone="success",
         reason_code="confirmed",
         detail_text="本楼已确认。",
@@ -3066,10 +3093,10 @@ def _build_review_cloud_retry_feedback(result: Dict[str, Any] | None = None) -> 
     if status in {"ok", "success"}:
         return _review_display_item(
             status="success",
-            text="云表上传成功",
+            text="附件上传成功",
             tone="success",
             reason_code="success",
-            detail_text="云表上传已完成。",
+            detail_text="附件上传已完成。",
         )
     if status == "blocked":
         blocked_reason = ""
@@ -3077,20 +3104,20 @@ def _build_review_cloud_retry_feedback(result: Dict[str, Any] | None = None) -> 
         if isinstance(cloud_sheet_sync, dict):
             blocked_reason = str(cloud_sheet_sync.get("blocked_reason", "")).strip()
         if blocked_reason == "pending_review":
-            blocked_reason = "当前楼栋尚未确认，不能重试云表上传。"
+            blocked_reason = "当前楼栋尚未确认，不能重试附件上传。"
         return _review_display_item(
             status="blocked",
-            text=blocked_reason or "当前楼栋暂不能重试云表上传。",
+            text=blocked_reason or "当前楼栋暂不能重试附件上传。",
             tone="warning",
             reason_code="blocked",
-            detail_text=blocked_reason or "当前楼栋暂不能重试云表上传。",
+            detail_text=blocked_reason or "当前楼栋暂不能重试附件上传。",
         )
     return _review_display_item(
         status="failed",
-        text="云表上传失败",
+        text="附件上传失败",
         tone="danger",
         reason_code="failed",
-        detail_text="云表上传失败。",
+        detail_text="附件上传失败。",
     )
 
 
@@ -3102,17 +3129,17 @@ def _build_review_history_cloud_update_feedback(result: Dict[str, Any] | None = 
     if status in {"ok", "success"}:
         return _review_display_item(
             status="success",
-            text="历史云文档已更新",
+            text="历史班次附件已更新",
             tone="success",
             reason_code="success",
-            detail_text="当前历史交接班对应的云文档已更新。",
+            detail_text="当前历史交接班对应的班次附件已更新。",
         )
     return _review_display_item(
         status="failed",
-        text="历史云文档更新失败",
+        text="历史班次附件更新失败",
         tone="danger",
         reason_code="failed",
-        detail_text="历史云文档更新失败。",
+        detail_text="历史班次附件更新失败。",
     )
 
 
@@ -3273,7 +3300,7 @@ def _build_review_display_state(
         status_banners.append(
             {
                 "code": "history_mode",
-                "text": "当前为历史模式：只更新当前历史记录，不改模板默认值；当前班次云文档上传由确认楼栋流程处理。",
+                "text": "当前为历史模式：只更新当前历史记录，不改模板默认值；当前班次附件上传由确认楼栋流程处理。",
                 "tone": "info",
             }
         )
@@ -3289,7 +3316,7 @@ def _build_review_display_state(
         status_banners.append(
             {
                 "code": "cloud_sheet_error",
-                "text": f"云表同步失败: {cloud_sheet_state['error']}",
+                "text": f"附件同步失败: {cloud_sheet_state['error']}",
                 "tone": "danger",
             }
         )
@@ -3297,7 +3324,7 @@ def _build_review_display_state(
         status_banners.append(
             {
                 "code": "cloud_sheet_uploading",
-                "text": "当前楼栋云文档上传中，上传完成前不能修改确认状态。",
+                "text": "当前楼栋附件上传中，上传完成前不能修改确认状态。",
                 "tone": "info",
             }
         )
@@ -3308,7 +3335,7 @@ def _build_review_display_state(
         status_banners.append(
             {
                 "code": "cloud_sheet_stale",
-                "text": "审核内容已修改，云文档需要重新上传；系统会在空闲时自动处理。",
+                "text": "审核内容已修改，班次附件需要重新上传；请重新生成成品并提交。",
                 "tone": "warning",
             }
         )
@@ -3378,25 +3405,25 @@ def _build_review_display_state(
     elif remote_editor_active:
         confirm_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
     elif cloud_sheet_uploading:
-        confirm_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再操作确认状态"
+        confirm_disabled_reason = "当前楼栋附件上传中，请等待上传完成后再操作确认状态"
     elif confirmed:
-        confirm_disabled_reason = "当前楼栋已确认且云文档已提交，本班次不需要重复操作"
+        confirm_disabled_reason = "当前楼栋已提交"
     retry_allowed = bool(session_payload) and (not is_history_mode) and confirmed and str(cloud_sheet_state["status"]) in {"failed", "prepare_failed"}
     retry_disabled_reason = ""
     if not session_payload:
         retry_disabled_reason = "暂无可重试的交接班记录"
     elif is_history_mode:
-        retry_disabled_reason = "历史模式不支持重试当前云表上传"
+        retry_disabled_reason = "历史模式不支持重试当前附件上传"
     elif not confirmed:
-        retry_disabled_reason = "当前楼栋尚未确认，不能重试云表上传"
+        retry_disabled_reason = "当前楼栋尚未确认，不能重试附件上传"
     elif str(cloud_sheet_state["status"]) not in {"failed", "prepare_failed"}:
-        retry_disabled_reason = "当前云表状态无需重试"
+        retry_disabled_reason = "当前附件状态无需重试"
     update_history_allowed = bool(session_payload) and is_history_mode and not remote_editor_active
     update_history_disabled_reason = ""
     if not session_payload:
         update_history_disabled_reason = "暂无可更新的历史交接班记录"
     elif not is_history_mode:
-        update_history_disabled_reason = "仅历史模式支持更新云文档"
+        update_history_disabled_reason = "仅历史模式支持更新班次附件"
     elif remote_editor_active:
         update_history_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
     return_to_latest_allowed = bool(session_payload) and is_history_mode and bool(latest_session_id_text)
@@ -3450,9 +3477,9 @@ def _build_review_display_state(
     elif remote_editor_active:
         regenerate_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
     elif cloud_sheet_uploading:
-        regenerate_disabled_reason = "当前楼栋云文档上传中，请等待上传完成后再重新生成"
+        regenerate_disabled_reason = "当前楼栋附件上传中，请等待上传完成后再重新生成"
     elif confirmed:
-        regenerate_disabled_reason = "当前楼栋已确认并提交上传，本班次不能重新生成；如需修改请直接编辑后保存，系统会自动重传云文档"
+        regenerate_disabled_reason = "当前楼栋已确认并提交上传，本班次不能重新生成；如需修改请直接编辑后保存，再生成成品并提交"
     history_limit = max(1, int(history_payload.get("history_limit", HISTORY_CLOUD_SUCCESS_LIMIT) or HISTORY_CLOUD_SUCCESS_LIMIT))
     history_rule = str(history_payload.get("history_rule", HISTORY_CLOUD_SUCCESS_RULE) or "").strip().lower()
     if history_rule == "generated_files":
@@ -3531,13 +3558,13 @@ def _build_review_display_state(
     confirm_state = _review_display_item(
         status="retry_upload" if confirmed_cloud_retry_allowed else ("confirmed" if confirmed else ("history_mode" if is_history_mode else ("blocked" if remote_editor_active else "pending_confirm"))),
         text=(
-            "当前楼栋已确认，云文档待重传"
+            "当前楼栋已确认，班次附件待重传"
             if confirmed_cloud_retry_allowed
             else ("当前楼栋已确认并已上传" if confirmed else ("历史模式不可确认" if is_history_mode else ("其他终端编辑中" if remote_editor_active else "当前楼栋待确认")))
         ),
         tone="warning" if confirmed_cloud_retry_allowed else ("success" if confirmed else ("neutral" if is_history_mode else "warning")),
         reason_code="retry_upload" if confirmed_cloud_retry_allowed else ("confirmed" if confirmed else ("history_mode" if is_history_mode else ("remote_editor_active" if remote_editor_active else "pending_confirm"))),
-        detail_text=("点击确认按钮可重新上传本楼云文档" if confirmed_cloud_retry_allowed else ("" if confirmed else confirm_disabled_reason)),
+        detail_text=("重新生成成品后可提交本楼附件" if confirmed_cloud_retry_allowed else ("" if confirmed else confirm_disabled_reason)),
     )
     document_state = _build_review_document_state(
         session=session_payload,
@@ -3610,7 +3637,7 @@ def _build_review_display_state(
             "save": _review_action(
                 allowed=save_allowed,
                 visible=bool(session_payload),
-                label="保存修改并重传云文档" if confirmed else "保存",
+                label="保存修改" if confirmed else "保存",
                 disabled_reason=save_disabled_reason,
                 tone="primary",
                 variant="primary",
@@ -3651,9 +3678,9 @@ def _build_review_display_state(
                 allowed=confirm_allowed,
                 visible=bool(session_payload) and not is_history_mode,
                 label=(
-                    "重传本楼云文档"
+                    "重传本楼班次附件"
                     if confirmed_cloud_retry_allowed
-                    else ("已确认并已上传" if confirmed else "确认并上传本楼云文档")
+                    else ("已确认并已上传" if confirmed else "生成成品并提交")
                 ),
                 disabled_reason=confirm_disabled_reason,
                 tone="warning" if confirmed_cloud_retry_allowed else ("success" if confirmed else "warning"),
@@ -3662,7 +3689,7 @@ def _build_review_display_state(
             "retry_cloud_sync": _review_action(
                 allowed=False,
                 visible=False,
-                label="重试云表上传",
+                label="重试附件上传",
                 disabled_reason=retry_disabled_reason,
                 tone="warning",
                 variant="warning",
@@ -3670,7 +3697,7 @@ def _build_review_display_state(
             "update_history_cloud_sync": _review_action(
                 allowed=False,
                 visible=False,
-                label="更新云文档",
+                label="更新班次附件",
                 disabled_reason=update_history_disabled_reason,
                 tone="warning",
                 variant="warning",
@@ -3687,6 +3714,55 @@ def _build_review_display_state(
     }
 
 
+def _review_delivery_state(service, session, *, job_service=None):
+    config = getattr(service, "config", None)
+    if not isinstance(config, dict) or session.get("building") not in HandoverDeliveryWorkflowService.BUILDINGS:
+        return {}
+    state = HandoverDeliveryStateService(config, initialize=False)
+    manifest = state.for_session(session)
+    if job_service and manifest.get("status") in HandoverDeliveryStateService.ACTIVE and manifest.get("job_id"):
+        try:
+            job = job_service.get_job(manifest["job_id"])
+        except KeyError:
+            job = {"status": "failed", "error": "成品任务已不存在，请重新提交"}
+        if job.get("status") in {"failed", "partial_failed", "cancelled", "blocked", "success"}:
+            latest = state.for_session(session)
+            if latest.get("generation_id") != manifest.get("generation_id") or latest.get("status") not in state.ACTIVE:
+                return latest
+            return {**latest, "status": "failed",
+                    "error": str(job.get("error") or "成品任务已结束但未生成可用文件，请重新提交")}
+    return manifest
+
+
+def _ensure_review_delivery_not_preparing(service, session, container):
+    state = _review_delivery_state(service, session, job_service=getattr(container, "job_service", None))
+    if state.get("status") in HandoverDeliveryStateService.ACTIVE:
+        raise HTTPException(status_code=409, detail="本楼正在生成成品，请等待完成后再操作")
+
+
+def _require_review_delivery(service, session):
+    try:
+        row = _review_delivery_state(service, session)
+        if row.get("artifacts_ready") and HandoverDeliveryStateService.artifacts_exist(row):
+            return row
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        pass
+    raise HTTPException(status_code=409, detail="当前审核版本的交接班成品尚未就绪，请先生成成品")
+
+
+def _use_prepared_download(service, session):
+    if session.get("building") not in HandoverDeliveryWorkflowService.BUILDINGS:
+        return False
+    try:
+        if _review_delivery_state(service, session):
+            return True
+        latest = service.get_latest_session_fast(session["building"])
+    except Exception:
+        return True
+    # Archived shifts predating the delivery manifest keep their existing download path.
+    return not latest or latest.get("session_id") == session["session_id"]
+
+
 def _attach_review_display_state(
     payload: Dict[str, Any],
     *,
@@ -3699,6 +3775,7 @@ def _attach_review_display_state(
     include_concurrency: bool = True,
     include_shared_blocks: bool = True,
     include_outdoor_temperature: bool = True,
+    delivery_job_service=None,
 ) -> Dict[str, Any]:
     response = dict(payload or {})
     session = response.get("session") if isinstance(response.get("session"), dict) else {}
@@ -3716,7 +3793,7 @@ def _attach_review_display_state(
             client_revision=client_revision,
         )
         return response
-    session_revision = int(session.get("revision", 0) or 0)
+    session_revision = int(session.get("session_revision", session.get("revision", 0)) or 0)
     try:
         document_revision = int(
             response.get("document_revision")
@@ -3733,6 +3810,19 @@ def _attach_review_display_state(
     session["document_revision"] = current_revision
     session["session_revision"] = session_revision
     response["session"] = session
+    try:
+        manifest = _review_delivery_state(
+            service, {**session, "revision": session_revision}, job_service=delivery_job_service,
+        )
+        response["attachment_delivery"] = HandoverDeliveryStateService.public(manifest)
+    except Exception:  # The review page stays usable when the delivery store is unavailable.
+        response["attachment_delivery"] = {"status": "failed", "artifacts_ready": False, "error": "暂无法读取成品状态"}
+    config = getattr(service, "config", None)
+    if isinstance(config, dict) and building in HandoverDeliveryWorkflowService.BUILDINGS:
+        session["cloud_sheet_sync"] = HandoverDeliveryStateService.sync_view(
+            response["attachment_delivery"], {**session, "revision": session_revision},
+            enabled=config.get("daily_report_bitable_export", {}).get("enabled", True),
+        )
     response["document_revision"] = current_revision
     response["snapshot_revision"] = current_revision
     if include_concurrency:
@@ -3830,6 +3920,15 @@ def _attach_review_display_state(
         client_session_id=client_session_id,
         client_revision=client_revision,
     )
+    if building in HandoverDeliveryWorkflowService.BUILDINGS:
+        actions = response["display_state"]["actions"]
+        confirm = actions["confirm"]
+        history_mode = bool(latest_session_id and session.get("session_id") != latest_session_id)
+        locked = bool(concurrency.get("locked_by_other")) or (
+            not confirm.get("allowed") and "其他终端" in str(confirm.get("disabled_reason") or "")
+        )
+        if not history_mode and not locked:
+            confirm.update(allowed=True, disabled_reason="", label="生成成品并提交")
     return response
 
 
@@ -3838,7 +3937,7 @@ def _ensure_latest_session_actionable_or_400(service: ReviewSessionService, *, b
     if not latest_session_id:
         raise HTTPException(status_code=404, detail="暂无可审核交接班文件")
     if str(session_id or "").strip() != latest_session_id:
-        raise HTTPException(status_code=400, detail="仅最新交接班日志支持确认上传和云表重试")
+        raise HTTPException(status_code=400, detail="仅最新交接班日志支持确认上传和附件重试")
 
 
 def _station_h_person_options(*values: Any) -> list[dict[str, str]]:
@@ -3969,6 +4068,25 @@ def _schedule_station_h_roster_refresh(
     return True
 
 
+def _refresh_station_h_focus_in_background(service, *, duty_date, duty_shift, selection, emit_log):
+    global _STATION_H_FOCUS_FUTURE, _STATION_H_FOCUS_REFRESH_AT
+    with _STATION_H_FOCUS_LOCK:
+        if _STATION_H_FOCUS_FUTURE is not None and not _STATION_H_FOCUS_FUTURE.done():
+            return True
+        if time.monotonic() - _STATION_H_FOCUS_REFRESH_AT < 60:
+            return False
+        _STATION_H_FOCUS_REFRESH_AT = time.monotonic()
+
+        def refresh():
+            try:
+                service.build_status(duty_date=duty_date, duty_shift=duty_shift, selection=selection)
+            except Exception as exc:
+                emit_log(f"[交接班][H楼后台刷新] 暂未完成，下次重试: {exc}")
+
+        _STATION_H_FOCUS_FUTURE = _STATION_H_FOCUS_EXECUTOR.submit(refresh)
+        return True
+
+
 def _station_h_status_payload(
     container,
     *,
@@ -4044,13 +4162,21 @@ def _station_h_status_payload(
         "long_day_people": selected_long_day_people,
         "long_day_people_text": join_station_h_people(selected_long_day_people),
     }
+    focus_refresh_pending = False
     try:
-        duty_focus = _build_station_h_duty_focus_service(container).build_status(
+        focus_service = _build_station_h_duty_focus_service(container)
+        duty_focus = focus_service.build_status(
             duty_date=duty_date_text,
             duty_shift=duty_shift_text,
             selection=focus_selection,
             historical=historical,
+            allow_remote=False,
         )
+        if not historical:
+            focus_refresh_pending = _refresh_station_h_focus_in_background(
+                focus_service, duty_date=duty_date_text, duty_shift=duty_shift_text,
+                selection=copy.deepcopy(focus_selection), emit_log=container.add_system_log,
+            )
     except Exception as exc:  # noqa: BLE001
         duty_focus = {
             "date_text": duty_date_text,
@@ -4105,9 +4231,9 @@ def _station_h_status_payload(
         "candidate_source": {
             "duty_people": "saved" if bool(saved_selection) else "roster_default",
             "error": roster_candidate_error or roster_refresh_error,
-            "refresh_pending": roster_refresh_pending,
+            "refresh_pending": roster_refresh_pending or focus_refresh_pending,
             "refreshing": roster_refreshing,
-            "retry_after_ms": 4000 if roster_refresh_pending else 0,
+            "retry_after_ms": 4000 if roster_refresh_pending or focus_refresh_pending else 0,
         },
         "duty_focus": duty_focus,
         "training_rows": resolved_selection.get("training_rows", []),
@@ -4177,7 +4303,7 @@ def handover_review_inspection_access(building_code: str, request: Request):
 
 
 @router.get("/api/handover/review/station-h/status")
-@_dedicated_review_endpoint
+@_dedicated_station_h_status_endpoint
 def handover_review_station_h_status(
     request: Request,
     duty_date: str = "",
@@ -4188,6 +4314,26 @@ def handover_review_station_h_status(
         return _station_h_status_payload(container, duty_date=duty_date, duty_shift=duty_shift)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _queue_station_h_attachment_refresh(container, duty_date, duty_shift):
+    batch_key = f"{duty_date}|{duty_shift}"
+    try:
+        config = _handover_cfg(container)
+        manifests = HandoverDeliveryStateService(config, initialize=False).batch(batch_key)
+        if any(manifests.get(b, {}).get("status") != "uploaded" for b in HandoverDeliveryWorkflowService.BUILDINGS):
+            return
+        from app.worker.task_handlers import handle_handover_refresh_station_h
+
+        worker_payload = {"batch_key": batch_key}
+        _start_handover_background_job(
+            container, name=f"交接班H楼附件补传-{batch_key}",
+            run_func=lambda emit: handle_handover_refresh_station_h(config, worker_payload, emit),
+            worker_handler="handover_refresh_station_h", worker_payload=worker_payload,
+            resource_keys=[f"handover_station_h:{batch_key}"], feature="handover",
+        )
+    except Exception as exc:
+        container.add_system_log(f"[交接班][H楼附件] 补传任务提交失败 batch={batch_key}: {exc}")
 
 
 @router.put("/api/handover/review/station-h")
@@ -4247,6 +4393,7 @@ def handover_review_station_h_save(
         )
     status = _station_h_status_payload(container, duty_date=duty_date_text, duty_shift=duty_shift_text)
     status["saved_selection"] = saved
+    _queue_station_h_attachment_refresh(container, duty_date_text, duty_shift_text)
     return status
 
 
@@ -4408,6 +4555,7 @@ def handover_review_station_h_regenerate_duty_focus_image(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"值班关注点图片生成失败: {exc}") from exc
+    _queue_station_h_attachment_refresh(container, duty_date_text, duty_shift_text)
     return {
         "status": str(generated.get("status", "current") or "current"),
         "available": bool(generated.get("available", False)),
@@ -4547,7 +4695,7 @@ def handover_review_110_station_cloud_sync_retry(
     except ReviewSessionStoreUnavailableError as exc:
         _raise_review_store_http_error(exc)
     except Exception as exc:  # noqa: BLE001
-        container.add_system_log(f"[交接班][110站云表] 重试失败: {exc}")
+        container.add_system_log(f"[交接班][110站附件] 重试失败: {exc}")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -4597,59 +4745,20 @@ def handover_review_confirm_all(batch_key: str, request: Request) -> Dict[str, A
     container = request.app.state.container
 
     def _run(emit_log) -> Dict[str, Any]:
-        service = _build_review_session_service(container)
-        followup = _build_review_followup_service(container)
-        emit_log(f"[交接班][审核一键全确认] 开始 batch={batch_key}")
-        updated_sessions, batch_status = service.confirm_all_in_batch(batch_key=batch_key)
-        emit_log(
-            f"[交接班][审核一键全确认] batch={batch_key}, sessions={len(updated_sessions)}, all_confirmed={bool(batch_status.get('all_confirmed', False))}"
-        )
-        try:
-            followup_result = _start_handover_followup_job_after_confirm(
-                container,
-                batch_key=batch_key,
-                submitted_by="confirm_all",
-            )
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][确认后上传] 任务提交失败 batch={batch_key}, 错误={exc}")
-            followup_result = _build_followup_failure_result(
-                followup,
-                batch_key=batch_key,
-                error=str(exc),
-            )
-        emit_log(
-            f"[交接班][确认后上传] batch={batch_key}, 状态={_followup_status_text(followup_result.get('status'))}, "
-            f"云表状态={_followup_status_text(followup_result.get('cloud_sheet_sync', {}).get('status', '-'))}"
-        )
-        refreshed_batch_status = _attach_followup_progress(followup, service.get_batch_status(batch_key))
-        refreshed_sessions = service.list_batch_sessions(batch_key)
-        _review_history_cache_invalidate_sessions(refreshed_sessions or updated_sessions)
-        _publish_handover_review_status_cache(
-            request,
-            container,
-            service=service,
-            batch_status=refreshed_batch_status or _attach_followup_progress(followup, batch_status),
-            reason="confirm_all",
-        )
-        return {
-            "ok": True,
-            "updated_sessions": refreshed_sessions or updated_sessions,
-            "batch_status": refreshed_batch_status or _attach_followup_progress(followup, batch_status),
-            "followup_result": followup_result,
-        }
+        from app.worker.task_handlers import handle_handover_confirm_all
+
+        return handle_handover_confirm_all(_handover_cfg(container), {"batch_key": batch_key}, emit_log)
 
     job = _start_handover_background_job(
         container,
-        name=f"交接班审核一键全确认-{batch_key}",
+        name=f"交接班批次成品生成-{batch_key}",
         run_func=_run,
-        worker_handler="",
-        worker_payload={},
+        worker_handler="handover_confirm_all",
+        worker_payload={"batch_key": batch_key},
         resource_keys=_handover_resource_keys(batch_key=batch_key),
-        priority="manual",
         feature="handover_confirm_all",
-        submitted_by="manual",
+        dedupe_key=f"handover:confirm-all:{batch_key}",
     )
-    container.add_system_log(f"[任务] 已提交: 交接班审核一键全确认 batch={batch_key} ({job.job_id})")
     return _accepted_job_response(job)
 
 
@@ -4896,6 +5005,7 @@ def handover_review_snapshot(
         # 拖慢页面打开；共享块状态由后续 status/共享块接口刷新。
         include_shared_blocks=False,
         include_outdoor_temperature=False,
+        delivery_job_service=getattr(container, "job_service", None),
     )
 
 
@@ -4969,6 +5079,7 @@ def handover_review_bootstrap(
         # 110KV 已带入本地已保存数据；锁和其他共享状态由 status 补齐。
         include_shared_blocks=False,
         include_outdoor_temperature=False,
+        delivery_job_service=getattr(container, "job_service", None),
     )
 
 
@@ -5250,6 +5361,7 @@ def handover_review_status(
         emit_log=container.add_system_log,
         include_shared_blocks=True,
         include_outdoor_temperature=False,
+        delivery_job_service=getattr(container, "job_service", None),
     )
 
 
@@ -5309,6 +5421,22 @@ def handover_review_history(
     }
 
 
+@router.get("/api/handover/review/{building_code}/delivery-download")
+def handover_review_delivery_download(
+    building_code: str, request: Request, session_id: str, generation_id: str, artifact: str = "log",
+) -> FileResponse:
+    if artifact not in {"log", "capacity"}:
+        raise HTTPException(status_code=400, detail="不支持的交接班成品类型")
+    service = _build_review_session_service(request.app.state.container)
+    building = _resolve_building_or_404(service, building_code)
+    target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    manifest = _require_review_delivery(service, target)
+    if manifest["generation_id"] != generation_id:
+        raise HTTPException(status_code=409, detail="交接班成品版本已更新，请刷新后下载")
+    filename_key = "output_file" if artifact == "log" else "capacity_output_file"
+    return FileResponse(manifest["paths"][artifact], filename=Path(target[filename_key]).name)
+
+
 @router.get("/api/handover/review/{building_code}/download")
 def handover_review_download(building_code: str, request: Request, session_id: str = "") -> FileResponse:
     container = request.app.state.container
@@ -5320,6 +5448,9 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    if _use_prepared_download(service, target):
+        artifact = _require_review_delivery(service, target)["paths"]["log"]
+        return FileResponse(artifact, filename=Path(target["output_file"]).name)
     existing_document_state: Dict[str, Any] | None = None
     try:
         ensured_state = document_state.ensure_document_for_session(target)
@@ -5424,6 +5555,9 @@ def handover_review_capacity_download(
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    if _use_prepared_download(service, target):
+        artifact = _require_review_delivery(service, target)["paths"]["capacity"]
+        return FileResponse(artifact, filename=Path(target["capacity_output_file"]).name)
 
     output_file_text = str(target.get("capacity_output_file", "")).strip()
     if not output_file_text:
@@ -5527,10 +5661,14 @@ def handover_review_capacity_image_prepare(
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
     if not str(target.get("capacity_output_file", "") or "").strip():
         raise HTTPException(status_code=409, detail="当前交接班容量报表尚未生成")
+    manifest = _require_review_delivery(service, target) if building in HandoverDeliveryWorkflowService.BUILDINGS else {}
+    if manifest and payload.get("generation_id") is not None and payload["generation_id"] != manifest["generation_id"]:
+        raise HTTPException(status_code=409, detail="交接班成品版本已更新，请刷新后发送")
     token = _issue_capacity_image_send_token(
         building=building,
         session_id=session_id_text,
         client_id=client_id,
+        generation_id=manifest.get("generation_id", ""),
     )
     container.add_system_log(
         f"[交接班][容量表图片发送] 已签发手动发送令牌 building={building}, session_id={session_id_text}, client_id={client_id or '-'}"
@@ -5562,16 +5700,29 @@ def handover_review_capacity_image_send(
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     if trigger_source != "capacity_image_send_button":
         raise HTTPException(status_code=400, detail="容量表图片发送仅允许审核页按钮手动触发")
+    _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
+    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    manifest = _require_review_delivery(service, target) if building in HandoverDeliveryWorkflowService.BUILDINGS else {}
+    if manifest and payload.get("generation_id") is not None and payload["generation_id"] != manifest["generation_id"]:
+        raise HTTPException(status_code=409, detail="交接班成品版本已更新，请刷新后发送")
     token_error = _verify_capacity_image_send_token(
         str(payload.get("send_token", "") or "").strip(),
         building=building,
         session_id=session_id_text,
         client_id=client_id,
+        generation_id=manifest.get("generation_id", ""),
     )
     if token_error:
         raise HTTPException(status_code=400, detail=token_error)
-    _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
-    target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    if manifest:
+        delivery_service = CapacityReportImageDeliveryService(
+            _handover_cfg(container), config_path=getattr(container, "config_path", None), review_service=service,
+        )
+        prepared = {**target, "capacity_output_file": manifest["paths"]["capacity"]}
+        return delivery_service.send_for_session(
+            prepared, building=building, client_id=client_id, manual_trigger=True,
+            prepared_artifacts=manifest["paths"], emit_log=container.add_system_log,
+        )
     if not str(target.get("capacity_output_file", "") or "").strip():
         return {
             "ok": False,
@@ -5793,6 +5944,7 @@ def _submit_review_regeneration_locked(
             duty_shift_text,
         )
         action_label = "生成当前班次交接班及容量表"
+    _ensure_review_delivery_not_preparing(service, target, container)
     reused = reuse_generated_report_pair(target) if only_if_missing else None
     if reused:
         # Preserve the job response expected by existing review pages without waiting for the batch lock.
@@ -5806,8 +5958,10 @@ def _submit_review_regeneration_locked(
     if bool(target.get("confirmed", False)):
         raise HTTPException(status_code=409, detail="当前楼栋已确认并提交上传，本班次不能重新生成；如需修改请直接编辑后保存")
     cloud_sync = target.get("cloud_sheet_sync", {}) if isinstance(target.get("cloud_sheet_sync", {}), dict) else {}
-    if str(cloud_sync.get("status", "") or "").strip().lower() in {"uploading", "syncing"}:
-        raise HTTPException(status_code=409, detail="当前楼栋云文档上传中，请等待完成后再重新生成")
+    if str(cloud_sync.get("status", "") or "").strip().lower() in {"uploading", "syncing"} and str(
+        cloud_sync.get("spreadsheet_token", "")
+    ).startswith("bitable:"):
+        raise HTTPException(status_code=409, detail="当前楼栋附件正在上传，请等待完成后再重新生成")
 
     duty_date = str(target.get("duty_date", "") or "").strip()
     duty_shift = str(target.get("duty_shift", "") or "").strip().lower()
@@ -5932,6 +6086,7 @@ def handover_review_save(
     if not isinstance(document, dict):
         raise HTTPException(status_code=400, detail="document 格式错误")
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    _ensure_review_delivery_not_preparing(service, target, container)
     try:
         session_base_revision = int(payload.get("session_base_revision") or target.get("revision", 0) or base_revision or 0)
     except (TypeError, ValueError) as exc:
@@ -6445,6 +6600,71 @@ def handover_review_save(
     )
 
 
+@router.post("/api/handover/review/{building_code}/prepare-delivery")
+def handover_review_prepare_delivery(
+    building_code: str, request: Request, payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    service = _build_review_session_service(container)
+    building = _resolve_building_or_404(service, building_code)
+    session_id = str(payload.get("session_id") or "").strip()
+    if building not in HandoverDeliveryWorkflowService.BUILDINGS or not session_id:
+        raise HTTPException(status_code=400, detail="请选择有效的楼栋和班次")
+    base_revision = _parse_base_revision_or_400(payload)
+    _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id)
+    _ensure_session_lock_held_or_409(
+        service, building=building, session_id=session_id, client_id=str(payload.get("client_id") or "").strip(),
+    )
+    target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    document_revision = _review_document_revision_from_store(container, target)
+    if base_revision != document_revision:
+        raise HTTPException(status_code=409, detail="审核内容已变更，请刷新页面后重新提交")
+    config = _handover_cfg(container)
+    state = HandoverDeliveryStateService(config)
+    dedupe_key = f"handover:prepare-delivery:{session_id}"
+    with _REVIEW_DELIVERY_SUBMIT_LOCK, attachment_record_lock(f"prepare-admit:{session_id}", timeout=3):
+        active = container.job_service.find_active_job_by_dedupe_key(dedupe_key)
+        manifest = state.get(session_id)
+        if active:
+            if not manifest.get("generation_id"):
+                raise HTTPException(status_code=409, detail="当前楼栋已有成品生成任务，请稍后刷新")
+            job = active
+        else:
+            current = state.for_session({**target, "document_revision": document_revision})
+            if current.get("status") in state.ACTIVE and not current.get("job_id"):
+                raise HTTPException(status_code=409, detail="本楼成品正在生成，请稍后刷新")
+            reuse = bool(current.get("artifacts_ready")) and state.artifacts_exist(current)
+            generation_id = current["generation_id"] if reuse else secrets.token_hex(16)
+            manifest = current if reuse else state.begin(target, generation_id)
+            worker_payload = {
+                "session_id": session_id, "generation_id": generation_id,
+                "expected_revision": int(target["revision"]), "document_revision": base_revision,
+                "reuse_artifacts": reuse,
+            }
+            from app.worker.task_handlers import handle_handover_prepare_delivery
+
+            try:
+                job = _start_handover_background_job(
+                    container, name=f"交接班{'附件续传' if reuse else '成品生成'}-{session_id}",
+                    run_func=lambda emit: handle_handover_prepare_delivery(config, worker_payload, emit),
+                    worker_handler="handover_prepare_delivery", worker_payload=worker_payload,
+                    resource_keys=_handover_resource_keys(building=building), dedupe_key=dedupe_key,
+                    feature="handover", submitted_by="review",
+                )
+                job = job.to_dict() if hasattr(job, "to_dict") else dict(job or {})
+                manifest = state.update(session_id, generation_id, job_id=str(job.get("job_id") or ""))
+            except Exception as exc:
+                if reuse:
+                    state.update(session_id, generation_id, upload_error=str(exc))
+                else:
+                    state.update(session_id, generation_id, status="failed", error=str(exc))
+                raise
+    return {
+        "ok": True, "accepted": True, "job": job, "generation_id": manifest["generation_id"],
+        "attachment_delivery": state.public(manifest),
+    }
+
+
 @router.post("/api/handover/review/{building_code}/confirm")
 def handover_review_confirm(
     building_code: str,
@@ -6455,6 +6675,8 @@ def handover_review_confirm(
     service = _build_review_session_service(container)
     followup = _build_review_followup_service(container)
     building = _resolve_building_or_404(service, building_code)
+    if building in HandoverDeliveryWorkflowService.BUILDINGS and isinstance(getattr(service, "config", None), dict):
+        return handover_review_prepare_delivery(building_code, request, payload)
     session_id = str(payload.get("session_id", "")).strip()
     base_revision = _parse_base_revision_or_400(payload)
     if not session_id:
@@ -6677,6 +6899,7 @@ def handover_review_unconfirm(
 
 
 @router.post("/api/handover/review/{building_code}/lock/claim")
+@_dedicated_review_lock_endpoint
 def handover_review_lock_claim(
     building_code: str,
     request: Request,
@@ -6706,6 +6929,7 @@ def handover_review_lock_claim(
 
 
 @router.post("/api/handover/review/{building_code}/lock/heartbeat")
+@_dedicated_review_lock_endpoint
 def handover_review_lock_heartbeat(
     building_code: str,
     request: Request,
@@ -6733,6 +6957,7 @@ def handover_review_lock_heartbeat(
 
 
 @router.post("/api/handover/review/{building_code}/lock/release")
+@_dedicated_review_lock_endpoint
 def handover_review_lock_release(
     building_code: str,
     request: Request,
@@ -6957,7 +7182,7 @@ def handover_review_retry_cloud_sync(
             else service.get_batch_status(str(session.get("batch_key", "")).strip())
         )
         emit_log(
-            f"[交接班][云表重试] building={building}, batch={session.get('batch_key', '-')}, 状态={_followup_status_text(result.get('status'))}"
+            f"[交接班][附件重试] building={building}, batch={session.get('batch_key', '-')}, 状态={_followup_status_text(result.get('status'))}"
         )
         response = {
             "ok": str(result.get("status", "")).strip().lower() in {"ok", "success"},
@@ -6980,7 +7205,7 @@ def handover_review_retry_cloud_sync(
 
     job = _start_handover_background_job(
         container,
-        name=f"交接班云表重试-{building}-{target_batch_key}",
+        name=f"交接班附件重试-{building}-{target_batch_key}",
         run_func=_run,
         worker_handler="handover_cloud_retry_single",
         worker_payload={
@@ -6994,7 +7219,7 @@ def handover_review_retry_cloud_sync(
         submitted_by="manual",
     )
     container.add_system_log(
-        f"[任务] 已提交: 交接班云表重试 building={building} batch={target_batch_key} ({job.job_id})"
+        f"[任务] 已提交: 交接班附件重试 building={building} batch={target_batch_key} ({job.job_id})"
     )
     return _accepted_job_response(job)
 
@@ -7068,7 +7293,7 @@ def handover_review_retry_cloud_sync_batch(
         followup = _build_review_followup_service(container)
         result = followup.retry_failed_cloud_sheet_in_batch(batch_key, emit_log=emit_log)
         emit_log(
-            f"[交接班][云表批量重试] batch={batch_key}, 状态={_followup_status_text(result.get('status'))}"
+            f"[交接班][附件批量重试] batch={batch_key}, 状态={_followup_status_text(result.get('status'))}"
         )
         batch_status = (
             result.get("batch_status")
@@ -7096,7 +7321,7 @@ def handover_review_retry_cloud_sync_batch(
 
     job = _start_handover_background_job(
         container,
-        name=f"交接班云表批量重试-{batch_key}",
+        name=f"交接班附件批量重试-{batch_key}",
         run_func=_run,
         worker_handler="handover_cloud_retry_batch",
         worker_payload={"batch_key": batch_key},
@@ -7105,5 +7330,5 @@ def handover_review_retry_cloud_sync_batch(
         feature="handover_cloud_retry_batch",
         submitted_by="manual",
     )
-    container.add_system_log(f"[任务] 已提交: 交接班云表批量重试 batch={batch_key} ({job.job_id})")
+    container.add_system_log(f"[任务] 已提交: 交接班附件批量重试 batch={batch_key} ({job.job_id})")
     return _accepted_job_response(job)

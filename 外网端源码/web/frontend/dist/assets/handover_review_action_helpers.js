@@ -1,3 +1,119 @@
+// Cloud document wording is shown as "班次附件/多维记录"; legacy backends still send cloud_sheet keys.
+export const ATTACHMENT_DELIVERY_STATUSES = ["queued", "preparing", "ready", "uploaded", "failed", "stale"];
+export const ATTACHMENT_DELIVERY_TERMINAL_FAILED = ["failed", "stale"];
+export const ATTACHMENT_DELIVERY_BUSY_STATUSES = ["queued", "preparing"];
+
+const ATTACHMENT_DELIVERY_STATUS_TEXT = {
+  queued: "排队中",
+  preparing: "准备中",
+  ready: "成品已就绪",
+  uploaded: "附件已上传",
+  failed: "生成失败",
+  stale: "已过期",
+};
+
+const ATTACHMENT_DELIVERY_IDLE_TEXT = "尚未生成成品";
+
+function attachmentDeliveryText(value) {
+  return String(value ?? "").trim();
+}
+
+function normalizeAttachmentDeliveryStatus(value) {
+  const normalized = attachmentDeliveryText(value).toLowerCase();
+  return ATTACHMENT_DELIVERY_STATUSES.includes(normalized) ? normalized : "";
+}
+
+export function normalizeAttachmentDelivery(raw) {
+  if (!raw || typeof raw !== "object") {
+    return emptyAttachmentDelivery();
+  }
+  const status = normalizeAttachmentDeliveryStatus(raw.status);
+  // A manifest may lose its status; readiness still means the generation finished.
+  const artifactsReady = Boolean(raw.artifacts_ready ?? raw.artifactsReady) && (!status || status === "ready" || status === "uploaded");
+  return {
+    status: status || (artifactsReady ? "ready" : ""),
+    artifacts_ready: artifactsReady,
+    generation_id: attachmentDeliveryText(raw.generation_id ?? raw.generationId),
+    error: attachmentDeliveryText(raw.error),
+    upload_error: attachmentDeliveryText(raw.upload_error),
+    record_url: attachmentDeliveryText(raw.record_url ?? raw.recordUrl),
+  };
+}
+
+export function emptyAttachmentDelivery() {
+  return { status: "", artifacts_ready: false, generation_id: "", error: "", record_url: "" };
+}
+
+export function resolveAttachmentDeliveryGate(raw, { expectedGenerationId = "" } = {}) {
+  const delivery = normalizeAttachmentDelivery(raw);
+  const expected = attachmentDeliveryText(expectedGenerationId);
+  const hasGeneration = Boolean(delivery.generation_id);
+  const isBusy = ATTACHMENT_DELIVERY_BUSY_STATUSES.includes(delivery.status);
+  const isFailed = ATTACHMENT_DELIVERY_TERMINAL_FAILED.includes(delivery.status);
+  // Any older generation is stale even if the backend has not relabelled it yet.
+  const isStale = Boolean(expected && hasGeneration && delivery.generation_id !== expected);
+  const isReady = delivery.artifacts_ready && hasGeneration && (!expected || !isStale);
+  let reason = "";
+  let reasonCode = "";
+  if (isStale) {
+    reason = "成品版本已变化，请重新生成成品";
+    reasonCode = "delivery_generation_changed";
+  } else if (delivery.status === "failed") {
+    reason = delivery.error ? `成品生成失败：${delivery.error}` : "成品生成失败，请重试";
+    reasonCode = "delivery_failed";
+  } else if (delivery.status === "stale") {
+    reason = "成品已过期，请重新生成成品";
+    reasonCode = "delivery_stale";
+  } else if (delivery.status === "queued" || delivery.status === "preparing") {
+    reason = "成品生成中，请等待本楼任务完成";
+    reasonCode = "delivery_busy";
+  } else if (!hasGeneration) {
+    reason = "尚未生成成品，请先点击“生成成品并提交”";
+    reasonCode = "delivery_missing";
+  } else if (!delivery.artifacts_ready) {
+    reason = "成品尚未就绪，请等待生成完成";
+    reasonCode = "delivery_not_ready";
+  }
+  return {
+    delivery,
+    expected_generation_id: expected,
+    is_busy: isBusy,
+    is_failed: isFailed,
+    is_stale: isStale,
+    is_ready: isReady,
+    can_download: isReady,
+    can_send: isReady,
+    can_regenerate: !isBusy,
+    can_prepare: !isBusy,
+    show_retry: isFailed || isStale,
+    can_refresh: true,
+    reason,
+    reason_code: reasonCode,
+  };
+}
+
+export function resolveAttachmentDeliveryUi(raw, { expectedGenerationId = "" } = {}) {
+  const gate = resolveAttachmentDeliveryGate(raw, { expectedGenerationId });
+  const { delivery } = gate;
+  if (gate.is_stale) {
+    return { text: ATTACHMENT_DELIVERY_STATUS_TEXT.stale, tone: "danger", gate };
+  }
+  if (delivery.status === "failed") {
+    return {
+      text: delivery.error ? `${ATTACHMENT_DELIVERY_STATUS_TEXT.failed}：${delivery.error}` : ATTACHMENT_DELIVERY_STATUS_TEXT.failed,
+      tone: "danger",
+      gate,
+    };
+  }
+  if (gate.is_ready) {
+    return { text: ATTACHMENT_DELIVERY_STATUS_TEXT[delivery.status] || ATTACHMENT_DELIVERY_STATUS_TEXT.ready, tone: "success", gate };
+  }
+  if (gate.is_busy) {
+    return { text: ATTACHMENT_DELIVERY_STATUS_TEXT[delivery.status], tone: "info", gate };
+  }
+  return { text: ATTACHMENT_DELIVERY_IDLE_TEXT, tone: "neutral", gate };
+}
+
 export function createHandoverReviewActionHelpers(options = {}) {
   const {
     session,
@@ -15,6 +131,9 @@ export function createHandoverReviewActionHelpers(options = {}) {
     capacityDownloading,
     capacityImageSending,
     regenerating,
+    attachmentDelivery,
+    attachmentGenerationId,
+    preparingDelivery,
     retryingCloudSync,
     updatingHistoryCloudSync,
     activeRouteSelection,
@@ -47,6 +166,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
     releaseCurrentLock,
     loadReviewData,
     shouldPreferBootstrapLoad,
+    // Optional poll rhythm override; production keeps the 2.5s tick / 15min budget.
+    attachmentDeliveryPollOptions,
     beginRemoteSaveRefresh,
     isRevisionConflictError,
     applyPayloadMeta,
@@ -62,12 +183,31 @@ export function createHandoverReviewActionHelpers(options = {}) {
     regenerateHandoverReviewFromFilesApi,
     buildHandoverReviewDownloadUrl,
     buildHandoverReviewCapacityDownloadUrl,
+    prepareHandoverReviewDeliveryApi,
+    buildHandoverReviewDeliveryDownloadUrl,
     triggerBrowserDownload,
   } = options;
 
   function isIncompleteJobStatus(status) {
     const normalized = String(status || "").trim().toLowerCase();
     return normalized === "queued" || normalized === "running" || normalized === "waiting_resource";
+  }
+
+  function readDeliveryGenerationId() {
+    return String(attachmentGenerationId?.value || "").trim();
+  }
+
+  function setDeliveryGenerationId(value) {
+    if (attachmentGenerationId) {
+      attachmentGenerationId.value = String(value || "").trim();
+    }
+  }
+
+  // This building's own generation unlocks downloads; the five-building upload gate is irrelevant here.
+  function resolveDeliveryGate() {
+    return resolveAttachmentDeliveryGate(attachmentDelivery?.value, {
+      expectedGenerationId: readDeliveryGenerationId(),
+    });
   }
 
   async function refreshAfterRevisionConflict(message = "已同步最新审核内容，请重新下载。") {
@@ -106,6 +246,37 @@ export function createHandoverReviewActionHelpers(options = {}) {
       await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
     }
     return null;
+  }
+
+  // The worker owns artifact preparation; the client only polls its own generation to completion.
+  async function waitForDeliveryArtifacts(generationId, options = {}) {
+    const {
+      timeoutMs = attachmentDeliveryPollOptions?.timeoutMs ?? 15 * 60 * 1000,
+      intervalMs = attachmentDeliveryPollOptions?.intervalMs ?? 2500,
+    } = options || {};
+    const targetGenerationId = String(generationId || "").trim();
+    if (!targetGenerationId || typeof loadReviewData !== "function") return resolveDeliveryGate();
+    const startedAt = Date.now();
+    while (Date.now() - startedAt <= timeoutMs) {
+      let loaded = true;
+      try {
+        loaded = await loadReviewData({ background: true });
+      } catch (_error) {
+        // Transient polling failures keep the known state and retry on the next tick.
+      }
+      const gate = resolveDeliveryGate();
+      if (loaded !== false && gate.delivery.generation_id === targetGenerationId && gate.is_ready) {
+        return gate;
+      }
+      if (gate.delivery.generation_id === targetGenerationId && (gate.is_failed || gate.is_stale)) {
+        return gate;
+      }
+      await new Promise((resolve) => {
+        const timer = typeof window !== "undefined" ? window.setTimeout : setTimeout;
+        timer(resolve, intervalMs);
+      });
+    }
+    return resolveDeliveryGate();
   }
 
   async function switchToSession(sessionId, { toLatest = false, dutyDate = "", dutyShift = "" } = {}) {
@@ -149,6 +320,11 @@ export function createHandoverReviewActionHelpers(options = {}) {
     await switchToSession(latestSessionId.value, { toLatest: true });
   }
 
+  function deliveryConflictText(gate) {
+    return gate.reason || "成品尚未就绪，请先点击“生成成品并提交”";
+  }
+
+  // "生成成品并提交": save content, hold the edit lock, then queue this building's artifact job.
   async function toggleConfirm() {
     if (confirmActionVm.value.disabled) {
       statusText.value = confirmActionVm.value.disabledReason || "";
@@ -163,45 +339,73 @@ export function createHandoverReviewActionHelpers(options = {}) {
       || saving.value
       || regenerating.value
       || confirming.value
+      || preparingDelivery?.value
       || cloudSyncBusy.value
       || syncingRemoteRevision.value
       || needsRefresh.value
       || staleRevisionConflict.value
     ) return;
+    if (!resolveDeliveryGate().can_prepare) {
+      statusText.value = deliveryConflictText(resolveDeliveryGate());
+      return;
+    }
+    // The lock must be held before saving; otherwise another terminal could save in between.
+    statusText.value = "正在获取审核页编辑锁...";
+    errorText.value = "";
+    let locked = true;
+    if (typeof ensureEditingLock === "function") {
+      locked = await ensureEditingLock();
+    }
+    if (!locked) {
+      errorText.value = "当前审核页编辑锁获取失败，请确认没有其他终端编辑后重试";
+      statusText.value = "生成成品失败，请处理后重试。";
+      return;
+    }
     if (dirty.value) {
-      const saved = await saveDocument({ reason: "confirm", allowSubstationFailure: true });
+      const saved = await saveDocument({ reason: "prepare_delivery", allowSubstationFailure: true });
       if (!saved) return;
     }
     confirming.value = true;
-    errorText.value = "";
-    statusText.value = "正在获取审核页编辑锁...";
-    const wasConfirmedBefore = Boolean(session.value?.confirmed);
+    if (preparingDelivery) preparingDelivery.value = true;
+    const requestBaseRevision = session.value?.document_revision || session.value?.revision;
     try {
-      if (typeof ensureEditingLock === "function") {
-        const locked = await ensureEditingLock();
-        if (!locked) {
-          errorText.value = "当前审核页编辑锁获取失败，请确认没有其他终端编辑后重试";
-          statusText.value = "确认失败，请处理后重试。";
-          return;
-        }
-      }
-      statusText.value = wasConfirmedBefore
-        ? "正在同步交接班文件并重传本楼云文档..."
-        : "正在同步交接班文件并确认上传本楼云文档...";
+      statusText.value = "正在保存审核内容并生成班次附件成品...";
       const request = {
         session_id: session.value.session_id,
-        base_revision: session.value.revision,
+        base_revision: requestBaseRevision,
         client_id: reviewClientId,
       };
-      const response = await confirmHandoverReviewApi(buildingCode, request);
-      applyPayloadMeta(response || {});
-      broadcastHandoverReviewStatusChange(response || {});
+      const response = await prepareHandoverReviewDeliveryApi(buildingCode, request);
+      const generationId = String(response?.generation_id || response?.attachment_delivery?.generation_id || "").trim();
+      setDeliveryGenerationId(generationId);
+      const deliverySnippet = response?.attachment_delivery && typeof response.attachment_delivery === "object"
+        ? response.attachment_delivery
+        : (generationId ? { status: "queued", artifacts_ready: false, generation_id: generationId } : {});
+      applyPayloadMeta({ ...(response || {}), attachment_delivery: deliverySnippet });
+      broadcastHandoverReviewStatusChange({ ...(response || {}), attachment_delivery: deliverySnippet });
       staleRevisionConflict.value = false;
       needsRefresh.value = false;
-      statusText.value = resolveOperationFeedbackText(
-        response,
-        wasConfirmedBefore ? "本楼云文档已重新提交上传" : "已确认本楼并提交云文档上传",
-      );
+      const jobId = String(response?.job?.job_id || response?.job_id || "").trim();
+      if (!jobId) {
+        throw new Error("生成成品任务提交失败");
+      }
+      statusText.value = "已提交本楼班次附件成品生成任务，等待生成完成...";
+      const gate = await waitForDeliveryArtifacts(generationId);
+      if (gate.delivery.generation_id !== generationId) {
+        // A newer generation replaced this one; readiness must be checked against the newest id.
+        setDeliveryGenerationId(gate.delivery.generation_id || generationId);
+      }
+      const latest = resolveDeliveryGate();
+      if (latest.is_ready) {
+        statusText.value = resolveOperationFeedbackText(response, "本楼班次附件成品已就绪，可下载或发送");
+        errorText.value = "";
+      } else if (latest.is_failed || latest.is_stale) {
+        errorText.value = latest.reason || "班次附件成品生成失败，请重试";
+        statusText.value = "班次附件成品生成失败，请重试。";
+      } else {
+        statusText.value = "班次附件成品仍在生成，可稍后刷新查看结果";
+        errorText.value = "";
+      }
     } catch (error) {
       if (isRevisionConflictError(error)) {
         beginRemoteSaveRefresh();
@@ -211,11 +415,12 @@ export function createHandoverReviewActionHelpers(options = {}) {
         });
         statusText.value = "已同步最新审核内容";
       } else {
-        errorText.value = String(error?.message || error || "确认失败");
-        statusText.value = "确认失败，请处理后重试。";
+        errorText.value = String(error?.message || error || "生成成品失败");
+        statusText.value = "生成成品失败，请处理后重试。";
       }
     } finally {
       confirming.value = false;
+      if (preparingDelivery) preparingDelivery.value = false;
     }
   }
 
@@ -227,16 +432,16 @@ export function createHandoverReviewActionHelpers(options = {}) {
     if (!buildingCode || !session.value || retryingCloudSync.value) return;
     retryingCloudSync.value = true;
     errorText.value = "";
-    statusText.value = "正在重试云表同步...";
+    statusText.value = "正在重试班次附件多维记录...";
     try {
       const response = await retryHandoverReviewCloudSyncApi(buildingCode, {
         session_id: session.value.session_id,
       });
       const jobId = String(response?.job?.job_id || response?.job_id || "").trim();
       if (!jobId) {
-        throw new Error("云表重试任务提交失败");
+        throw new Error("班次附件多维记录重试任务提交失败");
       }
-      statusText.value = "已提交云表同步任务，正在处理中...";
+      statusText.value = "已提交班次附件多维记录同步任务，正在处理中...";
       void (async () => {
         const job = await waitForBackgroundJob(jobId, getJobApi, { timeoutMs: 10 * 60 * 1000 });
         if (!job) return;
@@ -247,26 +452,26 @@ export function createHandoverReviewActionHelpers(options = {}) {
           broadcastHandoverReviewStatusChange(result || {});
           const retryStatus = String(result.status || "").trim().toLowerCase();
           if (retryStatus === "ok" || retryStatus === "success") {
-            statusText.value = resolveOperationFeedbackText(result, "云表上传成功");
+            statusText.value = resolveOperationFeedbackText(result, "班次附件多维记录上传成功");
             errorText.value = "";
           } else if (retryStatus === "blocked") {
-            errorText.value = resolveOperationFeedbackText(result, "当前楼栋尚未确认，不能重试云表上传。");
+            errorText.value = resolveOperationFeedbackText(result, "当前楼栋成品尚未就绪，不能重试班次附件多维记录上传。");
           } else {
             const failedRows = Array.isArray(result?.cloud_sheet_sync?.failed_buildings)
               ? result.cloud_sheet_sync.failed_buildings
               : [];
             const failedItem = failedRows.find((item) => String(item?.building || "").trim() === String(building.value || "").trim());
-            errorText.value = String(failedItem?.error || "云表上传失败");
-            statusText.value = resolveOperationFeedbackText(result, "云表上传失败");
+            errorText.value = String(failedItem?.error || "班次附件多维记录上传失败");
+            statusText.value = resolveOperationFeedbackText(result, "班次附件多维记录上传失败");
           }
         } else {
-          errorText.value = String(job?.error || "云表重试失败");
-          statusText.value = "云表上传失败";
+          errorText.value = String(job?.error || "班次附件多维记录重试失败");
+          statusText.value = "班次附件多维记录上传失败";
         }
       })();
     } catch (error) {
-      errorText.value = String(error?.message || error || "云表重试失败");
-      statusText.value = "云表上传失败";
+      errorText.value = String(error?.message || error || "班次附件多维记录重试失败");
+      statusText.value = "班次附件多维记录上传失败";
     } finally {
       retryingCloudSync.value = false;
     }
@@ -278,13 +483,18 @@ export function createHandoverReviewActionHelpers(options = {}) {
       return;
     }
     if (!buildingCode || !session.value) return;
+    // History updates must never republish a generation that is no longer current.
+    if (!resolveDeliveryGate().can_regenerate) {
+      statusText.value = deliveryConflictText(resolveDeliveryGate());
+      return;
+    }
     if (dirty.value) {
       const saved = await saveDocument({ reason: "cloud_update", allowSubstationFailure: true });
       if (!saved) return;
     }
     updatingHistoryCloudSync.value = true;
     errorText.value = "";
-    statusText.value = "正在更新历史云文档...";
+    statusText.value = "正在更新历史班次附件多维记录...";
     try {
       const response = await updateHandoverReviewCloudSyncApi(buildingCode, {
         session_id: session.value.session_id,
@@ -294,14 +504,14 @@ export function createHandoverReviewActionHelpers(options = {}) {
       broadcastHandoverReviewStatusChange(response || {});
       const updateStatus = String(response.status || "").trim().toLowerCase();
       if (updateStatus === "ok" || updateStatus === "success") {
-        statusText.value = resolveOperationFeedbackText(response, "历史云文档已更新");
+        statusText.value = resolveOperationFeedbackText(response, "历史班次附件多维记录已更新");
       } else {
-        errorText.value = String(response?.cloud_sheet_sync?.failed_buildings?.[0]?.error || response?.status || "历史云文档更新失败");
-        statusText.value = resolveOperationFeedbackText(response, "历史云文档更新失败");
+        errorText.value = String(response?.cloud_sheet_sync?.failed_buildings?.[0]?.error || response?.status || "历史班次附件多维记录更新失败");
+        statusText.value = resolveOperationFeedbackText(response, "历史班次附件多维记录更新失败");
       }
     } catch (error) {
-      errorText.value = String(error?.message || error || "历史云文档更新失败");
-      statusText.value = "历史云文档更新失败";
+      errorText.value = String(error?.message || error || "历史班次附件多维记录更新失败");
+      statusText.value = "历史班次附件多维记录更新失败";
     } finally {
       updatingHistoryCloudSync.value = false;
     }
@@ -312,7 +522,12 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = downloadActionVm.value.disabledReason || "";
       return;
     }
-    if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value) {
+    const gate = resolveDeliveryGate();
+    if (!gate.can_download) {
+      statusText.value = deliveryConflictText(gate);
+      return;
+    }
+    if (saving.value || regenerating.value || confirming.value || preparingDelivery?.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value) {
       statusText.value = "请先等待当前保存或同步完成后再下载。";
       return;
     }
@@ -327,16 +542,17 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     downloading.value = true;
     errorText.value = "";
-    statusText.value = "正在同步交接班文件...";
+    statusText.value = "正在下载本楼班次附件成品...";
     try {
-      const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId, {
+      const url = buildHandoverReviewDeliveryDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,
+        generation_id: gate.delivery.generation_id,
         ts: Date.now(),
       });
-      const result = await triggerBrowserDownload(url, session.value?.output_file || "交接班日志.xlsx");
+      const result = await triggerBrowserDownload(url, session.value?.output_file || "班次附件.xlsx");
       statusText.value = result?.warning
-        ? `文件已下载，但部分填充失败：${result.warning}`
-        : "交接班文件已下载";
+        ? `成品已下载，但部分填充失败：${result.warning}`
+        : "本楼班次附件成品已下载";
     } catch (error) {
       if (isRevisionConflictError(error)) {
         await refreshAfterRevisionConflict();
@@ -353,7 +569,12 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = capacityDownloadActionVm.value.disabledReason || "";
       return;
     }
-    if (saving.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
+    const gate = resolveDeliveryGate();
+    if (!gate.can_download) {
+      statusText.value = deliveryConflictText(gate);
+      return;
+    }
+    if (saving.value || regenerating.value || confirming.value || preparingDelivery?.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
       statusText.value = "请先等待当前保存或同步完成后再下载。";
       return;
     }
@@ -373,16 +594,18 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     capacityDownloading.value = true;
     errorText.value = "";
-    statusText.value = "正在同步并下载容量报表...";
+    statusText.value = "正在下载本楼容量表成品...";
     try {
-      const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, {
+      const url = buildHandoverReviewDeliveryDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,
+        generation_id: gate.delivery.generation_id,
+        artifact: "capacity",
         ts: Date.now(),
       });
       const result = await triggerBrowserDownload(url, capacityOutputFile || "交接班容量报表.xlsx");
       statusText.value = result?.warning
-        ? `文件已下载，但部分填充失败：${result.warning}`
-        : "容量报表已下载";
+        ? `成品已下载，但部分填充失败：${result.warning}`
+        : "本楼容量表成品已下载";
     } catch (error) {
       if (isRevisionConflictError(error)) {
         await refreshAfterRevisionConflict();
@@ -399,9 +622,16 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = capacityImageSendActionVm.value.disabledReason || "";
       return;
     }
+    // Sending is always a manual click; generation never sends on its own.
+    const gate = resolveDeliveryGate();
+    if (!gate.can_send) {
+      statusText.value = deliveryConflictText(gate);
+      return;
+    }
     if (
       saving.value
       || confirming.value
+      || preparingDelivery?.value
       || cloudSyncBusy.value
       || downloading.value
       || capacityDownloading.value
@@ -423,11 +653,12 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     capacityImageSending.value = true;
     errorText.value = "";
-    statusText.value = "正在生成并发送审核文本和容量表图片...";
+    statusText.value = "正在发送审核文本和容量表图片...";
     try {
       const prepared = await prepareHandoverReviewCapacityImageApi(buildingCode, {
         session_id: sessionId,
         client_id: reviewClientId,
+        generation_id: gate.delivery.generation_id,
         trigger_source: "capacity_image_send_button",
       });
       const sendToken = String(prepared?.send_token || "").trim();
@@ -437,6 +668,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       const response = await sendHandoverReviewCapacityImageApi(buildingCode, {
         session_id: sessionId,
         client_id: reviewClientId,
+        generation_id: gate.delivery.generation_id,
         trigger_source: "capacity_image_send_button",
         send_token: sendToken,
       });
@@ -482,9 +714,16 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = regenerateActionVm.value.disabledReason || "";
       return;
     }
+    // A queued/preparing artifact job must finish or fail before regenerating again.
+    const deliveryGate = resolveDeliveryGate();
+    if (!deliveryGate.can_regenerate) {
+      statusText.value = deliveryConflictText(deliveryGate);
+      return;
+    }
     if (
       saving.value
       || confirming.value
+      || preparingDelivery?.value
       || cloudSyncBusy.value
       || downloading.value
       || capacityDownloading.value
@@ -595,6 +834,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
     onHistorySelectionChange,
     returnToLatestSession,
     toggleConfirm,
+    // Same entry point the "生成成品并提交" button uses.
+    prepareAttachmentDelivery: toggleConfirm,
     retryCloudSheetSync,
     updateHistoryCloudSync,
     downloadCurrentReviewFile,
@@ -603,5 +844,6 @@ export function createHandoverReviewActionHelpers(options = {}) {
     regenerateCurrentHandover,
     refreshData,
     saveCurrentReview,
+    resolveDeliveryGate,
   };
 }

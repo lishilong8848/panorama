@@ -6,14 +6,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Sequence
 
-from handover_log_module.core.shift_window import format_duty_date_text
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.review_session_state_store import ReviewSessionStateStore
 from handover_log_module.service.handover_110_main_transformer_parser import (
     normalize_110_main_transformer_rows,
     parse_110_main_transformer_rows,
 )
-from handover_log_module.service.handover_cloud_sheet_sync_service import HandoverCloudSheetSyncService
+from handover_log_module.service.handover_attachment_delivery_service import HandoverAttachmentDeliveryService
+from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
 from handover_log_module.service.review_session_service import ReviewSessionService
 from pipeline_utils import get_app_dir
 
@@ -220,6 +220,8 @@ def _empty_cloud_sync(status: str = "") -> Dict[str, Any]:
         "synced_column_count": 0,
         "synced_merges": [],
         "dynamic_merge_signature": "",
+        "reason": "",
+        "missing_buildings": [],
         "updated_at": "",
         "error": "",
     }
@@ -260,6 +262,8 @@ def _normalize_upload_state(raw: Dict[str, Any] | None, *, batch_key: str = "") 
                 "synced_column_count": int(cloud.get("synced_column_count", 0) or 0),
                 "synced_merges": cloud.get("synced_merges", []) if isinstance(cloud.get("synced_merges", []), list) else [],
                 "dynamic_merge_signature": str(cloud.get("dynamic_merge_signature", "")).strip(),
+                "reason": str(cloud.get("reason", "")).strip(),
+                "missing_buildings": cloud["missing_buildings"] if isinstance(cloud.get("missing_buildings"), list) else [],
                 "updated_at": str(cloud.get("updated_at", "")).strip(),
                 "error": str(cloud.get("error", "")).strip(),
             },
@@ -278,7 +282,7 @@ class Handover110StationUploadService:
             global_paths=global_paths if isinstance(global_paths, dict) else None,
         )
         self._review_service = ReviewSessionService(self.config, initialize_generated_file_index=False)
-        self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(self.config)
+        self._attachment_delivery_service = HandoverAttachmentDeliveryService(self.config)
 
     def batch_lock(self, batch_key: str) -> threading.RLock:
         return _batch_lock(batch_key)
@@ -612,43 +616,6 @@ class Handover110StationUploadService:
             raise ValueError(f"110站识别结果不完整，{'；'.join(problems)}")
         return [by_id[spec["row_id"]] for spec in _ROW_SPECS]
 
-    def _ensure_cloud_batch(
-        self,
-        *,
-        batch_key: str,
-        duty_date: str,
-        duty_shift: str,
-        emit_log: Callable[[str], None],
-    ) -> Dict[str, Any]:
-        existing = self._review_service.get_cloud_batch(batch_key)
-        if isinstance(existing, dict) and str(existing.get("spreadsheet_token", "")).strip():
-            status = str(existing.get("status", "")).strip().lower()
-            if status in {"prepared", "success"}:
-                validation = self._cloud_sheet_sync_service.validate_batch_spreadsheet(
-                    batch_meta=existing,
-                    emit_log=emit_log,
-                )
-                if bool(validation.get("valid", False)):
-                    return existing
-                emit_log(
-                    "[交接班][110站云表预建] 已缓存云文档失效，将重新创建: "
-                    f"batch={batch_key}, token={existing.get('spreadsheet_token', '')}"
-                )
-
-        shift_text = "白班" if duty_shift == "day" else "夜班"
-        prepared = self._cloud_sheet_sync_service.prepare_batch_spreadsheet(
-            duty_date=duty_date,
-            duty_date_text=format_duty_date_text(duty_date),
-            shift_text=shift_text,
-            emit_log=emit_log,
-        )
-        return self._review_service.register_cloud_batch(
-            batch_key=batch_key,
-            duty_date=duty_date,
-            duty_shift=duty_shift,
-            cloud_batch=prepared,
-        )
-
     def _sync_state_to_cloud(
         self,
         *,
@@ -664,41 +631,52 @@ class Handover110StationUploadService:
         if not stored_path.exists():
             raise FileNotFoundError(f"110站上传文件不存在: {stored_path}")
 
-        with _batch_lock(batch_key):
-            batch_meta = self._ensure_cloud_batch(
-                batch_key=batch_key,
-                duty_date=duty_date,
-                duty_shift=duty_shift,
-                emit_log=emit_log,
-            )
-            if str(batch_meta.get("status", "")).strip().lower() not in {"prepared", "success"}:
-                result = {
-                    **_empty_cloud_sync("failed"),
-                    "spreadsheet_token": str(batch_meta.get("spreadsheet_token", "")).strip(),
-                    "spreadsheet_url": str(batch_meta.get("spreadsheet_url", "")).strip(),
-                    "spreadsheet_title": str(batch_meta.get("spreadsheet_title", "")).strip(),
-                    "error": str(batch_meta.get("error", "")).strip() or "云文档预创建失败",
-                    "updated_at": _now_text(),
-                }
+        manifests = HandoverDeliveryStateService(self.config).batch(batch_key)
+        missing = [
+            building for building in HandoverAttachmentDeliveryService.MANAGED_BUILDINGS
+            if manifests.get(building, {}).get("status") != "uploaded"
+            or manifests.get(building, {}).get("artifacts_ready") is not True
+        ]
+        if missing:
+            message = f"110站原件已保存，等待以下楼栋完成附件上传后补传：{'、'.join(missing)}"
+            result = {
+                "status": "pending",
+                "reason": "waiting_for_buildings",
+                "missing_buildings": missing,
+                "error": message,
+            }
+            emit_log(f"[交接班][110站附件] {message} batch={batch_key}")
+        else:
+            existing = self._attachment_batch_view(self._review_service.get_cloud_batch(batch_key) or {})
+            if not existing:
+                result = {"status": "pending", "reason": "waiting_for_attachment_record",
+                          "error": "110站原件已保存，等待五楼班次附件记录"}
             else:
-                result = self._cloud_sheet_sync_service.sync_station_110_workbook(
-                    batch_meta=batch_meta,
+                result = self._attachment_delivery_service.sync_station_110_workbook(
+                    batch_meta={**existing, "batch_key": batch_key, "duty_date": duty_date, "duty_shift": duty_shift},
                     source_file=stored_path,
                     emit_log=emit_log,
                 )
-                result["updated_at"] = _now_text()
-            next_state = {
-                **state,
-                "cloud_sync": {**_empty_cloud_sync(), **result},
-                "updated_at": _now_text(),
-            }
-            return self._save_state(batch_key, next_state)
+        updated_at = _now_text()
+        return self._save_state(batch_key, {
+            **state,
+            "cloud_sync": {**_empty_cloud_sync(), **result, "updated_at": updated_at},
+            "updated_at": updated_at,
+        })
+
+    @staticmethod
+    def _attachment_batch_view(meta):
+        token = str(meta.get("spreadsheet_token", "") or "").strip()
+        return meta if token.startswith("bitable:") and token[7:] else {}
 
     def status(self, *, duty_date: str = "", duty_shift: str = "") -> Dict[str, Any]:
         context = self.resolve_context(duty_date=duty_date, duty_shift=duty_shift)
         batch_key = context["batch_key"]
         upload_state = self._load_state(batch_key)
-        cloud_batch = self._review_service.get_cloud_batch_fast(batch_key) or {}
+        cloud_batch = self._attachment_batch_view(self._review_service.get_cloud_batch_fast(batch_key) or {})
+        cloud_sync = upload_state.get("cloud_sync", {})
+        if cloud_sync.get("spreadsheet_token") and not str(cloud_sync["spreadsheet_token"]).startswith("bitable:"):
+            upload_state = {**upload_state, "cloud_sync": {**_empty_cloud_sync(), "status": "pending"}}
         batch_status = self._review_service.get_batch_status_fast(batch_key)
         return {
             "ok": True,
@@ -756,7 +734,7 @@ class Handover110StationUploadService:
                 "ok": True,
                 "batch": context,
                 "upload": saved_state,
-                "cloud_batch": self._review_service.get_cloud_batch(batch_key) or {},
+                "cloud_batch": self._attachment_batch_view(self._review_service.get_cloud_batch(batch_key) or {}),
             }
 
     def parse(
@@ -836,7 +814,7 @@ class Handover110StationUploadService:
                 "ok": True,
                 "batch": context,
                 "upload": state,
-                "cloud_batch": self._review_service.get_cloud_batch(batch_key) or {},
+                "cloud_batch": self._attachment_batch_view(self._review_service.get_cloud_batch(batch_key) or {}),
             }
 
     def upload(
@@ -934,7 +912,7 @@ class Handover110StationUploadService:
                 "ok": True,
                 "batch": context,
                 "upload": synced_state,
-                "cloud_batch": self._review_service.get_cloud_batch(batch_key) or {},
+                "cloud_batch": self._attachment_batch_view(self._review_service.get_cloud_batch(batch_key) or {}),
             }
 
     def retry_cloud_sync(
@@ -945,21 +923,23 @@ class Handover110StationUploadService:
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         context = self.resolve_context(duty_date=duty_date, duty_shift=duty_shift)
-        state = self._load_state(context["batch_key"])
-        if str(state.get("status", "")).strip().lower() != "success":
+        batch_key = context["batch_key"]
+        with _batch_lock(batch_key):
+            state = self._load_state(batch_key)
+            if str(state.get("status", "")).strip().lower() != "success":
+                return {
+                    "ok": False,
+                    "batch": context,
+                    "upload": state,
+                    "error": str(state.get("error", "")).strip() or "当前批次没有可同步的110站文件",
+                }
+            synced_state = self._sync_state_to_cloud(state=state, emit_log=emit_log)
             return {
-                "ok": False,
+                "ok": synced_state["cloud_sync"]["status"] == "success",
                 "batch": context,
-                "upload": state,
-                "error": str(state.get("error", "")).strip() or "当前批次没有可同步的110站文件",
+                "upload": synced_state,
+                "cloud_batch": self._attachment_batch_view(self._review_service.get_cloud_batch(batch_key) or {}),
             }
-        synced_state = self._sync_state_to_cloud(state=state, emit_log=emit_log)
-        return {
-            "ok": str(synced_state.get("cloud_sync", {}).get("status", "")).strip().lower() == "success",
-            "batch": context,
-            "upload": synced_state,
-            "cloud_batch": self._review_service.get_cloud_batch(context["batch_key"]) or {},
-        }
 
     def sync_existing_upload_to_cloud(
         self,
@@ -970,30 +950,31 @@ class Handover110StationUploadService:
         target_batch = str(batch_key or "").strip()
         if not target_batch:
             return {"status": "skipped", "reason": "missing_batch_key"}
-        state = self._load_state(target_batch)
-        if str(state.get("status", "")).strip().lower() != "success":
-            return {"status": "skipped", "reason": "no_success_upload", "upload": state}
-        cloud_sync = state.get("cloud_sync", {}) if isinstance(state.get("cloud_sync", {}), dict) else {}
-        batch_meta = self._review_service.get_cloud_batch(target_batch) or {}
-        stored_identity = _runtime_path_identity(self.config, state.get("stored_path", ""))
-        synced_identity = _runtime_path_identity(self.config, cloud_sync.get("source_file", ""))
-        cloud_token = str(cloud_sync.get("spreadsheet_token", "") or "").strip()
-        batch_token = str(batch_meta.get("spreadsheet_token", "") or "").strip()
-        if (
-            str(cloud_sync.get("status", "") or "").strip().lower() == "success"
-            and stored_identity
-            and stored_identity == synced_identity
-            and cloud_token
-            and cloud_token == batch_token
-        ):
-            emit_log(f"[交接班][110站云表] 同一文件已同步成功，本次跳过 batch={target_batch}")
-            return {
-                "status": "skipped",
-                "reason": "already_synced_same_source",
-                "upload": state,
-            }
-        synced = self._sync_state_to_cloud(state=state, emit_log=emit_log)
-        return {
-            "status": str(synced.get("cloud_sync", {}).get("status", "")).strip().lower() or "failed",
-            "upload": synced,
-        }
+        with _batch_lock(target_batch):
+            state = self._load_state(target_batch)
+            if str(state.get("status", "")).strip().lower() != "success":
+                return {"status": "skipped", "reason": "no_success_upload", "upload": state}
+            cloud_sync = state.get("cloud_sync", {}) if isinstance(state.get("cloud_sync", {}), dict) else {}
+            batch_meta = self._review_service.get_cloud_batch(target_batch) or {}
+            stored_identity = _runtime_path_identity(self.config, state.get("stored_path", ""))
+            synced_identity = _runtime_path_identity(self.config, cloud_sync.get("source_file", ""))
+            cloud_token = str(cloud_sync.get("spreadsheet_token", "") or "").strip()
+            batch_token = str(batch_meta.get("spreadsheet_token", "") or "").strip()
+            if (
+                str(cloud_sync.get("status", "") or "").strip().lower() == "success"
+                and stored_identity
+                and stored_identity == synced_identity
+                and cloud_token.startswith("bitable:")
+                and cloud_token == batch_token
+            ):
+                emit_log(f"[交接班][110站附件] 同一文件已同步成功，本次跳过 batch={target_batch}")
+                return {
+                    "status": "skipped",
+                    "reason": "already_synced_same_source",
+                    "upload": state,
+                }
+            synced = self._sync_state_to_cloud(state=state, emit_log=emit_log)
+            result = {"status": synced["cloud_sync"]["status"] or "failed", "upload": synced}
+            if result["status"] == "pending":
+                result.update(reason=synced["cloud_sync"]["reason"], missing_buildings=synced["cloud_sync"]["missing_buildings"])
+            return result

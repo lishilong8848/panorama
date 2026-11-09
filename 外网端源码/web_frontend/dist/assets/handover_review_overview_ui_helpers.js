@@ -21,7 +21,7 @@ export function createHandoverReviewOverviewUiHelpers(options = {}) {
     allowed: false,
     pending: false,
     visible: false,
-    label: "一键全部重试云表上传",
+    label: "一键全部重试班次附件上传",
     disabledReason: "",
   });
   const handoverFollowupContinueActionBase = computed(() => handoverReviewOverview.value?.actions?.continueFollowup || {
@@ -41,7 +41,7 @@ export function createHandoverReviewOverviewUiHelpers(options = {}) {
   const canShowHandoverCloudRetryAll = computed(() => false);
   const handoverCloudRetryAllButtonText = computed(() => {
     if (isHandoverCloudRetryAllLocked.value) return "重试中...";
-    return handoverCloudRetryAllActionBase.value.label || "一键全部重试云表上传";
+    return handoverCloudRetryAllActionBase.value.label || "一键全部重试班次附件上传";
   });
   const isHandoverCloudRetryAllDisabled = computed(() => {
     if (isHandoverCloudRetryAllLocked.value) return true;

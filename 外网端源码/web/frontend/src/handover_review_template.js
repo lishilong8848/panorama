@@ -15,7 +15,7 @@
             v-if="showSaveAction"
             class="btn btn-primary btn-mini"
             @click="saveCurrentReview"
-            :disabled="saveActionVm.disabled"
+            :disabled="saveActionVm.disabled || attachmentDeliveryBusy"
             :title="saveActionVm.disabledReason || ''"
           >
             {{ saveActionVm.text }}
@@ -24,7 +24,7 @@
             v-if="showDownloadAction"
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentReviewFile"
-            :disabled="downloadActionVm.disabled"
+            :disabled="downloadActionVm.disabled || attachmentDeliveryBusy || !attachmentDeliveryGate.can_download"
             :title="downloadActionVm.disabledReason || ''"
           >
             {{ downloadActionVm.text }}
@@ -33,7 +33,7 @@
             v-if="showCapacityDownloadAction"
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentCapacityReviewFile"
-            :disabled="capacityDownloadDisabled"
+            :disabled="capacityDownloadDisabled || attachmentDeliveryBusy || !attachmentDeliveryGate.can_download"
             :title="capacityDownloadActionVm.disabledReason || ''"
           >
             {{ capacityDownloadActionVm.text }}
@@ -42,7 +42,7 @@
             v-if="showCapacityImageSendAction"
             class="btn btn-secondary btn-mini"
             @click="sendCurrentCapacityImage"
-            :disabled="capacityImageSendActionVm.disabled"
+            :disabled="capacityImageSendActionVm.disabled || attachmentDeliveryBusy || !attachmentDeliveryGate.can_send"
             :title="capacityImageSendActionVm.disabledReason || ''"
           >
             {{ capacityImageSendActionVm.text }}
@@ -51,38 +51,56 @@
             v-if="showRegenerateAction"
             class="btn btn-warning btn-mini"
             @click="regenerateCurrentReview"
-            :disabled="regenerateActionVm.disabled"
+            :disabled="regenerateActionVm.disabled || attachmentDeliveryBusy"
             :title="regenerateActionVm.disabledReason || ''"
           >
             {{ regenerateActionVm.text }}
           </button>
           <a
-            v-if="reviewCloudSheetUrl"
+            v-if="attachmentDeliveryRecordUrl"
             class="btn btn-secondary btn-mini"
             :class="{ 'is-disabled': regenerating }"
-            :href="reviewCloudSheetUrl"
+            :href="attachmentDeliveryRecordUrl"
             target="_blank"
             rel="noopener noreferrer"
             :aria-disabled="regenerating ? 'true' : 'false'"
             @click="regenerating && $event.preventDefault()"
           >
-            打开云文档
+            打开班次附件多维记录
           </a>
+          <button
+            v-if="showUpdateHistoryCloudSyncAction"
+            class="btn btn-secondary btn-mini"
+            @click="updateHistoryCloudSync"
+            :disabled="updateHistoryCloudSyncActionVm.disabled || attachmentDeliveryBusy"
+            :title="updateHistoryCloudSyncActionVm.disabledReason || ''"
+          >
+            更新历史班次附件
+          </button>
           <button
             v-if="showConfirmAction"
             class="btn"
             :class="'btn-' + confirmActionVm.variant"
-            @click="toggleConfirm"
+            @click="prepareAttachmentDelivery"
+            :disabled="confirmActionVm.disabled || attachmentDeliveryBusy"
+            :title="confirmActionVm.disabledReason || attachmentDeliveryGate.reason || ''"
+          >
+            {{ attachmentDeliveryBusy ? '正在提交...' : attachmentDeliveryGate.delivery.upload_error ? '重试上传班次附件' : '生成成品并提交' }}
+          </button>
+          <button
+            v-if="showAttachmentDeliveryRetry"
+            class="btn btn-warning btn-mini"
+            @click="prepareAttachmentDelivery"
             :disabled="confirmActionVm.disabled"
             :title="confirmActionVm.disabledReason || ''"
           >
-            {{ confirmActionVm.text }}
+            重试生成成品
           </button>
         </div>
       </div>
 
       <div class="review-meta-row review-meta-row-rich">
-        <span
+        <a
           v-for="(badge, index) in reviewHeaderBadges"
           :key="'review-badge-' + index"
           class="status-badge"
@@ -93,7 +111,21 @@
           ]"
         >
           {{ badge.text }}
-        </span>
+        </a>
+        <a
+          v-for="(badge, index) in attachmentDeliveryBadges"
+          :key="'review-delivery-badge-' + index"
+          v-bind="badge.href ? { href: badge.href, target: '_blank', rel: 'noopener noreferrer' } : {}"
+          class="status-badge"
+          :class="[
+            'status-badge-soft',
+            'tone-' + badge.tone,
+            'icon-' + badge.icon,
+          ]"
+          :title="badge.href ? '打开班次附件多维记录' : ''"
+        >
+          {{ badge.text }}
+        </a>
       </div>
 
       <div
@@ -103,6 +135,12 @@
         :class="'review-status-' + banner.tone"
       >
         {{ banner.text }}
+      </div>
+      <div
+        v-if="attachmentDeliveryErrorText"
+        class="review-status-line review-status-danger"
+      >
+        {{ attachmentDeliveryErrorText }}
       </div>
     </header>
 

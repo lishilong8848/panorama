@@ -882,35 +882,35 @@ export function createRuntimeHealthConfigActions(ctx) {
       : [];
     if (followupStatus === "ok") {
       if (cloudStatus === "ok") {
-        return "已一键全确认，并自动完成后续上传和云文档同步";
+        return "已一键全确认，并自动完成后续上传和班次附件交付";
       }
       if (cloudStatus === "skipped") {
         const reasonText = cloudSkippedReasons.length
-          ? `，云文档已跳过（${cloudSkippedReasons.join(" / ")}）`
-          : "，但云文档已跳过";
+          ? `，班次附件已跳过（${cloudSkippedReasons.join(" / ")}）`
+          : "，但班次附件已跳过";
         return `已一键全确认，并自动完成后续上传${reasonText}`;
       }
       if (cloudStatus === "failed" || cloudStatus === "partial_failed") {
-        return "已一键全确认，后续上传成功，但云文档同步失败，请查看系统日志";
+        return "已一键全确认，后续上传成功，但附件上传失败，请查看系统日志";
       }
       return "已一键全确认，并自动完成后续上传";
     }
     if (followupStatus === "partial_failed") {
       if (cloudStatus === "failed" || cloudStatus === "partial_failed") {
-        return "已一键全确认，但后续上传或云文档同步存在部分失败，请查看系统日志";
+        return "已一键全确认，但后续上传或班次附件交付存在部分失败，请查看系统日志";
       }
       return "已一键全确认，但后续上传存在部分失败，请查看系统日志";
     }
     if (followupStatus === "failed") {
       if (cloudStatus === "failed" || cloudStatus === "partial_failed") {
-        return "已一键全确认，但后续上传和云文档同步失败，请查看系统日志";
+        return "已一键全确认，但后续上传和班次附件交付失败，请查看系统日志";
       }
       return "已一键全确认，但后续上传失败，请查看系统日志";
     }
     if (cloudStatus === "blocked") {
       const blockedReason = String(data?.followup_result?.cloud_sheet_sync?.blocked_reason || "").trim();
       return blockedReason
-        ? `已一键全确认（${confirmedCount}/${requiredCount}），云文档未执行：${blockedReason}`
+        ? `已一键全确认（${confirmedCount}/${requiredCount}），班次附件未执行：${blockedReason}`
         : `已一键全确认（${confirmedCount}/${requiredCount}）`;
     }
     return `已一键全确认（${confirmedCount}/${requiredCount}）`;
@@ -918,13 +918,13 @@ export function createRuntimeHealthConfigActions(ctx) {
 
   function summarizeBatchCloudRetryResult(data) {
     const cloudStatus = String(data?.cloud_sheet_sync?.status || data?.status || "").trim().toLowerCase();
-    if (cloudStatus === "ok") return "失败楼栋已完成云表重试上传";
-    if (cloudStatus === "partial_failed") return "云表批量重试已执行，但仍有部分楼栋失败";
-    if (cloudStatus === "failed") return "云表批量重试失败，请查看系统日志";
+    if (cloudStatus === "ok") return "失败楼栋已完成班次附件重试上传";
+    if (cloudStatus === "partial_failed") return "班次附件批量重试已执行，但仍有部分楼栋失败";
+    if (cloudStatus === "failed") return "班次附件批量重试失败，请查看系统日志";
     if (cloudStatus === "blocked") {
       return (
         String(data?.cloud_sheet_sync?.blocked_reason || "").trim()
-        || "当前楼栋尚未确认，暂不能重试云表上传"
+        || "当前楼栋尚未确认，暂不能重试班次附件上传"
       );
     }
     return "当前没有需要重试的失败楼栋";
@@ -4266,7 +4266,7 @@ export function createRuntimeHealthConfigActions(ctx) {
       }
       try {
         const data = await retryHandoverReviewBatchCloudSyncApi(batchKey);
-        const jobId = await focusAcceptedJob(data, "云表批量重试任务已提交，请在任务与资源面板查看进度。");
+        const jobId = await focusAcceptedJob(data, "班次附件批量重试任务已提交，请在任务与资源面板查看进度。");
         if (jobId) {
           void (async () => {
             const job = await waitForAcceptedJobCompletion(jobId, { timeoutMs: 10 * 60 * 1000 });
@@ -4276,13 +4276,13 @@ export function createRuntimeHealthConfigActions(ctx) {
               message.value = summarizeBatchCloudRetryResult(job?.result || {});
             }
             if (job.status === "failed" && shouldPublishAcceptedJobResult(jobId)) {
-              message.value = `云表批量重试失败: ${String(job?.error || "请查看系统错误日志").trim() || "请查看系统错误日志"}`;
+              message.value = `班次附件批量重试失败: ${String(job?.error || "请查看系统错误日志").trim() || "请查看系统错误日志"}`;
             }
           })();
         }
         return data;
       } catch (err) {
-        message.value = `一键全部重试云表上传失败: ${err}`;
+        message.value = `一键全部重试班次附件上传失败: ${err}`;
         return { ok: false, reason: "error", error: String(err) };
       }
     };
