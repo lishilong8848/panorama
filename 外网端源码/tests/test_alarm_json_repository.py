@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from handover_log_module.repository.alarm_json_repository import AlarmJsonRepository
 from handover_log_module.service.handover_orchestrator import HandoverOrchestrator
@@ -146,6 +148,68 @@ class AlarmJsonRepositoryTests(unittest.TestCase):
         self.assertEqual(day_window.end_time, "2026-05-31 18:00:00")
         self.assertEqual(night_window.start_time, "2026-05-31 18:00:00")
         self.assertEqual(night_window.end_time, "2026-06-01 09:00:00")
+
+    def test_early_generation_caps_window_and_reloads_replaced_file(self) -> None:
+        class Clock(datetime):
+            current = datetime(2026, 11, 9, 16, 5)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        start, end = "2026-11-09 09:00:00", "2026-11-09 18:00:00"
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "handover_log_module.repository.alarm_json_repository.datetime", Clock
+        ):
+            path = Path(tmp) / "window.json"
+            _write_alarm_json(path, building="A楼", query_start=start, query_end="2026-11-09 15:00:00")
+            repo = AlarmJsonRepository({})
+            repo.build_window_selection_snapshot = Mock(return_value={
+                "duty_date": "2026-11-09", "duty_shift": "day",
+                "selected_by_building": {"A楼": {"file_path": str(path), "source_kind": "handover_window"}},
+            })
+
+            def refresh(**kwargs):
+                self.assertEqual(kwargs["end_dt"], datetime(2026, 11, 9, 16, 5))
+                _write_alarm_json(path, building="A楼", query_start=start, query_end="2026-11-09 16:05:00", rows=[
+                    {"event_time": "2026-11-09 16:04:00", "is_recover": "0"},
+                    {"event_time": "2026-11-09 17:00:00", "is_recover": "0"},
+                ])
+                return True
+
+            repo._request_alarm_refresh_for_window = Mock(side_effect=refresh)
+            cache = {}
+            snapshot = repo.ensure_window_coverage(buildings=["A楼"], start_time=start, end_time=end,
+                                                   emit_log=lambda _: None, document_cache=cache)
+            Clock.current = datetime(2026, 11, 9, 16, 6)
+            summary = repo.query_alarm_summary(building="A楼", start_time=start, end_time=end,
+                                               emit_log=lambda _: None, selection_snapshot=snapshot, document_cache=cache)
+            self.assertEqual(summary.total_count, 1)
+            self.assertFalse(summary.coverage_ok)
+            repo._request_alarm_refresh_for_window.assert_called_once()
+
+    def test_unavailable_batch_does_not_resubmit_for_each_building(self) -> None:
+        repo = AlarmJsonRepository({})
+        repo.build_window_selection_snapshot = Mock(return_value={"selected_by_building": {}})
+        repo._request_alarm_refresh_for_window = Mock(return_value=False)
+        start, end = "2026-05-31 09:00:00", "2026-05-31 18:00:00"
+        snapshot = repo.ensure_window_coverage(buildings=["A楼", "B楼"], start_time=start, end_time=end, emit_log=lambda _: None)
+        for building in ("A楼", "B楼"):
+            with self.assertRaisesRegex(RuntimeError, "未找到覆盖"):
+                repo.query_alarm_summary(building=building, start_time=start, end_time=end,
+                                         emit_log=lambda _: None, selection_snapshot=snapshot)
+        repo._request_alarm_refresh_for_window.assert_called_once()
+
+    def test_previous_shift_does_not_reuse_current_shift_snapshot(self) -> None:
+        repo = AlarmJsonRepository({})
+        repo.build_window_selection_snapshot = Mock(return_value={"selected_by_building": {}})
+        repo._request_alarm_refresh_for_window = Mock(return_value=False)
+        snapshot = {"duty_date": "2026-05-31", "duty_shift": "day",
+                    "selected_by_building": {"A楼": {"file_path": "unrelated-day.json"}}}
+        with self.assertRaisesRegex(RuntimeError, "未找到覆盖"):
+            repo.query_alarm_summary(building="A楼", start_time="2026-05-30 18:00:00", end_time="2026-05-31 09:00:00",
+                                     emit_log=lambda _: None, selection_snapshot=snapshot)
+        repo.build_window_selection_snapshot.assert_called_once_with(buildings=["A楼"], duty_date="2026-05-30", duty_shift="night")
 
 
 if __name__ == "__main__":

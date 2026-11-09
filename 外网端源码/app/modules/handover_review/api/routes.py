@@ -63,6 +63,7 @@ from handover_log_module.service.review_session_service import (
     ReviewSessionNotFoundError,
     ReviewSessionService,
     ReviewSessionStoreUnavailableError,
+    reuse_generated_report_pair,
 )
 from handover_log_module.service.training_management_payload_builder import (
     TrainingManagementPayloadBuilder, TRAINING_SECTION,
@@ -203,6 +204,10 @@ _REVIEW_BOOTSTRAP_API_EXECUTOR = ThreadPoolExecutor(
     max_workers=8,
     thread_name_prefix="handover-review-bootstrap",
 )
+_STATION_110_STATUS_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="station-110-status",
+)
 _STATION_H_ROSTER_REFRESH_EXECUTOR = ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="station-h-roster-refresh",
@@ -215,6 +220,7 @@ _REVIEW_SLOW_LOG_STATE: dict[str, dict[str, Any]] = {}
 def shutdown_handover_review_api_executor() -> None:
     _REVIEW_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _REVIEW_BOOTSTRAP_API_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _STATION_110_STATUS_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _STATION_H_ROSTER_REFRESH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
@@ -299,6 +305,10 @@ def _dedicated_review_bootstrap_endpoint(func):
         func,
         executor=_REVIEW_BOOTSTRAP_API_EXECUTOR,
     )
+
+
+def _dedicated_station_110_status_endpoint(func):
+    return _dedicated_review_endpoint_with_executor(func, executor=_STATION_110_STATUS_EXECUTOR)
 
 
 async def _read_upload_file_limited(file: UploadFile, *, max_bytes: int, file_label: str = "110站文件") -> bytes:
@@ -4448,7 +4458,7 @@ def handover_review_station_h_duty_focus_image(
 
 
 @router.get("/api/handover/review/110-station/status")
-@_dedicated_review_endpoint
+@_dedicated_station_110_status_endpoint
 def handover_review_110_station_status(
     request: Request,
     duty_date: str = "",
@@ -4936,6 +4946,14 @@ def handover_review_bootstrap(
         "snapshot_revision": revision,
         "snapshot_source": "sqlite_document" if found_snapshot else "missing_sqlite_document",
     }
+    batch_key = str(session_for_response.get("batch_key", "") or "").strip()
+    if batch_key:
+        try:
+            payload["shared_blocks"] = {
+                "substation_110kv": service.get_saved_substation_110kv_block(batch_key=batch_key),
+            }
+        except Exception as exc:  # noqa: BLE001 - shared data is optional on the first screen
+            container.add_system_log(f"[交接班][110KV共享] 首屏读取已降级: batch={batch_key}, error={exc}")
     if not found_snapshot:
         payload["document_import"] = _schedule_history_document_import(
             container, service, parser, building=building, duty_date=session.get("duty_date", ""),
@@ -4948,8 +4966,7 @@ def handover_review_bootstrap(
         client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
         include_concurrency=False,
-        # bootstrap 是审核页首屏关键路径，只返回本楼 SQLite 快照。
-        # 共享块锁状态不参与首屏加载，避免局域网访问时触发前端超时。
+        # 110KV 已带入本地已保存数据；锁和其他共享状态由 status 补齐。
         include_shared_blocks=False,
         include_outdoor_temperature=False,
     )
@@ -5743,6 +5760,7 @@ def _submit_review_regeneration_locked(
     handover_cfg = _handover_cfg(container)
     building = _resolve_building_or_404(service, building_code)
     session_id_text = str(payload.get("session_id", "") or "").strip()
+    only_if_missing = not session_id_text and uploaded_sources is None
     client_id = str(payload.get("client_id", "") or "").strip()
     if session_id_text:
         _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
@@ -5775,6 +5793,16 @@ def _submit_review_regeneration_locked(
             duty_shift_text,
         )
         action_label = "生成当前班次交接班及容量表"
+    reused = reuse_generated_report_pair(target) if only_if_missing else None
+    if reused:
+        # Preserve the job response expected by existing review pages without waiting for the batch lock.
+        job = _start_handover_background_job(
+            container,
+            name=f"复用已生成的交接班及容量表 {building}",
+            run_func=lambda _emit_log: reused,
+            feature="handover_review_regenerate",
+        )
+        return _accepted_job_response(job)
     if bool(target.get("confirmed", False)):
         raise HTTPException(status_code=409, detail="当前楼栋已确认并提交上传，本班次不能重新生成；如需修改请直接编辑后保存")
     cloud_sync = target.get("cloud_sheet_sync", {}) if isinstance(target.get("cloud_sheet_sync", {}), dict) else {}
@@ -5802,6 +5830,7 @@ def _submit_review_regeneration_locked(
         "data_file": handover_source,
         "capacity_source_file": capacity_source,
         "client_id": client_id,
+        "only_if_missing": only_if_missing,
     }
 
     def _run(emit_log):

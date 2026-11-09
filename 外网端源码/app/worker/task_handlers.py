@@ -33,7 +33,7 @@ from handover_log_module.service.handover_xlsx_write_queue_service import Handov
 from handover_log_module.service.branch_power_upload_service import BranchPowerUploadService
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
-from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.review_session_service import ReviewSessionService, reuse_generated_report_pair
 from handover_log_module.service.ali_monthly_over_power_attachment_service import AliMonthlyOverPowerAttachmentService
 from handover_log_module.service.monthly_power_alert_report_service import MonthlyPowerAlertReportService
 from handover_log_module.service.top5_power_report_service import (
@@ -960,13 +960,19 @@ def handle_handover_review_regenerate(
         runtime.raise_if_cancelled()
     if not building or not session_id or not duty_date or duty_shift not in {"day", "night"}:
         raise RuntimeError("重新生成参数不完整")
+    handover_cfg = load_handover_config(config)
+    review_service = ReviewSessionService(handover_cfg)
+    if payload.get("only_if_missing") is True:
+        existing = review_service.get_session_for_building_duty_fast(building, duty_date, duty_shift)
+        reused = reuse_generated_report_pair(existing)
+        if reused and reused["session_id"] == session_id:
+            emit_log(f"[交接班][审核生成] {session_id} 已生成，复用现有文件，不重复生成")
+            return reused
     if not data_file or not Path(data_file).exists():
         raise RuntimeError(f"交接班源文件不存在: {data_file or '-'}")
     if not capacity_source_file or not Path(capacity_source_file).exists():
         raise RuntimeError(f"交接班容量报表源文件不存在: {capacity_source_file or '-'}")
 
-    handover_cfg = load_handover_config(config)
-    review_service = ReviewSessionService(handover_cfg)
     document_state = ReviewDocumentStateService(handover_cfg, emit_log=emit_log)
     queue_service = HandoverXlsxWriteQueueService(
         handover_cfg,
@@ -995,8 +1001,14 @@ def handle_handover_review_regenerate(
         duty_date=duty_date,
         duty_shift=duty_shift,
         auto_send_review_link=False,
+        only_if_missing=payload.get("only_if_missing") is True,
         emit_log=emit_log,
     )
+    if payload.get("only_if_missing") is True:
+        reused_pairs = result.get("reused_report_pairs", {})
+        reused = reused_pairs.get(building) if isinstance(reused_pairs, dict) else None
+        if isinstance(reused, dict) and reused.get("session_id") == session_id:
+            return reused
     rows = result.get("results", []) if isinstance(result.get("results", []), list) else []
     row = next((item for item in rows if isinstance(item, dict) and _text(item.get("building")) == building), None)
     if not isinstance(row, dict) or not bool(row.get("success", False)):

@@ -13,6 +13,10 @@ from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_
 from app.modules.feishu.service.feishu_token_manager import feishu_token_manager
 
 
+class FeishuBitableDataNotReady(RuntimeError):
+    pass
+
+
 class FeishuBitableClient:
     CREATE_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
     LIST_RECORD_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
@@ -273,7 +277,8 @@ class FeishuBitableClient:
                         self._api_retry_sleep(api_attempt, error_body)
                         break
                     detail = self._response_error_detail(response)
-                    raise RuntimeError(
+                    error_type = FeishuBitableDataNotReady if str(error_body.get("code")) == "1254607" else RuntimeError
+                    raise error_type(
                         "飞书HTTP请求失败: "
                         f"status={response.status_code}, url={response.url}, body={detail}"
                     ) from exc
@@ -298,7 +303,8 @@ class FeishuBitableClient:
                     self._api_retry_sleep(api_attempt, body)
                     break
 
-                raise RuntimeError(f"飞书接口调用失败: {body}")
+                error_type = FeishuBitableDataNotReady if str(body.get("code")) == "1254607" else RuntimeError
+                raise error_type(f"飞书接口调用失败: {body}")
 
             if should_retry_api:
                 continue

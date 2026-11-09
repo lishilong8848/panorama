@@ -8,6 +8,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from pipeline_utils import get_app_dir
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableDataNotReady
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.core.section_layout import parse_category_sections
 from handover_log_module.repository.event_followup_cache_store import EventFollowupCacheStore
@@ -359,21 +360,26 @@ class EventCategoryPayloadBuilder:
                 cache_store = self._get_cache_store(cfg)
                 cached_rows = cache_store.list_pending_for_building(building)
                 cache_before_count = len(cached_rows)
+                lookup_deferred = False
                 for snap in cached_rows:
                     record_id = str(snap.get("record_id", "")).strip()
                     if not record_id:
                         continue
                     if record_id in outside_ongoing_ids:
                         continue
-                    queried_ids.append(record_id)
                     resolved = None
-                    try:
-                        resolved = self.repo.get_record_by_id(record_id=record_id)
-                    except Exception as exc:  # noqa: BLE001
-                        if self._is_record_not_found_error(exc):
-                            stale_cached_record_ids.add(record_id)
-                        else:
-                            emit_log(f"[交接班][事件分类] 回查record失败 record_id={record_id}: {exc}")
+                    if not lookup_deferred:
+                        queried_ids.append(record_id)
+                        try:
+                            resolved = self.repo.get_record_by_id(record_id=record_id)
+                        except FeishuBitableDataNotReady:
+                            lookup_deferred = True
+                            emit_log(f"[交接班][事件分类] 飞书数据暂未就绪(1254607)，本楼其余历史事件沿用缓存 building={building}")
+                        except Exception as exc:  # noqa: BLE001
+                            if self._is_record_not_found_error(exc):
+                                stale_cached_record_ids.add(record_id)
+                            else:
+                                emit_log(f"[交接班][事件分类] 回查record失败 record_id={record_id}: {exc}")
                     if resolved is None:
                         cache_from_snapshot_count += 1
                         resolved = self._row_from_snapshot(snap)

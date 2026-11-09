@@ -218,6 +218,7 @@ class OrchestratorService:
         duty_shift: str | None,
         auto_send_review_link: bool = True,
         skip_manual_generated: bool = False,
+        only_if_missing: bool = False,
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
         selected_buildings = [str(building or "").strip() for building, _ in building_files if str(building or "").strip()]
@@ -241,6 +242,7 @@ class OrchestratorService:
             duty_shift=duty_shift,
             auto_send_review_link=bool(auto_send_review_link),
             skip_manual_generated=bool(skip_manual_generated),
+            only_if_missing=only_if_missing,
             emit_log=emit_log,
         )
         emit_log(

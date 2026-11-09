@@ -39,7 +39,7 @@ from handover_log_module.service.handover_fill_service import HandoverFillServic
 from handover_log_module.service.handover_source_file_cache_service import HandoverSourceFileCacheService
 from handover_log_module.service.maintenance_management_payload_builder import MaintenanceManagementPayloadBuilder
 from handover_log_module.service.other_important_work_payload_builder import OtherImportantWorkPayloadBuilder
-from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.review_session_service import ReviewSessionService, reuse_generated_report_pair
 from handover_log_module.service.review_document_state_service import ReviewDocumentStateService
 from handover_log_module.service.review_link_delivery_service import ReviewLinkDeliveryService
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
@@ -670,6 +670,8 @@ class HandoverOrchestrator:
             )
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[交接班][告警JSON] building={building} 读取失败，按兜底填充: {exc}")
+            if accept_desc_text == "/":
+                accept_desc_text = "告警数据未就绪，请核对"
             alarm_summary_payload = self._build_alarm_summary_payload(
                 source="alarm_json",
                 building=building,
@@ -1070,8 +1072,17 @@ class HandoverOrchestrator:
         capacity_source_file: str | None = None,
         source_mode: str = "from_file",
         auto_send_review_link: bool = True,
+        only_if_missing: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
+        if only_if_missing:
+            # Recheck under the per-building generation lock: another process may have finished
+            # while this worker was preparing shared inputs.
+            existing = self._review_session_service.get_session_for_building_duty_fast(building, duty_date, duty_shift)
+            reused = reuse_generated_report_pair(existing)
+            if reused:
+                emit_log(f"[交接班][审核生成] {reused['session_id']} 已生成，复用现有文件，不重复生成")
+                return {"results": [], "reused_report_pair": reused}
         summary = RunSummary(mode="from_existing_file")
         result = BuildingResult(building=building, data_file=data_file)
         duty_date_text = str(duty_date or "").strip()
@@ -1729,6 +1740,7 @@ class HandoverOrchestrator:
         duty_shift: str | None = None,
         auto_send_review_link: bool = True,
         skip_manual_generated: bool = False,
+        only_if_missing: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         summary = RunSummary(mode="from_existing_files")
@@ -1891,6 +1903,7 @@ class HandoverOrchestrator:
                     capacity_source_file=capacity_file_map.get(building),
                     source_mode="from_file",
                     auto_send_review_link=auto_send_review_link,
+                    only_if_missing=only_if_missing,
                     emit_log=emit_log,
                 ))
             except Exception as exc:  # noqa: BLE001
@@ -1901,7 +1914,11 @@ class HandoverOrchestrator:
                 emit_log(f"[交接班][已有数据表批量] building={building} 处理失败: {exc}")
                 continue
 
+        reused_report_pairs = {}
         for building, data_file, one in self._run_building_jobs(generation_jobs, emit_log):
+            if isinstance(one.get("reused_report_pair"), dict):
+                reused_report_pairs[building] = one["reused_report_pair"]
+                continue
             for row in one.get("results", []):
                 result = BuildingResult(
                     building=str(row.get("building", building)),
@@ -1936,6 +1953,10 @@ class HandoverOrchestrator:
         result_summary = summary.to_dict()
         result_summary["selected_buildings"] = selected_buildings
         result_summary["skipped_buildings"] = skipped_buildings
+        if reused_report_pairs:
+            result_summary["reused_report_pairs"] = reused_report_pairs
+            if not summary.results:
+                return {**result_summary, "status": "skipped", "reason": "already_generated"}
         if str(duty_date or "").strip() and str(duty_shift or "").strip():
             result_summary["duty_date"] = str(duty_date or "").strip()
             result_summary["duty_shift"] = str(duty_shift or "").strip().lower()

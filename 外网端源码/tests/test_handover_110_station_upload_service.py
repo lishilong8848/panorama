@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from app.modules.handover_review.api import routes
+from handover_log_module.service import handover_110_station_upload_service as station_110_module
 from handover_log_module.service.handover_110_station_upload_service import (
     Handover110StationUploadService,
 )
+from handover_log_module.service.review_session_service import ReviewSessionService
 
 
 ROW_LABELS = ("阿开", "阿家", "1号主变", "2号主变", "3号主变", "4号主变")
@@ -51,6 +58,57 @@ def _complete_rows():
             ("transformer_4", "4#主变"),
         )
     ]
+
+
+def test_110_status_reads_only_requested_batch_without_history_or_file_index(monkeypatch, tmp_path):
+    cfg = {"_global_paths": {"runtime_state_root": str(tmp_path / "runtime")}}
+    service = Handover110StationUploadService(cfg)
+    store = service._state_store
+    for day, shift, status in (
+        ("2026-11-08", "day", "parsed"),
+        ("2026-11-09", "day", "success"),
+        ("2026-11-09", "night", "parsed"),
+    ):
+        batch_key = f"{day}|{shift}"
+        store.apply_changes(
+            upsert_sessions=[{
+                "session_id": f"A楼|{batch_key}", "building": "A楼", "duty_date": day,
+                "duty_shift": shift, "batch_key": batch_key, "confirmed": status == "success",
+            }],
+            upsert_cloud_batches=[{"batch_key": batch_key, "spreadsheet_url": f"https://example.com/{day}/{shift}"}],
+        )
+        service._save_state(batch_key, {"status": status})
+
+    monkeypatch.setattr(ReviewSessionService, "_load_state", Mock(side_effect=AssertionError("full history read")))
+    monkeypatch.setattr(ReviewSessionService, "_build_generated_file_index", Mock(side_effect=AssertionError("file index init")))
+    monkeypatch.setattr(routes, "_handover_cfg", lambda _container: cfg)
+    monkeypatch.setattr(station_110_module, "_default_duty_context", lambda _cfg: ("2026-11-09", "day"))
+    run_review_api = routes._run_review_api
+
+    async def run_without_shared_review_pool(func, *, executor):
+        assert executor is routes._STATION_110_STATUS_EXECUTOR, "other review pools are busy"
+        return await run_review_api(func, executor=executor)
+
+    monkeypatch.setattr(routes, "_run_review_api", run_without_shared_review_pool)
+    app = FastAPI()
+    app.state.container = SimpleNamespace(add_system_log=Mock())
+    app.include_router(routes.router)
+    with TestClient(app) as client:
+        result = client.get("/api/handover/review/110-station/status")
+        history = client.get("/api/handover/review/110-station/status", params={
+            "duty_date": "2026-11-08", "duty_shift": "day",
+        })
+    assert result.status_code == 200
+    body = result.json()
+    assert body["batch"]["batch_key"] == "2026-11-09|day"
+    assert body["upload"]["status"] == "success"
+    assert body["cloud_batch"]["spreadsheet_url"] == "https://example.com/2026-11-09/day"
+    assert body["batch_status"]["confirmed_count"] == 1
+    assert history.status_code == 200
+    assert history.json()["batch"]["batch_key"] == "2026-11-08|day"
+    assert history.json()["upload"]["status"] == "parsed"
+    assert history.json()["cloud_batch"]["spreadsheet_url"] == "https://example.com/2026-11-08/day"
+    assert history.json()["batch_status"]["confirmed_count"] == 0
 
 
 def test_parse_workbook_finds_day_layout_after_sheet_order_changes(tmp_path):

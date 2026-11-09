@@ -2023,6 +2023,7 @@ function mountHandover110StationApp(Vue) {
       const editableMainTransformerRows = ref([]);
       const mainTransformerRowsDirty = ref(false);
       let station110RefreshTimer = null;
+      let station110RequestSeq = 0;
 
       const batchText = computed(() => {
         const date = dutyDate.value || state.value.batch.duty_date || "-";
@@ -2163,6 +2164,8 @@ function mountHandover110StationApp(Vue) {
       }
 
       async function refreshStatus({ background = false } = {}) {
+        if (background && (loading.value || parsing.value || uploading.value || retrying.value || savingParsedRows.value || parsedRowsDirty.value || mainTransformerRowsDirty.value)) return;
+        const requestSeq = ++station110RequestSeq;
         if (!background) {
           loading.value = true;
           errorText.value = "";
@@ -2172,16 +2175,18 @@ function mountHandover110StationApp(Vue) {
             ...buildStation110ContextPayload(),
             _t: Date.now(),
           });
+          if (requestSeq !== station110RequestSeq) return;
+          if (background && (parsing.value || uploading.value || retrying.value || savingParsedRows.value || parsedRowsDirty.value || mainTransformerRowsDirty.value)) return;
           applyState(response);
           if (!background) {
             statusText.value = "110站状态已刷新";
           }
         } catch (error) {
-          if (!background) {
+          if (!background && requestSeq === station110RequestSeq) {
             errorText.value = String(error?.message || error || "读取110站状态失败");
           }
         } finally {
-          if (!background) {
+          if (!background && requestSeq === station110RequestSeq) {
             loading.value = false;
           }
         }
@@ -2297,6 +2302,7 @@ function mountHandover110StationApp(Vue) {
       });
 
       onBeforeUnmount(() => {
+        station110RequestSeq += 1;
         if (station110RefreshTimer) {
           window.clearInterval(station110RefreshTimer);
           station110RefreshTimer = null;
@@ -4176,25 +4182,28 @@ export function mountHandoverReviewApp(Vue) {
           };
         }
         const hasIncomingSubstation = Object.prototype.hasOwnProperty.call(shared, "substation_110kv");
-        let incomingBlock = normalizeSubstation110kvBlock(hasIncomingSubstation ? shared.substation_110kv : sharedBlocks.value.substation_110kv);
-        const incomingLock = normalizeSharedLockPayload(
-          locks.substation_110kv || sharedBlockLocks.value.substation_110kv,
-          incomingBlock.revision,
-        );
-        const currentRevision = Number(sharedBlocks.value?.substation_110kv?.revision || 0);
+        const selectedBatchKey = String(payload?.session?.batch_key || payload?.review_context?.batch_key || session.value?.batch_key || "").trim();
+        const previousBlock = normalizeSubstation110kvBlock(sharedBlocks.value.substation_110kv);
+        const batchChanged = Boolean(selectedBatchKey && selectedBatchKey !== previousBlock.batch_key);
+        const currentBlock = batchChanged ? normalizeSubstation110kvBlock({ batch_key: selectedBatchKey }) : previousBlock;
+        const incomingBlock = hasIncomingSubstation ? normalizeSubstation110kvBlock(shared.substation_110kv) : currentBlock;
+        if (selectedBatchKey && incomingBlock.batch_key && incomingBlock.batch_key !== selectedBatchKey) return;
+        if (batchChanged && substation110kvDirty.value) return;
+        if (hasIncomingSubstation && incomingBlock.revision < currentBlock.revision) return;
         const previousSubstationLock = normalizeSharedLockPayload(
-          sharedBlockLocks.value.substation_110kv,
-          currentRevision,
+          batchChanged ? {} : sharedBlockLocks.value.substation_110kv,
+          currentBlock.revision,
         );
-        const incomingRevision = Number(incomingBlock.revision || 0);
-        if (hasIncomingSubstation && currentRevision > 0 && incomingRevision > 0 && incomingRevision < currentRevision) {
-          incomingBlock = normalizeSubstation110kvBlock(sharedBlocks.value.substation_110kv || {});
+        const incomingLock = normalizeSharedLockPayload(locks.substation_110kv || previousSubstationLock, incomingBlock.revision);
+        if (batchChanged) {
+          clearSubstation110kvAutoSaveTimer();
+          clearSubstation110kvPreviewSyncTimer();
+          substation110kvDirtyMarked.value = false;
         }
-        const serverRevisionChanged = hasIncomingSubstation && incomingRevision !== currentRevision;
+        const serverRevisionChanged = hasIncomingSubstation && incomingBlock.revision !== currentBlock.revision;
         const preserveLocalRows = Boolean(substation110kvDirty.value) && !serverRevisionChanged;
         const localEditingInterrupted = serverRevisionChanged && (Boolean(substation110kvDirty.value) || Boolean(previousSubstationLock?.client_holds_lock));
         if (preserveLocalRows && hasIncomingSubstation) {
-          const currentBlock = normalizeSubstation110kvBlock(sharedBlocks.value.substation_110kv || {});
           sharedBlocks.value = {
             ...sharedBlocks.value,
             substation_110kv: {

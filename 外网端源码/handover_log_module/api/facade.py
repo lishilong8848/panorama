@@ -187,6 +187,7 @@ def run_from_existing_files(
     duty_shift: str | None = None,
     auto_send_review_link: bool = True,
     skip_manual_generated: bool = False,
+    only_if_missing: bool = False,
     emit_log: Callable[[str], None] = print,
 ) -> Dict[str, Any]:
     cfg = load_handover_config(config)
@@ -211,6 +212,7 @@ def run_from_existing_files(
         duty_shift=str(duty_shift or "").strip().lower() or None,
         auto_send_review_link=bool(auto_send_review_link),
         skip_manual_generated=bool(skip_manual_generated),
+        only_if_missing=only_if_missing,
         emit_log=emit_log,
     )
 

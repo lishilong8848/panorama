@@ -277,7 +277,7 @@ class Handover110StationUploadService:
             cache_state_file=str(cache_cfg.get("state_file", "") or ""),
             global_paths=global_paths if isinstance(global_paths, dict) else None,
         )
-        self._review_service = ReviewSessionService(self.config)
+        self._review_service = ReviewSessionService(self.config, initialize_generated_file_index=False)
         self._cloud_sheet_sync_service = HandoverCloudSheetSyncService(self.config)
 
     def batch_lock(self, batch_key: str) -> threading.RLock:
@@ -698,8 +698,8 @@ class Handover110StationUploadService:
         context = self.resolve_context(duty_date=duty_date, duty_shift=duty_shift)
         batch_key = context["batch_key"]
         upload_state = self._load_state(batch_key)
-        cloud_batch = self._review_service.get_cloud_batch(batch_key) or {}
-        batch_status = self._review_service.get_batch_status(batch_key)
+        cloud_batch = self._review_service.get_cloud_batch_fast(batch_key) or {}
+        batch_status = self._review_service.get_batch_status_fast(batch_key)
         return {
             "ok": True,
             "batch": context,

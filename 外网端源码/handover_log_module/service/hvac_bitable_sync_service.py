@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any, Callable, Dict, Iterable, List
 
-from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient, FeishuBitableDataNotReady
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from handover_log_module.vendor import hvac_bitable_sync as hvac
 
@@ -181,6 +181,8 @@ class _HvacFeishuAppClient:
                 view_id=view_text,
                 field_names=selected,
             )
+        except FeishuBitableDataNotReady:
+            raise
         except Exception as exc:  # noqa: BLE001
             if not view_text:
                 raise
@@ -196,6 +198,8 @@ class _HvacFeishuAppClient:
                 view_id="",
                 field_names=selected,
             )
+        except FeishuBitableDataNotReady:
+            raise
         except Exception as exc:  # noqa: BLE001
             self.emit_log(
                 "[暖通运行数据同步] 全表按字段读取失败，自动降级为全字段读取: "

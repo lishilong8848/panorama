@@ -624,6 +624,24 @@ class ReviewSessionStateStore:
                 sessions.append(payload)
         return sessions
 
+    def get_cloud_batch(self, batch_key: str) -> Dict[str, Any] | None:
+        batch_key_text = str(batch_key or "").strip()
+        if not batch_key_text:
+            return None
+        self.ensure_read_ready()
+        with self.connect(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM review_cloud_batches WHERE batch_key=?",
+                (batch_key_text,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(str(row["payload_json"] or ""))
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def save_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.ensure_ready()
         state = self._normalize_state(payload)

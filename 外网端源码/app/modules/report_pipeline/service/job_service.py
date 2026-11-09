@@ -15,7 +15,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Dict, List, Optional
 
 from app.modules.network.service.network_stability import get_network_reachability_state
@@ -1184,6 +1184,18 @@ class JobService:
         return bool(lowered and any(token in lowered for token in _WORKER_RUNTIME_REPAIR_TOKENS))
 
     @staticmethod
+    def _worker_failure_without_result(return_code: int, stderr_lines) -> str:
+        detail = " ".join(
+            line for line in stderr_lines
+            if line and not (
+                "Workbook contains no default style, apply openpyxl's default" in line
+                and ("UserWarning:" in line or line.lstrip().startswith("warn("))
+            )
+        ).strip()
+        summary = f"worker 无明确错误结果（退出码 {return_code}）"
+        return f"{summary}；错误输出: {detail}" if detail else summary
+
+    @staticmethod
     def _is_worker_stdout_shutdown_artifact(detail: str) -> bool:
         lowered = " ".join(str(detail or "").strip().lower().split())
         if not lowered:
@@ -1527,6 +1539,21 @@ class JobService:
             return False
         return wait_reason == "waiting:shared_bridge"
 
+    def _restore_legacy_handover_generation_intent(self, job: JobState, stage: StageState, payload_path: Path) -> None:
+        if not job.name.startswith("生成当前班次交接班及容量表 "):
+            return
+        payload = self._load_stage_payload_for_resume(payload_path)
+        if not payload or "only_if_missing" in payload:
+            return
+        # Old uploaded-source jobs used the same label, but their inputs were staged separately.
+        if any(
+            "manual_sources" in PureWindowsPath(str(payload.get(key) or "")).parts
+            for key in ("data_file", "capacity_source_file")
+        ):
+            return
+        payload["only_if_missing"] = True
+        self._task_engine_store.persist_stage_payload(job.job_id, stage.stage_id, payload)
+
     def _launch_existing_worker_job(self, job: JobState, stage: StageState, *, payload_path: Path, worker_handler: str) -> None:
         normalized_handler = str(worker_handler or "").strip()
         if not normalized_handler:
@@ -1551,6 +1578,8 @@ class JobService:
                     with self._lock:
                         if self._shutting_down or job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
                             return
+                    if normalized_handler == "handover_review_regenerate":
+                        self._restore_legacy_handover_generation_intent(job, stage, payload_path)
                     control_port = self._allocate_worker_control_port()
                     command = self._build_worker_command(
                         job_dir=self._task_engine_store.resolve_job_dir(job.job_id),
@@ -1675,8 +1704,7 @@ class JobService:
                                     str(worker_result.get("error", "") or "").strip()
                                     or str(worker_result.get("message", "") or "").strip()
                                     or str(worker_result.get("exception_type", "") or "").strip()
-                                    or stderr_detail
-                                    or f"worker exited with code {return_code}"
+                                    or self._worker_failure_without_result(return_code, worker_stderr_lines)
                                 )
                                 unhandled_error_detail = detail
                                 job.status = "failed"

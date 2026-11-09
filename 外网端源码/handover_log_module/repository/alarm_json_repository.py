@@ -620,6 +620,7 @@ class AlarmJsonRepository:
         end_dt = datetime.strptime(str(end_time).strip(), time_format)
         duty_date_text = str(duty_date or "").strip() or start_dt.date().isoformat()
         duty_shift_text = str(duty_shift or "").strip().lower() or self._infer_duty_shift(start_dt, end_dt)
+        cutoff_dt = min(end_dt, datetime.now().replace(microsecond=0))
         target_buildings = self._target_buildings(buildings)
         cache = document_cache if isinstance(document_cache, dict) else {}
         snapshot = self.build_window_selection_snapshot(
@@ -643,7 +644,7 @@ class AlarmJsonRepository:
                 coverage = self._coverage_result(
                     payload,
                     start_dt=start_dt,
-                    end_dt=end_dt,
+                    end_dt=cutoff_dt,
                     source_kind=source_kind,
                     selection_scope=selection_scope,
                 )
@@ -651,25 +652,38 @@ class AlarmJsonRepository:
                     missing_or_stale.append(building)
             except Exception:
                 missing_or_stale.append(building)
-        if missing_or_stale:
+        refresh_attempted = []
+        if missing_or_stale and cutoff_dt > start_dt:
+            refresh_attempted = missing_or_stale
             emit_log(
                 "[交接班][告警JSON] 当前交接班告警窗口 JSON 未覆盖班次窗口，准备内网补采: "
-                f"buildings={','.join(missing_or_stale)}, window={start_time}~{end_time}"
+                f"buildings={','.join(missing_or_stale)}, window={start_time}~{self._format_window_time(cutoff_dt)}"
             )
-            self._request_alarm_refresh_for_window(
+            refreshed = self._request_alarm_refresh_for_window(
                 buildings=missing_or_stale,
                 start_dt=start_dt,
-                end_dt=end_dt,
+                end_dt=cutoff_dt,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
                 emit_log=emit_log,
             )
+            if refreshed:
+                # A refreshed window can replace the JSON at the same path.
+                cache.clear()
             snapshot = self.build_window_selection_snapshot(
                 buildings=target_buildings,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
             )
-        return snapshot
+        return {
+            **snapshot,
+            "coverage_request": {
+                "start_time": start_time,
+                "end_time": end_time,
+                "cutoff": self._format_window_time(cutoff_dt),
+                "refresh_attempted_buildings": refresh_attempted,
+            },
+        }
 
     @staticmethod
     def _coverage_result(
@@ -761,8 +775,24 @@ class AlarmJsonRepository:
         duty_date_text = start_dt.date().isoformat()
         duty_shift_text = self._infer_duty_shift(start_dt, end_dt)
 
-        if isinstance(selection_snapshot, dict):
+        cutoff_dt = min(end_dt, datetime.now().replace(microsecond=0))
+        refresh_attempted = False
+        if (
+            isinstance(selection_snapshot, dict)
+            and selection_snapshot.get("duty_date", duty_date_text) == duty_date_text
+            and selection_snapshot.get("duty_shift", duty_shift_text) == duty_shift_text
+        ):
             snapshot = selection_snapshot
+            coverage_request = snapshot.get("coverage_request", {})
+            if (
+                isinstance(coverage_request, dict)
+                and coverage_request.get("start_time") == start_time
+                and coverage_request.get("end_time") == end_time
+            ):
+                batch_cutoff = _parse_datetime_text(coverage_request.get("cutoff"))
+                if batch_cutoff is not None:
+                    cutoff_dt = min(cutoff_dt, batch_cutoff)
+                refresh_attempted = building_text in (coverage_request.get("refresh_attempted_buildings") or [])
         else:
             snapshot = self.build_window_selection_snapshot(
                 buildings=[building_text],
@@ -771,13 +801,16 @@ class AlarmJsonRepository:
             )
         if not isinstance(snapshot, dict):
             snapshot = {}
+        if cutoff_dt <= start_dt:
+            raise RuntimeError("班次尚未开始，没有可统计的告警时段")
         selected_by_building = snapshot.get("selected_by_building", {}) if isinstance(snapshot, dict) else {}
         selected = selected_by_building.get(building_text) if isinstance(selected_by_building, dict) else None
-        if not isinstance(selected, dict):
+        if not isinstance(selected, dict) and not refresh_attempted:
+            refresh_attempted = True
             refreshed = self._request_alarm_refresh_for_window(
                 buildings=[building_text],
                 start_dt=start_dt,
-                end_dt=end_dt,
+                end_dt=cutoff_dt,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
                 emit_log=emit_log,
@@ -802,20 +835,21 @@ class AlarmJsonRepository:
         coverage = self._coverage_result(
             payload,
             start_dt=start_dt,
-            end_dt=end_dt,
+            end_dt=cutoff_dt,
             source_kind=source_kind,
             selection_scope=selection_scope,
         )
-        if not coverage["ok"]:
+        if not coverage["ok"] and not refresh_attempted:
             refreshed = self._request_alarm_refresh_for_window(
                 buildings=[building_text],
                 start_dt=start_dt,
-                end_dt=end_dt,
+                end_dt=cutoff_dt,
                 duty_date=duty_date_text,
                 duty_shift=duty_shift_text,
                 emit_log=emit_log,
             )
             if refreshed:
+                cache.clear()
                 snapshot = self.build_window_selection_snapshot(
                     buildings=[building_text],
                     duty_date=duty_date_text,
@@ -833,7 +867,7 @@ class AlarmJsonRepository:
                     coverage = self._coverage_result(
                         payload,
                         start_dt=start_dt,
-                        end_dt=end_dt,
+                        end_dt=cutoff_dt,
                         source_kind=source_kind,
                         selection_scope=selection_scope,
                     )
@@ -845,9 +879,9 @@ class AlarmJsonRepository:
             )
         available_end_dt = _parse_datetime_text(coverage.get("available_end"))
         effective_end_dt = (
-            min(end_dt, available_end_dt)
+            min(cutoff_dt, available_end_dt)
             if isinstance(available_end_dt, datetime)
-            else end_dt
+            else cutoff_dt
         )
 
         total_count = 0
@@ -897,7 +931,14 @@ class AlarmJsonRepository:
             f"building={building_text}, selected={selection_scope}/{source_kind}, downloaded_at={selected_downloaded_at}, "
             f"total={total_count}, unrecovered={unrecovered_count}, accept_desc={'有' if bool(accept_description) else '无'}"
         )
-        if not bool(coverage.get("full", False)):
+        elapsed_window_covered = bool(coverage.get("full", False))
+        full_shift_coverage = elapsed_window_covered and cutoff_dt >= end_dt
+        if elapsed_window_covered and not full_shift_coverage:
+            emit_log(
+                f"[交接班][告警JSON] building={building_text}, 班次尚未结束，"
+                f"按已发生时段统计至 {self._format_window_time(effective_end_dt)}"
+            )
+        elif not elapsed_window_covered:
             emit_log(
                 "[交接班][告警JSON] "
                 f"building={building_text}, coverage部分命中，已按可用区间继续统计: "
@@ -907,7 +948,7 @@ class AlarmJsonRepository:
         emit_log(
             "[交接班][告警JSON][诊断] "
             f"building={building_text}, file={str(file_path)}, "
-            f"query_start={start_time}, query_end={end_time}, "
+            f"query_start={start_time}, query_end={end_time}, as_of={self._format_window_time(effective_end_dt)}, "
             f"coverage_mode={str(coverage.get('mode', '') or '-').strip() or '-'}, "
             f"available_end={str(coverage.get('available_end', '') or '-').strip() or '-'}, "
             f"json_rows={rows_total}, parsed_time={parsed_time_count}, parse_failed={parse_failed_count}, "
@@ -929,7 +970,7 @@ class AlarmJsonRepository:
             selected_downloaded_at=selected_downloaded_at,
             query_start=str(payload.get("query_start", "") or "").strip(),
             query_end=str(payload.get("query_end", "") or "").strip(),
-            coverage_ok=bool(coverage.get("full", False)),
+            coverage_ok=full_shift_coverage,
             fallback_used=False,
             error="",
         )

@@ -27,6 +27,34 @@ class ReviewSessionStoreUnavailableError(RuntimeError):
     pass
 
 
+def reuse_generated_report_pair(session: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    """Return a no-write result for an already generated log and capacity pair."""
+    if not isinstance(session, dict) or not session.get("session_id"):
+        return None
+    capacity_sync = session.get("capacity_sync")
+    if str(session.get("capacity_status") or "").lower() not in {"success", "ok"} and not (
+        isinstance(capacity_sync, dict) and capacity_sync.get("status") == "ready"
+    ):
+        return None
+    files = {
+        key: str(session.get(key) or "").strip()
+        for key in ("output_file", "capacity_output_file")
+    }
+    try:
+        if not all(path and Path(path).is_file() and Path(path).stat().st_size > 0 for path in files.values()):
+            return None
+    except OSError:
+        return None
+    return {
+        "ok": True,
+        "status": "success",
+        "reason": "already_generated",
+        "building": session.get("building"),
+        "session_id": session["session_id"],
+        **files,
+    }
+
+
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -220,7 +248,7 @@ class ReviewSessionService:
         {"code": "e", "name": "E楼"},
     ]
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Dict[str, Any], *, initialize_generated_file_index: bool = True) -> None:
         self.config = config if isinstance(config, dict) else {}
         event_sections = self.config.get("event_sections", {})
         cache_cfg = event_sections.get("cache", {}) if isinstance(event_sections, dict) else {}
@@ -230,7 +258,9 @@ class ReviewSessionService:
             global_paths=global_paths if isinstance(global_paths, dict) else None,
         )
         self._source_file_cache_service = HandoverSourceFileCacheService(self.config)
-        self._generated_file_index: AppStateRepository | None = self._build_generated_file_index(global_paths)
+        self._generated_file_index: AppStateRepository | None = (
+            self._build_generated_file_index(global_paths) if initialize_generated_file_index else None
+        )
 
     @staticmethod
     def _build_generated_file_index(global_paths: Any) -> AppStateRepository | None:
@@ -2324,6 +2354,16 @@ class ReviewSessionService:
             "rows": normalized["rows"],
         }
 
+    def get_saved_substation_110kv_block(self, *, batch_key: str) -> Dict[str, Any]:
+        try:
+            raw_block = self._review_state_store.get_shared_block(
+                batch_key=str(batch_key or "").strip(),
+                block_id=_SUBSTATION_110KV_BLOCK_ID,
+            )
+            return self._compose_substation_110kv_block(raw_block)
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+
     def get_substation_110kv_state(
         self,
         *,
@@ -2332,11 +2372,7 @@ class ReviewSessionService:
     ) -> Dict[str, Any]:
         batch_key_text = str(batch_key or "").strip()
         try:
-            raw_block = self._review_state_store.get_shared_block(
-                batch_key=batch_key_text,
-                block_id=_SUBSTATION_110KV_BLOCK_ID,
-            )
-            block = self._compose_substation_110kv_block(raw_block)
+            block = self.get_saved_substation_110kv_block(batch_key=batch_key_text)
             lock = self._review_state_store.get_shared_block_lock(
                 batch_key=batch_key_text,
                 block_id=_SUBSTATION_110KV_BLOCK_ID,
@@ -2772,6 +2808,18 @@ class ReviewSessionService:
         normalized = self._normalize_cloud_batch(raw)
         if not normalized.get("batch_key"):
             normalized["batch_key"] = target_batch
+        return normalized
+
+    def get_cloud_batch_fast(self, batch_key: str) -> Dict[str, Any] | None:
+        target_batch = str(batch_key or "").strip()
+        if not target_batch:
+            return None
+        try:
+            raw = self._review_state_store.get_cloud_batch(target_batch)
+        except Exception as exc:  # noqa: BLE001
+            _reraise_review_store_error(exc)
+        normalized = self._normalize_cloud_batch(raw)
+        normalized["batch_key"] = normalized.get("batch_key") or target_batch
         return normalized
 
     def is_first_full_cloud_sync_completed(self, batch_key: str) -> bool:
