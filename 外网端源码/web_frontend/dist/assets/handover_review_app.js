@@ -35,6 +35,7 @@ import {
   saveHandoverReviewApi,
   saveHandoverReview110kvApi,
   saveHandoverReviewStationHApi,
+  uploadHandoverReviewStationHApi,
   prepareHandoverReviewCapacityImageApi,
   prepareHandoverReviewDeliveryApi,
   sendHandoverReviewCapacityImageApi,
@@ -53,6 +54,7 @@ import {
   normalizeAttachmentDelivery,
   resolveAttachmentDeliveryGate,
   resolveAttachmentDeliveryUi,
+  waitForBackgroundJob,
 } from "./handover_review_action_helpers.js";
 import { appendTrainingRows, TRAINING_COLUMNS } from "./handover_training_helpers.js";
 import { createMaintenanceRecurringHelpers } from "./handover_maintenance_recurring_helpers.js";
@@ -643,15 +645,18 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           <p class="review-subtitle">{{ batchText }}</p>
         </div>
         <div class="review-header-actions">
-          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing" @click="refreshStatus">刷新页面</button>
-          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing" @click="refreshSignatures">
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading" @click="refreshStatus">刷新页面</button>
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading" @click="refreshSignatures">
             {{ signatureRefreshing ? "刷新中..." : "刷新签名" }}
           </button>
-          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || !canPrintDutyFocus" :title="dutyFocusPrintReason" @click="printDutyFocus">
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading || !canPrintDutyFocus" :title="dutyFocusPrintReason" @click="printDutyFocus">
             {{ printing ? "准备打印..." : "打印值班关注点" }}
           </button>
-          <button class="btn btn-primary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing" @click="saveSelection">
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading" @click="saveSelection">
             {{ saving ? "保存中..." : "保存全部" }}
+          </button>
+          <button class="btn btn-primary btn-mini" type="button" :disabled="!canUploadAttachment" @click="uploadStationHAttachment">
+            {{ attachmentUploading ? "正在生成并上传..." : "生成并上传多维表" }}
           </button>
         </div>
       </div>
@@ -660,6 +665,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
         <span>保存状态：{{ state.saved ? "已保存" : "未保存" }}</span>
         <span v-if="state.selection.updated_at">更新时间：{{ state.selection.updated_at }}</span>
         <span v-if="state.duty_focus.signature_directory.refreshed_at">签名刷新：{{ state.duty_focus.signature_directory.refreshed_at }}</span>
+        <a v-if="attachmentRecordUrl" :href="attachmentRecordUrl" target="_blank" rel="noopener noreferrer">查看班次附件记录</a>
       </div>
       <div v-if="statusText" class="review-status-line review-status-info">{{ statusText }}</div>
       <div v-if="errorText" class="review-status-line review-status-danger">{{ errorText }}</div>
@@ -671,11 +677,11 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
         <div class="review-fixed-fields review-current-view-fields">
           <label class="review-field">
             <span class="review-field-label">日期</span>
-            <input class="review-input" type="date" v-model="dutyDate" :disabled="loading || saving" @change="onDutyChange" />
+            <input class="review-input" type="date" v-model="dutyDate" :disabled="loading || saving || attachmentUploading" @change="onDutyChange" />
           </label>
           <label class="review-field">
             <span class="review-field-label">班次</span>
-            <select class="review-input" v-model="dutyShift" :disabled="loading || saving" @change="onDutyChange">
+            <select class="review-input" v-model="dutyShift" :disabled="loading || saving || attachmentUploading" @change="onDutyChange">
               <option value="day">白班</option>
               <option value="night">夜班</option>
             </select>
@@ -756,7 +762,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           <h2>培训管理</h2>
           <div class="review-inline-actions">
             <button type="button" class="btn btn-secondary btn-mini" :disabled="saving || trainingRefreshing" @click="addTrainingRow" title="新增培训">新增</button>
-            <button type="button" class="btn btn-secondary btn-mini" :disabled="saving || trainingRefreshing" @click="refreshTraining">{{ trainingRefreshing ? '刷新中...' : '刷新' }}</button>
+            <button type="button" class="btn btn-secondary btn-mini" :disabled="saving || trainingRefreshing || attachmentUploading" @click="refreshTraining">{{ trainingRefreshing ? '刷新中...' : '刷新' }}</button>
           </div>
         </div>
         <div class="review-table-wrap">
@@ -993,14 +999,14 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
               <button
                 class="btn btn-secondary btn-mini"
                 type="button"
-                :disabled="saving || printing || dutyFocusImageLoading || !canPrintDutyFocus"
+                :disabled="saving || printing || dutyFocusImageLoading || attachmentUploading || !canPrintDutyFocus"
                 :title="canPrintDutyFocus ? '' : dutyFocusPrintReason"
                 @click="regenerateDutyFocusImage"
               >{{ dutyFocusImageLoading ? "生成中..." : "重新生成图片" }}</button>
               <button
                 class="btn btn-primary btn-mini"
                 type="button"
-                :disabled="saving || printing || dutyFocusImageLoading || !canPrintDutyFocus"
+                :disabled="saving || printing || dutyFocusImageLoading || attachmentUploading || !canPrintDutyFocus"
                 :title="canPrintDutyFocus ? '使用当前成品图片直接打印' : dutyFocusPrintReason"
                 @click="printDutyFocus"
               >{{ printing ? "准备打印..." : "直接打印" }}</button>
@@ -2432,6 +2438,8 @@ function mountHandoverStationHApp(Vue) {
       let routeHadExplicitDuty = Boolean(initialSelection.dutyDate && initialSelection.dutyShift);
       const loading = ref(true);
       const saving = ref(false);
+      const attachmentUploading = ref(false);
+      const attachmentRecordUrl = ref("");
       const signatureRefreshing = ref(false);
       const trainingRefreshing = ref(false);
       let stationHRequestSeq = 0;
@@ -2452,6 +2460,9 @@ function mountHandoverStationHApp(Vue) {
         ? String(initialSelection.dutyShift || "").trim().toLowerCase()
         : "");
       const state = ref(normalizeStationHState({}));
+      const canUploadAttachment = computed(() => Boolean(state.value.batch.batch_key)
+        && !loading.value && !saving.value && !signatureRefreshing.value && !trainingRefreshing.value
+        && !printing.value && !dutyFocusImageLoading.value && !attachmentUploading.value);
       const form = ref({
         current_people_text: "",
         next_people_text: "",
@@ -2529,6 +2540,7 @@ function mountHandoverStationHApp(Vue) {
           || `${state.value.batch.duty_date || ""}|${state.value.batch.duty_shift || ""}`,
         ).trim();
         if (currentBatchKey && nextBatchKey && currentBatchKey !== nextBatchKey) {
+          attachmentRecordUrl.value = "";
           replaceDutyFocusImageUrl("");
           clearSignaturePreview("handover");
           clearSignaturePreview("takeover");
@@ -2698,7 +2710,7 @@ function mountHandoverStationHApp(Vue) {
       }
 
       async function refreshStatus({ background = false, forceCurrent = false, includeSelectedDuty = false } = {}) {
-        if (background && (loading.value || saving.value || trainingRefreshing.value || hasUnsavedChanges.value)) return;
+        if (background && (loading.value || saving.value || trainingRefreshing.value || attachmentUploading.value || hasUnsavedChanges.value)) return;
         const requestSeq = ++stationHRequestSeq;
         if (!background) {
           loading.value = true;
@@ -2710,7 +2722,7 @@ function mountHandoverStationHApp(Vue) {
             _t: Date.now(),
           });
           if (requestSeq !== stationHRequestSeq) return;
-          if (background && (saving.value || hasUnsavedChanges.value)) return;
+          if (background && (saving.value || attachmentUploading.value || hasUnsavedChanges.value)) return;
           applyState(response);
           if (!background) statusText.value = "H楼人员选择已刷新";
         } catch (error) {
@@ -2944,6 +2956,37 @@ function mountHandoverStationHApp(Vue) {
         }
       }
 
+      async function uploadStationHAttachment() {
+        if (!canUploadAttachment.value) return;
+        attachmentUploading.value = true;
+        errorText.value = "";
+        statusText.value = "正在保存并生成H楼附件...";
+        try {
+          if ((hasUnsavedChanges.value || !state.value.saved) && !await saveSelection({ silent: true })) return;
+          const response = await uploadHandoverReviewStationHApi(buildContextPayload());
+          const jobId = response?.job?.job_id;
+          if (!jobId) throw new Error("未能提交H楼附件上传任务");
+          statusText.value = "正在生成并上传H楼附件...";
+          const job = await waitForBackgroundJob(jobId, getJobApi, { timeoutMs: 10 * 60 * 1000 });
+          if (!job) {
+            statusText.value = "已提交H楼附件上传，可在任务面板查看进度。";
+            return;
+          }
+          const result = job.result || {};
+          if (!result.record_url || !["success", "partial_failed"].includes(result.status)) {
+            throw new Error(job.error || result.error || "H楼附件上传未完成");
+          }
+          attachmentRecordUrl.value = result.record_url;
+          statusText.value = ["H楼交接班文件已上传", result.warning].filter(Boolean).join("；");
+          if (result.status === "partial_failed") errorText.value = `值班关注点图片未更新：${result.error || "请检查签名后重试"}`;
+        } catch (error) {
+          statusText.value = "";
+          errorText.value = String(error?.message || error || "H楼附件上传失败");
+        } finally {
+          attachmentUploading.value = false;
+        }
+      }
+
       async function refreshSignatures() {
         if (hasUnsavedChanges.value) {
           const saved = await saveSelection({ silent: true });
@@ -2993,7 +3036,7 @@ function mountHandoverStationHApp(Vue) {
       }
 
       async function ensureDutyFocusImage({ force = false, silent = false } = {}) {
-        if (dutyFocusImageLoading.value) return false;
+        if (dutyFocusImageLoading.value || attachmentUploading.value) return false;
         const context = buildContextPayload();
         const stillSelected = () => context.duty_date === dutyDate.value && context.duty_shift === dutyShift.value;
         const hasCurrentImage = Boolean(state.value.duty_focus?.image_status?.current
@@ -3191,6 +3234,10 @@ function mountHandoverStationHApp(Vue) {
       return {
         loading,
         saving,
+        attachmentUploading,
+        attachmentRecordUrl,
+        canUploadAttachment,
+        uploadStationHAttachment,
         signatureRefreshing,
         trainingRefreshing,
         trainingColumns: TRAINING_COLUMNS,
@@ -5430,13 +5477,18 @@ export function mountHandoverReviewApp(Vue) {
         triggerBrowserDownload,
       });
 
+      function historyDownloadRegenerating(item) {
+        return Boolean(item?.session_id && item.session_id === session.value?.session_id
+          && (regenerating.value || downloadActionBase.value.reasonCode === "regenerating"));
+      }
+
       async function downloadHistoryReviewFile(item) {
         const sessionId = String(item?.session_id || "").trim();
         if (!sessionId || !item?.has_output_file) {
           statusText.value = "当前历史记录没有可下载的交接班日志文件";
           return;
         }
-        if (saving.value || regenerating.value || confirming.value || preparingDelivery.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value || downloading.value) {
+        if (saving.value || historyDownloadRegenerating(item) || confirming.value || preparingDelivery.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityImageSending.value || downloading.value) {
           statusText.value = "请先等待当前保存或同步完成后再下载。";
           return;
         }
@@ -5475,7 +5527,7 @@ export function mountHandoverReviewApp(Vue) {
           statusText.value = "当前历史记录没有可下载的容量报表文件";
           return;
         }
-        if (saving.value || regenerating.value || confirming.value || preparingDelivery.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
+        if (saving.value || historyDownloadRegenerating(item) || confirming.value || preparingDelivery.value || cloudSyncBusy.value || syncingRemoteRevision.value || capacityDownloading.value || capacityImageSending.value) {
           statusText.value = "请先等待当前保存或同步完成后再下载。";
           return;
         }
@@ -5654,6 +5706,7 @@ export function mountHandoverReviewApp(Vue) {
         onHistorySelectionChange,
         returnToLatestSession,
         ensureHistoryLoaded,
+        historyDownloadRegenerating,
         downloadHistoryReviewFile,
         downloadHistoryCapacityFile,
         updateHistoryCloudSync,

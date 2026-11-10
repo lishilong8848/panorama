@@ -178,7 +178,7 @@ def test_each_floor_publishes_independently_and_only_reuploads_changed_pair(tmp_
 
 
 @pytest.mark.parametrize("complete", [False, True])
-def test_h_supplement_only_runs_when_all_five_uploaded(complete, tmp_path, monkeypatch):
+def test_batch_supplements_only_run_when_all_five_uploaded(complete, tmp_path, monkeypatch):
     service = object.__new__(followup_module.ReviewFollowupTriggerService)
     service.config = {"paths": {"runtime_state_root": tmp_path}}
     service._daily_report_state_service = SimpleNamespace(update_export_state=Mock())
@@ -288,32 +288,154 @@ def test_supplement_reuploads_after_building_generation_changes():
     assert not check(state, "bitable:rec", "new")
 
 
-def test_h_attachment_only_uses_completed_bitable_batch(bitable, tmp_path):
+def test_h_attachment_creates_batch_and_replaces_only_h_files(bitable, tmp_path):
     from PIL import Image
 
     store, client, record = bitable
     source = tmp_path / "local.xlsx"
     source.write_bytes(b"mock prepared Excel")
-    result = store.upload_files(DATE, SHIFT, {
-        f"{building}_{role}.xlsx": source
-        for building in workflow_module.HandoverDeliveryWorkflowService.BUILDINGS
-        for role in ("handover", "capacity")
-    })
     service = HandoverAttachmentDeliveryService(
         {"cloud_sheet_sync": {"enabled": False}, "daily_report_bitable_export": {"enabled": True}},
         store=store, output_root=tmp_path / "supplement",
     )
     image = tmp_path / "focus.png"
     Image.new("RGB", (200, 300), "white").save(image)
-    meta = {"batch_key": BATCH, "spreadsheet_token": f"bitable:{result['record_id']}"}
+    meta = {"batch_key": BATCH}
 
     sent = service.sync_station_h_sheet(
         batch_meta=meta, cell_values={"B2": DATE, "F2": "白班"}, duty_focus_image_path=image,
     )
 
     assert sent["status"] == "success" and sent["duty_focus_image_synced"]
-    assert {item["name"] for item in record["fields"][FIELD]} >= {"H_handover.xlsx", "H_duty_focus.png"}
+    assert {item["name"] for item in record["fields"][FIELD]} == {"H_handover.xlsx", "H_duty_focus.png"}
+    client.batch_create_records.assert_called_once()
+    store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": source, "110_original.xlsx": source})
+    first = {item["name"]: item["file_token"] for item in record["fields"][FIELD]}
+    second = service.sync_station_h_sheet(
+        batch_meta=meta, cell_values={"B2": DATE, "F2": "白班", "C3": "新值班人员"},
+        duty_focus_image_path=image,
+    )
+    assert second["record_id"] == sent["record_id"]
+    latest = {item["name"]: item["file_token"] for item in record["fields"][FIELD]}
+    assert set(latest) == set(first)
+    assert latest["H_handover.xlsx"] != first["H_handover.xlsx"]
+    assert latest["A楼_handover.xlsx"] == first["A楼_handover.xlsx"]
+    assert latest["110_original.xlsx"] == first["110_original.xlsx"]
+    client.batch_create_records.assert_called_once()
+    client.update_record.reset_mock()
+    stale = service.sync_station_h_sheet(
+        batch_meta=meta, cell_values={"B2": DATE, "F2": "白班"}, duty_focus_image_path=image, is_current=lambda: False,
+    )
+    assert stale["status"] == "failed" and "版本已更新" in stale["error"]
+    client.update_record.assert_not_called()
     client.update_record.reset_mock()
     rejected = service.sync_station_h_sheet(batch_meta={**meta, "spreadsheet_token": "old_sheet"}, cell_values={"B2": DATE})
     assert rejected["status"] == "failed"
     client.update_record.assert_not_called()
+
+
+def test_manual_h_upload_uses_saved_content_without_other_building_sessions(bitable, tmp_path, monkeypatch):
+    from PIL import Image
+    from openpyxl import load_workbook
+
+    store, client, record = bitable
+    service = object.__new__(followup_module.ReviewFollowupTriggerService)
+    service.config = {}
+    service._review_service = SimpleNamespace(
+        parse_batch_key=lambda batch: tuple(batch.split("|")),
+        list_batch_sessions=Mock(return_value=[]),
+        get_cloud_batch=Mock(return_value=None),
+        get_outdoor_temperature_state=Mock(return_value={}),
+        register_cloud_batch=Mock(),
+    )
+    selection = {
+        "current_people": ["值班甲", "值班乙"], "next_people": ["接班甲", "接班乙"],
+        "long_day_people": ["长白甲", "长白乙"], "resolved_source": "current",
+        "training_rows": [{"cells": {"B": "本班已保存培训"}}],
+    }
+    service._station_h_review_selection_service = SimpleNamespace(
+        get_selection=Mock(return_value=selection), resolve_selection=Mock(return_value=selection),
+    )
+    service._cloud_sheet_sync_service = HandoverAttachmentDeliveryService(
+        {}, store=store, output_root=tmp_path / "supplement",
+    )
+    image = tmp_path / "focus.png"
+    Image.new("RGB", (200, 300), "white").save(image)
+    service._station_h_duty_focus_service = SimpleNamespace(
+        build_status=Mock(return_value={"checks": {"H19": "20℃/18℃"}}),
+        build_image_document=Mock(return_value={"path": image}),
+    )
+    training = Mock(side_effect=AssertionError("manual upload must not refresh training"))
+    monkeypatch.setattr(followup_module, "TrainingManagementPayloadBuilder", training)
+
+    result = service.publish_station_h_attachment(batch_key=BATCH, historical=True, emit_log=Mock())
+
+    assert result["status"] == "success", result
+    assert "机柜汇总已留空" in result["warning"]
+    service._station_h_duty_focus_service.build_image_document.assert_called_once()
+    assert service._station_h_duty_focus_service.build_image_document.call_args.kwargs["force"] is True
+    assert service._station_h_duty_focus_service.build_status.call_args.kwargs["historical"] is True
+    service._review_service.register_cloud_batch.assert_called_once()
+    assert service._review_service.register_cloud_batch.call_args.kwargs["update_latest"] is False
+    assert {item["name"] for item in record["fields"][FIELD]} == {"H_handover.xlsx", "H_duty_focus.png"}
+    training.assert_not_called()
+    workbook = load_workbook(result["source_file"])
+    try:
+        sheet = workbook["H楼"]
+        assert sheet["C3"].value == "值班甲"
+        assert sheet["D3"].value == "值班乙"
+        assert sheet["B31"].value == "本班已保存培训"
+        assert sheet["B12"].value is None
+        assert len(sheet._images) == 1
+    finally:
+        workbook.close()
+
+
+def test_station_h_upload_submits_selected_historical_shift_only(monkeypatch):
+    from app.modules.handover_review.api import routes
+
+    start = Mock(return_value={"job_id": "job-h"})
+    selected = {"current_people": ["值班甲"]}
+    selection_service = SimpleNamespace(get_selection=Mock(return_value=selected))
+    monkeypatch.setattr(routes, "_handover_cfg", lambda _: {})
+    monkeypatch.setattr(routes, "_start_handover_background_job", start)
+    monkeypatch.setattr(routes, "_build_station_h_review_selection_service", lambda _: selection_service)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=object())))
+
+    payload = {"duty_date": "2026-11-08", "duty_shift": "night"}
+    result = routes.handover_review_station_h_upload(request, payload)
+
+    assert result["job"]["job_id"] == "job-h"
+    assert start.call_args.kwargs["worker_payload"] == {
+        "batch_key": "2026-11-08|night", "manual_upload": True, "historical": True,
+    }
+    dedupe_key = start.call_args.kwargs["dedupe_key"]
+    assert dedupe_key.startswith("handover:station-h-upload:2026-11-08|night:")
+    routes.handover_review_station_h_upload(request, payload)
+    assert start.call_args.kwargs["dedupe_key"] == dedupe_key
+    selected["current_people"] = ["值班乙"]
+    routes.handover_review_station_h_upload(request, payload)
+    assert start.call_args.kwargs["dedupe_key"] != dedupe_key
+    assert start.call_args.kwargs["resource_keys"] == ["handover_station_h:2026-11-08|night"]
+    with pytest.raises(routes.HTTPException) as error:
+        routes.handover_review_station_h_upload(request, {"duty_date": "2026-11-31", "duty_shift": "night"})
+    assert error.value.status_code == 400
+    assert start.call_count == 3
+
+
+def test_ae_upload_supplements_no_longer_trigger_h_attachment():
+    service = object.__new__(followup_module.ReviewFollowupTriggerService)
+    service._cloud_sheet_sync_service = object.__new__(HandoverAttachmentDeliveryService)
+    service._attach_station_h_sync_result_after_final_building_upload = Mock()
+    passthrough = lambda **kwargs: kwargs["cloud_result"]
+    service._attach_abcdeh_work_content_sync_result_after_final_building_upload = Mock(side_effect=passthrough)
+    service._attach_station_110_transformer_bitable_result = Mock(side_effect=passthrough)
+    service._attach_station_110_sync_result = Mock(side_effect=passthrough)
+
+    service._attach_extra_cloud_sheet_sync_results_locked(
+        batch_key=BATCH, sessions=[], cloud_result={"status": "ok"}, emit_log=Mock(),
+    )
+    service._attach_station_h_sync_result_after_final_building_upload.assert_not_called()
+    service._attach_abcdeh_work_content_sync_result_after_final_building_upload.assert_called_once()
+    service._attach_station_110_transformer_bitable_result.assert_called_once()
+    service._attach_station_110_sync_result.assert_called_once()

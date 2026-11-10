@@ -122,8 +122,10 @@ class HandoverAttachmentDeliveryService:
         }
 
     @staticmethod
-    def _reject_cloud_token(meta):
+    def _reject_cloud_token(meta, *, allow_missing=False):
         token = str(meta.get("spreadsheet_token", "") or "").strip()
+        if not token and allow_missing:
+            return
         if not token.startswith("bitable:") or not token[7:].strip():
             raise ValueError("五楼班次附件尚未生成多维记录，暂不能补传")
 
@@ -166,15 +168,17 @@ class HandoverAttachmentDeliveryService:
             self._save_atomic(target, lambda temporary: shutil.copyfile(source, temporary))
         return target
 
-    def _upload(self, meta, files):
-        self._reject_cloud_token(meta)
+    def _upload(self, meta, files, *, require_buildings=True, is_current=None):
+        self._reject_cloud_token(meta, allow_missing=not require_buildings)
         date, shift = self._context(meta)
+        options = {"is_current": is_current} if is_current is not None else {}
         record = self._attachment_store().upload_files(
             date, shift, files, expected_record_id=str(meta.get("spreadsheet_token") or "").removeprefix("bitable:"),
             required_existing_names={
                 f"{building}_{kind}.xlsx"
                 for building in self.MANAGED_BUILDINGS for kind in ("handover", "capacity")
-            },
+            } if require_buildings else (),
+            **options,
         )
         result = self._base(meta, status="success")
         result.update(self._record_meta(record, date, shift, meta))
@@ -183,14 +187,14 @@ class HandoverAttachmentDeliveryService:
         return result
 
     def sync_station_h_sheet(self, *, batch_meta, cell_values, duty_focus_image_path=None,
-                             skip_values=False, emit_log=print):
+                             skip_values=False, emit_log=print, is_current=None):
         title = "H楼"
         if not self._enabled():
             return self._base(batch_meta, status="skipped", error="disabled", sheet_title=title)
         image_error = ""
         image = None
         try:
-            self._reject_cloud_token(batch_meta)
+            self._reject_cloud_token(batch_meta, allow_missing=True)
             date, shift = self._context(batch_meta)
             if not cell_values:
                 raise ValueError("H attachment requires complete cell_values, including on image retry")
@@ -215,7 +219,7 @@ class HandoverAttachmentDeliveryService:
             files = {target.name: self._require_file(target, workbook=True)}
             if image is not None:
                 files[image.name] = image
-            result = self._upload(batch_meta, files)
+            result = self._upload(batch_meta, files, require_buildings=False, is_current=is_current)
             result.update(sheet_title=title, source_file=str(target), h_values_status="success",
                           duty_focus_image_synced=image is not None,
                           duty_focus_image_status="success" if image is not None else "failed",

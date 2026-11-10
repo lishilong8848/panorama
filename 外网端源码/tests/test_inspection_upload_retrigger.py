@@ -418,11 +418,12 @@ def test_stop_waits_for_inflight_dispatch_and_blocks_restart(tmp_path):
     watchdog.start()
     assert started.wait(5)
     fake = SimpleNamespace(runtime_config=config, inspection_retrigger_watchdog=watchdog,
-                           inspection_retrigger_shutdown=False, add_system_log=lambda message: None)
+                           inspection_retrigger_shutdown=False, _inspection_retrigger_lock=threading.Lock(),
+                           add_system_log=lambda message: None)
     holder = {}
 
     def stopper():
-        holder["result"] = AppContainer.stop_inspection_retrigger_watchdog(fake, source="关闭")
+        holder["result"] = AppContainer.stop_inspection_retrigger_watchdog(fake, source="关闭", closing=True)
 
     thread = threading.Thread(target=stopper)
     thread.start()
@@ -434,3 +435,25 @@ def test_stop_waits_for_inflight_dispatch_and_blocks_restart(tmp_path):
     restart = AppContainer.start_inspection_retrigger_watchdog(fake, source="迟到启动")
     assert restart["ok"] is False and restart["reason"] == "shutdown_started"
     assert watchdog._thread is None
+
+def test_watchdog_can_restart_after_role_exit_but_cannot_start_after_web_close():
+    watchdog = InspectionRetriggerWatchdog(dispatch=lambda: {"ok": True})
+    fake = SimpleNamespace(
+        inspection_retrigger_watchdog=None,
+        inspection_retrigger_shutdown=False,
+        _inspection_retrigger_lock=threading.Lock(),
+        _build_inspection_retrigger_watchdog=lambda: watchdog,
+        add_system_log=lambda message: None,
+    )
+    assert AppContainer.start_inspection_retrigger_watchdog(fake)["running"]
+    try:
+        assert AppContainer.stop_inspection_retrigger_watchdog(fake)["stopped"]
+        assert AppContainer.start_inspection_retrigger_watchdog(fake)["running"]
+    finally:
+        AppContainer.stop_inspection_retrigger_watchdog(fake)
+
+    fake.inspection_retrigger_watchdog = None
+    result = AppContainer.stop_inspection_retrigger_watchdog(fake, closing=True)
+    assert result["reason"] == "not_initialized"
+    assert AppContainer.start_inspection_retrigger_watchdog(fake)["reason"] == "shutdown_started"
+    assert fake.inspection_retrigger_watchdog is None

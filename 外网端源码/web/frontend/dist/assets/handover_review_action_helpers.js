@@ -115,6 +115,23 @@ export function resolveAttachmentDeliveryUi(raw, { expectedGenerationId = "" } =
   return { text: ATTACHMENT_DELIVERY_IDLE_TEXT, tone: "neutral", gate };
 }
 
+export async function waitForBackgroundJob(jobId, getJobApi, { timeoutMs = 120000, intervalMs = 1500 } = {}) {
+  const targetJobId = String(jobId || "").trim();
+  if (!targetJobId) return null;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      const job = await getJobApi(targetJobId);
+      const status = String(job?.status || "").trim().toLowerCase();
+      if (status && !["queued", "running", "waiting_resource"].includes(status)) return job;
+    } catch (_error) {
+      // Ignore transient polling failures and keep waiting.
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+  }
+  return null;
+}
+
 export function createHandoverReviewActionHelpers(options = {}) {
   const {
     session,
@@ -189,11 +206,6 @@ export function createHandoverReviewActionHelpers(options = {}) {
     triggerBrowserDownload,
   } = options;
 
-  function isIncompleteJobStatus(status) {
-    const normalized = String(status || "").trim().toLowerCase();
-    return normalized === "queued" || normalized === "running" || normalized === "waiting_resource";
-  }
-
   function readDeliveryGenerationId() {
     return String(attachmentGenerationId?.value || "").trim();
   }
@@ -229,24 +241,6 @@ export function createHandoverReviewActionHelpers(options = {}) {
       errorText.value = `刷新最新内容失败：${String(error?.message || error || "加载失败")}`;
       statusText.value = "";
     }
-  }
-
-  async function waitForBackgroundJob(jobId, getJobApi, { timeoutMs = 120000, intervalMs = 1500 } = {}) {
-    const targetJobId = String(jobId || "").trim();
-    if (!targetJobId) return null;
-    const startedAt = Date.now();
-    while (Date.now() - startedAt <= timeoutMs) {
-      try {
-        const job = await getJobApi(targetJobId);
-        if (!isIncompleteJobStatus(job?.status)) {
-          return job;
-        }
-      } catch (_error) {
-        // Ignore transient polling failures and keep waiting.
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
-    }
-    return null;
   }
 
   // Stop on this floor's delivery result, not on the batch or H-floor follow-up job.

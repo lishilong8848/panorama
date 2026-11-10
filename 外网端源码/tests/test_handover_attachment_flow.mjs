@@ -64,6 +64,7 @@ function createHarness(overrides = {}) {
   const statusText = makeRef("");
   const errorText = makeRef("");
   const dirty = makeRef(false);
+  const regenerating = makeRef(false);
 
   const allowedBase = { allowed: true, visible: true, disabledReason: "" };
   const allowedVm = { allowed: true, visible: true, disabled: false, disabledReason: "", text: "x" };
@@ -90,7 +91,7 @@ function createHarness(overrides = {}) {
     downloading: makeRef(false),
     capacityDownloading: makeRef(false),
     capacityImageSending: makeRef(false),
-    regenerating: makeRef(false),
+    regenerating,
     attachmentDelivery,
     attachmentGenerationId,
     preparingDelivery,
@@ -198,7 +199,7 @@ function createHarness(overrides = {}) {
   return {
     helpers,
     calls,
-    refs: { session, attachmentDelivery, attachmentGenerationId, preparingDelivery, statusText, errorText, dirty },
+    refs: { session, attachmentDelivery, attachmentGenerationId, preparingDelivery, statusText, errorText, dirty, regenerating },
     getPayload: () => payload,
   };
 }
@@ -398,6 +399,30 @@ await test("failed generation surfaces the error and permits a retry", async () 
   const gate = harness.helpers.resolveDeliveryGate();
   assert.equal(gate.show_retry, true);
   assert.equal(gate.can_prepare, true);
+});
+
+await test("review regeneration blocks both downloads and manual send until it ends", async () => {
+  const harness = createHarness();
+  harness.refs.attachmentDelivery.value = normalizeAttachmentDelivery({
+    status: "ready",
+    artifacts_ready: true,
+    generation_id: "gen-5",
+  });
+  harness.refs.attachmentGenerationId.value = "gen-5";
+  harness.refs.regenerating.value = true;
+  await harness.helpers.downloadCurrentReviewFile();
+  await harness.helpers.downloadCurrentCapacityReviewFile();
+  await harness.helpers.sendCurrentCapacityImage(async () => null);
+  assert.equal(harness.calls.download.length, 0);
+  assert.equal(harness.calls.send.length, 0);
+
+  harness.refs.regenerating.value = false;
+  await harness.helpers.downloadCurrentReviewFile();
+  await harness.helpers.downloadCurrentCapacityReviewFile();
+  await harness.helpers.sendCurrentCapacityImage(async () => null);
+  assert.deepEqual(harness.calls.download.filter((item) => item.kind === "trigger").map((item) => item.url),
+    ["/legacy", "/legacy-capacity"]);
+  assert.equal(harness.calls.send.length, 2);
 });
 
 await test("send uses this generation and never fires during generation", async () => {

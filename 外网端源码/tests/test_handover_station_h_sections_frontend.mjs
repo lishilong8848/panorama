@@ -119,4 +119,34 @@ assert.equal(requests[1].sections["新事件处理"][0].cells.B, "未保存内�
 assert.equal(page.form.value.sections["新事件处理"][0].cells.B, "未保存内容");
 assert.match(page.errorText.value, /分类已被更新/);
 
+const batch = { batch_key: "2026-11-08|night", duty_date: "2026-11-08", duty_shift: "night" };
+page.loading.value = false;
+page.state.value.batch = batch;
+page.dutyDate.value = batch.duty_date;
+page.dutyShift.value = batch.duty_shift;
+assert.equal(page.canUploadAttachment.value, true);
+const calls = [];
+globalThis.fetch = async (url, options) => {
+  calls.push(url);
+  let payload;
+  if (url === "/api/handover/review/station-h") {
+    const saved = JSON.parse(options.body);
+    assert.equal(saved.sections["新事件处理"][0].cells.B, "未保存内容");
+    payload = { saved: true, batch, sections: saved.sections, sections_revision: 8 };
+  } else if (url === "/api/handover/review/station-h/upload") {
+    assert.deepEqual(JSON.parse(options.body), { duty_date: batch.duty_date, duty_shift: batch.duty_shift });
+    payload = { job: { job_id: "job-h" } };
+  } else if (url === "/api/jobs/job-h") {
+    payload = { status: "success", result: { status: "success", record_url: "https://example.test/record-h" } };
+  } else {
+    assert.fail(`Unexpected request: ${url}`);
+  }
+  return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
+};
+await page.uploadStationHAttachment();
+assert.deepEqual(calls, ["/api/handover/review/station-h", "/api/handover/review/station-h/upload", "/api/jobs/job-h"]);
+assert.equal(page.attachmentUploading.value, false);
+assert.equal(page.attachmentRecordUrl.value, "https://example.test/record-h");
+assert.match(page.statusText.value, /已上传/);
+
 console.log("H station sections frontend checks passed");

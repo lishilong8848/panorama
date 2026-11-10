@@ -552,6 +552,9 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         try:
             yield
         finally:
+            stop_watchdog = getattr(container, "stop_inspection_retrigger_watchdog", None)
+            if callable(stop_watchdog):
+                await asyncio.to_thread(stop_watchdog, source="关闭自动", closing=True)
             runtime_status_coordinator = getattr(container, "runtime_status_coordinator", None)
             if runtime_status_coordinator is not None:
                 try:
@@ -584,15 +587,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.stop_alarm_rule_export_upload_scheduler(source="关闭自动")
             if getattr(container, "system_screenshot_demand_poller", None):
                 container.stop_system_screenshot_demand_poller(source="关闭自动")
-            if getattr(container, "inspection_retrigger_watchdog", None):
-                # 先停补传巡检并等待线程实际退出，再关闭任务引擎；
-                # 关停期间线程引用保留，且 shutdown 标记阻止新建线程。
-                watchdog_result = await asyncio.to_thread(
-                    container.stop_inspection_retrigger_watchdog, source="关闭自动", timeout=30.0,
-                )
-                if bool(watchdog_result.get("running")):
-                    container.add_system_log(
-                        "[巡检数据处理] 关闭时补传巡检线程未在宽限内退出，保留线程引用并继续关闭流程")
             if container.monthly_change_report_scheduler:
                 container.stop_monthly_change_report_scheduler(source="关闭自动")
             if container.monthly_event_report_scheduler:

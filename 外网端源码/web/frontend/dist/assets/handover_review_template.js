@@ -265,7 +265,7 @@
               <button
                 class="btn btn-secondary btn-mini"
                 @click="downloadHistoryReviewFile(item)"
-                :disabled="downloading || saving || confirming || cloudSyncBusy || !item.has_output_file"
+                :disabled="downloading || saving || confirming || cloudSyncBusy || historyDownloadRegenerating(item) || !item.has_output_file"
                 :title="item.has_output_file ? '' : '该历史记录没有交接班日志文件'"
               >
                 下载交接班日志
@@ -273,7 +273,7 @@
               <button
                 class="btn btn-secondary btn-mini"
                 @click="downloadHistoryCapacityFile(item)"
-                :disabled="capacityDownloading || saving || confirming || cloudSyncBusy || !item.has_capacity_output_file"
+                :disabled="capacityDownloading || saving || confirming || cloudSyncBusy || historyDownloadRegenerating(item) || !item.has_capacity_output_file"
                 :title="item.has_capacity_output_file ? '' : '该历史记录没有容量报表文件'"
               >
                 下载容量表

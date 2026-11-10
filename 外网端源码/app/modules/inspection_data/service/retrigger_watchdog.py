@@ -23,7 +23,7 @@ class InspectionRetriggerWatchdog:
         self._thread.start()
         return {"ok": True, "running": True, "reason": "started"}
 
-    def stop(self, timeout: float = 10.0) -> Dict[str, Any]:
+    def stop(self, timeout: float | None = 10.0) -> Dict[str, Any]:
         self._stop.set()
         thread = self._thread
         if thread and thread.is_alive():

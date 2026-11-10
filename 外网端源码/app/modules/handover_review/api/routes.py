@@ -3767,6 +3767,26 @@ def _review_delivery_state(service, session, *, job_service=None):
     return manifest
 
 
+def _review_regeneration_block_reason(session, job_service) -> str:
+    session_id = str(session.get("session_id") or "").strip()
+    find_active = getattr(job_service, "find_active_job_by_dedupe_key", None)
+    if not session_id or not callable(find_active):
+        return ""
+    try:
+        active_job = find_active(f"handover_review_regenerate:{session_id}")
+    except (OSError, sqlite3.Error):
+        return "暂无法确认本楼本班次的生成状态，请稍后重试"
+    if isinstance(active_job, dict) and active_job:
+        return "本楼本班次正在等待或执行重新生成，请等待完成后再操作"
+    return ""
+
+
+def _ensure_review_not_regenerating(session, container):
+    reason = _review_regeneration_block_reason(session, getattr(container, "job_service", None))
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+
+
 def _ensure_review_delivery_not_preparing(service, session, container):
     state = _review_delivery_state(service, session, job_service=getattr(container, "job_service", None))
     if state.get("status") in HandoverDeliveryStateService.ACTIVE:
@@ -3838,6 +3858,11 @@ def _stable_review_download_snapshot(
     # 拷贝后再只读核对一次：拷贝期间若有人保存新版或重新生成切换路径，丢弃副本并拒绝。
     if not _read_only_consistent():
         _reject(snapshot_dir)
+    try:
+        _ensure_review_not_regenerating(target, container)
+    except HTTPException:
+        cleanup_runtime_temp_dir(snapshot_dir)
+        raise
     return snapshot_path, snapshot_dir
 
 
@@ -3998,8 +4023,13 @@ def _attach_review_display_state(
         client_session_id=client_session_id,
         client_revision=client_revision,
     )
+    actions = response["display_state"]["actions"]
+    regeneration_reason = _review_regeneration_block_reason(session, delivery_job_service)
+    if regeneration_reason:
+        for action in ("download", "capacity_download", "capacity_image_send"):
+            actions[action].update(allowed=False, pending=True, reason_code="regenerating",
+                                   disabled_reason=regeneration_reason)
     if building in HandoverDeliveryWorkflowService.BUILDINGS:
-        actions = response["display_state"]["actions"]
         confirm = actions["confirm"]
         history_mode = bool(latest_session_id and session.get("session_id") != latest_session_id)
         locked = bool(concurrency.get("locked_by_other")) or (
@@ -4399,24 +4429,38 @@ def handover_review_station_h_status(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-def _queue_station_h_attachment_refresh(container, duty_date, duty_shift):
-    batch_key = f"{duty_date}|{duty_shift}"
+@router.post("/api/handover/review/station-h/upload")
+def handover_review_station_h_upload(
+    request: Request, payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    config = _handover_cfg(container)
+    if not config.get("daily_report_bitable_export", {}).get("enabled", True):
+        raise HTTPException(status_code=409, detail="班次附件多维表上传未启用")
+    duty_date, duty_shift = _normalize_duty_context(payload.get("duty_date"), payload.get("duty_shift"))
     try:
-        config = _handover_cfg(container)
-        manifests = HandoverDeliveryStateService(config, initialize=False).batch(batch_key)
-        if any(manifests.get(b, {}).get("status") != "uploaded" for b in HandoverDeliveryWorkflowService.BUILDINGS):
-            return
-        from app.worker.task_handlers import handle_handover_refresh_station_h
+        if datetime.strptime(duty_date, "%Y-%m-%d").date().isoformat() != duty_date or not duty_shift:
+            raise ValueError("invalid duty context")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="请选择有效的日期和白班/夜班") from exc
+    batch_key = f"{duty_date}|{duty_shift}"
+    from app.worker.task_handlers import handle_handover_refresh_station_h
 
-        worker_payload = {"batch_key": batch_key}
-        _start_handover_background_job(
-            container, name=f"交接班H楼附件补传-{batch_key}",
-            run_func=lambda emit: handle_handover_refresh_station_h(config, worker_payload, emit),
-            worker_handler="handover_refresh_station_h", worker_payload=worker_payload,
-            resource_keys=[f"handover_station_h:{batch_key}"], feature="handover",
-        )
-    except Exception as exc:
-        container.add_system_log(f"[交接班][H楼附件] 补传任务提交失败 batch={batch_key}: {exc}")
+    selection = _build_station_h_review_selection_service(container).get_selection(duty_date, duty_shift)
+    revision_key = hashlib.sha256(json.dumps(selection, sort_keys=True).encode("utf-8")).hexdigest()
+    worker_payload = {
+        "batch_key": batch_key,
+        "manual_upload": True,
+        "historical": not _is_current_handover_duty_context(duty_date=duty_date, duty_shift=duty_shift),
+    }
+    job = _start_handover_background_job(
+        container, name=f"交接班H楼附件上传-{batch_key}",
+        run_func=lambda emit: handle_handover_refresh_station_h(config, worker_payload, emit),
+        worker_handler="handover_refresh_station_h", worker_payload=worker_payload,
+        resource_keys=[f"handover_station_h:{batch_key}"],
+        dedupe_key=f"handover:station-h-upload:{batch_key}:{revision_key}", feature="handover", submitted_by="review",
+    )
+    return _accepted_job_response(job)
 
 
 @router.put("/api/handover/review/station-h")
@@ -4487,7 +4531,6 @@ def handover_review_station_h_save(
         )
     status = _station_h_status_payload(container, duty_date=duty_date_text, duty_shift=duty_shift_text)
     status["saved_selection"] = saved
-    _queue_station_h_attachment_refresh(container, duty_date_text, duty_shift_text)
     return status
 
 
@@ -4649,7 +4692,6 @@ def handover_review_station_h_regenerate_duty_focus_image(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"值班关注点图片生成失败: {exc}") from exc
-    _queue_station_h_attachment_refresh(container, duty_date_text, duty_shift_text)
     return {
         "status": str(generated.get("status", "current") or "current"),
         "available": bool(generated.get("available", False)),
@@ -5020,6 +5062,7 @@ def handover_review_data(
         building=building,
         client_id=str(client_id or "").strip(),
         emit_log=container.add_system_log,
+        delivery_job_service=getattr(container, "job_service", None),
     )
 
 
@@ -5521,13 +5564,16 @@ def handover_review_delivery_download(
 ) -> FileResponse:
     if artifact not in {"log", "capacity"}:
         raise HTTPException(status_code=400, detail="不支持的交接班成品类型")
-    service = _build_review_session_service(request.app.state.container)
+    container = request.app.state.container
+    service = _build_review_session_service(container)
     building = _resolve_building_or_404(service, building_code)
     target = _load_target_session_or_404(service, building=building, session_id=session_id)
+    _ensure_review_not_regenerating(target, container)
     manifest = _require_review_delivery(service, target)
     if manifest["generation_id"] != generation_id:
         raise HTTPException(status_code=409, detail="交接班成品版本已更新，请刷新后下载")
     filename_key = "output_file" if artifact == "log" else "capacity_output_file"
+    _ensure_review_not_regenerating(target, container)
     return FileResponse(manifest["paths"][artifact], filename=Path(target[filename_key]).name)
 
 
@@ -5542,7 +5588,7 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
-    # 下载不再强制要求先提交成品；但成品生成期间禁止下载（后端硬限制，不只靠按钮置灰）。
+    _ensure_review_not_regenerating(target, container)
     _ensure_review_delivery_not_preparing(service, target, container)
     # 会话记录不一定带 document_revision，从审核文档存储读取权威版本，避免把旧成品当成最新版。
     existing_document_state: Dict[str, Any] | None = None
@@ -5566,6 +5612,7 @@ def handover_review_download(building_code: str, request: Request, session_id: s
         service, delivery_session, job_service=getattr(container, "job_service", None),
     )
     if prepared.get("artifacts_ready") and HandoverDeliveryStateService.artifacts_exist(prepared):
+        _ensure_review_not_regenerating(target, container)
         return FileResponse(prepared["paths"]["log"], filename=Path(target["output_file"]).name)
 
     output_file_text = str(target.get("output_file", "")).strip()
@@ -5674,7 +5721,7 @@ def handover_review_capacity_download(
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
-    # 下载不再强制要求先提交成品；但成品生成期间禁止下载（后端硬限制，不只靠按钮置灰）。
+    _ensure_review_not_regenerating(target, container)
     _ensure_review_delivery_not_preparing(service, target, container)
 
     output_file_text = str(target.get("capacity_output_file", "")).strip()
@@ -5707,6 +5754,7 @@ def handover_review_capacity_download(
         service, delivery_session, job_service=getattr(container, "job_service", None),
     )
     if prepared.get("artifacts_ready") and HandoverDeliveryStateService.artifacts_exist(prepared):
+        _ensure_review_not_regenerating(target, container)
         return FileResponse(prepared["paths"]["capacity"], filename=Path(output_file_text).name)
 
     tracked_cells = _extract_capacity_tracked_cells(document)
@@ -5814,6 +5862,7 @@ def handover_review_capacity_image_prepare(
         raise HTTPException(status_code=400, detail="容量表图片发送仅允许审核页按钮手动触发")
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    _ensure_review_not_regenerating(target, container)
     if not str(target.get("capacity_output_file", "") or "").strip():
         raise HTTPException(status_code=409, detail="当前交接班容量报表尚未生成")
     manifest = _require_review_delivery(service, target) if building in HandoverDeliveryWorkflowService.BUILDINGS else {}
@@ -5857,9 +5906,11 @@ def handover_review_capacity_image_send(
         raise HTTPException(status_code=400, detail="容量表图片发送仅允许审核页按钮手动触发")
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+    _ensure_review_not_regenerating(target, container)
     manifest = _require_review_delivery(service, target) if building in HandoverDeliveryWorkflowService.BUILDINGS else {}
     if manifest and payload.get("generation_id") is not None and payload["generation_id"] != manifest["generation_id"]:
         raise HTTPException(status_code=409, detail="交接班成品版本已更新，请刷新后发送")
+    _ensure_review_not_regenerating(target, container)
     token_error = _verify_capacity_image_send_token(
         str(payload.get("send_token", "") or "").strip(),
         building=building,
@@ -5997,6 +6048,7 @@ def handover_review_capacity_image_send(
     except ReviewDocumentStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    _ensure_review_not_regenerating(target, container)
     delivery_service = CapacityReportImageDeliveryService(
         _handover_cfg(container),
         config_path=getattr(container, "config_path", None),
@@ -6765,6 +6817,7 @@ def handover_review_save(
         building=building,
         client_id=str(payload.get("client_id", "")).strip(),
         emit_log=container.add_system_log,
+        delivery_job_service=getattr(container, "job_service", None),
     )
 
 

@@ -1294,10 +1294,16 @@ def handle_handover_refresh_station_h(config, payload, emit_log, runtime=None):
 
     if runtime:
         runtime.raise_if_cancelled()
+    if payload.get("manual_upload") is not True:
+        return {"status": "skipped", "reason": "station_h_requires_manual_upload"}
     cfg = config if "_global_paths" in config else load_handover_config(config)
-    return ReviewFollowupTriggerService(cfg).publish_attachment_delivery(
-        batch_key=payload["batch_key"], emit_log=emit_log, refresh_h=True,
+    result = ReviewFollowupTriggerService(cfg).publish_station_h_attachment(
+        batch_key=payload["batch_key"], historical=bool(payload.get("historical")),
+        emit_log=emit_log, runtime=runtime,
     )
+    if result.get("status") not in {"success", "partial_failed", "failed"}:
+        return {**result, "status": "failed", "error": result.get("error") or "H楼附件未上传"}
+    return result
 
 
 def handle_handover_confirm_all(

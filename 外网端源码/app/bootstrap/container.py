@@ -178,6 +178,7 @@ class AppContainer:
     inspection_data_upload_scheduler: InspectionDataScheduler | None = None
     inspection_retrigger_watchdog: InspectionRetriggerWatchdog | None = None
     inspection_retrigger_shutdown: bool = False
+    _inspection_retrigger_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     energy_report_upload_scheduler: ApschedulerSchedulerFacade | None = None
     temperature_humidity_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     top5_power_report_scheduler: ApschedulerSchedulerFacade | None = None
@@ -857,24 +858,27 @@ class AppContainer:
         )
 
     def start_inspection_retrigger_watchdog(self, source: str = "手动") -> Dict[str, Any]:
-        if self.inspection_retrigger_shutdown:
-            # 关停开始后不再创建新的补传线程（含固定角色后台启动迟到的情况）。
-            self.add_system_log(f"[巡检数据处理] {source}补传巡检未启动：关停已开始")
-            return {"ok": False, "running": False, "reason": "shutdown_started"}
-        if not self.inspection_retrigger_watchdog:
-            self.inspection_retrigger_watchdog = self._build_inspection_retrigger_watchdog()
-        result = self.inspection_retrigger_watchdog.start()
+        with self._inspection_retrigger_lock:
+            if self.inspection_retrigger_shutdown:
+                return {"ok": False, "running": False, "reason": "shutdown_started"}
+            if not self.inspection_retrigger_watchdog:
+                self.inspection_retrigger_watchdog = self._build_inspection_retrigger_watchdog()
+            result = self.inspection_retrigger_watchdog.start()
         self.add_system_log(
             f"[巡检数据处理] {source}补传巡检: running={bool(result.get('running'))}, "
             f"reason={result.get('reason', '-')}")
         return result
 
-    def stop_inspection_retrigger_watchdog(self, source: str = "手动", timeout: float = 10.0) -> Dict[str, Any]:
-        self.inspection_retrigger_shutdown = True
-        if self.inspection_retrigger_watchdog:
-            result = self.inspection_retrigger_watchdog.stop(timeout=timeout)
-        else:
-            result = {"ok": True, "running": False, "reason": "not_initialized"}
+    def stop_inspection_retrigger_watchdog(
+        self, source: str = "手动", timeout: float | None = None, *, closing: bool = False,
+    ) -> Dict[str, Any]:
+        with self._inspection_retrigger_lock:
+            if closing:
+                self.inspection_retrigger_shutdown = True
+            if self.inspection_retrigger_watchdog:
+                result = self.inspection_retrigger_watchdog.stop(timeout=timeout)
+            else:
+                result = {"ok": True, "running": False, "reason": "not_initialized"}
         self.add_system_log(
             f"[巡检数据处理] {source}补传巡检停止: running={bool(result.get('running'))}")
         return result
@@ -2596,6 +2600,7 @@ class AppContainer:
             source=f"{source}:退出不覆盖记忆"
         )
 
+        results["inspection_retrigger_watchdog"] = self.stop_inspection_retrigger_watchdog(source=source)
         active_job_ids: list[str] = []
         try:
             active_job_ids = list(self.job_service.active_job_ids(include_waiting=True))
@@ -2625,7 +2630,6 @@ class AppContainer:
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
             ("system_screenshot_upload_scheduler", self.stop_system_screenshot_upload_scheduler),
             ("system_screenshot_demand_poller", self.stop_system_screenshot_demand_poller),
-            ("inspection_retrigger_watchdog", self.stop_inspection_retrigger_watchdog),
             (
                 "temperature_humidity_upload_scheduler",
                 self.stop_temperature_humidity_upload_scheduler,

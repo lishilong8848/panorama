@@ -2801,6 +2801,7 @@ class ReviewSessionService:
         duty_date: str,
         duty_shift: str,
         cloud_batch: Dict[str, Any],
+        update_latest: bool = True,
     ) -> Dict[str, Any]:
         target_batch = str(batch_key or "").strip()
         if not target_batch:
@@ -2820,7 +2821,7 @@ class ReviewSessionService:
         )
         self._apply_review_state_changes(
             upsert_cloud_batches=[normalized],
-            latest_batch_key=target_batch,
+            latest_batch_key=target_batch if update_latest else None,
         )
         return dict(normalized)
 

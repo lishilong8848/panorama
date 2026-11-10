@@ -1688,7 +1688,9 @@ class ReviewFollowupTriggerService:
     def _station_h_cabinet_values_from_session(self, session: Dict[str, Any]) -> Dict[str, Any]:
         source_cells = {"B12": "B13", "D12": "D13", "F12": "F13", "H12": "H13"}
         try:
-            document, _synced_session = self._review_document_state_service.load_document(session)
+            document, _synced_session = self._review_document_state_service.load_document(
+                session, preserve_existing=True,
+            )
             fixed_values = self._station_h_fixed_cell_values(document)
             if "B13" in fixed_values or "D13" in fixed_values:
                 return {
@@ -1755,6 +1757,7 @@ class ReviewFollowupTriggerService:
         batch_key: str,
         sessions: List[Dict[str, Any]],
         emit_log: Callable[[str], None],
+        independent: bool = False,
     ) -> Dict[str, Any]:
         duty_date, duty_shift = self._review_service.parse_batch_key(batch_key)
         if not duty_date or duty_shift not in {"day", "night"}:
@@ -1762,7 +1765,9 @@ class ReviewFollowupTriggerService:
 
         cabinet_result = self._station_h_cabinet_totals(sessions)
         if not bool(cabinet_result.get("ok", False)):
-            return cabinet_result
+            if not independent:
+                return cabinet_result
+            emit_log(f"[交接班][H楼附件] 机柜汇总留空 batch={batch_key}: {cabinet_result.get('error', '')}")
 
         try:
             outdoor_state = self._review_service.get_outdoor_temperature_state(batch_key=batch_key)
@@ -1773,7 +1778,10 @@ class ReviewFollowupTriggerService:
             )
             outdoor_cells = outdoor_block.get("cells", {}) if isinstance(outdoor_block, dict) else {}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "status": "failed", "reason": "outdoor_temperature_failed", "error": str(exc)}
+            if not independent:
+                return {"ok": False, "status": "failed", "reason": "outdoor_temperature_failed", "error": str(exc)}
+            outdoor_cells = {}
+            emit_log(f"[交接班][H楼附件] 共享室外温度读取失败，留空: {exc}")
         dry_bulb = str(outdoor_cells.get("B7", "") if outdoor_cells.get("B7") is not None else "").strip()
         wet_bulb = str(outdoor_cells.get("D7", "") if outdoor_cells.get("D7") is not None else "").strip()
         if not dry_bulb or not wet_bulb:
@@ -1859,10 +1867,7 @@ class ReviewFollowupTriggerService:
             "F4": f4_value,
             "B6": dry_bulb,
             "G6": wet_bulb,
-            "B12": totals.get("B12", 0),
-            "D12": totals.get("D12", 0),
-            "F12": totals.get("F12", 0),
-            "H12": totals.get("H12", 0),
+            **{cell: totals.get(cell, "") for cell in ("B12", "D12", "F12", "H12")},
             "B15": patrol_times[0],
             "B16": patrol_times[1],
             "H15": current_first,
@@ -1870,24 +1875,25 @@ class ReviewFollowupTriggerService:
         }
         for cell in ("H40", "H41", "H42", "H45", "H46", "H47", "H48"):
             cells[cell] = next_first
-        try:
-            incoming = TrainingManagementPayloadBuilder(self.config).build(
-                building="H楼", duty_date=duty_date,
-                current_people=current_names, next_people=next_names, emit_log=emit_log,
-            ).get(TRAINING_SECTION, [])
-            latest_selection = self._station_h_review_selection_service.get_selection(duty_date, duty_shift) or selection
-            training_rows = append_training_rows(latest_selection.get("training_rows", []), incoming)
-            if training_rows != latest_selection.get("training_rows", []):
-                latest_selection = self._station_h_review_selection_service.save_selection(
-                    duty_date=duty_date, duty_shift=duty_shift,
-                    current_people=latest_selection.get("current_people", current_names),
-                    next_people=latest_selection.get("next_people", next_names),
-                    long_day_people=latest_selection.get("long_day_people", long_day_people),
-                    training_rows=training_rows, append_training_only=True, source=latest_selection.get("source") or "auto",
-                )
-            selection["training_rows"] = latest_selection.get("training_rows", training_rows)
-        except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][H楼培训管理] 读取失败，保留已保存培训内容: {exc}")
+        if not independent:
+            try:
+                incoming = TrainingManagementPayloadBuilder(self.config).build(
+                    building="H楼", duty_date=duty_date,
+                    current_people=current_names, next_people=next_names, emit_log=emit_log,
+                ).get(TRAINING_SECTION, [])
+                latest_selection = self._station_h_review_selection_service.get_selection(duty_date, duty_shift) or selection
+                training_rows = append_training_rows(latest_selection.get("training_rows", []), incoming)
+                if training_rows != latest_selection.get("training_rows", []):
+                    latest_selection = self._station_h_review_selection_service.save_selection(
+                        duty_date=duty_date, duty_shift=duty_shift,
+                        current_people=latest_selection.get("current_people", current_names),
+                        next_people=latest_selection.get("next_people", next_names),
+                        long_day_people=latest_selection.get("long_day_people", long_day_people),
+                        training_rows=training_rows, append_training_only=True, source=latest_selection.get("source") or "auto",
+                    )
+                selection["training_rows"] = latest_selection.get("training_rows", training_rows)
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][H楼培训管理] 读取失败，保留已保存培训内容: {exc}")
         # H楼保留现有模板合并结构，多项培训在同一行各字段中按相同顺序换行。
         training_rows = selection.get("training_rows", [])
         if training_rows:
@@ -1900,7 +1906,8 @@ class ReviewFollowupTriggerService:
             cells.update(build_station_h_section_cell_values(selection.get("sections", {})))
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[交接班][H楼附件] 业务分类数据映射失败，已跳过分类写入: {exc}")
-        return {"ok": True, "cells": cells, "selection": selection}
+        return {"ok": True, "cells": cells, "selection": selection,
+                "warning": cabinet_result.get("error", "") if independent and not cabinet_result.get("ok") else ""}
 
     def _persist_station_h_sync_result(self, *, batch_key: str, sync_result: Dict[str, Any]) -> None:
         payload = dict(sync_result) if isinstance(sync_result, dict) else {}
@@ -1925,10 +1932,13 @@ class ReviewFollowupTriggerService:
         sessions: List[Dict[str, Any]],
         cloud_result: Dict[str, Any],
         emit_log: Callable[[str], None],
+        independent: bool = False,
+        is_current=None,
+        historical: bool = False,
     ) -> Dict[str, Any]:
         result = cloud_result if isinstance(cloud_result, dict) else {}
         token = str(result.get("spreadsheet_token", "")).strip()
-        if not token:
+        if not token and not independent:
             result["station_h_sync"] = {"status": "skipped", "reason": "missing_spreadsheet_token"}
             return result
         cloud_status = str(result.get("status", "")).strip().lower()
@@ -1938,14 +1948,17 @@ class ReviewFollowupTriggerService:
         if cloud_status not in {"ok", "skipped"}:
             result["station_h_sync"] = {"status": "skipped", "reason": "cloud_upload_not_complete"}
             return result
-        batch_meta = self._review_service.get_cloud_batch(batch_key) or {}
+        batch_meta = {} if independent else self._review_service.get_cloud_batch(batch_key) or {}
         existing = batch_meta.get("station_h_sync", {}) if isinstance(batch_meta, dict) else {}
         signature = str(result.get("attachment_generation_signature") or "")
-        if isinstance(existing, dict) and self._station_h_sync_complete(existing, token, signature):
+        if not independent and isinstance(existing, dict) and self._station_h_sync_complete(existing, token, signature):
             result["station_h_sync"] = {**existing, "reason": "already_synced_once"}
             return result
 
-        cell_result = self._build_station_h_cell_values(batch_key=batch_key, sessions=sessions, emit_log=emit_log)
+        cell_result = self._build_station_h_cell_values(
+            batch_key=batch_key, sessions=sessions, emit_log=emit_log,
+            **({"independent": True} if independent else {}),
+        )
         if not bool(cell_result.get("ok", False)):
             station_result = {
                 "status": str(cell_result.get("status", "failed") or "failed").strip().lower(),
@@ -1953,7 +1966,7 @@ class ReviewFollowupTriggerService:
                 "error": str(cell_result.get("error", "") or "").strip(),
             }
             result["station_h_sync"] = station_result
-            if station_result["status"] != "skipped":
+            if not independent and station_result["status"] != "skipped":
                 self._persist_station_h_sync_result(batch_key=batch_key, sync_result=station_result)
                 emit_log(
                     f"[交接班][H楼附件] 同步未完成 batch={batch_key}, "
@@ -1962,7 +1975,9 @@ class ReviewFollowupTriggerService:
             return result
 
         try:
-            latest_batch_meta = self._review_service.get_cloud_batch(batch_key) or batch_meta
+            latest_batch_meta = (
+                {"batch_key": batch_key} if independent else self._review_service.get_cloud_batch(batch_key) or batch_meta
+            )
             duty_date, duty_shift = self._review_service.parse_batch_key(batch_key)
             duty_focus_image: Dict[str, Any] = {}
             duty_focus_image_error = ""
@@ -1975,6 +1990,7 @@ class ReviewFollowupTriggerService:
                         if isinstance(cell_result.get("selection", {}), dict)
                         else {}
                     ),
+                    **({"historical": True} if historical else {}),
                 )
                 duty_focus_image = self._station_h_duty_focus_service.build_image_document(
                     duty_date=duty_date,
@@ -1997,9 +2013,12 @@ class ReviewFollowupTriggerService:
                     and str(existing.get("spreadsheet_token", "") or "").strip() == token
                 ),
                 emit_log=emit_log,
+                **({"is_current": is_current} if independent else {}),
             )
             if isinstance(station_result, dict):
                 station_result.setdefault("spreadsheet_token", token)
+                if cell_result.get("warning"):
+                    station_result["warning"] = f"机柜汇总已留空：{cell_result['warning']}"
                 if signature:
                     station_result["source_signature"] = signature
                 cloud_status = str(station_result.get("status", "") or "").strip().lower()
@@ -2022,11 +2041,46 @@ class ReviewFollowupTriggerService:
             emit_log(f"[交接班][H楼附件] 同步异常 batch={batch_key}, error={exc}")
         result["station_h_sync"] = station_result
         status = str(station_result.get("status", "")).strip().lower()
-        if status in {"success", "partial_failed", "failed"}:
+        if not independent and status in {"success", "partial_failed", "failed"}:
             self._persist_station_h_sync_result(batch_key=batch_key, sync_result=station_result)
         if status and status != "skipped":
-            emit_log(f"[交接班][H楼附件] 跟随附件上传完成 batch={batch_key}, status={status}")
+            emit_log(f"[交接班][H楼附件] 上传处理完成 batch={batch_key}, status={status}")
         return result
+
+    def publish_station_h_attachment(self, *, batch_key, historical=False, emit_log=print, runtime=None):
+        duty_date, duty_shift = self._review_service.parse_batch_key(batch_key)
+        with attachment_record_lock(f"station-h:{batch_key}"):
+            saved = self._station_h_review_selection_service.get_selection(duty_date, duty_shift)
+
+            def is_current():
+                if runtime is not None:
+                    runtime.raise_if_cancelled()
+                return saved == self._station_h_review_selection_service.get_selection(duty_date, duty_shift)
+
+            result = self._attach_station_h_sync_result(
+                batch_key=batch_key,
+                sessions=self._list_batch_sessions_resilient(batch_key, emit_log=emit_log),
+                cloud_result={"status": "ok"},
+                emit_log=emit_log,
+                independent=True,
+                is_current=is_current,
+                historical=historical,
+            )["station_h_sync"]
+            if result.get("record_id"):
+                # Serialize local batch metadata with A-E publishing, not H workbook generation.
+                with attachment_record_lock(f"publish:{batch_key}"):
+                    meta = self._review_service.get_cloud_batch(batch_key) or {}
+                    if meta.get("spreadsheet_token") != result["spreadsheet_token"]:
+                        meta = {**meta, "status": "prepared"}
+                    self._review_service.register_cloud_batch(
+                        batch_key=batch_key, duty_date=duty_date, duty_shift=duty_shift,
+                        update_latest=False,
+                        cloud_batch={
+                            **meta, "station_h_sync": result,
+                            **{key: result[key] for key in ("spreadsheet_token", "spreadsheet_url", "spreadsheet_title")},
+                        },
+                    )
+            return result
 
     def _attachment_manifests(self, batch_key):
         if not isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
@@ -2140,7 +2194,7 @@ class ReviewFollowupTriggerService:
         if not target_batch:
             return {"status": "skipped", "reason": "missing_batch_key"}
         if isinstance(self._cloud_sheet_sync_service, HandoverAttachmentDeliveryService):
-            return self.publish_attachment_delivery(batch_key=target_batch, emit_log=emit_log)
+            return {"status": "skipped", "reason": "station_h_requires_manual_upload", "batch_key": target_batch}
 
         with self._station_110_upload_service.batch_lock(target_batch):
             sessions = self._review_service.list_batch_sessions(target_batch)
@@ -2497,12 +2551,14 @@ class ReviewFollowupTriggerService:
         cloud_result: Dict[str, Any],
         emit_log: Callable[[str], None],
     ) -> Dict[str, Any]:
-        result = self._attach_station_h_sync_result_after_final_building_upload(
-            batch_key=batch_key,
-            sessions=sessions,
-            cloud_result=cloud_result,
-            emit_log=emit_log,
-        )
+        result = cloud_result
+        if not isinstance(self._cloud_sheet_sync_service, HandoverAttachmentDeliveryService):
+            result = self._attach_station_h_sync_result_after_final_building_upload(
+                batch_key=batch_key,
+                sessions=sessions,
+                cloud_result=cloud_result,
+                emit_log=emit_log,
+            )
         result = self._attach_abcdeh_work_content_sync_result_after_final_building_upload(
             batch_key=batch_key,
             sessions=sessions,
@@ -2520,7 +2576,7 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
 
-    def publish_attachment_delivery(self, *, batch_key, emit_log=print, refresh_h=False, building=""):
+    def publish_attachment_delivery(self, *, batch_key, emit_log=print, building=""):
         workflow = HandoverDeliveryWorkflowService(self.config)
         try:
             result = workflow.publish_ready_batch(batch_key, emit_log, building=building)
@@ -2546,8 +2602,6 @@ class ReviewFollowupTriggerService:
             if self._managed_building_cloud_sync_gaps(sessions):
                 return result
             self._maybe_mark_first_full_cloud_sync_completed(batch_key=batch_key, sessions=sessions, emit_log=emit_log)
-            if refresh_h:
-                self._persist_station_h_sync_result(batch_key=batch_key, sync_result={"status": "pending"})
             result = self._attach_extra_cloud_sheet_sync_results(
                 batch_key=batch_key, sessions=sessions, cloud_result=result, emit_log=emit_log,
             )

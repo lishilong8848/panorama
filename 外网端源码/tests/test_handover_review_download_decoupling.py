@@ -94,6 +94,78 @@ def _assert_valid_xlsx(path: Path) -> None:
     load_workbook(path, read_only=True).close()
 
 
+@pytest.mark.parametrize(
+    ("handler", "kwargs"),
+    [
+        (routes.handover_review_download, {"session_id": SESSION_ID}),
+        (routes.handover_review_capacity_download, {"session_id": SESSION_ID}),
+        (routes.handover_review_delivery_download, {"session_id": SESSION_ID, "generation_id": "ready"}),
+        (routes.handover_review_capacity_image_prepare, {"payload": {
+            "session_id": SESSION_ID, "trigger_source": "capacity_image_send_button",
+        }}),
+        (routes.handover_review_capacity_image_send, {"payload": {
+            "session_id": SESSION_ID, "trigger_source": "capacity_image_send_button",
+        }}),
+    ],
+)
+def test_active_regeneration_rejects_file_actions_before_side_effects(monkeypatch, tmp_path, handler, kwargs):
+    session = _base_session(tmp_path)
+    container = _container()
+    find_active = Mock(return_value={"status": "waiting_resource"})
+    container.job_service = SimpleNamespace(find_active_job_by_dedupe_key=find_active)
+    document_state = Mock()
+    require_delivery = Mock()
+    verify_token = Mock()
+    monkeypatch.setattr(routes, "_build_review_services", lambda _c: (object(), None, None, None))
+    monkeypatch.setattr(routes, "_build_review_session_service", lambda _c: object())
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *a, **k: document_state)
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda *a: "A楼")
+    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda *a, **k: session)
+    monkeypatch.setattr(routes, "_ensure_latest_session_actionable_or_400", lambda *a, **k: None)
+    monkeypatch.setattr(routes, "_require_review_delivery", require_delivery)
+    monkeypatch.setattr(routes, "_verify_capacity_image_send_token", verify_token)
+
+    with pytest.raises(HTTPException, match="重新生成") as exc:
+        handler("a", _request(container), **kwargs)
+
+    assert exc.value.status_code == 409
+    find_active.assert_called_once_with(f"handover_review_regenerate:{SESSION_ID}")
+    assert not document_state.mock_calls
+    require_delivery.assert_not_called()
+    verify_token.assert_not_called()
+
+
+def test_display_actions_recover_after_regeneration_and_other_sessions_remain_available(tmp_path):
+    session = _base_session(tmp_path)
+    active = {f"handover_review_regenerate:{SESSION_ID}": {"status": "queued"}}
+    job_service = SimpleNamespace(find_active_job_by_dedupe_key=active.get)
+    file_actions = ("download", "capacity_download", "capacity_image_send")
+
+    def actions_for(target):
+        return routes._attach_review_display_state(
+            {"session": target, "latest_session_id": target["session_id"]},
+            service=object(),
+            building=target["building"],
+            include_concurrency=False,
+            include_shared_blocks=False,
+            delivery_job_service=job_service,
+        )["display_state"]["actions"]
+
+    for status in ("queued", "waiting_resource", "running"):
+        active[f"handover_review_regenerate:{SESSION_ID}"]["status"] = status
+        actions = actions_for(session)
+        assert all(not actions[name]["allowed"] and actions[name]["reason_code"] == "regenerating"
+                   for name in file_actions)
+    other_building = {**session, "building": "B楼", "session_id": f"B楼|{BATCH}"}
+    other_shift = {**session, "duty_shift": "night", "session_id": "A楼|2026-11-09|night"}
+    for target in (other_building, other_shift):
+        actions = actions_for(target)
+        assert all(actions[name]["allowed"] for name in file_actions)
+    active.clear()
+    actions = actions_for(session)
+    assert all(actions[name]["allowed"] for name in file_actions)
+
+
 # ---------------------------------------------------------------------------
 # 交接班日志下载
 # ---------------------------------------------------------------------------
@@ -120,7 +192,8 @@ def test_download_entry_never_deletes_document_from_new_generation(monkeypatch, 
     store.delete_document.assert_not_called()
 
 
-def test_log_download_without_delivery_serves_stable_copy(monkeypatch, tmp_path):
+@pytest.mark.parametrize("regeneration_started", [False, True])
+def test_log_download_without_delivery_serves_stable_copy(monkeypatch, tmp_path, regeneration_started):
     """未提交成品（无成品清单）也能下载：回落原始文件通道，从稳定副本返回。"""
     session = _base_session(tmp_path, revision=1, confirmed=False)
     service = SimpleNamespace(config={"paths": {"runtime_state_root": tmp_path}})
@@ -136,7 +209,18 @@ def test_log_download_without_delivery_serves_stable_copy(monkeypatch, tmp_path)
     monkeypatch.setattr(routes, "_review_delivery_state", lambda *a, **k: {})
     snapshot_root = _mock_temp(monkeypatch, tmp_path)
 
-    response = routes.handover_review_download("a", _request(_container()), SESSION_ID)
+    container = _container()
+    if regeneration_started:
+        container.job_service = SimpleNamespace(find_active_job_by_dedupe_key=Mock(
+            side_effect=[None, {"status": "running"}],
+        ))
+        with pytest.raises(HTTPException, match="重新生成") as exc:
+            routes.handover_review_download("a", _request(container), SESSION_ID)
+        assert exc.value.status_code == 409
+        routes.cleanup_runtime_temp_dir.assert_called_once_with(snapshot_root)
+        return
+
+    response = routes.handover_review_download("a", _request(container), SESSION_ID)
 
     document_state.force_sync_session_dict.assert_called_once()
     snapshot_path = Path(response.path)
