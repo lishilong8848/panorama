@@ -771,6 +771,29 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
       </article>
     </section>
 
+    <section v-if="!loading && state.section_schema.length" class="review-current-view-section station-h-sections-area">
+      <article v-for="section in state.section_schema" :key="section.name" class="review-card station-h-section-card">
+        <div class="review-card-head">
+          <h2>{{ section.name }}</h2>
+          <span class="review-card-subtitle">按 H楼模板填写；某格留空则保留模板默认（如 / 占位、注意事项常备文本）。</span>
+        </div>
+        <div class="review-table-wrap">
+          <table class="review-table">
+            <thead><tr><th v-for="column in section.columns" :key="column.key">{{ column.label || column.key }}</th></tr></thead>
+            <tbody>
+              <tr v-for="(row, rowIndex) in (form.sections[section.name] || [])" :key="rowIndex">
+                <td v-for="column in section.columns" :key="column.key">
+                  <textarea class="review-input" rows="2" v-model="row.cells[column.key]"
+                    :aria-label="section.name + ' 第' + (rowIndex + 1) + '行 ' + (column.label || column.key)"
+                    :disabled="saving"></textarea>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
     <section v-if="!loading" class="review-current-view-section station-h-duty-focus-section">
       <article class="review-card station-h-duty-focus-card">
         <div class="review-card-head station-h-duty-focus-head">
@@ -1507,6 +1530,47 @@ function cloneStationHDutyFocus(value = {}) {
   return normalizeStationHDutyFocus(JSON.parse(JSON.stringify(value || {})));
 }
 
+function normalizeStationHSectionSchema(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((section) => ({
+      name: String(section?.name || "").trim(),
+      columns: Array.isArray(section?.columns)
+        ? section.columns
+          .map((column) => ({ key: String(column?.key || "").trim(), label: String(column?.label || "").trim() }))
+          .filter((column) => column.key)
+        : [],
+      rows: Array.isArray(section?.rows)
+        ? section.rows.map((row) => Number(row)).filter((row) => Number.isFinite(row))
+        : [],
+    }))
+    .filter((section) => section.name && section.columns.length);
+}
+
+// 按 schema 把已保存分类数据规范成 {name: [{cells:{key:str}}]}，行数严格等于模板数据行数。
+function normalizeStationHSections(rawSections, rawSchema) {
+  const schema = normalizeStationHSectionSchema(rawSchema);
+  const source = rawSections && typeof rawSections === "object" ? rawSections : {};
+  const result = {};
+  for (const section of schema) {
+    const incoming = Array.isArray(source[section.name]) ? source[section.name] : [];
+    const rowCount = Math.max(1, section.rows.length);
+    const rows = [];
+    for (let index = 0; index < rowCount; index += 1) {
+      const sourceRow = incoming[index] && typeof incoming[index] === "object" ? incoming[index] : {};
+      const sourceCells = sourceRow.cells && typeof sourceRow.cells === "object" ? sourceRow.cells : {};
+      const cells = {};
+      for (const column of section.columns) {
+        const value = sourceCells[column.key];
+        cells[column.key] = value == null ? "" : String(value);
+      }
+      rows.push({ cells });
+    }
+    result[section.name] = rows;
+  }
+  return result;
+}
+
 function normalizeStationHState(raw = {}) {
   const batch = raw?.batch && typeof raw.batch === "object" ? raw.batch : {};
   const selection = raw?.selection && typeof raw.selection === "object" ? raw.selection : {};
@@ -1552,6 +1616,9 @@ function normalizeStationHState(raw = {}) {
     candidate_source: raw?.candidate_source && typeof raw.candidate_source === "object" ? raw.candidate_source : {},
     duty_focus: normalizeStationHDutyFocus(raw?.duty_focus || {}),
     training_rows: Array.isArray(raw?.training_rows) ? cloneDeep(raw.training_rows) : [],
+    section_schema: normalizeStationHSectionSchema(raw?.section_schema),
+    sections: normalizeStationHSections(raw?.sections, raw?.section_schema),
+    sections_revision: Number(raw?.sections_revision || 0),
   };
 }
 
@@ -2391,6 +2458,7 @@ function mountHandoverStationHApp(Vue) {
         long_day_people_text: "",
         duty_focus: normalizeStationHDutyFocus({}),
         training_rows: [],
+        sections: {},
       });
       const stationHRefreshTimers = new Set();
       let stationHCandidateRetryCount = 0;
@@ -2412,6 +2480,7 @@ function mountHandoverStationHApp(Vue) {
         || String(form.value.long_day_people_text || "").trim() !== String(state.value.selection.long_day_people_text || "").trim()
         || JSON.stringify(buildDutyFocusPayload(form.value.duty_focus)) !== JSON.stringify(buildDutyFocusPayload(state.value.duty_focus))
         || JSON.stringify(form.value.training_rows) !== JSON.stringify(state.value.training_rows)
+        || JSON.stringify(form.value.sections) !== JSON.stringify(state.value.sections)
       ));
       const canPrintDutyFocus = computed(() => {
         if (state.value.historical && state.value.duty_focus?.image_status?.available && !hasUnsavedChanges.value) return true;
@@ -2478,6 +2547,7 @@ function mountHandoverStationHApp(Vue) {
           long_day_people_text: normalized.selection.long_day_people_text,
           duty_focus: cloneStationHDutyFocus(normalized.duty_focus),
           training_rows: cloneDeep(normalized.training_rows),
+          sections: cloneDeep(normalized.sections),
         };
         scheduleStationHCandidateRefresh(normalized);
         scheduleDutyFocusImagePreview(normalized);
@@ -2852,6 +2922,7 @@ function mountHandoverStationHApp(Vue) {
         errorText.value = "";
         if (!silent) statusText.value = "正在保存H楼审核内容...";
         try {
+          const sectionsChanged = JSON.stringify(form.value.sections) !== JSON.stringify(state.value.sections);
           const response = await saveHandoverReviewStationHApi({
             ...buildContextPayload(),
             current_people_text: form.value.current_people_text,
@@ -2859,9 +2930,10 @@ function mountHandoverStationHApp(Vue) {
             long_day_people_text: form.value.long_day_people_text,
             duty_focus: buildDutyFocusPayload(form.value.duty_focus),
             training_rows: form.value.training_rows,
+            ...(sectionsChanged ? { sections: form.value.sections, base_sections_revision: state.value.sections_revision } : {}),
           });
           applyState(response);
-          if (!silent) statusText.value = "H楼人员和值班关注点已保存。";
+          if (!silent) statusText.value = "H楼审核内容已保存。";
           return true;
         } catch (error) {
           errorText.value = String(error?.message || error || "保存H楼人员选择失败");
@@ -3491,7 +3563,10 @@ export function mountHandoverReviewApp(Vue) {
         }
         return badges;
       });
-      const attachmentDeliveryBusy = computed(() => Boolean(preparingDelivery.value || attachmentDeliveryGate.value.is_busy));
+      const attachmentDeliveryBusy = computed(() => {
+        const gate = attachmentDeliveryGate.value;
+        return gate.is_busy || (preparingDelivery.value && !(gate.is_ready && gate.delivery.status === "uploaded"));
+      });
       const showAttachmentDeliveryRetry = computed(() => attachmentDeliveryGate.value.show_retry);
       const attachmentDeliveryRecordUrl = computed(() => attachmentDeliveryGate.value.delivery.record_url || "");
       const attachmentDeliveryErrorText = computed(() => {
@@ -4041,6 +4116,13 @@ export function mountHandoverReviewApp(Vue) {
         return `${buildingCode || ""}|${latestId}|${currentSessionId}|${contextDate}|${contextShift}`;
       }
 
+      function applyAttachmentDelivery(payload) {
+        if (!Object.prototype.hasOwnProperty.call(payload, "attachment_delivery")) return;
+        const incoming = normalizeAttachmentDelivery(payload.attachment_delivery);
+        if (!preparingDelivery.value) attachmentGenerationId.value = incoming.generation_id;
+        attachmentDelivery.value = incoming;
+      }
+
       function applyPayloadMeta(payload = {}) {
         const requestedSelection = { ...activeRouteSelection.value };
         const hasSessionPayload = Object.prototype.hasOwnProperty.call(payload || {}, "session");
@@ -4065,14 +4147,7 @@ export function mountHandoverReviewApp(Vue) {
         }
         applySharedBlockPayload(payload || {});
         reviewDisplayState.value = normalizeReviewDisplayState(payload?.display_state || reviewDisplayState.value);
-        // First screen, status polling and prepare-delivery all carry attachment_delivery for this building.
-        if (Object.prototype.hasOwnProperty.call(payload || {}, "attachment_delivery")) {
-          const incoming = normalizeAttachmentDelivery(payload.attachment_delivery);
-          if (!preparingDelivery.value && incoming.generation_id !== attachmentGenerationId.value) {
-            attachmentGenerationId.value = incoming.generation_id;
-          }
-          attachmentDelivery.value = incoming;
-        }
+        applyAttachmentDelivery(payload);
         batchStatus.value = payload?.batch_status && typeof payload.batch_status === "object"
           ? cloneDeep(payload.batch_status)
           : batchStatus.value;
@@ -4566,6 +4641,7 @@ export function mountHandoverReviewApp(Vue) {
       }
 
       async function applyStatusPayload(payload = {}, { background = false } = {}) {
+        applyAttachmentDelivery(payload);
         if (background && documentOmitted.value && !dirty.value && !errorText.value && payload?.session?.session_id) {
           await loadReviewData({ background: false, mode: "bootstrap" });
           return;
@@ -4764,7 +4840,7 @@ export function mountHandoverReviewApp(Vue) {
         return true;
       }
 
-      async function loadReviewData({ background = false, mode = "auto" } = {}) {
+      async function loadReviewData({ background = false, mode = "auto", deliveryPoll = false } = {}) {
         if (!buildingCode) {
           loading.value = false;
           errorText.value = "无效的楼栋审核页面地址";
@@ -4776,7 +4852,7 @@ export function mountHandoverReviewApp(Vue) {
         if (background && backgroundLoadInFlight) {
           return false;
         }
-        if (background && (saving.value || loading.value || regenerating.value || confirming.value || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value || capacityImageSending.value)) {
+        if (background && (saving.value || loading.value || regenerating.value || (!deliveryPoll && confirming.value) || cloudSyncBusy.value || syncingRemoteRevision.value || downloading.value || capacityDownloading.value || capacityImageSending.value)) {
           return false;
         }
         const resolvedMode = background ? "status" : (mode === "bootstrap" ? "bootstrap" : "full");

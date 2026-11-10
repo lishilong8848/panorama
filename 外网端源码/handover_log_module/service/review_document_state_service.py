@@ -81,7 +81,9 @@ class ReviewDocumentStateService:
     def _output_file(session: Dict[str, Any]) -> str:
         return str(session.get("output_file", "") or "").strip()
 
-    def ensure_document_for_session(self, session: Dict[str, Any], *, training_rows=None) -> Dict[str, Any]:
+    def ensure_document_for_session(
+        self, session: Dict[str, Any], *, training_rows=None, preserve_existing: bool = False,
+    ) -> Dict[str, Any]:
         building = self._building(session)
         session_id = self._session_id(session)
         if not building or not session_id:
@@ -91,6 +93,9 @@ class ReviewDocumentStateService:
         if isinstance(existing, dict):
             current_output_file = self._output_file(session)
             existing_output_file = str(existing.get("source_excel_path", "") or "").strip()
+            path_changed = bool(current_output_file and existing_output_file != current_output_file)
+            if preserve_existing and path_changed:
+                raise ReviewDocumentStateError("审核文档已重新生成，请刷新后重试")
             current_path = Path(current_output_file) if current_output_file else None
             current_mtime = ""
             current_size = 0
@@ -104,7 +109,6 @@ class ReviewDocumentStateService:
                     current_size = 0
             existing_mtime = str(existing.get("source_excel_mtime", "") or "").strip()
             existing_size = int(existing.get("source_excel_size", 0) or 0)
-            path_changed = bool(current_output_file and existing_output_file != current_output_file)
             fingerprint_changed = bool(
                 current_mtime
                 and (existing_mtime != current_mtime or existing_size != current_size)
@@ -145,6 +149,8 @@ class ReviewDocumentStateService:
             document=document,
             imported_from_excel=True,
         )
+        if preserve_existing and imported.get("source_excel_path") != output_file:
+            raise ReviewDocumentStateError("审核文档已重新生成，请刷新后重试")
         self.emit_log(
             f"[交接班][审核SQLite] 已从Excel导入审核文档 building={building}, "
             f"session_id={session_id}, revision={imported.get('revision', '-')}, file={output_path}"
@@ -178,8 +184,27 @@ class ReviewDocumentStateService:
         state = self._store(building).get_document(session_id)
         return isinstance(state, dict)
 
-    def load_document(self, session: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
-        state = self.ensure_document_for_session(session)
+    def peek_document_state(self, session: Dict[str, Any]) -> Dict[str, Any] | None:
+        """只读读取已存审核文档状态（含 revision 与 source_excel_path），绝不触发任何写入。
+
+        与 ensure_document_for_session 不同：本方法不会因输出文件路径变化而删除并重新导入审核文档，
+        专供下载返回前的版本/路径一致性只读校验使用——读不到、版本不一致或路径不一致时由调用方拒绝下载，
+        而不是重新导入（重新导入会删除下载期间新生成的审核文档，造成数据损坏）。
+        """
+        building = self._building(session)
+        session_id = self._session_id(session)
+        if not building or not session_id:
+            return None
+        try:
+            state = self._store(building).get_document(session_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return state if isinstance(state, dict) else None
+
+    def load_document(
+        self, session: Dict[str, Any], *, preserve_existing: bool = False,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        state = self.ensure_document_for_session(session, preserve_existing=preserve_existing)
         session_with_sync = self.attach_excel_sync(session)
         session_with_sync["revision"] = int(state.get("revision", session_with_sync.get("revision", 0)) or 0)
         document = state.get("document", {}) if isinstance(state.get("document", {}), dict) else {}
@@ -884,8 +909,9 @@ class ReviewDocumentStateService:
         *,
         reason: str = "manual",
         force_all_regions: bool = False,
+        preserve_existing: bool = False,
     ) -> Dict[str, Any]:
-        self.ensure_document_for_session(session)
+        self.ensure_document_for_session(session, preserve_existing=preserve_existing)
         store = self._store(self._building(session))
         state = store.get_document(self._session_id(session))
         document_revision = (

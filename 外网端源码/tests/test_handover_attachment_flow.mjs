@@ -129,7 +129,8 @@ function createHarness(overrides = {}) {
     attachmentDeliveryPollOptions: { intervalMs: 0, timeoutMs: 5000 },
     saveDocument: async () => true,
     clearSaveTimers: () => {},
-    loadReviewData: async () => {
+    loadReviewData: async (options) => {
+      if (overrides.pollPayload) assert.equal(options.deliveryPoll, true, "polling must bypass the confirming guard");
       applyPayloadMeta(overrides.pollPayload ? overrides.pollPayload() : {});
       return true;
     },
@@ -296,10 +297,10 @@ await test("prepare delivery posts session_id/base_revision/client_id and unlock
     generationId: "gen-42",
     pollPayload: () => {
       emits += 1;
-      // Poll 1 = the preparing state right after submit, poll 2 = artifacts ready.
-      return emits >= 2
-        ? { attachment_delivery: { status: "ready", artifacts_ready: true, generation_id: "gen-42" } }
-        : { attachment_delivery: { status: "preparing", artifacts_ready: false, generation_id: "gen-42" } };
+      return { attachment_delivery: {
+        status: emits >= 3 ? "uploaded" : emits === 2 ? "ready" : "preparing",
+        artifacts_ready: emits >= 2, generation_id: "gen-42",
+      } };
     },
   });
 
@@ -314,17 +315,19 @@ await test("prepare delivery posts session_id/base_revision/client_id and unlock
   );
 
   assert.equal(harness.refs.attachmentGenerationId.value, "gen-42");
-  assert.equal(harness.refs.attachmentDelivery.value.status, "ready");
+  assert.equal(harness.refs.attachmentDelivery.value.status, "uploaded");
   assert.equal(harness.refs.attachmentDelivery.value.artifacts_ready, true);
   assert.equal(harness.refs.preparingDelivery.value, false, "preparing flag resets after completion");
-  assert.match(harness.refs.statusText.value, /已就绪/);
+  assert.match(harness.refs.statusText.value, /本楼班次附件已上传/);
+  assert.equal(emits, 3, "the button stops when this floor uploads, without waiting for supplements");
 
-  // Download now uses the delivery endpoint bound to this generation.
+  // Download is decoupled from 成品 submission: the header button always uses the raw
+  // download endpoint; the backend serves the current 成品 artifact when ready, else the
+  // force-synced raw file. The delivery-download endpoint is no longer used here.
   await harness.helpers.downloadCurrentReviewFile();
-  const deliveryUrl = harness.calls.download.find((item) => item.kind === "delivery");
-  assert.ok(deliveryUrl, "delivery download endpoint used");
-  assert.equal(deliveryUrl.params.generation_id, "gen-42");
-  assert.equal(harness.calls.download.some((item) => item.kind === "legacy"), false);
+  const legacyUrl = harness.calls.download.find((item) => item.kind === "legacy");
+  assert.ok(legacyUrl, "raw download endpoint used");
+  assert.equal(harness.calls.download.some((item) => item.kind === "delivery"), false);
 });
 
 await test("download/send/regenerate are blocked while the building job is queued", async () => {
@@ -351,7 +354,7 @@ await test("download/send/regenerate are blocked while the building job is queue
     { expectedGenerationId: "gen-1" }).can_refresh, true);
 });
 
-await test("stale generation (older ready payload) keeps actions locked", async () => {
+await test("stale generation keeps send locked but download falls back to the raw file", async () => {
   const harness = createHarness();
   harness.refs.attachmentDelivery.value = normalizeAttachmentDelivery({
     status: "ready",
@@ -360,10 +363,19 @@ await test("stale generation (older ready payload) keeps actions locked", async 
   });
   harness.refs.attachmentGenerationId.value = "gen-new";
 
+  // 成品已过期：不再把旧成品当作可下载版本，下载回落到原始（强制补写最新保存版）通道。
   await harness.helpers.downloadCurrentReviewFile();
-  assert.equal(harness.calls.download.length, 0);
-  assert.match(harness.refs.statusText.value, /过期|尚未就绪|生成/);
+  assert.ok(
+    harness.calls.download.some((item) => item.kind === "legacy"),
+    "stale delivery falls back to the raw download endpoint",
+  );
+  assert.equal(
+    harness.calls.download.some((item) => item.kind === "delivery"),
+    false,
+    "stale 成品 artifact is never served",
+  );
 
+  // 发送审核文本/容量表图片仍要求当前版本成品就绪，过期时保持锁定。
   await harness.helpers.sendCurrentCapacityImage(async () => null);
   assert.equal(harness.calls.send.length, 0);
 });
@@ -403,7 +415,10 @@ await test("send uses this generation and never fires during generation", async 
   assert.equal(harness.calls.send[1].body.generation_id, "gen-5");
 
   // Generating never triggers a send by itself.
-  const fresh = createHarness({ generationId: "gen-8" });
+  const fresh = createHarness({
+    generationId: "gen-8",
+    pollPayload: () => ({ attachment_delivery: { status: "uploaded", artifacts_ready: true, generation_id: "gen-8" } }),
+  });
   await fresh.helpers.prepareAttachmentDelivery();
   assert.equal(fresh.calls.send.length, 0, "no auto-send after generation");
 });

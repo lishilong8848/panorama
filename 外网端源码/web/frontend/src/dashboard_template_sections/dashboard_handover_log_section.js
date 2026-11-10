@@ -270,7 +270,7 @@ export const DASHBOARD_HANDOVER_LOG_SECTION = `        <section class="content-c
                 </div>
                 <div class="ops-focus-card">
                   <div class="ops-focus-card-label">执行条件</div>
-                  <div class="ops-focus-card-title">五楼成品齐全后汇总上传至班次多维记录</div>
+                  <div class="ops-focus-card-title">各楼确认后上传，五楼上传完成后补入 H 楼附件</div>
                   <div class="ops-focus-card-meta">日报多维表记录只写入年度、日期、班次和交接班日报链接。</div>
                 </div>
                 <div class="handover-daily-report-meta">

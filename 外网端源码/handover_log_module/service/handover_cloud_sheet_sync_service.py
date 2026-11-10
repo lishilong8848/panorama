@@ -14,6 +14,7 @@ from openpyxl.utils.cell import coordinate_to_tuple
 
 from app.modules.feishu.service.sheets_client_runtime import FeishuSheetsClientRuntime
 from handover_log_module.repository.excel_reader import load_workbook_quietly
+from handover_log_module.service.station_h_section_schema import station_h_section_cells
 
 
 class HandoverCloudSheetSyncService:
@@ -1554,7 +1555,9 @@ class HandoverCloudSheetSyncService:
         }
         value_ranges: List[Dict[str, Any]] = []
         training_cells = {"B31", "D31", "E31", "F31", "G31"} & payload.keys()
-        for coordinate in sorted(self.STATION_H_ALLOWED_CELLS | training_cells, key=coordinate_to_tuple):
+        # H楼业务分类单元格：仅写入 payload 中实际存在（非空）的分类值，避免用空值清掉云表模板默认。
+        section_cells = station_h_section_cells() & payload.keys()
+        for coordinate in sorted(self.STATION_H_ALLOWED_CELLS | training_cells | section_cells, key=coordinate_to_tuple):
             row_index, column_index = coordinate_to_tuple(coordinate)
             value_ranges.append(
                 {

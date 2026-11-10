@@ -37,6 +37,13 @@ def _read_point_settings(config):
         raise HTTPException(status_code=503, detail=f"读取巡检测点配置失败：{exc}") from exc
 
 
+def _trigger_upload_after_config_save(container, result: dict) -> dict:
+    """配置已同步飞书后，立即重传当前时段数值，让灯塔日常巡检实时拿到最新数据。"""
+    if not isinstance(result, dict) or not result.get("cloud_synced"):
+        return result
+    return {**result, "upload_trigger": container.trigger_inspection_data_upload_now()}
+
+
 @router.put("/points")
 def update_inspection_point_settings(payload: dict, request: Request):
     container = request.app.state.container
@@ -46,7 +53,7 @@ def update_inspection_point_settings(payload: dict, request: Request):
         raise HTTPException(status_code=409, detail="请重新加载测点配置后再保存")
     _read_point_settings(container.runtime_config)
     try:
-        return save_point_group(container.runtime_config, building=payload.get("building"), family=payload.get("family"),
+        result = save_point_group(container.runtime_config, building=payload.get("building"), family=payload.get("family"),
                                 points=payload.get("points", {}), remove=payload.get("remove", []),
                                 expected_group=payload["expected_group"], status_rules=payload.get("status_rules"),
                                 correction_rules=payload.get("correction_rules"),
@@ -55,6 +62,7 @@ def update_inspection_point_settings(payload: dict, request: Request):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _trigger_upload_after_config_save(container, result)
 
 
 def _point_building(building_code: str) -> str:
@@ -90,6 +98,7 @@ def update_building_inspection_point_settings(building_code: str, payload: dict,
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = _trigger_upload_after_config_save(container, result)
     return {**result, "settings": result["settings"].get(building, {})}
 
 

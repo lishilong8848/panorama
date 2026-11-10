@@ -23,7 +23,8 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.inspection_data.service.point_settings import (
-    load_or_restore_point_settings, load_point_settings, query_rules, retry_pending_point_config, sync_point_settings,
+    load_or_restore_point_settings, load_point_settings, load_point_settings_with_revision, query_rules,
+    retry_pending_point_config, sync_point_settings,
 )
 from app.shared.utils.atomic_file import atomic_write_text
 
@@ -704,7 +705,9 @@ class InspectionDataUploadService:
                 raise RuntimeError(f"巡检时段已结束或不匹配: {source_bucket_key}；未清空多维表")
 
         require_current_bucket()
-        point_settings = load_or_restore_point_settings(self.runtime_config)
+        # 配置与修订号同快照原子读取：记账只认本次实际加载并上传的版本，
+        # 加载之后并发保存的新版本不会被冒认为已覆盖。
+        point_settings, settings_revision = load_point_settings_with_revision(self.runtime_config)
         if not dry_run:
             try:
                 retry_pending_point_config(self.runtime_config)
@@ -753,6 +756,7 @@ class InspectionDataUploadService:
                            "source_file_count": sum(len(p["sources"]) for p in parsed.values())}
         if dry_run:
             return {"status": "success", "dry_run": True, "source_date": date,
+                    "settings_revision": settings_revision,
                     **source_metadata,
                     "buildings": list(parsed), "uploaded_count": 0,
                     "planned_count": sum(len(p["rows"]) for p in parsed.values()),
@@ -914,4 +918,5 @@ class InspectionDataUploadService:
             log(f"[巡检数据处理] {building} 上传完成: records={len(rows)}, deleted={len(ids)}")
         return {"status": "success", "source_date": date, "buildings": list(result), "results": result,
                 **source_metadata,
+                "settings_revision": settings_revision,
                 "uploaded_count": sum(v["uploaded_count"] for v in result.values())}

@@ -111,7 +111,8 @@ class HandoverDeliveryStateService:
                 "spreadsheet_url": url, "spreadsheet_title": "班次交接班附件",
                 "synced_revision": int(session.get("revision", 0) or 0),
             }
-        error = manifest.get("upload_error") or (manifest.get("error") if status == "failed" else "")
+        # Preparation failures are shown by attachment_delivery, not as upload failures.
+        error = manifest.get("upload_error")
         return {
             "status": "failed" if error else "pending_upload" if session.get("confirmed") else "idle",
             "error": error or "", "attempted": bool(error),

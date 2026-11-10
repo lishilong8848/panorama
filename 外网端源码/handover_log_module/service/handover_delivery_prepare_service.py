@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict
 
@@ -123,7 +124,32 @@ class HandoverDeliveryPrepareService:
     @staticmethod
     def _require_success(job: Dict[str, Any], label: str) -> None:
         if not isinstance(job, dict) or job.get("status") != "success":
-            raise HandoverDeliveryPrepareError(f"{label}未成功，不能准备交付成品")
+            detail = str(job.get("error") or "").strip() if isinstance(job, dict) else ""
+            raise HandoverDeliveryPrepareError(f"{label}未成功，不能准备交付成品" + (f": {detail}" if detail else ""))
+
+    def _capture_sources(self, sources, paths, *, check_version, check_cancelled, emit_log):
+        # Capture one stable pair before rendering. Later writes to the live Excel files
+        # do not invalidate copies of the same saved review version.
+        for delay in (0.1, 0.3, None):
+            check_cancelled()
+            check_version()
+            try:
+                before = {key: _fingerprint(source) for key, source in sources.items()}
+                for key, source in sources.items():
+                    shutil.copy2(source, paths[key])
+                    if _digest(paths[key]) != before[key][-1]:
+                        raise HandoverDeliveryPrepareRetryableError(f"{key}源Excel复制期间发生变化")
+                for key, source in sources.items():
+                    if _fingerprint(source) != before[key]:
+                        raise HandoverDeliveryPrepareRetryableError(f"{key}源Excel复制期间发生变化")
+            except (OSError, HandoverDeliveryPrepareRetryableError) as exc:
+                if delay is None:
+                    raise HandoverDeliveryPrepareRetryableError(f"无法取得稳定的交接班Excel副本: {exc}") from exc
+                emit_log(f"[交接班][成品] 正在补写源Excel，重新获取快照: {exc}")
+                time.sleep(delay)
+                continue
+            check_version()
+            return {key: fingerprint[-1] for key, fingerprint in before.items()}
 
     def prepare(
         self,
@@ -183,7 +209,10 @@ class HandoverDeliveryPrepareService:
             document, _ = self.document_state.load_document(session)
             cells = HandoverCapacityReportService.extract_tracked_cells_from_review_document(document)
             self._check_version(session_id, version)
-            job = queue.enqueue_capacity_overlay_sync(session, tracked_cells=cells, use_saved_shared_110kv=True)
+            job = queue.enqueue_capacity_overlay_sync(
+                session, tracked_cells=cells, use_saved_shared_110kv=True,
+                expected_document_revision=document_revision,
+            )
             if not job.get("job_id"):
                 raise HandoverDeliveryPrepareError("容量Excel同步入队失败")
             self._require_success(queue.wait_for_job(
@@ -198,10 +227,12 @@ class HandoverDeliveryPrepareService:
         session = self._check_version(session_id, version)
         capacity_sync = session.get("capacity_sync", {})
         if capacity_sync.get("status") != "ready":
-            raise HandoverDeliveryPrepareError("容量Excel补写未就绪")
+            detail = str(capacity_sync.get("error") or session.get("capacity_error") or "").strip()
+            if detail:
+                raise HandoverDeliveryPrepareError(f"容量Excel补写未就绪: {detail}")
+            raise HandoverDeliveryPrepareRetryableError("容量Excel正在后台补写，请稍后重新提交")
 
         sources = {"log": Path(session["output_file"]), "capacity": Path(session["capacity_output_file"])}
-        fingerprints = {key: _fingerprint(path) for key, path in sources.items()}
         session_root = _runtime_root(self.config) / "handover" / "delivery" / hashlib.sha256(
             session_id.encode("utf-8")
         ).hexdigest()
@@ -210,18 +241,11 @@ class HandoverDeliveryPrepareService:
         names = {"log": "log.xlsx", "capacity": "capacity.xlsx", "image": "capacity.png", "text": "handover.txt"}
         paths = {key: staging / name for key, name in names.items()}
 
-        def check_sources() -> None:
-            for key, source in sources.items():
-                if _fingerprint(source) != fingerprints[key]:
-                    raise HandoverDeliveryPrepareRetryableError("源Excel在准备期间被改写，请重试")
-            self._check_version(session_id, version)
-
         try:
-            for key, source in sources.items():
-                shutil.copy2(source, paths[key])
-                if _digest(paths[key]) != fingerprints[key][-1]:
-                    raise HandoverDeliveryPrepareRetryableError("源Excel复制期间发生变化，请重试")
-            check_sources()
+            source_hashes = self._capture_sources(
+                sources, paths, check_version=lambda: self._check_version(session_id, version),
+                check_cancelled=check_cancelled, emit_log=emit_log,
+            )
             signature = self.image_service.capacity_service.build_capacity_overlay_signature(
                 building=building, duty_date=session.get("duty_date", ""),
                 duty_shift=session.get("duty_shift", ""), handover_cells=cells,
@@ -229,7 +253,9 @@ class HandoverDeliveryPrepareService:
                 cooling_pump_pressures=document.get("cooling_pump_pressures", {}),
                 emit_log=emit_log,
             )
-            if (not signature.get("valid") or not signature.get("signature")
+            if not signature.get("valid"):
+                raise HandoverDeliveryPrepareError(str(signature.get("error") or "容量Excel补写输入不完整"))
+            if (not signature.get("signature")
                     or not signature.get("input_signature")
                     or signature["input_signature"] != capacity_sync.get("input_signature")):
                 raise HandoverDeliveryPrepareError("容量Excel签名与已同步输入不一致")
@@ -252,10 +278,10 @@ class HandoverDeliveryPrepareService:
                 raise HandoverDeliveryPrepareError("交接文本生成失败")
             paths["text"].write_text(message, encoding="utf-8")
             hashes = {key: _digest(path) for key, path in paths.items()}
-            if any(hashes[key] != fingerprints[key][-1] for key in sources):
+            if any(hashes[key] != source_hashes[key] for key in sources):
                 raise HandoverDeliveryPrepareRetryableError("成品源副本在生成期间被改写，请重试")
             check_cancelled()
-            check_sources()
+            self._check_version(session_id, version)
             destination = session_root / f"{revision}-{_json_digest(hashes)}"
             try:
                 staging.rename(destination)

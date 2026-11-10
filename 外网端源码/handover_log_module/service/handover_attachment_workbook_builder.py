@@ -112,7 +112,10 @@ def _write_values(worksheet: Any, cell_values: Mapping[str, Any]) -> None:
             )
     for (row, column), (_, value) in planned.items():
         # 只改 .value：不新建样式、不触碰合并区域与行列尺寸。
-        worksheet.cell(row=row, column=column).value = value
+        cell = worksheet.cell(row=row, column=column)
+        cell.value = value
+        if isinstance(value, str):
+            cell.data_type = "s"
 
 
 def _read_image(image_path: str | Path) -> tuple[bytes, tuple[int, int]]:

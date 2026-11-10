@@ -45,6 +45,7 @@ from handover_log_module.service.station_h_review_selection_service import (
     station_h_normalize_duty_people,
 )
 from handover_log_module.service.station_h_duty_focus_service import StationHDutyFocusService
+from handover_log_module.service.station_h_section_schema import build_station_h_section_cell_values
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
 )
@@ -1892,6 +1893,13 @@ class ReviewFollowupTriggerService:
         if training_rows:
             cells.update({f"{column}31": "\n".join(str(row.get("cells", {}).get(column) or "")
                                                 for row in training_rows) for column in TRAINING_COLUMNS})
+        # H楼业务分类：把已保存分类数据按模板既有数据行写入绝对单元格（仅非空值；空值保留模板默认，
+        # 如 / 占位与注意事项常备文本）。在既有扁平单元格之后 update：操作者填写值（含 H40:H42 执行人）
+        # 覆盖自动默认，未填写则保留默认。只填既有行、绝不插行/删行，故不位移培训行(31)与页脚(45:48)。
+        try:
+            cells.update(build_station_h_section_cell_values(selection.get("sections", {})))
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][H楼附件] 业务分类数据映射失败，已跳过分类写入: {exc}")
         return {"ok": True, "cells": cells, "selection": selection}
 
     def _persist_station_h_sync_result(self, *, batch_key: str, sync_result: Dict[str, Any]) -> None:
@@ -2512,16 +2520,16 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
 
-    def publish_attachment_delivery(self, *, batch_key, emit_log=print, refresh_h=False):
+    def publish_attachment_delivery(self, *, batch_key, emit_log=print, refresh_h=False, building=""):
         workflow = HandoverDeliveryWorkflowService(self.config)
         try:
-            result = workflow.publish_ready_batch(batch_key, emit_log)
+            result = workflow.publish_ready_batch(batch_key, emit_log, building=building)
         except Exception as exc:
             emit_log(f"[交接班][班次附件] 上传失败 batch={batch_key}: {exc}")
-            workflow.record_upload_error(batch_key, str(exc))
+            workflow.record_upload_error(batch_key, str(exc), building=building)
             return {"status": "failed", "error": str(exc), "uploaded_buildings": [],
                     "failed_buildings": [{"building": "班次附件", "error": str(exc)}], "skipped_buildings": []}
-        if result.get("status") != "ok":
+        if result.get("status") != "ok" and not result.get("completed_buildings"):
             return result
         date, shift = batch_key.split("|")
         state = self._daily_report_export_state(
@@ -2531,6 +2539,8 @@ class ReviewFollowupTriggerService:
         self._daily_report_state_service.update_export_state(
             duty_date=date, duty_shift=shift, daily_report_record_export=state,
         )
+        if not result.get("all_buildings_uploaded"):
+            return result
         with attachment_record_lock(f"supplements:{batch_key}"):
             sessions = self._review_service.list_batch_sessions(batch_key)
             if self._managed_building_cloud_sync_gaps(sessions):
@@ -2785,7 +2795,8 @@ class ReviewFollowupTriggerService:
         if not sessions:
             return self._daily_report_export_state(status="skipped", error="missing_sessions")
         if isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
-            if not self._all_sessions_cloud_synced_current_revision(sessions):
+            manifests = self._attachment_manifests(target_batch)
+            if not any(self._present_session_delivery(session, manifests).get("status") == "success" for session in sessions):
                 return self._daily_report_export_state(status="pending")
             first = sessions[0]
             return self._daily_report_state_service.get_export_state(

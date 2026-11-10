@@ -325,6 +325,43 @@ def test_external_inspection_rule_sync_persists_and_invalidates_current_snapshot
         assert cache._inspection_point_rule_snapshot() == (rules, 20)
 
 
+def test_inspection_rule_sync_tolerates_revision_drift_with_identical_rules(cache, tmp_path):
+    """规则完全一致时，外网 revision 漂移（低于内网已存）不得判为冲突，且不得回退内网最高版本。
+
+    复现并防止“巡检数据处理”任务因伪版本冲突失败，同时防止版本回退引发的覆盖回归：
+    同规则低版本重发 → 确认成功但内网保留最高版本；异规则只有携带严格更新版本才接受，否则 409。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.modules.internal_bridge_http.api.routes import router
+
+    cache.runtime_config['paths'] = {'runtime_state_root': str(tmp_path / 'state')}
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(runtime_config={'internal_bridge_http': {'enabled': True}},
+                                          shared_bridge_service=SimpleNamespace(_source_cache_service=cache))
+    family = FAMILY_ELECTRICAL_INSPECTION
+    rules = {'D楼': {family: {'add': [], 'remove': [], 'baseline': ['7_0_1', '7_0_2']}}}
+    url = '/api/internal-bridge/inspection/point-rules'
+    with TestClient(app) as client:
+        assert client.put(url, json={'point_overrides': rules, 'revision': 200}).status_code == 200
+        assert cache._inspection_point_rule_snapshot() == (rules, 200)
+        # 同规则、revision 漂移到更低值 → 确认成功，但保留内网最高版本 200（绝不回退）。
+        drifted = client.put(url, json={'point_overrides': rules, 'revision': 150})
+        assert drifted.status_code == 200, drifted.text
+        assert drifted.json()['point_overrides'] == rules
+        assert cache._inspection_point_rule_snapshot() == (rules, 200), '同规则低版本不得回退内网版本'
+        # 关键回归：版本未回退，异规则 180（介于 150 与 200 之间）必须被拒绝，不得覆盖配置。
+        different = {'D楼': {family: {'add': ['7_0_9'], 'remove': [], 'baseline': ['7_0_1', '7_0_2']}}}
+        assert client.put(url, json={'point_overrides': different, 'revision': 180}).status_code == 409
+        assert client.put(url, json={'point_overrides': different, 'revision': 150}).status_code == 409
+        assert client.put(url, json={'point_overrides': different, 'revision': 120}).status_code == 409
+        assert cache._inspection_point_rules() == rules, '内网配置不得被过期/冲突推送改写'
+        # 规则不同但 revision 更新 → 正常接受。
+        assert client.put(url, json={'point_overrides': different, 'revision': 300}).status_code == 200
+        assert cache._inspection_point_rule_snapshot() == (different, 300)
+
+
 def test_failed_download_isolated_and_retries_only_failed_family(family, cache, monkeypatch):
     calls = []
     def fail(**kwargs):

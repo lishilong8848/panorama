@@ -24,7 +24,7 @@
             v-if="showDownloadAction"
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentReviewFile"
-            :disabled="downloadActionVm.disabled || attachmentDeliveryBusy || !attachmentDeliveryGate.can_download"
+            :disabled="downloadActionVm.disabled || attachmentDeliveryBusy"
             :title="downloadActionVm.disabledReason || ''"
           >
             {{ downloadActionVm.text }}
@@ -33,7 +33,7 @@
             v-if="showCapacityDownloadAction"
             class="btn btn-secondary btn-mini"
             @click="downloadCurrentCapacityReviewFile"
-            :disabled="capacityDownloadDisabled || attachmentDeliveryBusy || !attachmentDeliveryGate.can_download"
+            :disabled="capacityDownloadDisabled || attachmentDeliveryBusy"
             :title="capacityDownloadActionVm.disabledReason || ''"
           >
             {{ capacityDownloadActionVm.text }}
@@ -85,7 +85,7 @@
             :disabled="confirmActionVm.disabled || attachmentDeliveryBusy"
             :title="confirmActionVm.disabledReason || attachmentDeliveryGate.reason || ''"
           >
-            {{ attachmentDeliveryBusy ? '正在提交...' : attachmentDeliveryGate.delivery.upload_error ? '重试上传班次附件' : '生成成品并提交' }}
+            {{ attachmentDeliveryBusy ? (attachmentDeliveryGate.is_ready ? '正在上传本楼附件...' : '正在提交...') : attachmentDeliveryGate.delivery.upload_error ? '重试上传本楼附件' : '生成成品并提交' }}
           </button>
           <button
             v-if="showAttachmentDeliveryRetry"
@@ -210,13 +210,13 @@
         <div class="review-fixed-fields">
           <label class="review-field">
             <span class="review-field-label">交接班日志（李世龙）源文件</span>
-            <input class="review-input" type="file" accept=".xlsx,.xlsm"
+            <input class="review-input" type="file" accept=".xlsx,.xlsm,.json"
               :disabled="loading || regenerateActionVm.disabled"
               @change="uploadedHandoverSource = $event.target.files[0] || null" />
           </label>
           <label class="review-field">
             <span class="review-field-label">交接班容量报表源文件</span>
-            <input class="review-input" type="file" accept=".xlsx,.xlsm"
+            <input class="review-input" type="file" accept=".xlsx,.xlsm,.json"
               :disabled="loading || regenerateActionVm.disabled"
               @change="uploadedCapacitySource = $event.target.files[0] || null" />
           </label>

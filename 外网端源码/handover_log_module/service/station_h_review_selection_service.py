@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Sequence
 from app.core.app_state import AppStateRepository
 from pipeline_utils import get_app_dir
 from handover_log_module.service.training_management_payload_builder import normalize_training_rows, append_training_rows
+from handover_log_module.service.station_h_section_schema import normalize_station_h_sections
 
 
 STATION_H_REVIEW_NAMESPACE = "station_h_review"
@@ -148,6 +149,10 @@ def _runtime_config_from_handover_config(config: Dict[str, Any]) -> Dict[str, An
     return {"paths": {"runtime_state_root": runtime_state_root}} if runtime_state_root else {}
 
 
+class StationHSectionsConflictError(RuntimeError):
+    pass
+
+
 class StationHReviewSelectionService:
     """Persist H-building manual review selections in the local app state DB."""
 
@@ -199,6 +204,8 @@ class StationHReviewSelectionService:
         long_day_people: Any,
         duty_focus: Any = None,
         training_rows: Any = None,
+        sections: Any = None,
+        base_sections_revision: int | None = None,
         append_training_only: bool = False,
         source: str = "manual",
     ) -> Dict[str, Any]:
@@ -223,6 +230,8 @@ class StationHReviewSelectionService:
             "duty_focus": normalized_duty_focus,
             "training_rows": (normalize_training_rows(training_rows) if training_rows is not None
                               else deepcopy(existing.get("training_rows", []))),
+            "sections": (normalize_station_h_sections(sections) if sections is not None
+                         else normalize_station_h_sections(existing.get("sections", {}))),
             "source": str(source or "manual").strip() or "manual",
             "updated_at": _now_text(),
         }
@@ -248,6 +257,13 @@ class StationHReviewSelectionService:
                 payload["training_rows"] = append_training_rows(payload["training_rows"], latest.get("training_rows", []))
             if duty_focus is None and latest:
                 payload["duty_focus"] = deepcopy(latest.get("duty_focus", {}))
+            latest_sections = latest.get("sections") if latest else normalize_station_h_sections({})
+            latest_sections_revision = latest.get("sections_revision", 0)
+            if sections is None or append_training_only:
+                payload["sections"] = latest_sections
+            elif base_sections_revision is not None and base_sections_revision != latest_sections_revision:
+                raise StationHSectionsConflictError("H楼分类已被更新，请保留未保存的修改，刷新后再编辑")
+            payload["sections_revision"] = latest_sections_revision + int(payload["sections"] != latest_sections)
             payload["training_rows"] = normalize_training_rows(payload["training_rows"])
             conn.execute("""INSERT INTO runtime_kv(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)
                          ON CONFLICT(namespace, key) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at""",
@@ -302,6 +318,8 @@ class StationHReviewSelectionService:
             "next_people_text": join_station_h_people(next_people),
             "long_day_people_text": join_station_h_people(long_day_people),
             "duty_focus": deepcopy(raw.get("duty_focus", {})) if isinstance(raw.get("duty_focus", {}), dict) else {},
+            "sections": normalize_station_h_sections(raw.get("sections", {})),
+            "sections_revision": int(raw.get("sections_revision", 0) or 0),
             "updated_at": str(raw.get("updated_at", "") or "").strip(),
             "source": str(raw.get("source", "") or "").strip(),
             "resolved_source": str(raw.get("resolved_source", "") or "").strip(),

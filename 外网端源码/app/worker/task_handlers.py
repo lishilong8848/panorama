@@ -749,23 +749,74 @@ def handle_inspection_data_upload(
     if not isinstance(dry_run, bool):
         raise ValueError("dry_run 必须是布尔值")
 
-    def inspection_log(message):
-        emit_log(message)
-        emit_event = getattr(runtime, "emit_event", None)
-        if callable(emit_event):
-            emit_event({
-                "type": "progress", "stage_id": getattr(runtime, "stage_id", "main"),
-                "message": str(message), "progress": 0,
-            })
-
-    inspection_log("[巡检数据处理] 正在核对测点配置和本时段内网数据")
-    result = InspectionDataUploadService(config).run(
-        source_date=payload.get("source_date") or None,
-        source_bucket_key=str(payload.get("source_bucket_key") or ""),
-        log=inspection_log,
-        check_cancel=check_cancel,
-        dry_run=dry_run,
+    from app.modules.inspection_data.service.point_settings import (
+        ack_inspection_upload_retrigger,
+        current_point_settings_revision,
+        last_inspection_upload_revision,
+        read_inspection_upload_retrigger,
+        record_inspection_upload_revision,
     )
+
+    if payload.get("retrigger"):
+        # 补派任务启动不清标记：待传请求持久保留，只有成功上传并回查覆盖到
+        # 其请求修订号后才由 ack 确认清除。标记请求已被既有回执覆盖时跳过，
+        # 避免重复清表重传。
+        marker = read_inspection_upload_retrigger(config)
+        current_revision = current_point_settings_revision(config)
+        last_revision = last_inspection_upload_revision(config)
+        if marker is not None and isinstance(marker.get("revision"), int) \
+                and isinstance(last_revision, int) and marker["revision"] <= last_revision:
+            ack_inspection_upload_retrigger(config, last_revision)
+            emit_log("[巡检数据处理] 补派标记的请求已由最近一次上传覆盖，本次补派跳过")
+            return {"status": "skipped", "reason": "配置已由最近一次上传覆盖"}
+        if marker is None and not dry_run and current_revision and last_revision == current_revision:
+            emit_log("[巡检数据处理] 配置已由最近一次上传覆盖，本次补派跳过")
+            return {"status": "skipped", "reason": "配置已由最近一次上传覆盖"}
+
+    emit_event = getattr(runtime, "emit_event", None)
+
+    def inspection_log_with_progress(message):
+        emit_log(message)
+        emit_event({
+            "type": "progress", "stage_id": getattr(runtime, "stage_id", "main"),
+            "message": str(message), "progress": 0,
+        })
+
+    inspection_log = inspection_log_with_progress if callable(emit_event) else emit_log
+    inspection_log("[巡检数据处理] 正在核对测点配置和本时段内网数据")
+
+    def run_once():
+        result = InspectionDataUploadService(config).run(
+            source_date=payload.get("source_date") or None,
+            source_bucket_key=str(payload.get("source_bucket_key") or ""),
+            log=inspection_log,
+            check_cancel=check_cancel,
+            dry_run=dry_run,
+        )
+        if not dry_run and isinstance(result, dict) and result.get("status") == "success":
+            uploaded_revision = result.get("settings_revision", result.get("uploaded_fixture_revision"))
+            if isinstance(uploaded_revision, int):
+                # 仅在上传成功且服务完成回查核验后记账并确认标记；
+                # skipped/失败/缺失权威快照版本一律不写回执、不动标记。
+                try:
+                    record_inspection_upload_revision(config, uploaded_revision)
+                    ack_inspection_upload_retrigger(config, uploaded_revision)
+                except (OSError, ValueError):
+                    emit_log("[巡检数据处理] 上传修订号记录失败，不影响本次上传结果")
+        return result
+
+    max_retriggers = 3
+    retriggers = 0
+    while True:
+        # 临时失败、取消、跨时段退出直接抛出：标记原样保留，
+        # 由补派巡检在队列空闲后按最新待传版本接手。
+        result = run_once()
+        if dry_run or retriggers >= max_retriggers:
+            break
+        if read_inspection_upload_retrigger(config) is None:
+            break
+        retriggers += 1
+        inspection_log("[巡检数据处理] 存在更新的待传版本，继续立即补传一次")
     if check_cancel:
         check_cancel()
     return result
@@ -1004,6 +1055,10 @@ def handle_handover_review_regenerate(
     )
     if runtime is not None:
         runtime.raise_if_cancelled()
+    if payload.get("uploaded_sources") is True:
+        current = review_service.get_session_by_id(session_id)
+        if isinstance(current, dict) and current.get("confirmed"):
+            raise RuntimeError("当前楼栋已确认，未使用上传的源文件覆盖本班次")
 
     result = OrchestratorService(config).run_handover_from_files(
         building_files=[(building, data_file)],
@@ -1027,7 +1082,8 @@ def handle_handover_review_regenerate(
         error_text = "; ".join([_text(item) for item in errors if _text(item)]) or _text(result.get("errors")) or "重新生成失败"
         raise RuntimeError(error_text)
     if _text(row.get("capacity_status")).lower() not in {"success", "ok"}:
-        raise RuntimeError(_text(row.get("capacity_error")) or "交接班容量报表生成失败，未登记人工生成完成标记")
+        detail = _text(row.get("capacity_error")) or "未生成容量报表"
+        raise RuntimeError(f"{building} {duty_date}/{duty_shift} 交接班容量报表生成失败: {detail}")
     review_session = row.get("review_session", {}) if isinstance(row.get("review_session", {}), dict) else {}
     regenerated_session_id = _text(review_session.get("session_id")) or session_id
     latest_session = review_service.get_session_by_id(regenerated_session_id)
@@ -1216,16 +1272,17 @@ def handle_handover_prepare_delivery(config, payload, emit_log, runtime=None):
     emit_log(f"[交接班][成品] 本楼文件、图片和文本已就绪 session={manifest['session_id']}")
     followup = ReviewFollowupTriggerService(workflow.config)
     result = followup.publish_attachment_delivery(
-        batch_key=manifest["batch_key"], emit_log=emit_log,
+        batch_key=manifest["batch_key"], building=manifest["building"], emit_log=emit_log,
     )
     session = workflow.review.get_session_by_id(manifest["session_id"])
     if session:
         followup._run_session_followup_exports(
             batch_key=manifest["batch_key"], sessions=[session], emit_log=emit_log,
         )
+    status = result.get("status")
     return {
-        "status": "partial_failed" if result.get("status") in {"failed", "partial_failed"} else "success",
-        "error": result.get("error", ""),
+        "status": "partial_failed" if status in {"failed", "partial_failed"} else "blocked" if status == "pending" else "success",
+        "error": result.get("error") or ("本楼成品已变化，尚未上传，请重新提交" if status == "pending" else ""),
         "attachment_delivery": workflow.state.public(workflow.state.get(manifest["session_id"])),
         "batch_upload": result,
     }

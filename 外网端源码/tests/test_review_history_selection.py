@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from openpyxl import Workbook
+
 from app.modules.handover_review.api import routes
 
 
@@ -50,6 +52,37 @@ def test_history_init_never_opens_unc(monkeypatch):
     routes._schedule_history_document_import(container, None, parser, building="A楼", duty_date="2026-03-01", duty_shift="day", session=session)
     queued[0]()
     parser.parse.assert_not_called()
+
+
+def test_saved_history_bootstrap_recovers_cooling_from_the_same_capacity_workbook(monkeypatch, tmp_path):
+    path = tmp_path / "night-capacity.xlsx"
+    workbook = Workbook()
+    for cell, value in {"D23": "1#制冷单元 板换", "J26": "32", "C47": "3#二次泵", "D48": "31.94"}.items():
+        workbook.active[cell] = value
+    workbook.save(path)
+    workbook.close()
+    session = {"building": "A楼", "session_id": "A楼|2026-11-09|night", "revision": 1,
+               "output_file": "night-log.xlsx", "capacity_output_file": str(path)}
+    document = {"sections": [], "cooling_pump_pressures": {"tanks": {"west": {"temperature": "17.5"}}}}
+    store = SimpleNamespace(get_document=Mock(return_value={"document": document, "revision": 1}), get_default=Mock(return_value={}))
+    monkeypatch.setattr(routes, "_REVIEW_DOCUMENT_CACHE", {})
+    monkeypatch.setattr(routes, "_handover_cfg", lambda _: {})
+    monkeypatch.setattr(routes, "_attach_excel_sync_from_store", lambda _container, value: dict(value))
+    monkeypatch.setattr(routes, "ReviewBuildingDocumentStore", lambda **_: store)
+    monkeypatch.setattr(routes.ReviewDocumentStateService, "_store", lambda *_: store)
+    container = SimpleNamespace(add_system_log=Mock())
+
+    restored, _, found = routes._load_existing_review_document_snapshot(container, session)
+    assert found
+    cooling = restored["cooling_pump_pressures"]
+    assert [row["unit"] for row in cooling["rows"]] == [1]
+    assert cooling["primary_rows"][0]["frequency"] == "32"
+    assert cooling["secondary_rows"][0]["frequency"] == "31.94"
+    assert cooling["tanks"]["west"]["temperature"] == "17.5"
+    assert "rows" not in document["cooling_pump_pressures"]
+
+    assert routes._load_existing_review_document_snapshot(container, session)[0] == restored
+    store.get_document.assert_called_once()
 
 
 def test_h_history_does_not_fetch_current_roster(monkeypatch):

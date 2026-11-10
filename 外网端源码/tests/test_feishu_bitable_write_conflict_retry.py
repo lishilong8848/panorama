@@ -83,3 +83,26 @@ def test_validation_errors_are_not_retried(client, monkeypatch):
         client.upload_attachment_record("全景平台月报", "B楼", "2026-10-05", ["file-token"])
     assert request.call_count == 1
     module.time.sleep.assert_not_called()
+
+
+@pytest.mark.parametrize("code,status", [(1254290, 429), (99991400, 200)])
+def test_rate_limit_uses_server_delay_and_keeps_create_key(client, monkeypatch, code, status):
+    limited = _response(code, status=status)
+    limited.headers["Retry-After"] = "3"
+    request = Mock(side_effect=[limited, _response(0)])
+    monkeypatch.setattr(module.requests, "request", request)
+    client.upload_attachment_record("全景平台月报", "B楼", "2026-10-05", ["file-token"])
+    module.time.sleep.assert_called_once_with(3)
+    assert request.call_args_list[0].kwargs["params"] == request.call_args_list[1].kwargs["params"]
+
+
+@pytest.mark.parametrize("code,delay,count", [(1254290, "", 4), (1254290, "90", 1), (99991403, "", 1)])
+def test_rate_limit_budget_or_long_cooldown_does_not_keep_retrying(client, monkeypatch, code, delay, count):
+    limited = _response(code, status=429)
+    limited.headers["Retry-After"] = delay
+    request = Mock(return_value=limited)
+    monkeypatch.setattr(module.requests, "request", request)
+    with pytest.raises(module.FeishuBitableRateLimited) as failure:
+        client.upload_attachment_record("全景平台月报", "B楼", "2026-10-05", ["file-token"])
+    assert request.call_count == count
+    assert failure.value.retry_after == max(30, int(delay or 0))

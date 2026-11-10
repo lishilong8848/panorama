@@ -12,7 +12,7 @@ const options = {
   activeRouteSelection: ref({}),
   clearSaveTimers() {},
   shouldPreferBootstrapLoad: () => true,
-  loadReviewData: async () => {},
+  loadReviewData: async () => { options.errorText.value = ""; },
   regenerateHandoverReviewApi: () => { throw new Error("must use uploaded sources"); },
 };
 for (const name of ["dirty", "saving", "confirming", "cloudSyncBusy", "downloading", "capacityDownloading", "capacityImageSending", "syncingRemoteRevision", "regenerating"]) {
@@ -21,6 +21,7 @@ for (const name of ["dirty", "saving", "confirming", "cloudSyncBusy", "downloadi
 options.statusText = ref("");
 options.errorText = ref("");
 let requests = 0;
+let uploadError = "";
 options.regenerateHandoverReviewFromFilesApi = async (building, form) => {
   requests += 1;
   assert.equal(building, "a");
@@ -28,6 +29,7 @@ options.regenerateHandoverReviewFromFilesApi = async (building, form) => {
   assert.equal(form.get("client_id"), "review-test");
   assert.equal(await form.get("handover_source_file").text(), "handover");
   assert.equal(await form.get("capacity_source_file").text(), "capacity");
+  if (uploadError) throw new Error(uploadError);
   return { job: { job_id: "generated" } };
 };
 const actions = createHandoverReviewActionHelpers(options);
@@ -47,9 +49,14 @@ assert.equal(requests, 2);
 assert.equal(options.errorText.value, "capacity failed");
 assert.equal(options.regenerating.value, false);
 
+uploadError = "交接班容量报表源文件读取失败";
+await actions.regenerateCurrentHandover(async () => ({ status: "success" }), sources);
+assert.equal(options.errorText.value, uploadError);
+assert.equal(options.regenerating.value, false);
+
 const app = await readFile(new URL("../web/frontend/dist/assets/handover_review_app.js", import.meta.url), "utf8");
 const template = await readFile(new URL("../web/frontend/dist/assets/handover_review_template.js", import.meta.url), "utf8");
 assert.match(app, /uploadedHandoverSource,\s+uploadedCapacitySource,/);
 assert.match(app, /generateFromUploadedSources:/);
-assert.equal((template.match(/type="file" accept="\.xlsx,\.xlsm"/g) || []).length, 2);
+assert.equal((template.match(/type="file" accept="\.xlsx,\.xlsm,\.json"/g) || []).length, 2);
 console.log("Handover dual-source frontend checks passed");

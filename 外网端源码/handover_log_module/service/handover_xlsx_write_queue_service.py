@@ -177,6 +177,7 @@ class HandoverXlsxWriteQueueService:
         tracked_cells: Dict[str, Any] | None = None,
         client_id: str = "",
         use_saved_shared_110kv: bool = False,
+        expected_document_revision: int | None = None,
     ) -> Dict[str, Any]:
         building = _text(session.get("building"))
         session_id = _text(session.get("session_id"))
@@ -189,15 +190,21 @@ class HandoverXlsxWriteQueueService:
         }
         if use_saved_shared_110kv:
             payload["use_saved_shared_110kv"] = True
+        if expected_document_revision is not None:
+            payload["expected_document_revision"] = expected_document_revision
         if tracked_cells is not None:
             payload["tracked_cells"] = {
                 cell: _text((tracked_cells or {}).get(cell, ""))
                 for cell in HandoverCapacityReportService.tracked_cells()
             }
+        dedupe_key = f"{session_id}|{output_file}"
+        if expected_document_revision is not None:
+            # A delivery overlay must not be replaced by a pending autosave overlay.
+            dedupe_key += f"|delivery:{expected_document_revision}"
         job = self._store(building).enqueue_xlsx_write_job(
             task_type="capacity_overlay_sync",
             session_id=session_id,
-            dedupe_key=f"{session_id}|{output_file}",
+            dedupe_key=dedupe_key,
             payload=payload,
             dedupe_running_if_payload_matches=True,
         )
@@ -324,6 +331,7 @@ class HandoverXlsxWriteQueueService:
                 session,
                 reason="xlsx_queue",
                 force_all_regions=bool(payload.get("force_all_regions")),
+                preserve_existing=True,
             )
             return
         if task_type == "capacity_overlay_sync":
@@ -334,11 +342,16 @@ class HandoverXlsxWriteQueueService:
     def _execute_capacity_overlay(self, *, session: Dict[str, Any], payload: Dict[str, Any]) -> None:
         building = _text(session.get("building"))
         session_id = _text(session.get("session_id"))
+        expected_revision = payload.get("expected_document_revision")
         document: Dict[str, Any] = {}
         try:
-            document, session = self.document_state.load_document(session)
+            document, session = self.document_state.load_document(session, preserve_existing=True)
         except ReviewDocumentStateError:
+            if expected_revision is not None:
+                raise
             document = {}
+        if expected_revision is not None and int(session.get("revision", 0) or 0) != expected_revision:
+            raise RuntimeError("审核文档已变更，未补写旧版本容量表，请重新提交")
         tracked_cells = payload.get("tracked_cells", {}) if isinstance(payload.get("tracked_cells", {}), dict) else {}
         if not tracked_cells:
             tracked_cells = self._extract_capacity_tracked_cells(document)
@@ -381,5 +394,7 @@ class HandoverXlsxWriteQueueService:
             capacity_status=capacity_status,
             capacity_error=capacity_error,
         )
+        if sync_status == "pending_input" and expected_revision is not None:
+            raise RuntimeError(f"{capacity_error or '容量报表缺少必填数据'}；请在审核页补齐并保存后再提交")
         if sync_status not in {"ready", "pending_input"}:
             raise RuntimeError(capacity_error or "容量报表补写失败")

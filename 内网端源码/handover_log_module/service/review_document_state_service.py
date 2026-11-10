@@ -158,6 +158,23 @@ class ReviewDocumentStateService:
         state = self._store(building).get_document(session_id)
         return isinstance(state, dict)
 
+    def peek_document_state(self, session: Dict[str, Any]) -> Dict[str, Any] | None:
+        """只读读取已存审核文档状态（含 revision 与 source_excel_path），绝不触发任何写入。
+
+        与 ensure_document_for_session 不同：本方法不会因输出文件路径变化而删除并重新导入审核文档，
+        专供下载返回前的版本/路径一致性只读校验使用——读不到、版本不一致或路径不一致时由调用方拒绝下载，
+        而不是重新导入（重新导入会删除下载期间新生成的审核文档，造成数据损坏）。
+        """
+        building = self._building(session)
+        session_id = self._session_id(session)
+        if not building or not session_id:
+            return None
+        try:
+            state = self._store(building).get_document(session_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return state if isinstance(state, dict) else None
+
     def load_document(self, session: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
         state = self.ensure_document_for_session(session)
         session_with_sync = self.attach_excel_sync(session)

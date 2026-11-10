@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import uuid
 
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableRateLimited
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
 from handover_log_module.service.review_session_service import ReviewSessionService
@@ -83,85 +84,102 @@ class HandoverDeliveryWorkflowService:
             and rows[session["building"]].get("revision") == int(session.get("revision", 0))
         }
 
-    def record_upload_error(self, batch_key, error):
-        for row in self._current_batch(batch_key).values():
+    def record_upload_error(self, batch_key, error, *, building=""):
+        for name, row in self._current_batch(batch_key).items():
+            if (building and name != building) or row.get("status") == "uploaded":
+                continue
             try:
                 self.state.update(row["session_id"], row["generation_id"], upload_error=error)
             except RuntimeError:
                 continue
 
-    def publish_ready_batch(self, batch_key, emit_log):
+    def publish_ready_batch(self, batch_key, emit_log, *, building=""):
         if not self.config.get("daily_report_bitable_export", {}).get("enabled", True):
             return {"status": "skipped", "reason": "disabled", "uploaded_buildings": [],
                     "failed_buildings": [], "skipped_buildings": []}
-        current = self._current_batch(batch_key)
-        missing = [b for b in self.BUILDINGS if b not in current]
-        if missing:
-            emit_log(f"[交接班][班次附件] 本楼成品已就绪，等待其他楼: {','.join(missing)}")
-            return {"status": "pending", "reason": "waiting_for_buildings", "missing_buildings": missing,
-                    "pending_buildings": [{"building": b, "reason": "waiting_for_artifacts"} for b in missing],
-                    "uploaded_buildings": [], "failed_buildings": [], "skipped_buildings": []}
+        if building and building not in self.BUILDINGS:
+            raise ValueError("无效的交接班楼栋")
+        requested = (building,) if building else self.BUILDINGS
         with attachment_record_lock(f"publish:{batch_key}"):
             manifests = self._current_batch(batch_key)
-            if any(b not in manifests for b in self.BUILDINGS):
-                return {"status": "pending", "reason": "generation_changed", "uploaded_buildings": [],
-                        "failed_buildings": [], "skipped_buildings": []}
+            candidates = [name for name in requested if name in manifests]
+            if not candidates:
+                return {"status": "pending", "reason": "waiting_for_artifacts", "missing_buildings": list(requested),
+                        "pending_buildings": [{"building": name, "reason": "waiting_for_artifacts"} for name in requested],
+                        "uploaded_buildings": [], "failed_buildings": [], "skipped_buildings": []}
             date, shift = batch_key.split("|")
             store = HandoverAttachmentStore(self.config)
             record = store.ensure_record(date, shift)
             url = record["record_url"]
             token = f"bitable:{record['record_id']}"
-            files, changed = {}, []
-            unchanged_names = set()
+            changed, failed = [], []
             existing_names = set(record.get("attachment_names", []))
-            for building in self.BUILDINGS:
-                row = manifests[building]
-                paths = row.get("paths", {})
-                if not self.state.artifacts_exist(row):
-                    raise RuntimeError(f"{building} 已准备成品缺失，请重新生成")
-                pair = {f"{building}_handover.xlsx": paths["log"], f"{building}_capacity.xlsx": paths["capacity"]}
-                if row.get("status") == "uploaded" and row.get("record_url") == url and pair.keys() <= existing_names:
-                    unchanged_names.update(pair)
+
+            def filenames(name):
+                return (f"{name}_handover.xlsx", f"{name}_capacity.xlsx")
+
+            def already_uploaded(name, row):
+                return row.get("status") == "uploaded" and row.get("record_url") == url and set(filenames(name)) <= existing_names
+
+            for name in candidates:
+                row = manifests[name]
+                if already_uploaded(name, row):
                     continue
-                files.update(pair)
-                changed.append(building)
 
-            def is_current():
-                current = self._current_batch(batch_key)
-                return all(current.get(b, {}).get("generation_id") == manifests[b]["generation_id"] for b in self.BUILDINGS)
+                def is_current():
+                    current = self._current_batch(batch_key).get(name, {})
+                    return current.get("generation_id") == row["generation_id"]
 
-            if files:
-                store.upload_files(
-                    date, shift, files, is_current=is_current, expected_record_id=record["record_id"],
-                    required_existing_names=unchanged_names,
-                )
-            if not is_current():
-                return {"status": "pending", "reason": "generation_changed", "uploaded_buildings": [],
-                        "failed_buildings": [], "skipped_buildings": []}
+                try:
+                    if not self.state.artifacts_exist(row):
+                        raise RuntimeError(f"{name} 已准备成品缺失，请重新生成")
+                    pair = dict(zip(filenames(name), (row["paths"]["log"], row["paths"]["capacity"])))
+                    store.upload_files(
+                        date, shift, pair, is_current=is_current, expected_record_id=record["record_id"],
+                    )
+                    updated = self.review.update_cloud_sheet_sync(
+                        session_id=row["session_id"], expected_revision=row["revision"], cloud_sheet_sync={
+                            "status": "success", "spreadsheet_token": token, "spreadsheet_url": url,
+                            "synced_revision": row["revision"],
+                        },
+                    )
+                    if not updated:
+                        raise RuntimeError("审核内容已变更，请重新提交")
+                    self.state.update(row["session_id"], row["generation_id"], status="uploaded",
+                                      artifacts_ready=True, record_url=url, upload_error="")
+                    existing_names.update(pair)
+                    changed.append(name)
+                except Exception as exc:
+                    failed.append({"building": name, "error": str(exc)})
+                    emit_log(f"[交接班][班次附件] {name} 上传未完成: {exc}")
+                    try:
+                        self.state.update(row["session_id"], row["generation_id"], status="ready",
+                                          record_url="", upload_error=str(exc))
+                    except RuntimeError:
+                        pass
+                    if isinstance(exc, FeishuBitableRateLimited):
+                        break
+            current = self._current_batch(batch_key)
+            completed = [name for name in self.BUILDINGS if already_uploaded(name, current.get(name, {}))]
+            missing = [name for name in self.BUILDINGS if name not in completed]
+            status = "partial_failed" if failed and completed else "failed" if failed else (
+                "pending" if not building and missing else "ok"
+            )
             previous = self.review.get_cloud_batch_fast(batch_key) or {}
             if previous.get("spreadsheet_token") != token:
                 previous = {}
             meta = {
-                **previous, "status": "success", "spreadsheet_token": token, "spreadsheet_url": url,
+                **previous, "status": "success" if not missing else "prepared",
+                "spreadsheet_token": token, "spreadsheet_url": url,
                 "spreadsheet_title": "班次交接班附件",
             }
             self.review.register_cloud_batch(batch_key=batch_key, duty_date=date, duty_shift=shift, cloud_batch=meta)
-            for building in changed:
-                row = manifests[building]
-                if self.state.get(row["session_id"]).get("generation_id") != row["generation_id"]:
-                    continue
-                session = self.review.get_session_by_id(row["session_id"]) or {}
-                if int(session.get("revision", 0)) != row["revision"]:
-                    continue
-                updated = self.review.update_cloud_sheet_sync(session_id=row["session_id"], expected_revision=row["revision"], cloud_sheet_sync={
-                    "status": "success", "spreadsheet_token": token, "spreadsheet_url": url,
-                    "synced_revision": row["revision"],
-                })
-                if not updated:
-                    continue
-                self.state.update(row["session_id"], row["generation_id"], status="uploaded",
-                                  artifacts_ready=True, record_url=url, upload_error="")
-            signature = hashlib.sha256("|".join(manifests[b]["generation_id"] for b in self.BUILDINGS).encode()).hexdigest()
-            return {**meta, "status": "ok", "record_id": record["record_id"], "record_url": url,
+            signature = hashlib.sha256("|".join(current[b]["generation_id"] for b in self.BUILDINGS).encode()).hexdigest() if not missing else ""
+            return {**meta, "status": status, "record_id": record["record_id"], "record_url": url,
+                    "all_buildings_uploaded": not missing, "missing_buildings": missing,
+                    "completed_buildings": completed,
+                    "pending_buildings": [{"building": name, "reason": "waiting_for_upload"} for name in missing
+                                          if name not in {item["building"] for item in failed}],
                     "attachment_generation_signature": signature,
-                    "uploaded_buildings": changed, "failed_buildings": [], "skipped_buildings": []}
+                    "uploaded_buildings": changed, "failed_buildings": failed, "skipped_buildings": [],
+                    "error": "；".join(f"{item['building']}：{item['error']}" for item in failed)}

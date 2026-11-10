@@ -107,7 +107,29 @@ const TEMPLATE = `
       </div>
       <p v-if="settingsError || latestError" role="alert" class="review-status-line review-status-danger">{{ settingsError || latestError }}</p>
       <p v-if="message" role="status" class="review-status-line review-status-info">{{ message }}</p>
-      <form v-if="draft" class="inspection-point-form" @submit.prevent="saveDraft">
+      <div v-if="draft" class="inspection-point-modal-overlay" role="dialog" aria-modal="true"
+        :aria-label="draftTitle" @click.self="requestCloseDraft">
+        <form class="inspection-point-modal-card" @submit.prevent="saveDraft">
+          <header class="inspection-point-modal-head">
+            <div class="inspection-point-modal-heading">
+              <p class="inspection-point-modal-kicker">{{ draftTitle }}</p>
+              <h2 class="inspection-point-modal-title">{{ (draft.info && draft.info.name) || draft.id || '新测点' }}</h2>
+            </div>
+            <button class="inspection-point-modal-close" type="button" :disabled="saving" aria-label="关闭" @click="requestCloseDraft">×</button>
+          </header>
+
+          <div v-if="draft.info" class="inspection-point-modal-info" aria-label="测点当前信息">
+            <div class="inspection-point-info-item"><span>测点 ID</span><strong>{{ draft.info.id }}</strong></div>
+            <div class="inspection-point-info-item"><span>最新值</span><strong>{{ draft.info.displayValue }}<em v-if="draft.info.rawDisplay">原始 {{ draft.info.rawDisplay }} · 已修正</em></strong></div>
+            <div class="inspection-point-info-item"><span>状态</span><strong>{{ draft.info.status || '—' }}</strong></div>
+            <div class="inspection-point-info-item"><span>采样时间</span><strong>{{ draft.info.sampleTime || '暂无采样' }}</strong></div>
+            <div class="inspection-point-info-item"><span>修正规则</span><strong>{{ draft.info.correctionCount }} 条</strong></div>
+            <div class="inspection-point-info-item"><span>用户主动启用</span><strong>{{ draft.originalExplicitlyEnabled ? '已启用' : '未启用' }}</strong></div>
+            <div class="inspection-point-info-item inspection-point-info-wide"><span>路径</span><strong>{{ draft.info.path || '—' }}</strong></div>
+            <div class="inspection-point-info-item inspection-point-info-wide"><span>当前目标位置</span><strong>{{ draft.info.targetText }}</strong></div>
+          </div>
+
+          <div class="inspection-point-modal-body">
         <label class="review-field"><span class="review-field-label">测点 ID</span>
           <input class="review-input" v-model.trim="draft.id" :disabled="saving" required maxlength="100" />
         </label>
@@ -165,11 +187,14 @@ const TEMPLATE = `
         <label v-for="round in (draft.target.sheet === coldSheet ? [] : roundFields)" :key="round.key" class="review-field"><span class="review-field-label">{{ round.label }}</span>
           <input class="review-input" v-model.trim="draft.target.round_cells[round.key]" :disabled="saving || !draft.target.workbook" placeholder="B6" maxlength="10" />
         </label>
-        <div class="btn-line">
-          <button class="btn btn-primary btn-mini" type="submit" :disabled="saving || !draft.id">{{ saving ? '保存中…' : '保存测点' }}</button>
-          <button class="btn btn-secondary btn-mini" type="button" :disabled="saving" @click="draft = null">取消</button>
-        </div>
-      </form>
+          </div>
+
+          <footer class="inspection-point-modal-foot">
+            <button class="btn btn-primary btn-mini" type="submit" :disabled="saving || !draft.id">{{ saving ? '保存中…' : '保存测点' }}</button>
+            <button class="btn btn-secondary btn-mini" type="button" :disabled="saving" @click="requestCloseDraft">取消</button>
+          </footer>
+        </form>
+      </div>
 
       <div v-if="!pageRows.length" class="review-empty-card">{{ latestBusy ? '正在读取最近采样…' : (keyword || positionFilter !== 'all' ? '没有匹配的测点' : '暂无测点') }}</div>
       <div v-else class="inspection-point-list">
@@ -216,7 +241,7 @@ export function mountInspectionPointsPage(Vue) {
     template: TEMPLATE,
     setup() {
       const family = ref(FAMILIES[0].key), keyword = ref(""), positionFilter = ref("all"), page = ref(1);
-      const settings = ref({}), datasets = ref({}), draft = ref(null), targetOptions = ref({});
+      const settings = ref({}), datasets = ref({}), draft = ref(null), draftBaseline = ref(""), targetOptions = ref({});
       const latestBusy = ref(false), settingsBusy = ref(false), settingsReady = ref(false), saving = ref(false);
       const latestError = ref(""), settingsError = ref(""), message = ref("");
       const controller = new AbortController();
@@ -271,6 +296,7 @@ export function mountInspectionPointsPage(Vue) {
         }
         return result;
       });
+      const draftTitle = computed(() => (draft.value && draft.value.originalId ? "修改测点" : "添加测点"));
 
       function isTargetComplete(target) {
         if (!target?.workbook || !target?.sheet || !(targetOptions.value[target.workbook] || []).includes(target.sheet)) return false;
@@ -333,8 +359,46 @@ export function mountInspectionPointsPage(Vue) {
           status: { type: rule.type === "数值" ? "直接填充" : (rule.type || ""), ...Object.fromEntries(STATUS_FIELDS.map(item => [item.key, (rule[item.key] || []).join("\n")])) },
           correctionRules: correctionRules.length ? correctionRules : emptyCorrectionRows(),
           target: { workbook: "", sheet: "", cell: "", ...row?.target,
-            round_cells: { ...emptyRoundCells(), ...row?.target?.round_cells } } };
+            round_cells: { ...emptyRoundCells(), ...row?.target?.round_cells } },
+          // 悬浮窗只读信息头：展示该测点当前完整信息，便于修改时对照（"信息要显示全"）。
+          info: row ? {
+            name: row.name || row.id,
+            id: row.id,
+            path: row.path || "",
+            displayValue: row.displayValue || "—",
+            rawDisplay: row.rawDisplay || "",
+            status: row.status || "",
+            sampleTime: row.sampleTime || "",
+            correctionCount: row.correctionCount || 0,
+            targetText: row.target
+              ? `${row.target.workbook || "—"} · ${row.target.sheet || "—"} · ${formatTarget(row.target)}`
+              : "未设置位置",
+          } : null };
+        draftBaseline.value = serializeDraft(draft.value);
         message.value = "";
+      }
+      // 仅序列化可编辑字段，用于判断悬浮窗内是否有未保存修改（只读 info 不参与）。
+      function serializeDraft(row) {
+        if (!row) return "";
+        return JSON.stringify({
+          id: row.id, note: row.note, explicitlyEnabled: row.explicitlyEnabled,
+          status: row.status, correctionRules: row.correctionRules, target: row.target,
+        });
+      }
+      function isDraftDirty() {
+        return Boolean(draft.value) && serializeDraft(draft.value) !== draftBaseline.value;
+      }
+      // 取消/遮罩/ESC 关闭：有未保存修改时二次确认；保存进行中不允许关闭。
+      function requestCloseDraft() {
+        if (!draft.value || saving.value) return;
+        if (isDraftDirty() && !window.confirm("放弃未保存的测点修改？")) return;
+        draft.value = null;
+      }
+      function onKeydown(event) {
+        if (event.key === "Escape" && draft.value) {
+          event.preventDefault();
+          requestCloseDraft();
+        }
       }
       function correctionRowsFull(rows) {
         return (rows || []).length >= CORRECTION_MAX_RULES || countCorrectionRules(rows) >= CORRECTION_MAX_RULES;
@@ -449,14 +513,14 @@ export function mountInspectionPointsPage(Vue) {
           window.setTimeout(() => window.location.assign(returnUrl), 100);
         }
       }
-      onMounted(() => { void loadSettings(); void loadLatest(); });
-      onBeforeUnmount(() => controller.abort());
+      onMounted(() => { void loadSettings(); void loadLatest(); window.addEventListener("keydown", onKeydown); });
+      onBeforeUnmount(() => { controller.abort(); window.removeEventListener("keydown", onKeydown); });
       return { building, families: FAMILIES, family, keyword, positionFilter, page, pageCount, pageButtons, pageRows, filteredRows, sampleTime,
         roundFields: ROUND_FIELDS, statusFields: STATUS_FIELDS, correctionFields: CORRECTION_FIELDS,
         correctionMaxRules: CORRECTION_MAX_RULES, correctionTextMaxlength: CORRECTION_TEXT_MAXLENGTH,
         coldSheet: COLD_SHEET, emptyRoundCells, formatTarget,
-        draft, targetOptions, settingsReady, settingsBusy, latestBusy, saving, settingsError, latestError, message, returnUrl,
-        loadSettings, loadLatest, selectFamily, editPoint, saveDraft, setExcluded, returnToReview,
+        draft, draftTitle, targetOptions, settingsReady, settingsBusy, latestBusy, saving, settingsError, latestError, message, returnUrl,
+        loadSettings, loadLatest, selectFamily, editPoint, saveDraft, setExcluded, returnToReview, requestCloseDraft,
         addCorrectionRule, removeCorrectionRule, clearCorrectionRules, isEmptyCorrectionRules, countCorrectionRules, correctionRowsFull };
     },
   }).mount("#app");

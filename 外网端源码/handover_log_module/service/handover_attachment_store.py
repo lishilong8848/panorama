@@ -1,6 +1,5 @@
-"""Batch attachment delivery. File transfers run in parallel; record merges are serialized."""
+"""Serialize and pace handover attachment requests to the same Bitable table."""
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import hashlib
 import mimetypes
@@ -9,6 +8,7 @@ from pathlib import Path
 import tempfile
 import time
 
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableRateLimited
 from handover_log_module.service.handover_daily_report_bitable_export_service import HandoverDailyReportBitableExportService
 
 
@@ -36,7 +36,7 @@ def attachment_record_lock(key, timeout=180):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("班次附件记录正在更新，请稍后续传") from exc
                 time.sleep(0.1)
-        yield
+        yield fd
     finally:
         try:
             if locked:
@@ -58,6 +58,30 @@ class HandoverAttachmentStore:
         self.target = self.cfg["target"]
         self.table_id = self.target["table_id"]
         self.client = client or self.exporter._new_client(self.cfg)
+        self.request_interval = 0.5 if client is None else 0.0
+
+    def _call(self, method, **kwargs):
+        # Flights for different shifts and the H/110 supplements use the same table queue.
+        with attachment_record_lock(f"bitable-attachments:{self.target['app_token']}|{self.table_id}") as fd:
+            # Byte zero is locked; the rest stores a cooldown shared by worker processes.
+            os.lseek(fd, 1, os.SEEK_SET)
+            try:
+                remaining = float(os.read(fd, 64) or b"0") - time.time()
+            except ValueError:
+                remaining = 0
+            if remaining > 0:
+                raise FeishuBitableRateLimited(f"飞书正在限流冷却，请在约 {int(remaining) + 1} 秒后重试",
+                                             retry_after=remaining)
+            try:
+                return method(**kwargs)
+            except FeishuBitableRateLimited as exc:
+                os.lseek(fd, 1, os.SEEK_SET)
+                os.write(fd, f"{time.time() + exc.retry_after:.3f}".encode("ascii"))
+                os.ftruncate(fd, os.lseek(fd, 0, os.SEEK_CUR))
+                raise
+            finally:
+                if self.request_interval:
+                    time.sleep(self.request_interval)
 
     def _lock_key(self, date, shift):
         return f"{self.target['app_token']}|{self.table_id}|{date}|{shift}"
@@ -71,7 +95,7 @@ class HandoverAttachmentStore:
             raise ValueError("班次必须为 day 或 night")
         end = (start + timedelta(days=1)).strftime("%Y-%m-%d")
         field = self.cfg["fields"]["date"]
-        records = self.client.list_records(
+        records = self._call(self.client.list_records,
             table_id=self.table_id, page_size=500, max_records=0,
             filter_formula=f'AND(CurrentValue.[{field}]>=TODATE("{date}"), CurrentValue.[{field}]<TODATE("{end}"))',
         )
@@ -81,14 +105,14 @@ class HandoverAttachmentStore:
         return sorted((r for r in records if r.get("record_id") in ids), key=lambda r: r["record_id"])
 
     def _ensure_locked(self, date, shift):
-        fields_meta = self.client.list_fields(table_id=self.table_id)
+        fields_meta = self._call(self.client.list_fields, table_id=self.table_id)
         if not any(f.get("field_name") == self.FIELD and int(f.get("type", 0)) == 17 for f in fields_meta):
             raise ValueError(f"目标表缺少附件字段：{self.FIELD}")
         records = self._records(date, shift)
         if records:
             return records[0]
         fields = self.cfg["fields"]
-        responses = self.client.batch_create_records(table_id=self.table_id, fields_list=[{
+        responses = self._call(self.client.batch_create_records, table_id=self.table_id, fields_list=[{
             fields["year"]: self.exporter._year_text(date),
             fields["date"]: self.exporter._midnight_timestamp_ms(date),
             fields["shift"]: self.exporter._shift_text(shift),
@@ -111,7 +135,7 @@ class HandoverAttachmentStore:
             fields = record.get("fields", {})
             link_field = self.cfg["fields"]["report_link"]
             if not self.exporter._is_same_report_link(fields.get(link_field), url):
-                self.client.update_record(
+                self._call(self.client.update_record,
                     table_id=self.table_id, record_id=record_id,
                     fields={link_field: {"link": url, "text": "查看本班交接班文件"}},
                 )
@@ -134,7 +158,7 @@ class HandoverAttachmentStore:
             content = Path(path).read_bytes()
             if not content:
                 raise ValueError(f"附件为空：{name}")
-            token = self.client.upload_attachment_bytes(
+            token = self._call(self.client.upload_attachment_bytes,
                 file_name=name, content=content,
                 mime_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
             )
@@ -142,13 +166,12 @@ class HandoverAttachmentStore:
                 raise RuntimeError(f"附件上传没有返回凭据：{name}")
             return {"file_token": token, "name": name}
 
-        with ThreadPoolExecutor(max_workers=min(5, max(1, len(files)))) as pool:
-            uploaded = list(pool.map(transfer, files.items()))
+        uploaded = [transfer(item) for item in files.items()]
         with attachment_record_lock(self._lock_key(date, shift)):
             if is_current is not None and not is_current():
                 raise RuntimeError("成品版本已更新，旧版本未写入附件记录")
             record_id = expected_record_id or self._ensure_locked(date, shift)["record_id"]
-            current = self.client.get_record_by_id(table_id=self.table_id, record_id=record_id)
+            current = self._call(self.client.get_record_by_id, table_id=self.table_id, record_id=record_id)
             fields = current.get("fields")
             if current.get("record_id") != record_id or not isinstance(fields, dict):
                 raise ValueError("未能读取目标班次记录，未覆盖原附件")
@@ -173,11 +196,11 @@ class HandoverAttachmentStore:
             url = self.record_url(record_id)
             if is_current is not None and not is_current():
                 raise RuntimeError("成品版本已更新，旧版本未写入附件记录")
-            self.client.update_record(table_id=self.table_id, record_id=record_id, fields={
+            self._call(self.client.update_record, table_id=self.table_id, record_id=record_id, fields={
                 self.FIELD: tokens,
                 self.cfg["fields"]["report_link"]: {"link": url, "text": "查看本班交接班文件"},
             })
-            saved = self.client.get_record_by_id(table_id=self.table_id, record_id=record_id)
+            saved = self._call(self.client.get_record_by_id, table_id=self.table_id, record_id=record_id)
             saved_tokens = {item.get("file_token") for item in saved.get("fields", {}).get(self.FIELD, [])}
             if saved_tokens != {item["file_token"] for item in tokens}:
                 raise RuntimeError("班次附件写入结果未通过回查，请重试")

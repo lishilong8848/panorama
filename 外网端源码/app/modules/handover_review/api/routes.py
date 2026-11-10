@@ -22,7 +22,9 @@ from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException,
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 from pipeline_utils import get_app_dir
-from app.shared.utils.atomic_file import atomic_write_bytes, validate_excel_workbook_file
+from app.shared.utils.atomic_file import atomic_copy_file, atomic_write_bytes, validate_excel_workbook_file
+from app.shared.utils.report_source_json import validate_report_source_json
+from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir, create_runtime_temp_dir
 
 from app.config.handover_segment_store import building_code_from_name, handover_building_segment_path
 from app.config.settings_loader import (
@@ -73,6 +75,7 @@ from handover_log_module.service.training_management_payload_builder import (
     TrainingManagementPayloadBuilder, TRAINING_SECTION,
 )
 from handover_log_module.service.station_h_review_selection_service import (
+    StationHSectionsConflictError,
     STATION_H_LONG_DAY_ROLE_BY_NAME,
     StationHReviewSelectionService,
     station_h_default_long_day_people_from_roster,
@@ -82,6 +85,7 @@ from handover_log_module.service.station_h_review_selection_service import (
     station_h_filter_duty_people,
     station_h_normalize_duty_people,
 )
+from handover_log_module.service.station_h_section_schema import station_h_section_schema
 from handover_log_module.service.station_h_duty_focus_service import (
     StationHDutyFocusError,
     StationHDutyFocusService,
@@ -475,6 +479,7 @@ def _review_document_signature(
             else int(session.get("revision", 0) or 0)
         ),
         "output_file": output_file,
+        "capacity_output_file": str(session.get("capacity_output_file", "") or "").strip(),
     }
 
 
@@ -833,7 +838,7 @@ def _load_existing_review_document_snapshot(
         return {}, payload, False
     signature = _review_document_signature(payload)
     cached_document = _review_document_cache_get(building=building, signature=signature)
-    if isinstance(cached_document, dict):
+    if isinstance(cached_document, dict) and (not cached_document or "cooling_pump_pressures" in cached_document):
         return cached_document, _attach_excel_sync_from_store(container, payload), True
     try:
         state = ReviewBuildingDocumentStore(
@@ -854,6 +859,20 @@ def _load_existing_review_document_snapshot(
         resolved_session["revision"] = int(state.get("revision", resolved_session.get("revision", 0)) or 0)
     except Exception:  # noqa: BLE001
         pass
+    if document:
+        # Imported history can contain only the log. Rebuild the cooling section once
+        # from this session's metadata and local capacity workbook before caching it.
+        cooling_session = resolved_session
+        if ReviewSessionService._is_shared_filesystem_path(resolved_session.get("capacity_output_file", "")):
+            cooling_session = {**resolved_session, "capacity_output_file": ""}
+        try:
+            document = _build_review_document_state_service(container).attach_cooling_pump_pressures(
+                document=document, session=cooling_session,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the saved review usable if the workbook cannot be read
+            emit_log = getattr(container, "add_system_log", None)
+            if callable(emit_log):
+                emit_log(f"[交接班][冷站数据] 首屏恢复失败 building={building}, session={session_id}, error={exc}")
     resolved_signature = _review_document_signature(
         resolved_session,
         revision_override=int(resolved_session.get("revision", payload.get("revision", 0)) or 0),
@@ -3043,7 +3062,7 @@ def _build_review_confirm_feedback(
             text="等待当前楼栋确认",
             tone="info",
             reason_code="await_all_confirmed",
-            detail_text="当前楼栋尚未确认，五楼成品齐全后会汇总上传附件。",
+            detail_text="当前楼栋尚未确认。确认后即可上传本楼附件。",
         )
     if followup_status == "queued":
         return _review_display_item(
@@ -3720,15 +3739,29 @@ def _review_delivery_state(service, session, *, job_service=None):
         return {}
     state = HandoverDeliveryStateService(config, initialize=False)
     manifest = state.for_session(session)
-    if job_service and manifest.get("status") in HandoverDeliveryStateService.ACTIVE and manifest.get("job_id"):
+    if not manifest:
+        return manifest
+    upload_disabled = not config.get("daily_report_bitable_export", {}).get("enabled", True)
+    manifest = {**manifest, "upload_disabled": upload_disabled}
+    status = manifest.get("status")
+    waiting_upload = status == "ready" and not manifest.get("upload_error") and not upload_disabled
+    if job_service and (status in state.ACTIVE or waiting_upload) and manifest.get("job_id"):
         try:
             job = job_service.get_job(manifest["job_id"])
         except KeyError:
             job = {"status": "failed", "error": "成品任务已不存在，请重新提交"}
         if job.get("status") in {"failed", "partial_failed", "cancelled", "blocked", "success"}:
-            latest = state.for_session(session)
-            if latest.get("generation_id") != manifest.get("generation_id") or latest.get("status") not in state.ACTIVE:
+            latest = {**state.for_session(session), "upload_disabled": upload_disabled}
+            if (
+                latest.get("generation_id") != manifest.get("generation_id")
+                or latest.get("job_id") != manifest.get("job_id")
+                or latest.get("status") != status
+            ):
                 return latest
+            if waiting_upload:
+                return {**latest, "upload_error": latest.get("upload_error") or str(
+                    job.get("error") or "后台任务已结束，附件上传未完成，请重试"
+                )}
             return {**latest, "status": "failed",
                     "error": str(job.get("error") or "成品任务已结束但未生成可用文件，请重新提交")}
     return manifest
@@ -3750,17 +3783,62 @@ def _require_review_delivery(service, session):
     raise HTTPException(status_code=409, detail="当前审核版本的交接班成品尚未就绪，请先生成成品")
 
 
-def _use_prepared_download(service, session):
-    if session.get("building") not in HandoverDeliveryWorkflowService.BUILDINGS:
-        return False
+def _stable_review_download_snapshot(
+    *,
+    container,
+    document_state,
+    target: Dict[str, Any],
+    output_file: Path,
+    expected_document_revision: int,
+    expected_source_path: str,
+    building: str,
+    session_id_text: str,
+    kind: str,
+    temp_kind: str,
+) -> tuple[Path, Path]:
+    """返回前只读重查审核版本与源文件路径，一致才把文件拷成稳定副本返回（TOCTOU 防护）。
+
+    校验必须只读：用 peek_document_state 读取已存审核文档，绝不调用 ensure_document_for_session——
+    后者在输出文件路径变化时会 delete_document 并重新导入，下载期间若有人重新生成切换了文件路径，
+    就会删掉新版审核文档（数据损坏）。读不到版本、版本不一致或源文件路径不一致时一律拒绝下载（409），
+    拷贝前后各只读核对一次。返回 (snapshot_path, snapshot_dir)，调用方用
+    BackgroundTask(cleanup_runtime_temp_dir, snapshot_dir) 在响应发送后清理临时副本。
+    """
+    def _read_only_consistent() -> bool:
+        peek = getattr(document_state, "peek_document_state", None)
+        state = peek(target) if callable(peek) else None
+        if not isinstance(state, dict):
+            return False
+        return (
+            int(state.get("revision", 0) or 0) == expected_document_revision
+            and str(state.get("source_excel_path", "") or "").strip() == expected_source_path
+        )
+
+    def _reject(snapshot_dir: Path | None = None) -> None:
+        if snapshot_dir is not None:
+            cleanup_runtime_temp_dir(snapshot_dir)
+        container.add_system_log(
+            f"[交接班][下载{kind}] 审核版本或源文件路径在下载期间已变化/不可读，已拒绝旧版下载 "
+            f"building={building}, session_id={session_id_text}, expected_revision={expected_document_revision}"
+        )
+        raise HTTPException(status_code=409, detail="审核内容在下载期间已更新，请重新下载最新版本")
+
+    if not _read_only_consistent():
+        _reject()
+    snapshot_dir = create_runtime_temp_dir(kind=temp_kind)
+    snapshot_path = snapshot_dir / output_file.name
     try:
-        if _review_delivery_state(service, session):
-            return True
-        latest = service.get_latest_session_fast(session["building"])
-    except Exception:
-        return True
-    # Archived shifts predating the delivery manifest keep their existing download path.
-    return not latest or latest.get("session_id") == session["session_id"]
+        atomic_copy_file(output_file, snapshot_path, validator=validate_excel_workbook_file)
+    except Exception as exc:  # noqa: BLE001
+        cleanup_runtime_temp_dir(snapshot_dir)
+        container.add_system_log(
+            f"[交接班][下载{kind}] 稳定副本生成失败 building={building}, session_id={session_id_text}, error={exc}"
+        )
+        raise HTTPException(status_code=409, detail="下载副本生成失败，请重试") from exc
+    # 拷贝后再只读核对一次：拷贝期间若有人保存新版或重新生成切换路径，丢弃副本并拒绝。
+    if not _read_only_consistent():
+        _reject(snapshot_dir)
+    return snapshot_path, snapshot_dir
 
 
 def _attach_review_display_state(
@@ -4237,6 +4315,11 @@ def _station_h_status_payload(
         },
         "duty_focus": duty_focus,
         "training_rows": resolved_selection.get("training_rows", []),
+        # H楼业务分类填写区：section_schema 解析自 H楼模板（排除已由 training_rows 处理的“培训管理”），
+        # sections 为已保存数据（规范化结构；未保存时各分类为空行，前端据此渲染可填写表格）。
+        "section_schema": station_h_section_schema(),
+        "sections": resolved_selection.get("sections", {}),
+        "sections_revision": resolved_selection.get("sections_revision", 0),
     }
 
 
@@ -4368,6 +4451,13 @@ def handover_review_station_h_save(
             },
         )
     selection_service = _build_station_h_review_selection_service(container)
+    sections = body.get("sections") if "sections" in body else None
+    base_sections_revision = body.get("base_sections_revision")
+    if "sections" in body:
+        if not isinstance(sections, dict):
+            raise HTTPException(status_code=400, detail="H楼分类数据格式无效")
+        if type(base_sections_revision) is not int or base_sections_revision < 0:
+            raise HTTPException(status_code=409, detail="H楼分类缺少编辑版本，请刷新审核页后再保存")
     try:
         saved = selection_service.save_selection(
             duty_date=duty_date_text,
@@ -4377,8 +4467,12 @@ def handover_review_station_h_save(
             long_day_people=long_day_people,
             duty_focus=duty_focus,
             training_rows=body.get("training_rows"),
+            sections=sections,
+            base_sections_revision=base_sections_revision,
             source="manual",
         )
+    except StationHSectionsConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -5448,15 +5542,31 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
-    if _use_prepared_download(service, target):
-        artifact = _require_review_delivery(service, target)["paths"]["log"]
-        return FileResponse(artifact, filename=Path(target["output_file"]).name)
+    # 下载不再强制要求先提交成品；但成品生成期间禁止下载（后端硬限制，不只靠按钮置灰）。
+    _ensure_review_delivery_not_preparing(service, target, container)
+    # 会话记录不一定带 document_revision，从审核文档存储读取权威版本，避免把旧成品当成最新版。
     existing_document_state: Dict[str, Any] | None = None
     try:
-        ensured_state = document_state.ensure_document_for_session(target)
+        ensured_state = document_state.ensure_document_for_session(target, preserve_existing=True)
         existing_document_state = ensured_state if isinstance(ensured_state, dict) else None
     except ReviewDocumentStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session_revision = int(target.get("revision", 0) or 0)
+    current_document_revision = int(
+        (existing_document_state or {}).get("revision", session_revision) or 0
+    )
+    delivery_session = {
+        **target,
+        "revision": session_revision,
+        "document_revision": current_document_revision,
+    }
+    # 仅当成品对当前审核版本仍就绪（for_session 已做 stale 校验）才优先下载成品；
+    # 成品过期/失败/缺失则继续走“原始文件 + 强制补写最新审核内容”通道。
+    prepared = _review_delivery_state(
+        service, delivery_session, job_service=getattr(container, "job_service", None),
+    )
+    if prepared.get("artifacts_ready") and HandoverDeliveryStateService.artifacts_exist(prepared):
+        return FileResponse(prepared["paths"]["log"], filename=Path(target["output_file"]).name)
 
     output_file_text = str(target.get("output_file", "")).strip()
     if not output_file_text:
@@ -5468,7 +5578,7 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     try:
         state = existing_document_state
         if not isinstance(state, dict) or not callable(getattr(document_state, "attach_excel_sync", None)):
-            document_state.force_sync_session_dict(target, reason="download", force_all_regions=True)
+            document_state.force_sync_session_dict(target, reason="download", force_all_regions=True, preserve_existing=True)
         else:
             document_revision = int(state.get("revision", target.get("revision", 0)) or 0)
             document_for_sync = state.get("document", {})
@@ -5528,14 +5638,23 @@ def handover_review_download(building_code: str, request: Request, session_id: s
         )
         raise HTTPException(status_code=409, detail=download_warning)
 
+    # 返回前只读重查审核版本与源文件路径，并从稳定副本返回：同步完成到返回前若有人保存新版或
+    # 重新生成切换了文件路径，拒绝旧版下载（TOCTOU 防护，校验只读、绝不删除/重导入审核文档）。
+    snapshot_path, snapshot_dir = _stable_review_download_snapshot(
+        container=container, document_state=document_state, target=target, output_file=output_file,
+        expected_document_revision=current_document_revision,
+        expected_source_path=str(target.get("output_file", "") or "").strip(),
+        building=building, session_id_text=session_id_text, kind="成品", temp_kind="handover_log_download",
+    )
     container.add_system_log(
         f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}, "
         "warning=no"
     )
     return FileResponse(
-        path=output_file,
+        path=snapshot_path,
         filename=output_file.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        background=BackgroundTask(cleanup_runtime_temp_dir, snapshot_dir),
     )
 
 
@@ -5555,9 +5674,8 @@ def handover_review_capacity_download(
     if not session_id_text:
         raise HTTPException(status_code=400, detail="session_id 不能为空")
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
-    if _use_prepared_download(service, target):
-        artifact = _require_review_delivery(service, target)["paths"]["capacity"]
-        return FileResponse(artifact, filename=Path(target["capacity_output_file"]).name)
+    # 下载不再强制要求先提交成品；但成品生成期间禁止下载（后端硬限制，不只靠按钮置灰）。
+    _ensure_review_delivery_not_preparing(service, target, container)
 
     output_file_text = str(target.get("capacity_output_file", "")).strip()
     if not output_file_text:
@@ -5565,15 +5683,34 @@ def handover_review_capacity_download(
     output_file = Path(output_file_text)
     if not output_file.exists() or not output_file.is_file():
         raise HTTPException(status_code=404, detail="交接班容量报表文件不存在，请重新生成")
+    # 会话记录不一定带 document_revision；load_document 返回的 revision 才是审核文档权威版本。
+    session_record_revision = int(target.get("revision", 0) or 0)
+    # 审核文档以交接班日志文件为源；在 target 被 load_document/refreshed_target 重赋值前捕获原始日志路径，
+    # 供返回前只读校验“源文件路径是否被重新生成切换”。
+    expected_source_path = str(target.get("output_file", "") or "").strip()
     try:
-        document, target = document_state.load_document(target)
+        document, target = document_state.load_document(target, preserve_existing=True)
     except ReviewDocumentStateError as exc:
         container.add_system_log(
             "[交接班][下载容量报表] 审核文档读取失败，已阻止下载旧容量表 "
             f"building={building}, session_id={session_id_text}, error={exc}"
         )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    current_document_revision = int(target.get("revision", 0) or 0)
+    # 仅当成品对当前审核版本仍就绪（for_session 已做 stale 校验）才优先下载成品；过期/失败/缺失则走补写下载。
+    delivery_session = {
+        **target,
+        "revision": session_record_revision,
+        "document_revision": current_document_revision,
+    }
+    prepared = _review_delivery_state(
+        service, delivery_session, job_service=getattr(container, "job_service", None),
+    )
+    if prepared.get("artifacts_ready") and HandoverDeliveryStateService.artifacts_exist(prepared):
+        return FileResponse(prepared["paths"]["capacity"], filename=Path(output_file_text).name)
+
     tracked_cells = _extract_capacity_tracked_cells(document)
+    expected_input_signature = HandoverCapacityReportService.capacity_input_signature(tracked_cells)
     try:
         queue_service = _build_xlsx_write_queue_service(
             container,
@@ -5584,6 +5721,7 @@ def handover_review_capacity_download(
             target,
             tracked_cells=tracked_cells,
             client_id=str(client_id or "").strip(),
+            expected_document_revision=current_document_revision,
         )
         completed_job = queue_service.wait_for_job(
             building=building,
@@ -5619,6 +5757,15 @@ def handover_review_capacity_download(
             f"[交接班][下载容量报表] 补写未就绪，已阻止下载旧容量表 building={building}, session_id={session_id_text}, status={sync_status or '-'}, error={detail}"
         )
         raise HTTPException(status_code=409, detail=detail)
+    # 校验补写结果的输入签名，确认写入的正是本次下载所用的审核内容版本，避免返回与当前输入不对应的旧表。
+    result_input_signature = str(sync_payload.get("input_signature", "") or "").strip()
+    if result_input_signature != expected_input_signature:
+        detail = "容量报表补写结果与当前审核内容不一致，请刷新后重试"
+        container.add_system_log(
+            f"[交接班][下载容量报表] 输入签名不匹配，已阻止下载 building={building}, session_id={session_id_text}, "
+            f"expected={expected_input_signature}, actual={result_input_signature}"
+        )
+        raise HTTPException(status_code=409, detail=detail)
     target = refreshed_target
     refreshed_output_file_text = str(target.get("capacity_output_file", "") or output_file_text).strip()
     output_file = Path(refreshed_output_file_text)
@@ -5628,15 +5775,23 @@ def handover_review_capacity_download(
             f"[交接班][下载容量报表] {detail} building={building}, session_id={session_id_text}, file={refreshed_output_file_text or '-'}"
         )
         raise HTTPException(status_code=409, detail=detail)
+    # 返回前只读重查审核版本与源文件路径，并从稳定副本返回：补写完成到返回前若有人保存新版或
+    # 重新生成切换了文件路径，拒绝旧版下载（TOCTOU 防护，校验只读、绝不删除/重导入审核文档）。
+    snapshot_path, snapshot_dir = _stable_review_download_snapshot(
+        container=container, document_state=document_state, target=target, output_file=output_file,
+        expected_document_revision=current_document_revision, expected_source_path=expected_source_path,
+        building=building, session_id_text=session_id_text, kind="容量报表", temp_kind="handover_capacity_download",
+    )
 
     container.add_system_log(
         f"[交接班][下载容量报表] building={building}, session_id={session_id_text}, "
         f"status={sync_status}, file={output_file}"
     )
     return FileResponse(
-        path=output_file,
+        path=snapshot_path,
         filename=output_file.name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        background=BackgroundTask(cleanup_runtime_temp_dir, snapshot_dir),
     )
 
 
@@ -5985,6 +6140,7 @@ def _submit_review_regeneration_locked(
         "capacity_source_file": capacity_source,
         "client_id": client_id,
         "only_if_missing": only_if_missing,
+        "uploaded_sources": uploaded_sources is not None,
     }
 
     def _run(emit_log):
@@ -6002,7 +6158,10 @@ def _submit_review_regeneration_locked(
         run_func=_run,
         worker_handler="handover_review_regenerate",
         worker_payload=worker_payload,
-        resource_keys=_handover_resource_keys("shared_bridge:handover", building=building, batch_key=batch_key),
+        resource_keys=(
+            _handover_resource_keys(building=building) if uploaded_sources else
+            _handover_resource_keys("shared_bridge:handover", building=building, batch_key=batch_key)
+        ),
         priority="manual",
         feature="handover_review_regenerate",
         submitted_by="manual",
@@ -6030,19 +6189,28 @@ async def handover_review_regenerate_from_files(
     stored_files: list[Path] = []
     try:
         service = _build_review_session_service(container)
-        _resolve_building_or_404(service, building_code)
-        for kind, label, upload in (
-            ("handover", "交接班日志源文件", handover_source_file),
-            ("capacity", "交接班容量报表源文件", capacity_source_file),
+        building = _resolve_building_or_404(service, building_code)
+        for kind, family, label, upload in (
+            ("handover", "handover_log_family", "交接班日志源文件", handover_source_file),
+            ("capacity", "handover_capacity_report_family", "交接班容量报表源文件", capacity_source_file),
         ):
             suffix = Path(upload.filename or "").suffix.lower()
-            if suffix not in {".xlsx", ".xlsm"}:
-                raise HTTPException(status_code=400, detail=f"{label}只支持 .xlsx / .xlsm")
+            if suffix not in {".xlsx", ".xlsm", ".json"}:
+                raise HTTPException(status_code=400, detail=f"{label}只支持 .xlsx / .xlsm / .json")
             content = await _read_upload_file_limited(upload, max_bytes=50 * 1024 * 1024, file_label=label)
             if not content:
                 raise HTTPException(status_code=400, detail=f"{label}不能为空")
             path = upload_dir / f"{kind}{suffix}"
-            await asyncio.to_thread(atomic_write_bytes, path, content, validator=validate_excel_workbook_file)
+            def validate(temp_path: Path, *, suffix=suffix, family=family) -> None:
+                if suffix == ".json":
+                    validate_report_source_json(temp_path, expected_family=family, expected_building=building)
+                else:
+                    validate_excel_workbook_file(temp_path)
+
+            try:
+                await asyncio.to_thread(atomic_write_bytes, path, content, validator=validate)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"{label}读取失败: {exc}") from exc
             stored_files.append(path)
             del content
         return await asyncio.to_thread(
@@ -6635,7 +6803,10 @@ def handover_review_prepare_delivery(
                 raise HTTPException(status_code=409, detail="本楼成品正在生成，请稍后刷新")
             reuse = bool(current.get("artifacts_ready")) and state.artifacts_exist(current)
             generation_id = current["generation_id"] if reuse else secrets.token_hex(16)
-            manifest = current if reuse else state.begin(target, generation_id)
+            manifest = (
+                state.update(session_id, generation_id, upload_error="", job_id="")
+                if reuse else state.begin(target, generation_id)
+            )
             worker_payload = {
                 "session_id": session_id, "generation_id": generation_id,
                 "expected_revision": int(target["revision"]), "document_revision": base_revision,

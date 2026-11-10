@@ -179,11 +179,27 @@ def _validate_target_collisions(groups):
 
 
 def query_rules(settings):
-    return {building: {
-        family: {"add": sorted(set(group["points"]) - set(group.get("baseline", {}))), "remove": group["remove"],
-                 **({"baseline": sorted(group["baseline"])} if "baseline" in group else {})}
-        for family, group in groups.items()
-    } for building, groups in (settings or {}).items()}
+    """产出与内网 normalize_inspection_point_overrides 完全一致（幂等）的规则。
+
+    add/remove/baseline 均排序、去重、去空白；三者全空的族丢弃。这样：
+    - sync_point_settings 的 `response.point_overrides != rules` 复核不会因内网归一化（如 remove 排序、
+      空族丢弃）与外网原始 query_rules 不一致而误报“内网未确认”；
+    - 上传时逐数据集 `doc.point_overrides != expected` 比较也不会因形态差异误跳过有效数据。
+    """
+    result = {}
+    for building, groups in (settings or {}).items():
+        for family, group in (groups or {}).items():
+            baseline_keys = set(group.get("baseline", {}) or {})
+            point_keys = set(group.get("points", {}) or {})
+            normalized = {
+                "add": sorted({str(i).strip() for i in (point_keys - baseline_keys)}),
+                "remove": sorted({str(i).strip() for i in (group.get("remove", []) or [])}),
+            }
+            if "baseline" in group:
+                normalized["baseline"] = sorted({str(i).strip() for i in baseline_keys})
+            if any(normalized.values()):
+                result.setdefault(building, {})[family] = normalized
+    return result
 
 
 def initialize_point_baseline(config, datasets):
@@ -256,6 +272,161 @@ def _pending_buildings(config):
 
 def _write_pending(config, buildings):
     atomic_write_text(_pending_path(config), json.dumps(sorted(buildings), ensure_ascii=False), encoding="utf-8")
+
+
+def _retrigger_path(config):
+    return _path(config).with_name("inspection_upload_retrigger_pending.json")
+
+
+@contextmanager
+def _retrigger_lock(config):
+    """补派标记的跨进程写锁：写标记与"比较+删除"必须互斥，避免旧确认删掉新请求。"""
+    path = _path(config).with_name("inspection_retrigger.lock.db")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK:
+        connection = sqlite3.connect(path, timeout=10)
+        try:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                raise OSError("巡检补派标记正在被其他进程修改，请稍后重试") from exc
+            yield
+        finally:
+            connection.close()
+
+
+def request_inspection_upload_retrigger(config, reason: str = "") -> None:
+    """测点配置保存时登记“待传版本”；若已有上传任务在执行则由补派/巡检接手。
+
+    标记携带保存时的配置修订号：任务只能确认覆盖到不高于该修订号的请求，
+    更高的新保存不会被旧任务清掉。
+    """
+    with _retrigger_lock(config):
+        atomic_write_text(
+            _retrigger_path(config),
+            json.dumps({
+                "requested_at": time.time(),
+                "reason": str(reason or ""),
+                "revision": _settings_snapshot(config)[1],
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+
+def read_inspection_upload_retrigger(config):
+    """只读取出补派标记（含修订号）；不存在或已过期返回 None，不删除。"""
+    path = _retrigger_path(config)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    requested = payload.get("requested_at")
+    if not isinstance(requested, (int, float)) or time.time() - requested > 6 * 3600:
+        return None
+    return payload
+
+
+def ack_inspection_upload_retrigger(config, covered_revision) -> bool:
+    """仅当标记请求的修订号已被本次实际上传覆盖（<= covered_revision）时清除标记。
+
+    比较与删除在同一跨进程锁内完成并重新读取标记：旧确认在暂停期间被新保存
+    替换的标记不会被误删。临时失败、取消、跨时段退出都不调用本函数，待传
+    请求因此持久保留。
+    """
+    with _retrigger_lock(config):
+        payload = read_inspection_upload_retrigger(config)
+        if payload is None:
+            return False
+        requested_revision = payload.get("revision")
+        if isinstance(requested_revision, int) and isinstance(covered_revision, int) \
+                and requested_revision > covered_revision:
+            return False
+        try:
+            _retrigger_path(config).unlink()
+        except OSError:
+            return False
+        return True
+
+
+def consume_inspection_upload_retrigger(config) -> bool:
+    """兼容旧调用：无条件取走未过期标记。新代码应使用 read/ack 成对语义。"""
+    payload = read_inspection_upload_retrigger(config)
+    if payload is None:
+        return False
+    try:
+        _retrigger_path(config).unlink()
+    except OSError:
+        pass
+    return True
+
+
+def _upload_revision_path(config):
+    return _path(config).with_name("inspection_upload_last_revision.json")
+
+
+def record_inspection_upload_revision(config, revision) -> None:
+    """记录最近一次成功上传覆盖的配置修订号，供补派任务判断是否仍需重传。"""
+    atomic_write_text(_upload_revision_path(config), json.dumps({"revision": int(revision)}), encoding="utf-8")
+
+
+def last_inspection_upload_revision(config):
+    try:
+        payload = json.loads(_upload_revision_path(config).read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    revision = payload.get("revision") if isinstance(payload, dict) else None
+    return revision if isinstance(revision, int) else None
+
+
+def current_point_settings_revision(config):
+    return _settings_snapshot(config)[1]
+
+
+def load_point_settings_with_revision(config):
+    """返回同一份快照的配置与修订号；首次缺失时先恢复再取一次新快照。
+
+    恢复函数内部自行获取写锁并落盘，外层不再嵌套加锁或重写文件：
+    恢复完成后直接读取新快照，配置内容与修订号必然同源，不会组成
+    "旧配置 + 新版本号" 的错位对；恢复期间落地的新保存会体现在该快照中。
+    """
+    settings, revision = _settings_snapshot(config)
+    if settings is None:
+        load_or_restore_point_settings(config)
+        settings, revision = _settings_snapshot(config)
+    return settings, revision
+
+
+def _retrigger_state_path(config):
+    return _path(config).with_name("inspection_upload_retrigger_state.json")
+
+
+def read_inspection_retrigger_dispatch_state(config):
+    """补派巡检的派发节流状态；用于限制失败后的重试频率。"""
+    try:
+        payload = json.loads(_retrigger_state_path(config).read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def record_inspection_retrigger_dispatch(config) -> None:
+    atomic_write_text(
+        _retrigger_state_path(config), json.dumps({"last_dispatch_at": time.time()}), encoding="utf-8")
+
+
+def peek_inspection_upload_retrigger(config) -> bool:
+    """只读检查补派标记是否存在且未过期，不消费它。"""
+    path = _retrigger_path(config)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    requested = payload.get("requested_at")
+    return isinstance(requested, (int, float)) and time.time() - requested <= 6 * 3600
 
 
 def _sync_cloud_config(config, settings, buildings):

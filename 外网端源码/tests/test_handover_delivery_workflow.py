@@ -2,6 +2,7 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -10,6 +11,7 @@ from handover_log_module.service.handover_attachment_store import HandoverAttach
 from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
 from handover_log_module.service.handover_attachment_delivery_service import HandoverAttachmentDeliveryService
 from handover_log_module.service import review_followup_trigger_service as followup_module
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableRateLimited
 
 
 BATCH = "2026-11-09|day"
@@ -97,7 +99,20 @@ def test_attachment_does_not_replace_record_moved_to_another_shift(bitable, tmp_
     client.update_record.assert_not_called()
 
 
-def test_requires_all_five_current_manifests_and_only_reuploads_changed_pair(tmp_path, monkeypatch, bitable):
+def test_cooldown_is_shared_by_stores_for_the_same_table(bitable, tmp_path):
+    store, client, _ = bitable
+    config = {"daily_report_bitable_export": {"target": {"app_token": str(tmp_path), "table_id": "test-table"}}}
+    first = HandoverAttachmentStore(config, client=client)
+    second = HandoverAttachmentStore(config, client=client)
+    client.list_fields.side_effect = FeishuBitableRateLimited("rate limited", retry_after=30)
+    with pytest.raises(FeishuBitableRateLimited, match="rate limited"):
+        first.ensure_record(DATE, SHIFT)
+    with pytest.raises(FeishuBitableRateLimited, match="冷却"):
+        second.ensure_record(DATE, SHIFT)
+    client.list_fields.assert_called_once()
+
+
+def test_each_floor_publishes_independently_and_only_reuploads_changed_pair(tmp_path, monkeypatch, bitable):
     store, client, record = bitable
     workflow = object.__new__(workflow_module.HandoverDeliveryWorkflowService)
     workflow.config = {}
@@ -122,24 +137,62 @@ def test_requires_all_five_current_manifests_and_only_reuploads_changed_pair(tmp
         workflow.state.update(session["session_id"], generation, status="ready",
                               artifacts_ready=True, revision=session["revision"], paths=artifacts)
 
-    for row in sessions[:4]:
+    assert workflow.publish_ready_batch(BATCH, lambda _: None, building="A楼")["status"] == "pending"
+    ready(sessions[0], "first")
+    first = workflow.publish_ready_batch(BATCH, lambda _: None, building="A楼")
+    assert first["uploaded_buildings"] == ["A楼"]
+    assert first["missing_buildings"] == list(workflow.BUILDINGS[1:])
+    assert not first["all_buildings_uploaded"]
+    assert len(record["fields"][FIELD]) == 2
+
+    for row in sessions[1:]:
         ready(row, "first")
-    assert workflow.publish_ready_batch(BATCH, lambda _: None)["missing_buildings"] == ["E楼"]
-    client.batch_create_records.assert_not_called()
-    ready(sessions[-1], "first")
-    assert len(workflow.publish_ready_batch(BATCH, lambda _: None)["uploaded_buildings"]) == 5
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(
+            lambda b: workflow.publish_ready_batch(BATCH, lambda _: None, building=b), workflow.BUILDINGS[1:],
+        ))
+    assert sum(result["all_buildings_uploaded"] for result in results) == 1
     assert len(record["fields"][FIELD]) == 10
     assert all(workflow.state.for_session(row)["status"] == "uploaded" for row in sessions)
 
     sessions[0]["revision"] = 2
     assert workflow.state.for_session(sessions[0])["status"] == "stale"
-    assert workflow.publish_ready_batch(BATCH, lambda _: None)["status"] == "pending"
+    assert workflow.publish_ready_batch(BATCH, lambda _: None, building="A楼")["status"] == "pending"
     ready(sessions[0], "second")
     client.upload_attachment_bytes.reset_mock()
     assert workflow.publish_ready_batch(BATCH, lambda _: None)["uploaded_buildings"] == ["A楼"]
     assert client.upload_attachment_bytes.call_count == 2
     assert len(record["fields"][FIELD]) == 10
     client.batch_create_records.assert_called_once()
+
+    original = deepcopy(record["fields"][FIELD])
+    sessions[0]["revision"] = 3
+    ready(sessions[0], "third")
+    client.upload_attachment_bytes.side_effect = OSError("mock upload failure")
+    failed = workflow.publish_ready_batch(BATCH, lambda _: None, building="A楼")
+    assert failed["status"] == "partial_failed"
+    assert failed["failed_buildings"][0]["building"] == "A楼"
+    assert record["fields"][FIELD] == original
+    assert workflow.state.for_session(sessions[0])["upload_error"] == "mock upload failure"
+    assert all(workflow.state.for_session(row)["status"] == "uploaded" for row in sessions[1:])
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_h_supplement_only_runs_when_all_five_uploaded(complete, tmp_path, monkeypatch):
+    service = object.__new__(followup_module.ReviewFollowupTriggerService)
+    service.config = {"paths": {"runtime_state_root": tmp_path}}
+    service._daily_report_state_service = SimpleNamespace(update_export_state=Mock())
+    service._review_service = SimpleNamespace(list_batch_sessions=lambda _: [])
+    service._managed_building_cloud_sync_gaps = lambda _: []
+    service._maybe_mark_first_full_cloud_sync_completed = Mock()
+    service._attach_extra_cloud_sheet_sync_results = Mock(side_effect=lambda **kw: kw["cloud_result"])
+    service._run_cabinet_shift_record_export = Mock(return_value={})
+    publish = Mock(return_value={"status": "ok", "all_buildings_uploaded": complete, "record_id": "recTest",
+                                 "record_url": "https://example.test/base?record=recTest"})
+    monkeypatch.setattr(followup_module, "HandoverDeliveryWorkflowService", lambda _: SimpleNamespace(publish_ready_batch=publish))
+    service.publish_attachment_delivery(batch_key=BATCH, building="A楼")
+    assert publish.call_args.kwargs["building"] == "A楼"
+    assert service._attach_extra_cloud_sheet_sync_results.called is complete
 
 
 @pytest.mark.parametrize("shift", ["day", "night"])

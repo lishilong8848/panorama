@@ -4609,12 +4609,20 @@ class SharedSourceCacheService:
         path = root / "inspection_remote_point_rules.json"
         with self._lock:
             previous_rules, previous_revision = self._inspection_point_rule_snapshot()
-            if previous_revision and (revision is None or revision < previous_revision
-                                      or (revision == previous_revision and previous_rules != rules)):
+            if previous_rules == rules:
+                # 规则完全一致：直接确认成功，并保留内网最高版本（绝不回退）。
+                # 仅当传入版本严格更高时才上调收敛；同规则的低版本漂移（时钟回拨/配置还原/重新部署）
+                # 不得降低内网版本，否则会让随后到达的“异规则但版本介于两者之间”的过期推送被误判为更新而覆盖配置。
+                effective_revision = max(previous_revision, revision or 0)
+                if effective_revision != previous_revision or not path.exists():
+                    saved = rules if not effective_revision else {"revision": effective_revision, "point_overrides": rules}
+                    atomic_write_text(path, json.dumps(saved, ensure_ascii=False), encoding="utf-8")
+                return rules
+            # 规则确实不同：必须携带严格更新的版本，否则判为过期/冲突，保留内网现有配置。
+            if previous_revision and (revision is None or revision <= previous_revision):
                 raise InspectionPointRevisionConflict("巡检测点配置版本过期或冲突，保留内网现有配置")
-            if previous_rules != rules or (revision or 0) != previous_revision or not path.exists():
-                saved = rules if revision is None else {"revision": revision, "point_overrides": rules}
-                atomic_write_text(path, json.dumps(saved, ensure_ascii=False), encoding="utf-8")
+            saved = rules if revision is None else {"revision": revision, "point_overrides": rules}
+            atomic_write_text(path, json.dumps(saved, ensure_ascii=False), encoding="utf-8")
         return rules
 
     def _inspection_selection_matches(self, entry: dict, metadata: dict) -> bool:

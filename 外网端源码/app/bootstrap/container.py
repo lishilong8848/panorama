@@ -17,6 +17,7 @@ from app.config.secret_masking import load_masked_settings
 from app.config.runtime_role import apply_forced_role_mode, forced_role_mode_from_env, role_mode_label
 from app.config.settings_loader import load_bootstrap_settings, save_settings
 from app.core.app_state import AppStateRepository
+from app.modules.inspection_data.service.retrigger_watchdog import InspectionRetriggerWatchdog
 from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from app.modules.feishu.service.feishu_auth_resolver import configure_feishu_auth_source
 from app.modules.report_pipeline.service.job_service import JobService
@@ -175,6 +176,8 @@ class AppContainer:
     system_screenshot_demand_poller: SystemScreenshotDemandPoller | None = None
     temperature_humidity_upload_scheduler: ApschedulerSchedulerFacade | None = None
     inspection_data_upload_scheduler: InspectionDataScheduler | None = None
+    inspection_retrigger_watchdog: InspectionRetriggerWatchdog | None = None
+    inspection_retrigger_shutdown: bool = False
     energy_report_upload_scheduler: ApschedulerSchedulerFacade | None = None
     temperature_humidity_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     top5_power_report_scheduler: ApschedulerSchedulerFacade | None = None
@@ -746,6 +749,135 @@ class AppContainer:
             submitted_by="scheduler",
         )
         return self.job_service.get_job_state(job.job_id) or job
+
+    def trigger_inspection_data_upload_now(self, source: str = "测点配置变更") -> Dict[str, Any]:
+        """测点配置变更后立即重传当前时段巡检数据。
+
+        空闲时直接派发；已有同类任务执行时登记待传标记并提交一个排队补派
+        任务（资源键串行，等当前任务结束后自动启动），多次保存由补派任务的
+        dedupe 键合并，保证标记不会无人消费。
+        """
+        if self._configured_deployment_snapshot().get("role_mode") != "external":
+            return {"ok": False, "skipped": "巡检数据处理仅允许在外网端执行"}
+        if not self.runtime_config.get("inspection_data_upload", {}).get("enabled", True):
+            return {"ok": False, "skipped": "巡检数据处理模块已关闭"}
+        busy = self._job_busy_for_feature_prefixes("inspection_data_upload")()
+        from app.modules.inspection_data.service.point_settings import request_inspection_upload_retrigger
+
+        # 空闲与忙时都先持久登记待传版本：直接派发临时失败或派发失败时，
+        # 标记留在磁盘由补派巡检接手，不会丢待传请求。
+        request_inspection_upload_retrigger(self.runtime_config, reason=source)
+        if busy:
+            if not self.job_service.find_active_job_by_dedupe_key("inspection_data_upload:retrigger"):
+                try:
+                    self._submit_inspection_retrigger()
+                except Exception as exc:
+                    self.add_system_log(f"[巡检数据处理] {source}的排队补派提交失败，待传标记保留：{exc}")
+                    return {"ok": False, "skipped": "已有任务在执行，排队补派提交失败，待传标记保留", "error": str(exc)}
+            self.add_system_log(f"[巡检数据处理] {source}，已有任务在执行，已登记并排队补派")
+            return {"ok": False, "skipped": "已有巡检数据处理任务在执行，已登记并在任务结束后补派"}
+        try:
+            self._submit_inspection_data_upload(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        except Exception as exc:  # 配置已同步飞书；标记保留，由巡检按节流节奏接手
+            self.add_system_log(f"[巡检数据处理] {source}触发的立即重传未启动，待传标记保留：{exc}")
+            return {"ok": False, "error": str(exc)}
+        self.add_system_log(f"[巡检数据处理] {source}，已触发当前时段立即重传")
+        return {"ok": True}
+
+    def _submit_inspection_retrigger(self):
+        from app.config.inspection_data_config import inspection_hour_bucket
+
+        now = datetime.now()
+        job = self.job_service.start_worker_job(
+            name=f"巡检数据处理补派 {now:%Y-%m-%d %H:%M:%S}", worker_handler="inspection_data_upload",
+            worker_payload={
+                "source_date": now.strftime("%Y-%m-%d"), "dry_run": False,
+                "source_bucket_key": inspection_hour_bucket(now), "retrigger": True,
+            },
+            resource_keys=["inspection_data_upload:global"], priority="scheduler",
+            feature="inspection_data_upload", dedupe_key="inspection_data_upload:retrigger",
+            submitted_by="config-save",
+        )
+        return self.job_service.get_job_state(job.job_id) or job
+
+    def dispatch_pending_inspection_retrigger(self) -> Dict[str, Any]:
+        """巡检未消费的补派标记：队列空闲时提交排队补派接班。
+
+        覆盖“补派任务运行中再保存、任务内接续达到上限退出”等并发窗口：
+        标记持久留在磁盘，本方法保证它最终一定有可执行的后续任务接手，
+        且不会与在跑/在等的同类任务叠加（串行与去重语义保留）。
+        """
+        if self._configured_deployment_snapshot().get("role_mode") != "external":
+            return {"ok": False, "skipped": "巡检数据处理仅允许在外网端执行"}
+        if not self.runtime_config.get("inspection_data_upload", {}).get("enabled", True):
+            return {"ok": False, "skipped": "巡检数据处理模块已关闭"}
+        watchdog = self.inspection_retrigger_watchdog
+        if watchdog is not None and watchdog.is_stopped():
+            return {"ok": False, "skipped": "补传巡检已停止（关闭中），不再派发"}
+        from app.modules.inspection_data.service.point_settings import peek_inspection_upload_retrigger
+
+        if not peek_inspection_upload_retrigger(self.runtime_config):
+            return {"ok": False, "skipped": "无待补派标记"}
+        if self._job_busy_for_feature_prefixes("inspection_data_upload")():
+            return {"ok": False, "skipped": "巡检任务仍在运行，下一轮再检查"}
+        if self.job_service.find_active_job_by_dedupe_key("inspection_data_upload:retrigger"):
+            return {"ok": False, "skipped": "已有排队补派等待"}
+        from app.modules.inspection_data.service.point_settings import (
+            read_inspection_retrigger_dispatch_state,
+            record_inspection_retrigger_dispatch,
+        )
+        feature_cfg = self.runtime_config.get("inspection_data_upload", {})
+        try:
+            min_gap = float(feature_cfg.get("retrigger_min_interval_sec", 60) or 60)
+        except (TypeError, ValueError):
+            min_gap = 60.0
+        last_dispatch = read_inspection_retrigger_dispatch_state(self.runtime_config).get("last_dispatch_at")
+        if isinstance(last_dispatch, (int, float)) and datetime.now().timestamp() - last_dispatch < min_gap:
+            return {"ok": False, "skipped": "补派重试冷却中，稍后再检查"}
+        try:
+            self._submit_inspection_retrigger()
+        except Exception as exc:
+            self.add_system_log(f"[巡检数据处理] 巡检补派提交失败：{exc}")
+            return {"ok": False, "error": str(exc)}
+        record_inspection_retrigger_dispatch(self.runtime_config)
+        self.add_system_log("[巡检数据处理] 巡检发现未消费补派标记，已提交排队补派接班")
+        return {"ok": True}
+
+    def _build_inspection_retrigger_watchdog(self) -> InspectionRetriggerWatchdog:
+        interval = self.runtime_config.get("inspection_data_upload", {}).get(
+            "retrigger_watchdog_interval_sec", 10)
+        try:
+            interval = float(interval)
+        except (TypeError, ValueError):
+            interval = 10.0
+        return InspectionRetriggerWatchdog(
+            dispatch=self.dispatch_pending_inspection_retrigger,
+            interval_sec=interval,
+            emit_log=self.add_system_log,
+        )
+
+    def start_inspection_retrigger_watchdog(self, source: str = "手动") -> Dict[str, Any]:
+        if self.inspection_retrigger_shutdown:
+            # 关停开始后不再创建新的补传线程（含固定角色后台启动迟到的情况）。
+            self.add_system_log(f"[巡检数据处理] {source}补传巡检未启动：关停已开始")
+            return {"ok": False, "running": False, "reason": "shutdown_started"}
+        if not self.inspection_retrigger_watchdog:
+            self.inspection_retrigger_watchdog = self._build_inspection_retrigger_watchdog()
+        result = self.inspection_retrigger_watchdog.start()
+        self.add_system_log(
+            f"[巡检数据处理] {source}补传巡检: running={bool(result.get('running'))}, "
+            f"reason={result.get('reason', '-')}")
+        return result
+
+    def stop_inspection_retrigger_watchdog(self, source: str = "手动", timeout: float = 10.0) -> Dict[str, Any]:
+        self.inspection_retrigger_shutdown = True
+        if self.inspection_retrigger_watchdog:
+            result = self.inspection_retrigger_watchdog.stop(timeout=timeout)
+        else:
+            result = {"ok": True, "running": False, "reason": "not_initialized"}
+        self.add_system_log(
+            f"[巡检数据处理] {source}补传巡检停止: running={bool(result.get('running'))}")
+        return result
 
     def _lookup_inspection_data_job(self, job_id: str):
         job = self.job_service.get_job_state(job_id)
@@ -2165,6 +2297,9 @@ class AppContainer:
         if role_mode == "external" and bool(demand_poll_cfg.get("enabled", True)):
             _report_progress("starting_system_screenshot_demand_poller")
             self.start_system_screenshot_demand_poller(source=source)
+        if role_mode == "external" and self.runtime_config.get("inspection_data_upload", {}).get("enabled", True):
+            _report_progress("starting_inspection_retrigger_watchdog")
+            self.start_inspection_retrigger_watchdog(source=source)
         elif role_mode == "internal":
             self.add_system_log("[系统截图上传][同步需求] 当前为内网端，启动时不自动开启轮询")
         else:
@@ -2490,6 +2625,7 @@ class AppContainer:
             ("alarm_event_upload_scheduler", self.stop_alarm_event_upload_scheduler),
             ("system_screenshot_upload_scheduler", self.stop_system_screenshot_upload_scheduler),
             ("system_screenshot_demand_poller", self.stop_system_screenshot_demand_poller),
+            ("inspection_retrigger_watchdog", self.stop_inspection_retrigger_watchdog),
             (
                 "temperature_humidity_upload_scheduler",
                 self.stop_temperature_humidity_upload_scheduler,

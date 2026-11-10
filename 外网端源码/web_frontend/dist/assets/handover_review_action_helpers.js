@@ -36,6 +36,7 @@ export function normalizeAttachmentDelivery(raw) {
     generation_id: attachmentDeliveryText(raw.generation_id ?? raw.generationId),
     error: attachmentDeliveryText(raw.error),
     upload_error: attachmentDeliveryText(raw.upload_error),
+    upload_disabled: Boolean(raw.upload_disabled),
     record_url: attachmentDeliveryText(raw.record_url ?? raw.recordUrl),
   };
 }
@@ -248,8 +249,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
     return null;
   }
 
-  // The worker owns artifact preparation; the client only polls its own generation to completion.
-  async function waitForDeliveryArtifacts(generationId, options = {}) {
+  // Stop on this floor's delivery result, not on the batch or H-floor follow-up job.
+  async function waitForDeliveryResult(generationId, options = {}) {
     const {
       timeoutMs = attachmentDeliveryPollOptions?.timeoutMs ?? 15 * 60 * 1000,
       intervalMs = attachmentDeliveryPollOptions?.intervalMs ?? 2500,
@@ -258,17 +259,16 @@ export function createHandoverReviewActionHelpers(options = {}) {
     if (!targetGenerationId || typeof loadReviewData !== "function") return resolveDeliveryGate();
     const startedAt = Date.now();
     while (Date.now() - startedAt <= timeoutMs) {
-      let loaded = true;
       try {
-        loaded = await loadReviewData({ background: true });
+        await loadReviewData({ background: true, deliveryPoll: true });
       } catch (_error) {
         // Transient polling failures keep the known state and retry on the next tick.
       }
       const gate = resolveDeliveryGate();
-      if (loaded !== false && gate.delivery.generation_id === targetGenerationId && gate.is_ready) {
-        return gate;
-      }
-      if (gate.delivery.generation_id === targetGenerationId && (gate.is_failed || gate.is_stale)) {
+      if (gate.delivery.generation_id === targetGenerationId && (
+        gate.delivery.status === "uploaded" || gate.is_failed || gate.is_stale
+        || (gate.is_ready && (gate.delivery.upload_error || gate.delivery.upload_disabled))
+      )) {
         return gate;
       }
       await new Promise((resolve) => {
@@ -389,21 +389,27 @@ export function createHandoverReviewActionHelpers(options = {}) {
       if (!jobId) {
         throw new Error("生成成品任务提交失败");
       }
-      statusText.value = "已提交本楼班次附件成品生成任务，等待生成完成...";
-      const gate = await waitForDeliveryArtifacts(generationId);
+      statusText.value = "已提交本楼任务，正在生成并上传附件...";
+      const gate = await waitForDeliveryResult(generationId);
       if (gate.delivery.generation_id !== generationId) {
         // A newer generation replaced this one; readiness must be checked against the newest id.
         setDeliveryGenerationId(gate.delivery.generation_id || generationId);
       }
       const latest = resolveDeliveryGate();
-      if (latest.is_ready) {
+      if (latest.delivery.status === "uploaded" && latest.is_ready) {
+        statusText.value = "本楼班次附件已上传";
+        errorText.value = "";
+      } else if (latest.delivery.upload_error) {
+        statusText.value = "本楼成品已就绪，附件上传未完成";
+        errorText.value = latest.delivery.upload_error;
+      } else if (latest.is_ready && latest.delivery.upload_disabled) {
         statusText.value = resolveOperationFeedbackText(response, "本楼班次附件成品已就绪，可下载或发送");
         errorText.value = "";
       } else if (latest.is_failed || latest.is_stale) {
         errorText.value = latest.reason || "班次附件成品生成失败，请重试";
         statusText.value = "班次附件成品生成失败，请重试。";
       } else {
-        statusText.value = "班次附件成品仍在生成，可稍后刷新查看结果";
+        statusText.value = "本楼任务仍在后台处理，可稍后刷新查看结果";
         errorText.value = "";
       }
     } catch (error) {
@@ -522,8 +528,9 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = downloadActionVm.value.disabledReason || "";
       return;
     }
+    // 下载与成品提交解耦：不再要求成品就绪；但成品正在生成（排队/准备）期间暂缓下载，与后端硬限制一致。
     const gate = resolveDeliveryGate();
-    if (!gate.can_download) {
+    if (gate.is_busy) {
       statusText.value = deliveryConflictText(gate);
       return;
     }
@@ -544,9 +551,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
     errorText.value = "";
     statusText.value = "正在下载本楼班次附件成品...";
     try {
-      const url = buildHandoverReviewDeliveryDownloadUrl(buildingCode, sessionId, {
+      const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,
-        generation_id: gate.delivery.generation_id,
         ts: Date.now(),
       });
       const result = await triggerBrowserDownload(url, session.value?.output_file || "班次附件.xlsx");
@@ -569,8 +575,9 @@ export function createHandoverReviewActionHelpers(options = {}) {
       statusText.value = capacityDownloadActionVm.value.disabledReason || "";
       return;
     }
+    // 下载与成品提交解耦：不再要求成品就绪；但成品正在生成（排队/准备）期间暂缓下载，与后端硬限制一致。
     const gate = resolveDeliveryGate();
-    if (!gate.can_download) {
+    if (gate.is_busy) {
       statusText.value = deliveryConflictText(gate);
       return;
     }
@@ -596,10 +603,8 @@ export function createHandoverReviewActionHelpers(options = {}) {
     errorText.value = "";
     statusText.value = "正在下载本楼容量表成品...";
     try {
-      const url = buildHandoverReviewDeliveryDownloadUrl(buildingCode, sessionId, {
+      const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,
-        generation_id: gate.delivery.generation_id,
-        artifact: "capacity",
         ts: Date.now(),
       });
       const result = await triggerBrowserDownload(url, capacityOutputFile || "交接班容量报表.xlsx");
@@ -775,6 +780,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       if (!jobId) {
         throw new Error(sessionId ? "重新生成任务提交失败" : "生成任务提交失败");
       }
+      if (sourceFiles) statusText.value = "两份源文件已上传，等待本楼生成交接班日志和容量表...";
       const job = await waitForBackgroundJob(jobId, getJobApi, { timeoutMs: 10 * 60 * 1000, intervalMs: 1500 });
       if (!job) {
         throw new Error(sessionId ? "重新生成任务等待超时，请稍后刷新查看结果" : "生成任务等待超时，请稍后刷新查看结果");
@@ -792,13 +798,13 @@ export function createHandoverReviewActionHelpers(options = {}) {
         statusText.value = sessionId ? "重新生成失败，请处理后重试。" : "生成失败，请处理后重试。";
       }
     } catch (error) {
-      errorText.value = String(error?.message || error || (sessionId ? "重新生成失败" : "生成失败"));
-      statusText.value = sessionId ? "重新生成失败，请处理后重试。" : "生成失败，请处理后重试。";
       try {
         await loadReviewData({ background: false, mode: shouldPreferBootstrapLoad() ? "bootstrap" : "full" });
       } catch (_error) {
         // Keep the original regenerate error visible.
       }
+      errorText.value = String(error?.message || error || (sessionId ? "重新生成失败" : "生成失败"));
+      statusText.value = sessionId ? "重新生成失败，请处理后重试。" : "生成失败，请处理后重试。";
     } finally {
       regenerating.value = false;
     }

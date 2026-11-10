@@ -79,8 +79,40 @@ def test_two_uploaded_workbooks_are_the_only_worker_sources(monkeypatch, tmp_pat
     assert payload["duty_date"] == "2026-10-06"
     assert payload["duty_shift"] == "day"
     assert payload["only_if_missing"] is False
+    assert payload["uploaded_sources"] is True
+    assert observed["resource_keys"] == ["handover_building:A楼"]
     assert observed["dedupe_key"] == "handover_review_regenerate:A楼|2026-10-06|day"
     assert handover.file.closed and capacity.file.closed
+
+
+def report_json_upload(family, building="A楼"):
+    payload = {
+        "schema_version": 1, "source_family": family, "building": building,
+        "query_start": "2026-10-06 16:00:00", "query_end": "2026-10-06 16:05:00",
+        "sheets": [{"name": "Sheet1", "rows": [[], [None, None, None, None, "2026-10-06 16:00:00"], [],
+                                                  [None, "West", "Unit 1", "mode", 1]]}],
+    }
+    return UploadFile(filename="source.json", file=BytesIO(json.dumps(payload).encode("utf-8")))
+
+
+def test_accepts_api_sources_without_shared_bridge(monkeypatch, tmp_path):
+    request, observed = setup_upload(monkeypatch, tmp_path)
+    assert call_upload(request, report_json_upload("handover_log_family"),
+                       report_json_upload("handover_capacity_report_family")) == {"job_id": "manual-job"}
+    assert observed["resource_keys"] == ["handover_building:A楼"]
+    for key in ("data_file", "capacity_source_file"):
+        assert Path(observed["worker_payload"][key]).suffix == ".json"
+
+
+@pytest.mark.parametrize("family,building", [("handover_log_family", "A楼"), ("handover_capacity_report_family", "B楼")])
+def test_rejects_wrong_json_source_family_or_building(monkeypatch, tmp_path, family, building):
+    request, observed = setup_upload(monkeypatch, tmp_path)
+    with pytest.raises(HTTPException) as error:
+        call_upload(request, report_json_upload("handover_log_family"), report_json_upload(family, building))
+    assert error.value.status_code == 400
+    assert "交接班容量报表源文件读取失败" in error.value.detail
+    assert not observed
+    assert not list(tmp_path.rglob("*.json"))
 
 
 @pytest.mark.parametrize("name,content", [("capacity.txt", b"text"), ("capacity.xlsx", b""), ("capacity.xlsx", b"broken")])
