@@ -14,6 +14,10 @@ TOKEN_TTL_SEC = 7200
 TOKEN_REFRESH_MARGIN_SEC = 600
 
 
+class FeishuTokenConnectTimeout(RuntimeError):
+    """The token endpoint could not be reached after its short retry."""
+
+
 @dataclass
 class _TokenEntry:
     token: str = ""
@@ -101,6 +105,8 @@ class FeishuTokenManager:
                     time.sleep(1)
             response.raise_for_status()
             payload: Dict[str, Any] = response.json()
+        except requests.exceptions.ConnectTimeout as exc:
+            raise FeishuTokenConnectTimeout(f"飞书获取 token 失败: {exc}") from exc
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"飞书获取 token 失败: {exc}") from exc
         if payload.get("code") != 0:

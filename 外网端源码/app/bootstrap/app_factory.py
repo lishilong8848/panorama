@@ -30,9 +30,11 @@ from app.modules.feishu.api.routes import router as feishu_router
 from app.modules.notify.api.routes import router as notify_router
 from app.modules.ocr.api.routes import router as ocr_router
 from app.modules.report_pipeline.api.routes import (
+    resume_chiller_mode_upload_jobs,
     router as pipeline_router,
     schedule_handover_review_access_startup_probe,
     shutdown_fast_status_api_executor,
+    start_chiller_mode_upload_job,
 )
 from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import (
     start_waiting_bridge_job,
@@ -795,6 +797,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         app.state.runtime_activation_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
             result = container.start_role_runtime_services(source=source)
+            if role_mode == "external":
+                resume_chiller_mode_upload_jobs(container)
             container.add_system_log(
                 f"[调度] 执行器绑定完成: {container.scheduler_executor_name()}, "
                 f"executor_bound={container.is_scheduler_executor_bound()}"
@@ -1891,9 +1895,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
         return True, detail
 
     def chiller_mode_upload_scheduler_callback(source: str) -> tuple[bool, str]:
-        from handover_log_module.service.chiller_mode_upload_service import ChillerModeUploadService
-
-        runtime_config = container.runtime_config
         role_mode = _deployment_role_mode()
         if role_mode == "internal":
             container.add_system_log("[制冷模式参数上传调度] 当前为内网端，调度跳过；请在外网端启用该调度")
@@ -1909,124 +1910,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             )
             return False, detail
 
-        def _failure_detail_from_result(result: Dict[str, Any] | None) -> str:
-            failed_files = (result or {}).get("failed_files", [])
-            detail_items = []
-            if isinstance(failed_files, list):
-                for failed in failed_files[:5]:
-                    if not isinstance(failed, dict):
-                        continue
-                    building = str(failed.get("building", "") or "-").strip() or "-"
-                    file_path = str(failed.get("file_path", "") or "").strip()
-                    file_name = os.path.basename(file_path) if file_path else "-"
-                    error = str(failed.get("error", "") or "未知错误").strip() or "未知错误"
-                    detail_items.append(f"{building}/{file_name}: {error}")
-            return "；".join(detail_items) if detail_items else "未提供失败明细"
-
-        def _run_from_cache(emit_log):
-            started_at = datetime.now()
-            try:
-                bridge_service, bridge_error = _resolve_bridge_runtime()
-                if bridge_service is None:
-                    raise RuntimeError(
-                        f"共享桥接未就绪，外网端无法执行制冷模式参数上传调度：{_bridge_runtime_error_text(bridge_error)}"
-                    )
-                target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
-                if not target_buildings:
-                    raise RuntimeError("共享缓存楼栋列表为空，无法选择制冷模式参数源文件")
-                emit_log(
-                    "[制冷模式参数上传调度] 后台读取共享缓存最新索引: "
-                    f"family={ChillerModeUploadService.SOURCE_FAMILY}, buildings={','.join(target_buildings)}"
-                )
-                selection = bridge_service.get_latest_source_cache_selection(
-                    source_family=ChillerModeUploadService.SOURCE_FAMILY,
-                    buildings=target_buildings,
-                    max_selection_age_hours=1.0,
-                )
-                cached_entries = list(selection.get("selected_entries", [])) if isinstance(selection, dict) else []
-                if not bool(selection.get("can_proceed", False)) or len(cached_entries) < len(target_buildings):
-                    missing_buildings = list(selection.get("missing_buildings", []) or []) if isinstance(selection, dict) else []
-                    stale_buildings = list(selection.get("stale_buildings", []) or []) if isinstance(selection, dict) else []
-                    ready_buildings = {
-                        str(item.get("building", "") or "").strip()
-                        for item in cached_entries
-                        if isinstance(item, dict)
-                    }
-                    is_best_bucket_too_old = bool(selection.get("is_best_bucket_too_old", False)) if isinstance(selection, dict) else False
-                    if is_best_bucket_too_old:
-                        refresh_candidates = target_buildings
-                    else:
-                        refresh_candidates = [*missing_buildings, *stale_buildings, *target_buildings]
-                    refresh_buildings = [
-                        item
-                        for item in refresh_candidates
-                        if str(item or "").strip()
-                        and (is_best_bucket_too_old or str(item or "").strip() not in ready_buildings)
-                    ]
-                    refresh_buildings = list(dict.fromkeys(str(item or "").strip() for item in refresh_buildings if str(item or "").strip()))
-                    if refresh_buildings and hasattr(bridge_service, "request_latest_source_cache_refresh"):
-                        refresh_result = bridge_service.request_latest_source_cache_refresh(
-                            source_family=ChillerModeUploadService.SOURCE_FAMILY,
-                            buildings=refresh_buildings,
-                        )
-                        emit_log(
-                            "[制冷模式参数上传调度] 共享文件缺失，已请求内网端补采: "
-                            f"buildings={','.join(refresh_buildings)}, "
-                            f"accepted={refresh_result.get('accepted_count', 0) if isinstance(refresh_result, dict) else 0}"
-                        )
-                    detail = _build_latest_cache_wait_text("制冷模式参数", selection if isinstance(selection, dict) else {})
-                    emit_log(f"[制冷模式参数上传调度] {detail}")
-                    container.record_chiller_mode_upload_external_run(
-                        status="skipped",
-                        source="scheduler_job",
-                        detail=detail,
-                        duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
-                    )
-                    return {"status": "skipped", "summary": detail}
-                service = ChillerModeUploadService(runtime_config)
-                source_units = [
-                    {
-                        "building": str(item.get("building", "") or "").strip(),
-                        "file_path": str(item.get("file_path", "") or "").strip(),
-                    }
-                    for item in cached_entries
-                ]
-                result = service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
-                if str((result or {}).get("status", "") or "").strip().lower() == "failed":
-                    raise RuntimeError("制冷模式参数上传失败：" + _failure_detail_from_result(result))
-                status = str((result or {}).get("status", "success") or "success").strip().lower()
-                container.record_chiller_mode_upload_external_run(
-                    status=status,
-                    source="scheduler_job",
-                    detail=str((result or {}).get("summary", "") or ""),
-                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
-                )
-                return result
-            except Exception as exc:  # noqa: BLE001
-                container.record_chiller_mode_upload_external_run(
-                    status="failed",
-                    source="scheduler_job",
-                    detail=str(exc),
-                    duration_ms=int((datetime.now() - started_at).total_seconds() * 1000),
-                )
-                raise
-
         try:
-            job = _start_external_cache_job(
-                name="制冷模式参数上传-共享文件",
-                feature="chiller_mode_upload_cache_latest",
-                resource_key="shared_bridge:chiller_mode_upload",
-                run_func=_run_from_cache,
-                dedupe_key=f"chiller_mode_upload:scheduler:{datetime.now().strftime('%Y%m%d%H%M')}",
-            )
+            job = start_chiller_mode_upload_job(container, priority="scheduler")
             submit_detail = f"已提交制冷模式参数共享文件上传任务 job_id={job.job_id}"
             container.add_system_log(f"[制冷模式参数上传调度] {submit_detail}")
-            container.record_chiller_mode_upload_external_run(
-                status="accepted",
-                source="scheduler",
-                detail=submit_detail,
-                duration_ms=0,
-            )
             return True, submit_detail
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)

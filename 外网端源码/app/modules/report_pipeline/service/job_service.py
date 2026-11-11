@@ -32,6 +32,16 @@ class TaskEngineUnavailableError(RuntimeError):
     pass
 
 
+class PrewriteJobRetry(RuntimeError):
+    """An opted-in local job can safely retry because no remote write began."""
+
+
+_PREWRITE_RETRY_POLICY = "prewrite_retry"
+_PREWRITE_RETRY_REASON = "waiting:feishu_auth"
+_PREWRITE_RETRY_DELAYS = (60, 120, 300)
+_PREWRITE_RETRY_WINDOW = 1800
+
+
 def _exception_detail(exc: BaseException) -> str:
     message = str(exc).strip()
     exception_type = type(exc).__name__
@@ -360,6 +370,10 @@ class JobService:
         if stage.cancel_requested:
             return
         old_status, old_wait_reason = previous
+        if self._has_deferred_prewrite_retry(job, stage) and old_status == "waiting_resource":
+            job.status = stage.status = old_status
+            job.wait_reason = old_wait_reason
+            return
         if stage.worker_handler and old_status in {"queued", "waiting_resource"}:
             status, wait_reason = old_status, old_wait_reason
         elif stage.worker_handler and stage.resume_policy == "requeue":
@@ -693,7 +707,7 @@ class JobService:
         if status not in {"queued", "waiting_resource"}:
             return False
         wait_reason = str(candidate.wait_reason or "").strip().lower()
-        if status == "waiting_resource" and wait_reason == "waiting:shared_bridge":
+        if status == "waiting_resource" and wait_reason in {"waiting:shared_bridge", _PREWRITE_RETRY_REASON}:
             return False
         return True
 
@@ -1931,6 +1945,7 @@ class JobService:
             max(0, int(now_monotonic - float(job.wait_started_monotonic or 0)))
             for job in self._ordered_jobs()
             if job.status in {"queued", "waiting_resource"}
+            and not self._in_prewrite_backoff(job)
             and self._job_network_side(job) == side
             and float(job.wait_started_monotonic or 0) > 0
         ]
@@ -1943,6 +1958,7 @@ class JobService:
             job
             for job in self._ordered_jobs()
             if job.status in {"queued", "waiting_resource"}
+            and not self._in_prewrite_backoff(job)
             and self._job_network_side(job) in {"internal", "external"}
         ]
         if not waiting_jobs:
@@ -1975,6 +1991,7 @@ class JobService:
             1
             for job in self._ordered_jobs()
             if job.status in {"queued", "waiting_resource"} and self._job_network_side(job) == "external"
+            and not self._in_prewrite_backoff(job)
         )
         if running_pipeline:
             self._network_window_current_side = "pipeline"
@@ -2209,7 +2226,7 @@ class JobService:
         stage.finished_at = now_text
         self._persist_job_snapshot(job)
 
-    def _acquire_job_resources(self, job: JobState) -> None:
+    def _acquire_job_resources(self, job: JobState, *, deadline: float = 0) -> None:
         stage = self._get_primary_stage(job)
         if self._shutting_down:
             return
@@ -2243,6 +2260,8 @@ class JobService:
                     self._mark_cancelled_before_run_locked(job, stage)
                     self._condition.notify_all()
                     return
+                if deadline and time.time() >= deadline:
+                    raise TimeoutError("等待飞书连接恢复超时，未开始写入")
                 unavailable = self._resource_unavailable_keys(job)
                 if not unavailable:
                     for resource_key in job.resource_keys:
@@ -2566,6 +2585,7 @@ class JobService:
         feature: str = "",
         dedupe_key: str = "",
         submitted_by: str = "",
+        retry_prewrite: bool = False,
     ) -> JobState:
         self._check_accepting_jobs()
         normalized_resources = self._normalize_resource_keys(resource_keys)
@@ -2600,7 +2620,7 @@ class JobService:
                     stage_id="main",
                     name=str(feature or name or "").strip() or str(name or "stage").strip() or "stage",
                     resource_keys=list(normalized_resources),
-                    resume_policy="manual_resume",
+                    resume_policy=_PREWRITE_RETRY_POLICY if retry_prewrite else "manual_resume",
                 )
             ]
             self._jobs[job_id] = job
@@ -2609,16 +2629,88 @@ class JobService:
                 self._task_engine_store.persist_config_snapshot(job_id, config_snapshot)
             self._persist_job_snapshot(job, config_snapshot=config_snapshot)
         self._persist_resource_snapshot()
+        self._launch_local_job(job, run_func)
+        return job
 
+    @staticmethod
+    def _has_deferred_prewrite_retry(job: JobState, stage: StageState) -> bool:
+        return (
+            stage.resume_policy == _PREWRITE_RETRY_POLICY
+            and isinstance(job.result, dict)
+            and bool(job.result.get("prewrite_retry_deadline"))
+        )
+
+    @staticmethod
+    def _in_prewrite_backoff(job: JobState) -> bool:
+        return (
+            job.wait_reason == _PREWRITE_RETRY_REASON
+            and isinstance(job.result, dict)
+            and float(job.result.get("prewrite_retry_at", 0)) > time.time()
+        )
+
+    def resume_deferred_prewrite_jobs(self, feature: str, run_func: Callable[[Callable[[str], None]], Any]) -> None:
+        with self._lock:
+            for job in self._jobs.values():
+                if job.feature == feature and job.status == "waiting_resource" and job.thread is None:
+                    if self._has_deferred_prewrite_retry(job, self._get_primary_stage(job)):
+                        self._launch_local_job(job, run_func)
+
+    def _launch_local_job(self, job: JobState, run_func: Callable[[Callable[[str], None]], Any]) -> None:
         def _run() -> None:
             unhandled_error_detail = ""
             stage = self._get_primary_stage(job)
             try:
-                self._acquire_job_resources(job)
-                with self._lock:
-                    if self._shutting_down or job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
-                        return
-                result = run_func(lambda line: self.log(job.job_id, line))
+                while True:
+                    deferred = job.result if self._has_deferred_prewrite_retry(job, stage) else {}
+                    deadline = float(deferred.get("prewrite_retry_deadline", 0))
+                    with self._condition:
+                        while not self._shutting_down and not job.cancel_requested:
+                            remaining = float(deferred.get("prewrite_retry_at", 0)) - time.time()
+                            if remaining <= 0:
+                                break
+                            self._condition.wait(timeout=remaining)
+                        if self._shutting_down or job.cancel_requested:
+                            return
+                    if deadline and time.time() >= deadline:
+                        raise TimeoutError("等待飞书连接恢复超时，未开始写入")
+                    if deadline:
+                        self._acquire_job_resources(job, deadline=deadline)
+                    else:
+                        self._acquire_job_resources(job)
+                    with self._lock:
+                        if self._shutting_down or job.cancel_requested or stage.cancel_requested or job.status == "cancelled":
+                            return
+                    try:
+                        result = run_func(lambda line: self.log(job.job_id, line))
+                        break
+                    except PrewriteJobRetry as exc:
+                        if stage.resume_policy != _PREWRITE_RETRY_POLICY:
+                            raise
+                        now = time.time()
+                        deadline = deadline or now + _PREWRITE_RETRY_WINDOW
+                        if now >= deadline:
+                            raise TimeoutError(f"等待飞书连接恢复超时，未开始写入: {exc}") from exc
+                        count = int(deferred.get("prewrite_retry_count", 0))
+                        delay = _PREWRITE_RETRY_DELAYS[min(count, len(_PREWRITE_RETRY_DELAYS) - 1)]
+                        with self._condition:
+                            if job.cancel_requested or stage.cancel_requested:
+                                self._mark_cancelled_before_run_locked(job, stage)
+                                return
+                            job.status = stage.status = "waiting_resource"
+                            job.wait_reason = _PREWRITE_RETRY_REASON
+                            job.summary = stage.summary = "等待飞书连接恢复"
+                            job.wait_started_monotonic = time.monotonic()
+                            job.result = stage.result = {
+                                "prewrite_retry_at": min(now + delay, deadline),
+                                "prewrite_retry_deadline": deadline,
+                                "prewrite_retry_count": count + 1,
+                            }
+                            if self._shutting_down:
+                                self._shutdown_job_states[job.job_id] = (job.status, job.wait_reason)
+                            self._persist_job_snapshot(job)
+                            self._append_log(job, f"[任务资源] 等待飞书连接恢复，约 {min(delay, deadline - now):g} 秒后重试: {exc}")
+                            self._release_resources(job.job_id, list(job.acquired_resources))
+                            job.acquired_resources = []
                 with self._lock:
                     job.status = "success"
                     job.summary = "ok"
@@ -2643,6 +2735,7 @@ class JobService:
                 unhandled_error_detail = detail
                 with self._lock:
                     job.status = "failed"
+                    job.wait_reason = ""
                     job.error = detail
                     job.summary = detail
                     job.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2676,11 +2769,10 @@ class JobService:
                 self._preserve_shutdown_job_locked(job)
                 self._persist_job_snapshot(job)
                 job.done_event.set()
-                return job
-            thread = threading.Thread(target=_run, daemon=True, name=f"job-{job_id[:8]}")
+                return
+            thread = threading.Thread(target=_run, daemon=True, name=f"job-{job.job_id[:8]}")
             job.thread = thread
             thread.start()
-        return job
 
     def _restore_incomplete_jobs(self) -> None:
         if not self._task_engine_db or not self._task_engine_store:
@@ -2716,6 +2808,9 @@ class JobService:
                 )
                 continue
             if not stage.worker_handler:
+                if job.status == "waiting_resource" and self._has_deferred_prewrite_retry(job, stage):
+                    # Runtime-dependent local callbacks are attached after role activation.
+                    continue
                 self._mark_restored_job_terminal(
                     job,
                     stage,

@@ -5,6 +5,7 @@ import pytest
 import requests
 
 from app.modules.feishu.service import feishu_token_manager as module
+from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.report_pipeline.service import energy_report_upload_service as energy
 
 
@@ -32,6 +33,22 @@ def test_auth_rejection_is_not_retried(monkeypatch):
     post.assert_called_once()
 
 
+@pytest.mark.parametrize("propagate", [False, True])
+def test_only_opted_in_target_probe_propagates_token_timeout(propagate):
+    resolver = BitableTargetResolver(app_id="test-app", app_secret="test-secret",
+                                    propagate_token_connect_timeout=propagate)
+    client = Mock()
+    client.refresh_token.side_effect = module.FeishuTokenConnectTimeout("test timeout")
+    if propagate:
+        with pytest.raises(module.FeishuTokenConnectTimeout, match="test timeout"):
+            resolver._probe_bitable_fields(client, app_token="app", table_id="table", context_label="test")
+    else:
+        result = resolver._probe_bitable_fields(client, app_token="app", table_id="table", context_label="test")
+        assert result["kind"] == "probe_error"
+        assert "test timeout" in result["message"]
+    client._request_with_retry.assert_not_called()
+
+
 def test_energy_report_auth_timeout_leaves_month_pending_without_writes(monkeypatch, tmp_path):
     post = Mock(side_effect=requests.ConnectTimeout("test timeout"))
     monkeypatch.setattr(module.requests, "post", post)
@@ -45,7 +62,7 @@ def test_energy_report_auth_timeout_leaves_month_pending_without_writes(monkeypa
     monkeypatch.setattr(service, "source_paths", lambda _: {})
     now = datetime(2026, 11, 9, 7, 5)
     assert energy.pending_periods(config, now) == ("2026-10",)
-    with pytest.raises(RuntimeError, match="test timeout"):
+    with pytest.raises(module.FeishuTokenConnectTimeout, match="test timeout"):
         service.run("2026-10", log=lambda _: None)
     assert post.call_count == 2
     assert energy.pending_periods(config, now) == ("2026-10",)

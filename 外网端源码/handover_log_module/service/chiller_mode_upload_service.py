@@ -15,6 +15,7 @@ from app.config.config_compat_cleanup import sanitize_chiller_mode_upload_config
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
+from app.modules.feishu.service.feishu_token_manager import FeishuTokenConnectTimeout
 from handover_log_module.service.chiller_mode_focus_state_service import (
     ChillerModeFocusStateService,
 )
@@ -174,7 +175,7 @@ class ChillerModeUploadService:
         cfg["hvac_bitable_sync"] = self._deep_merge(hvac_default, hvac_sync)
         return cfg
 
-    def _new_target_resolver(self) -> BitableTargetResolver:
+    def _new_target_resolver(self, *, propagate_token_connect_timeout: bool = False) -> BitableTargetResolver:
         global_feishu = require_feishu_auth_settings(self.runtime_config)
         return BitableTargetResolver(
             app_id=str(global_feishu.get("app_id", "") or "").strip(),
@@ -182,13 +183,19 @@ class ChillerModeUploadService:
             timeout=int(global_feishu.get("timeout", 30) or 30),
             request_retry_count=int(global_feishu.get("request_retry_count", 3) or 3),
             request_retry_interval_sec=float(global_feishu.get("request_retry_interval_sec", 2) or 2),
+            propagate_token_connect_timeout=propagate_token_connect_timeout,
         )
 
-    def build_target_descriptor(self, cfg: Dict[str, Any] | None = None, *, force_refresh: bool = False) -> Dict[str, str]:
+    def build_target_descriptor(
+        self, cfg: Dict[str, Any] | None = None, *, force_refresh: bool = False,
+        propagate_token_connect_timeout: bool = False,
+    ) -> Dict[str, str]:
         normalized = cfg if isinstance(cfg, dict) else self._normalize_cfg()
         target = normalized.get("target", {}) if isinstance(normalized.get("target", {}), dict) else {}
         return dict(
-            self._new_target_resolver().resolve_token_pair_preview(
+            self._new_target_resolver(
+                **({"propagate_token_connect_timeout": True} if propagate_token_connect_timeout else {})
+            ).resolve_token_pair_preview(
                 configured_app_token=str(target.get("app_token", "") or "").strip(),
                 table_id=str(target.get("table_id", "") or "").strip(),
                 force_refresh=force_refresh,
@@ -245,6 +252,7 @@ class ChillerModeUploadService:
         target: Dict[str, Any],
         list_field_names: List[str],
         emit_log: Callable[[str], None],
+        before_write: Callable[[], None] | None = None,
     ) -> tuple[int, int]:
         page_size = int(target.get("page_size", 500) or 500)
         delete_batch_size = int(target.get("delete_batch_size", 500) or 500)
@@ -263,6 +271,8 @@ class ChillerModeUploadService:
         created_record_ids: List[str] = []
         original_timeout = int(getattr(client, "timeout", 30) or 30)
         original_retry_count = int(getattr(client, "request_retry_count", 3) or 3)
+        if before_write:
+            before_write()
         client.timeout = max(original_timeout, int(target.get("create_timeout_sec", 60) or 60))
         client.request_retry_count = max(
             original_retry_count,
@@ -379,6 +389,7 @@ class ChillerModeUploadService:
         cfg: Dict[str, Any],
         rows: List[Dict[str, Any]],
         emit_log: Callable[[str], None],
+        before_write: Callable[[], None] | None = None,
     ) -> List[Dict[str, Any]]:
         fields = cfg.get("fields", {}) if isinstance(cfg.get("fields", {}), dict) else {}
         target_fields = client.list_fields(table_id=table_id, page_size=500)
@@ -410,6 +421,8 @@ class ChillerModeUploadService:
         has_mode_values = any(configured_mode_field in row for row in rows if isinstance(row, dict))
         if has_mode_values and not actual_mode_field:
             preferred_mode_field = "冷机状态"
+            if before_write:
+                before_write()
             self._create_text_field(client=client, table_id=table_id, field_name=preferred_mode_field)
             existing.add(preferred_mode_field)
             actual_mode_field = preferred_mode_field
@@ -625,6 +638,7 @@ class ChillerModeUploadService:
         emit_log: Callable[[str], None] = print,
         cfg: Dict[str, Any] | None = None,
         target_descriptor: Dict[str, Any] | None = None,
+        before_write: Callable[[], None] | None = None,
     ) -> Dict[str, Any]:
         normalized_cfg = cfg if isinstance(cfg, dict) else self._normalize_cfg()
         run_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -654,7 +668,11 @@ class ChillerModeUploadService:
                 if isinstance(item, dict)
             )
         )
-        resolved_target = dict(target_descriptor or self.build_target_descriptor(normalized_cfg, force_refresh=True))
+        write_hook = {"before_write": before_write} if before_write is not None else {}
+        resolved_target = dict(target_descriptor or self.build_target_descriptor(
+            normalized_cfg, force_refresh=True,
+            **({"propagate_token_connect_timeout": True} if before_write is not None else {}),
+        ))
         if str(resolved_target.get("target_kind", "")).strip() not in {"base_token_pair", "wiki_token_pair"}:
             message = str(resolved_target.get("message", "") or "").strip() or "制冷模式目标多维表不可用"
             emit_log(f"[制冷模式参数上传] 目标多维表不可用: {message}")
@@ -770,8 +788,11 @@ class ChillerModeUploadService:
                 cfg=normalized_cfg,
                 rows=prepared_rows,
                 emit_log=emit_log,
+                **write_hook,
             )
         except Exception as exc:  # noqa: BLE001
+            if before_write is not None and isinstance(exc, FeishuTokenConnectTimeout):
+                raise
             message = str(exc)
             emit_log(f"[制冷模式参数上传] 目标字段校验失败，未清空目标多维表: {message}")
             return {
@@ -796,6 +817,7 @@ class ChillerModeUploadService:
                 str(normalized_cfg.get("fields", {}).get("building", "楼栋") or "楼栋").strip()
             ],
             emit_log=emit_log,
+            **write_hook,
         )
         duty_focus_state: Dict[str, Any] = {}
         try:

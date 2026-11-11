@@ -62,7 +62,8 @@ from app.modules.report_pipeline.service.scheduler_state_presenter import (
     present_scheduler_overview_summary,
     present_scheduler_state,
 )
-from app.modules.report_pipeline.service.job_service import JobBusyError, TaskEngineUnavailableError
+from app.modules.feishu.service.feishu_token_manager import FeishuTokenConnectTimeout
+from app.modules.report_pipeline.service.job_service import JobBusyError, PrewriteJobRetry, TaskEngineUnavailableError
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import (
@@ -76,6 +77,7 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_CHILLER_MODE_SWITCH,
     FAMILY_HANDOVER_CAPACITY_REPORT,
     SharedSourceCacheService,
+    _parse_hour_bucket,
     is_accessible_cached_file_path,
 )
 from app.modules.shared_bridge.service.bridge_status_presenter import (
@@ -2295,7 +2297,48 @@ def _run_external_chiller_mode_upload_shared_flow(
         )
     )
     service = ChillerModeUploadService(config)
-    return service.continue_from_source_units(source_units=source_units, emit_log=emit_log)
+    cfg = service._normalize_cfg()
+    if not cfg.get("enabled", True):
+        return {"status": "skipped", "summary": "制冷模式参数上传未启用"}
+    target = cfg["target"]
+    state_key = f"{target['app_token']}:{target['table_id']}"
+    repository = container.app_state_repository
+    versions = {}
+    for item in cached_entries:
+        building = str(item.get("building") or "").strip()
+        bucket = _parse_hour_bucket(item.get("bucket_key") or selection["best_bucket_key"])
+        if not building or building in versions or bucket is None:
+            raise RuntimeError("制冷模式共享索引缺少有效楼栋或批次时间，未上传")
+        versions[building] = bucket.strftime("%Y-%m-%d %H:%M")
+    if set(versions) != set(target_buildings):
+        raise RuntimeError("制冷模式共享索引未覆盖全部目标楼栋，未上传")
+    bucket_text = max(versions.values())
+    state_namespace = "chiller_mode_upload_watermark"
+    previous = repository.get_runtime_kv(state_namespace, state_key) or {}
+    old_versions = previous.get("versions") or {}
+    regressed = [building for building, value in versions.items() if str(old_versions.get(building) or "") > value]
+    if regressed:
+        detail = f"已处理更新的制冷模式源文件，跳过含旧文件的批次 {bucket_text}: {','.join(regressed)}"
+        emit_log(f"[制冷模式参数上传] {detail}")
+        return {"status": "skipped", "summary": detail}
+
+    write_started = False
+
+    def before_write() -> None:
+        nonlocal write_started
+        if not write_started:
+            # Record before the first mutation so a restart cannot replay an older batch.
+            repository.put_runtime_kv(state_namespace, state_key, {"versions": {**old_versions, **versions}})
+            write_started = True
+
+    try:
+        return service.continue_from_source_units(
+            source_units=source_units, emit_log=emit_log, cfg=cfg, before_write=before_write,
+        )
+    except FeishuTokenConnectTimeout as exc:
+        if write_started:
+            raise
+        raise PrewriteJobRetry(str(exc)) from exc
 
 
 def _raise_if_chiller_mode_upload_failed(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -2314,6 +2357,62 @@ def _raise_if_chiller_mode_upload_failed(result: Dict[str, Any]) -> Dict[str, An
             detail_items.append(f"{building}/{file_name}: {error}")
     detail = "；".join(detail_items) if detail_items else "未提供失败明细"
     raise RuntimeError(f"制冷模式参数上传失败：{detail}")
+
+
+def _run_chiller_mode_job(container, emit_log, *, scheduled: bool) -> Dict[str, Any]:
+    started = time.monotonic()
+    status, detail = "", ""
+    try:
+        if _deployment_role_mode(container) != "external":
+            raise RuntimeError("当前不是外网端，已停止制冷模式参数上传")
+        result = _raise_if_chiller_mode_upload_failed(_run_external_chiller_mode_upload_shared_flow(
+            container=container, config=_runtime_config(container), emit_log=emit_log,
+        ))
+        status = str(result.get("status") or "success")
+        detail = str(result.get("summary") or result.get("waiting_reason") or "")
+        return result
+    except PrewriteJobRetry as exc:
+        status, detail = "waiting_resource", str(exc)
+        raise
+    except Exception as exc:
+        status, detail = "failed", str(exc)
+        raise
+    finally:
+        if scheduled:
+            container.record_chiller_mode_upload_external_run(
+                status=status, source="scheduler_job", detail=detail,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+
+
+_CHILLER_UPLOAD_FEATURES = {
+    "scheduler": "chiller_mode_upload_cache_latest",
+    "manual": "chiller_mode_upload_external_dispatch",
+}
+
+
+def start_chiller_mode_upload_job(container, *, priority: str):
+    scheduled = priority == "scheduler"
+    return container.job_service.start_job(
+        name="制冷模式参数上传-共享文件" if scheduled else "制冷模式参数上传-共享文件处理",
+        run_func=lambda emit_log: _run_chiller_mode_job(container, emit_log, scheduled=scheduled),
+        resource_keys=["network:external", "shared_bridge:chiller_mode_upload"],
+        priority=priority,
+        feature=_CHILLER_UPLOAD_FEATURES[priority],
+        dedupe_key="chiller_mode_upload:latest",
+        submitted_by=priority,
+        retry_prewrite=True,
+    )
+
+
+def resume_chiller_mode_upload_jobs(container) -> None:
+    for priority, feature in _CHILLER_UPLOAD_FEATURES.items():
+        container.job_service.resume_deferred_prewrite_jobs(
+            feature,
+            lambda emit_log, scheduled=priority == "scheduler": _run_chiller_mode_job(
+                container, emit_log, scheduled=scheduled,
+            ),
+        )
 
 
 def _run_external_multi_date_shared_flow(
@@ -4890,7 +4989,6 @@ def job_wet_bulb_collection_run(request: Request) -> Dict[str, Any]:
 @router.post("/api/jobs/chiller-mode-upload/run")
 def job_chiller_mode_upload_run(request: Request) -> Dict[str, Any]:
     container = request.app.state.container
-    config = _runtime_config(container)
     role_mode = _deployment_role_mode(container)
 
     if role_mode == "internal":
@@ -4899,28 +4997,9 @@ def job_chiller_mode_upload_run(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail="当前未确认外网端角色，无法执行制冷模式参数上传")
 
     _shared_bridge_service_or_raise(container)
-    dedupe_key = _job_dedupe_key("chiller_mode_upload_external_dispatch", source="manual")
-
-    def _run_external_shared(emit_log):
-        return _raise_if_chiller_mode_upload_failed(_run_external_chiller_mode_upload_shared_flow(
-            container=container,
-            config=config,
-            emit_log=emit_log,
-        ))
 
     try:
-        job = _start_background_job(
-            container,
-            name="制冷模式参数上传-共享文件处理",
-            run_func=_run_external_shared,
-            worker_handler="",
-            worker_payload={},
-            resource_keys=_job_resource_keys("network:external", "shared_bridge:chiller_mode_upload"),
-            priority="manual",
-            feature="chiller_mode_upload_external_dispatch",
-            dedupe_key=dedupe_key,
-            submitted_by="manual",
-        )
+        job = start_chiller_mode_upload_job(container, priority="manual")
         container.add_system_log(f"[任务] 已提交: 制冷模式参数上传-共享文件处理 ({job.job_id})")
         return job.to_dict()
     except JobBusyError as exc:

@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from app.modules.feishu.service.feishu_auth_resolver import resolve_feishu_auth_settings
+from app.modules.feishu.service.feishu_token_manager import FeishuTokenConnectTimeout
 from app.modules.feishu.service.sheets_client_runtime import FeishuSheetsClientRuntime
 
 
@@ -161,6 +162,7 @@ class BitableTargetResolver:
         timeout: int = 20,
         request_retry_count: int = 3,
         request_retry_interval_sec: float = 1.0,
+        propagate_token_connect_timeout: bool = False,
     ) -> None:
         auth = resolve_feishu_auth_settings(
             {
@@ -176,6 +178,7 @@ class BitableTargetResolver:
         self.timeout = max(1, int(auth.get("timeout", 20) or 20))
         self.request_retry_count = max(0, int(auth.get("request_retry_count", 0) or 0))
         self.request_retry_interval_sec = max(0.0, float(auth.get("request_retry_interval_sec", 0.0) or 0.0))
+        self.propagate_token_connect_timeout = propagate_token_connect_timeout
 
     @staticmethod
     def _now_text() -> str:
@@ -287,6 +290,8 @@ class BitableTargetResolver:
                     timeout=self.timeout,
                 )
             except Exception as exc:  # noqa: BLE001
+                if self.propagate_token_connect_timeout and isinstance(exc, FeishuTokenConnectTimeout):
+                    raise
                 return {
                     "ok": False,
                     "kind": "probe_error",
