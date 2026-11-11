@@ -75,6 +75,9 @@ from handover_log_module.service.training_management_payload_builder import (
     TrainingManagementPayloadBuilder, TRAINING_SECTION, append_training_rows,
 )
 from handover_log_module.service.station_h_training_preview_service import StationHTrainingPreviewService
+from handover_log_module.core.station_h_operating_cells import STATION_H_TEMPERATURE_CELLS
+from handover_log_module.service.handover_attachment_delivery_service import HandoverAttachmentDeliveryService
+from handover_log_module.service.handover_attachment_workbook_builder import read_station_h_operating_defaults
 from handover_log_module.service.station_h_review_selection_service import (
     StationHSectionsConflictError,
     STATION_H_LONG_DAY_ROLE_BY_NAME,
@@ -4201,6 +4204,22 @@ def _refresh_station_h_focus_in_background(service, *, duty_date, duty_shift, se
         return True
 
 
+def _station_h_operating_payload(container, batch_key: str, readings: Dict[str, Any]) -> Dict[str, Any]:
+    template = HandoverAttachmentDeliveryService(_handover_cfg(container)).station_h_template_path()
+    values = read_station_h_operating_defaults(template)
+    try:
+        state = _build_review_session_service(container).get_outdoor_temperature_state(batch_key=batch_key)
+        shared = state["shared_blocks"]["outdoor_temperature"]["cells"]
+    except Exception:  # noqa: BLE001 - missing shared values do not prevent H-only edits
+        shared = {}
+    values.update({"B6": shared.get("B7"), "G6": shared.get("D7")})
+    values.update(readings)
+    return {
+        "values": values,
+        "temperature_overrides": [cell for cell in STATION_H_TEMPERATURE_CELLS if cell in readings],
+    }
+
+
 def _station_h_status_payload(
     container,
     *,
@@ -4333,6 +4352,12 @@ def _station_h_status_payload(
                 )
             training_rows_out = saved_training
     saved_training_ids = {row["row_id"] for row in saved_training}
+    try:
+        operating = _station_h_operating_payload(
+            container, batch_key, selection_service.resolve_operating_readings(duty_date_text, duty_shift_text),
+        )
+    except Exception as exc:  # noqa: BLE001 - keep the rest of the H review usable
+        operating = {"values": {}, "error": str(exc)}
     return {
         "ok": True,
         "building": "H楼",
@@ -4378,6 +4403,7 @@ def _station_h_status_payload(
             "retry_after_ms": 4000 if roster_refresh_pending or focus_refresh_pending else 0,
         },
         "duty_focus": duty_focus,
+        "operating_readings": operating,
         "training_rows": training_rows_out,
         "training_preview_row_ids": [row["row_id"] for row in training_rows_out if row["row_id"] not in saved_training_ids],
         "deleted_training_row_ids": sorted(deleted_training_ids),
@@ -4484,8 +4510,13 @@ def handover_review_station_h_upload(
     batch_key = f"{duty_date}|{duty_shift}"
     from app.worker.task_handlers import handle_handover_refresh_station_h
 
-    selection = _build_station_h_review_selection_service(container).get_selection(duty_date, duty_shift)
-    revision_key = hashlib.sha256(json.dumps(selection, sort_keys=True).encode("utf-8")).hexdigest()
+    service = _build_station_h_review_selection_service(container)
+    selection = service.get_selection(duty_date, duty_shift)
+    try:
+        readings = service.resolve_operating_readings(duty_date, duty_shift)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"H楼运行数据读取失败，未提交上传: {exc}") from exc
+    revision_key = hashlib.sha256(json.dumps([selection, readings], sort_keys=True).encode("utf-8")).hexdigest()
     worker_payload = {
         "batch_key": batch_key,
         "manual_upload": True,
@@ -4499,6 +4530,24 @@ def handover_review_station_h_upload(
         dedupe_key=f"handover:station-h-upload:{batch_key}:{revision_key}", feature="handover", submitted_by="review",
     )
     return _accepted_job_response(job)
+
+
+@router.put("/api/handover/review/station-h/operating-readings")
+@_dedicated_review_endpoint
+def handover_review_station_h_save_operating_readings(
+    request: Request, payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    container = request.app.state.container
+    duty_date = str(payload.get("duty_date") or "").strip()
+    duty_shift = str(payload.get("duty_shift") or "").strip()
+    service = _build_station_h_review_selection_service(container)
+    try:
+        readings = service.save_operating_readings(duty_date, duty_shift, payload.get("changes"))
+        return _station_h_operating_payload(container, station_h_build_batch_key(duty_date, duty_shift), readings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"H楼运行数据保存失败: {exc}") from exc
 
 
 @router.put("/api/handover/review/station-h")

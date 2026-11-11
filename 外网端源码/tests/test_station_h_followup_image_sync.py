@@ -118,6 +118,10 @@ def test_station_h_success_persists_only_after_image_is_synced(tmp_path):
 def test_station_h_roster_fallback_is_forwarded_to_duty_focus(monkeypatch):
     class _SelectionService:
         @staticmethod
+        def resolve_operating_readings(*_args):
+            return {}
+
+        @staticmethod
         def resolve_selection(**_kwargs):
             return {
                 "current_people": [],

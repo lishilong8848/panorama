@@ -179,7 +179,7 @@ def test_missing_shared_temperature_does_not_block_h_body(monkeypatch, temperatu
     service.config = {}
     service._station_h_cabinet_totals = lambda _sessions: {"ok": True, "totals": {}}
     service._review_service.get_outdoor_temperature_state = lambda **_kw: {"shared_blocks": {"outdoor_temperature": {"cells": temperature}}}
-    service._station_h_review_selection_service = SimpleNamespace(resolve_selection=lambda **_kw: {
+    service._station_h_review_selection_service = SimpleNamespace(resolve_operating_readings=lambda *_: {}, resolve_selection=lambda **_kw: {
         "current_people": ["甲", "乙"], "next_people": ["丙", "丁"], "long_day_people": [], "resolved_source": "current",
     })
     monkeypatch.setattr(module, "ShiftRosterRepository", lambda _cfg: Mock())

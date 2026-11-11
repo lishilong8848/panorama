@@ -1,0 +1,3 @@
+STATION_H_TEMPERATURE_CELLS = ("B6", "G6")
+STATION_H_CARRY_READING_CELLS = ("B7", "B8", "B9", "G8", "H8", "G9", "H9")
+STATION_H_PERCENT_CELLS = frozenset({"B7", "B8", "G9", "H9"})

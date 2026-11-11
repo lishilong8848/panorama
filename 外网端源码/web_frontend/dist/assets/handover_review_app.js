@@ -35,6 +35,7 @@ import {
   saveHandoverReviewApi,
   saveHandoverReview110kvApi,
   saveHandoverReviewStationHApi,
+  saveStationHOperatingReadingsApi,
   uploadHandoverReviewStationHApi,
   prepareHandoverReviewCapacityImageApi,
   prepareHandoverReviewDeliveryApi,
@@ -636,8 +637,28 @@ const HANDOVER_REVIEW_110_STATION_TEMPLATE = `
   </div>
 `;
 
+const STATION_H_OPERATING_GROUPS = [
+  { title: "室外温度", fields: [
+    { cell: "B6", label: "干球温度（℃）" },
+    { cell: "G6", label: "湿球温度（℃）" },
+  ] },
+  { title: "UPS", fields: [
+    { cell: "B7", label: "UPS-1 负载率（%）", min: 0, max: 100 },
+    { cell: "B8", label: "UPS-2 负载率（%）", min: 0, max: 100 },
+    { cell: "B9", label: "蓄电池最短后备时间（min）", min: 0 },
+  ] },
+  ...[["配电室CRAC-01", "G"], ["电池室CRAC-01", "H"]].map(([title, column]) => ({
+    title, fields: [
+      { cell: column + "8", label: "回风温度（℃）" },
+      { cell: column + "9", label: "回风湿度（%）", min: 0, max: 100 },
+    ],
+  })),
+];
+const STATION_H_OPERATING_FIELDS = STATION_H_OPERATING_GROUPS.flatMap((group) => group.fields);
+const stationHReadingText = (value) => value == null ? "" : String(value).trim();
+
 const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
-  <div class="review-shell">
+  <div class="review-shell station-h-review-shell">
     <header class="review-header review-header-sticky">
       <div class="review-header-main">
         <div class="review-header-copy">
@@ -645,7 +666,7 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           <p class="review-subtitle">{{ batchText }}</p>
         </div>
         <div class="review-header-actions">
-          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading" @click="refreshStatus">刷新页面</button>
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading || operatingSaving" @click="refreshStatus">刷新页面</button>
           <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading" @click="refreshSignatures">
             {{ signatureRefreshing ? "刷新中..." : "刷新签名" }}
           </button>
@@ -677,11 +698,11 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
         <div class="review-fixed-fields review-current-view-fields">
           <label class="review-field">
             <span class="review-field-label">日期</span>
-            <input class="review-input" type="date" v-model="dutyDate" :disabled="loading || saving || attachmentUploading" @change="onDutyChange" />
+            <input class="review-input" type="date" v-model="dutyDate" :disabled="loading || saving || attachmentUploading || operatingSaving" @change="onDutyChange" />
           </label>
           <label class="review-field">
             <span class="review-field-label">班次</span>
-            <select class="review-input" v-model="dutyShift" :disabled="loading || saving || attachmentUploading" @change="onDutyChange">
+            <select class="review-input" v-model="dutyShift" :disabled="loading || saving || attachmentUploading || operatingSaving" @change="onDutyChange">
               <option value="day">白班</option>
               <option value="night">夜班</option>
             </select>
@@ -753,6 +774,31 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           >{{ item.name }}<span v-if="item.role"> · {{ item.role }}</span></button>
         </div>
         <small class="person-picker-hint">{{ state.rules.long_day_people || "默认复用上一班组保存的长白岗；不上班时清空后保存。" }}</small>
+      </article>
+    </section>
+
+    <section v-if="!loading" class="review-current-view-section">
+      <article class="review-card">
+        <div class="review-card-head">
+          <h2>运行信息交接</h2>
+          <div class="review-inline-actions">
+            <span class="person-picker-hint" role="status">{{ operatingSaving ? "正在保存…" : operatingDirty ? "有未保存修改" : "无待保存修改" }}</span>
+            <button v-if="operatingSaveError" type="button" class="btn btn-secondary btn-mini" :disabled="operatingSaving || attachmentUploading" @click="saveOperatingReadings">重试保存</button>
+          </div>
+        </div>
+        <div v-if="operatingLoadError || operatingSaveError" class="review-status-line review-status-danger" role="alert">{{ operatingLoadError || operatingSaveError }}</div>
+        <div class="station-h-operating-grid">
+          <div v-for="group in operatingGroups" :key="group.title" class="station-h-operating-group">
+            <h3>{{ group.title }}</h3>
+            <label v-for="field in group.fields" :key="field.cell" class="review-field">
+              <span class="review-field-label">{{ field.label }}</span>
+              <input class="review-input" type="number" step="any" :min="field.min" :max="field.max"
+                :value="operatingValues[field.cell]" :disabled="!state.batch.batch_key || !!operatingLoadError || attachmentUploading"
+                @input="setOperatingReading(field.cell, $event)" @change="saveOperatingReadings" />
+            </label>
+          </div>
+        </div>
+        <small class="person-picker-hint">室外温度手改仅用于本班 H 楼成品，清空后恢复共享值。UPS 和回风数据沿用至后续班次。</small>
       </article>
     </section>
 
@@ -2502,9 +2548,72 @@ function mountHandoverStationHApp(Vue) {
         ? String(initialSelection.dutyShift || "").trim().toLowerCase()
         : "");
       const state = ref(normalizeStationHState({}));
+      const operatingValues = ref({});
+      const operatingBaseline = ref({});
+      const operatingInvalid = ref({});
+      const operatingSaving = ref(false);
+      const operatingLoadError = ref("");
+      const operatingSaveError = ref("");
+      let operatingRequest = null;
+      const operatingChanges = computed(() => Object.fromEntries(STATION_H_OPERATING_FIELDS
+        .filter(({ cell }) => (operatingValues.value[cell] || "") !== (operatingBaseline.value[cell] || ""))
+        .map(({ cell }) => [cell, operatingValues.value[cell] || null])));
+      const operatingDirty = computed(() => Object.keys(operatingChanges.value).length > 0
+        || Object.keys(operatingInvalid.value).length > 0);
+
+      function operatingResponseValues(response) {
+        return Object.fromEntries(STATION_H_OPERATING_FIELDS.map(({ cell }) => [
+          cell, stationHReadingText(response?.values?.[cell]),
+        ]));
+      }
+
+      function setOperatingReading(cell, event) {
+        operatingValues.value[cell] = event.target.value;
+        if (event.target.validity?.valid === false) operatingInvalid.value[cell] = true;
+        else delete operatingInvalid.value[cell];
+        operatingSaveError.value = "";
+      }
+
+      async function saveOperatingReadings() {
+        if (operatingRequest) return operatingRequest;
+        if (!operatingDirty.value) return true;
+        const { duty_date, duty_shift } = state.value.batch;
+        if (!duty_date || !duty_shift || operatingLoadError.value) return false;
+        operatingSaving.value = true;
+        operatingRequest = (async () => {
+          try {
+            while (operatingDirty.value) {
+              if (Object.keys(operatingInvalid.value).length) throw new Error("请检查运行数据的数字和取值范围");
+              const draft = { ...operatingValues.value };
+              const response = await saveStationHOperatingReadingsApi({
+                duty_date, duty_shift, changes: { ...operatingChanges.value },
+              });
+              const saved = operatingResponseValues(response);
+              operatingBaseline.value = saved;
+              for (const { cell } of STATION_H_OPERATING_FIELDS) {
+                if (operatingValues.value[cell] === draft[cell] && !operatingInvalid.value[cell]) {
+                  operatingValues.value[cell] = saved[cell];
+                }
+              }
+            }
+            operatingSaveError.value = "";
+            return true;
+          } catch (error) {
+            operatingSaveError.value = String(error?.message || "H楼运行数据自动保存失败");
+            return false;
+          }
+        })();
+        try {
+          return await operatingRequest;
+        } finally {
+          operatingRequest = null;
+          operatingSaving.value = false;
+        }
+      }
+
       const canUploadAttachment = computed(() => Boolean(state.value.batch.batch_key)
         && !loading.value && !saving.value && !signatureRefreshing.value && !trainingRefreshing.value
-        && !printing.value && !dutyFocusImageLoading.value && !attachmentUploading.value);
+        && !printing.value && !dutyFocusImageLoading.value && !attachmentUploading.value && !operatingLoadError.value);
       const form = ref({
         current_people_text: "",
         next_people_text: "",
@@ -2823,7 +2932,9 @@ function mountHandoverStationHApp(Vue) {
       }
 
       async function refreshStatus({ background = false, forceCurrent = false, includeSelectedDuty = false } = {}) {
-        if (background && (loading.value || saving.value || trainingRefreshing.value || attachmentUploading.value || hasUnsavedChanges.value)) return;
+        if (background && (loading.value || saving.value || trainingRefreshing.value || attachmentUploading.value
+          || hasUnsavedChanges.value || operatingSaving.value || operatingDirty.value)) return;
+        if (!background && !includeSelectedDuty && !await saveOperatingReadings()) return;
         const requestSeq = ++stationHRequestSeq;
         if (!background) {
           loading.value = true;
@@ -2835,8 +2946,14 @@ function mountHandoverStationHApp(Vue) {
             _t: Date.now(),
           });
           if (requestSeq !== stationHRequestSeq) return;
-          if (background && (saving.value || attachmentUploading.value || hasUnsavedChanges.value)) return;
+          if (background && (saving.value || attachmentUploading.value || hasUnsavedChanges.value
+            || operatingSaving.value || operatingDirty.value)) return;
           applyState(response);
+          operatingLoadError.value = String(response?.operating_readings?.error || "");
+          operatingBaseline.value = operatingResponseValues(response?.operating_readings);
+          operatingValues.value = { ...operatingBaseline.value };
+          operatingInvalid.value = {};
+          operatingSaveError.value = "";
           if (!background) statusText.value = "H楼人员选择已刷新";
         } catch (error) {
           if (requestSeq !== stationHRequestSeq) return;
@@ -2850,7 +2967,8 @@ function mountHandoverStationHApp(Vue) {
       }
 
       function onDutyChange() {
-        if (hasUnsavedChanges.value && !window.confirm("有未保存内容，是否放弃修改并切换班次？")) {
+        if (operatingSaving.value || ((hasUnsavedChanges.value || operatingDirty.value)
+          && !window.confirm("有未保存内容，是否放弃修改并切换班次？"))) {
           dutyDate.value = state.value.batch.duty_date;
           dutyShift.value = state.value.batch.duty_shift;
           return;
@@ -3044,6 +3162,7 @@ function mountHandoverStationHApp(Vue) {
       async function saveSelection(options = {}) {
         const silent = Boolean(options?.silent);
         const previewOnly = Boolean(options?.previewOnly);
+        if (!await saveOperatingReadings()) return false;
         saving.value = true;
         errorText.value = "";
         if (!silent) statusText.value = "正在保存H楼审核内容...";
@@ -3089,6 +3208,10 @@ function mountHandoverStationHApp(Vue) {
         errorText.value = "";
         statusText.value = "正在保存并生成H楼附件...";
         try {
+          if (!await saveOperatingReadings()) {
+            statusText.value = "";
+            return;
+          }
           if (hasUnsavedChanges.value || !state.value.saved) {
             if (!await saveSelection({ silent: true })) return;
           } else if (state.value.training_preview_row_ids.length) {
@@ -3369,6 +3492,14 @@ function mountHandoverStationHApp(Vue) {
         attachmentRecordUrl,
         canUploadAttachment,
         uploadStationHAttachment,
+        operatingGroups: STATION_H_OPERATING_GROUPS,
+        operatingValues,
+        operatingSaving,
+        operatingDirty,
+        operatingLoadError,
+        operatingSaveError,
+        setOperatingReading,
+        saveOperatingReadings,
         signatureRefreshing,
         trainingRefreshing,
         trainingColumns: TRAINING_COLUMNS,

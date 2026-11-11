@@ -3,12 +3,16 @@ from __future__ import annotations
 import re
 import json
 import ast
+import math
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
 from app.core.app_state import AppStateRepository
+from handover_log_module.core.station_h_operating_cells import (
+    STATION_H_CARRY_READING_CELLS, STATION_H_PERCENT_CELLS, STATION_H_TEMPERATURE_CELLS,
+)
 from pipeline_utils import get_app_dir
 from handover_log_module.service.training_management_payload_builder import normalize_training_rows, append_training_rows
 from handover_log_module.service.station_h_section_schema import (
@@ -17,6 +21,7 @@ from handover_log_module.service.station_h_section_schema import (
 
 
 STATION_H_REVIEW_NAMESPACE = "station_h_review"
+_STATION_H_READINGS_NAMESPACE = "station_h_operating_readings"
 
 STATION_H_LONG_DAY_ROLE_BY_NAME = {
     "梅冰冰": "设施运维经理",
@@ -195,6 +200,80 @@ class StationHReviewSelectionService:
     def get_selection(self, duty_date: str, duty_shift: str) -> Dict[str, Any] | None:
         payload = self._get(duty_date, duty_shift)
         return self._normalize_payload(payload) if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _readings_key(duty_date: str, duty_shift: str) -> str:
+        parsed = _parse_duty_date(duty_date)
+        if parsed is None or parsed.date().isoformat() != duty_date or duty_shift not in {"day", "night"}:
+            raise ValueError("请选择有效的日期和白班/夜班")
+        return station_h_build_batch_key(duty_date, duty_shift)
+
+    def resolve_operating_readings(self, duty_date: str, duty_shift: str) -> dict[str, Any]:
+        key = self._readings_key(duty_date, duty_shift)
+        repository = self._repository
+        if repository is None:
+            raise RuntimeError("H楼运行数据状态库不可用")
+        repository.ensure_ready()
+        values: dict[str, Any] = {}
+        with repository.connect(read_only=True) as conn:
+            # ISO dates and day/night keys sort in duty-shift order.
+            rows = conn.execute(
+                "SELECT key, payload_json FROM runtime_kv WHERE namespace=? AND key<=? ORDER BY key DESC",
+                (_STATION_H_READINGS_NAMESPACE, key),
+            )
+            remaining = set(STATION_H_CARRY_READING_CELLS)
+            for row in rows:
+                readings = json.loads(row["payload_json"])
+                if row["key"] == key:
+                    values.update({cell: readings[cell] for cell in STATION_H_TEMPERATURE_CELLS
+                                   if readings.get(cell) is not None})
+                for cell in remaining.intersection(readings):
+                    values[cell] = readings[cell]
+                    remaining.remove(cell)
+                if not remaining:
+                    break
+        return values
+
+    def save_operating_readings(self, duty_date: str, duty_shift: str, changes: Any) -> dict[str, Any]:
+        key = self._readings_key(duty_date, duty_shift)
+        if not isinstance(changes, dict) or not changes:
+            raise ValueError("没有要保存的H楼运行数据")
+        patch: dict[str, Any] = {}
+        for cell, raw in changes.items():
+            if cell not in STATION_H_TEMPERATURE_CELLS + STATION_H_CARRY_READING_CELLS:
+                raise ValueError("存在不可编辑的H楼运行数据单元格")
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                patch[cell] = None
+                continue
+            try:
+                if not isinstance(raw, (int, float, str)) or isinstance(raw, bool):
+                    raise ValueError
+                value = float(raw)
+                if not math.isfinite(value):
+                    raise ValueError
+            except (ValueError, OverflowError) as exc:
+                raise ValueError(f"{cell}请输入有效数字") from exc
+            if cell in STATION_H_PERCENT_CELLS and not 0 <= value <= 100:
+                raise ValueError(f"{cell}百分比应在0至100之间")
+            if cell == "B9" and value < 0:
+                raise ValueError("UPS后备时间不能小于0")
+            patch[cell] = value
+        repository = self._repository
+        if repository is None:
+            raise RuntimeError("H楼运行数据状态库不可用")
+        repository.ensure_ready()
+        with repository.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT payload_json FROM runtime_kv WHERE namespace=? AND key=?", (_STATION_H_READINGS_NAMESPACE, key),
+            ).fetchone()
+            existing = json.loads(row["payload_json"]) if row else {}
+            conn.execute(
+                """INSERT INTO runtime_kv(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(namespace, key) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at""",
+                (_STATION_H_READINGS_NAMESPACE, key, json.dumps({**existing, **patch}), _now_text()),
+            )
+        return self.resolve_operating_readings(duty_date, duty_shift)
 
     def save_selection(
         self,

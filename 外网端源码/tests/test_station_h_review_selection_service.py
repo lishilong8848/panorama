@@ -1,4 +1,7 @@
+import asyncio
 from types import SimpleNamespace
+
+import pytest
 
 from app.core.app_state import AppStateRepository
 from app.modules.handover_review.api import routes as review_routes
@@ -14,6 +17,54 @@ def _service(tmp_path):
     repository = AppStateRepository(app_dir=tmp_path)
     repository.ensure_ready()
     return StationHReviewSelectionService({}, app_state_repository=repository), repository
+
+
+def test_operating_readings_persist_and_carry_only_equipment(tmp_path):
+    service, _ = _service(tmp_path)
+    service.save_selection(duty_date="2026-11-11", duty_shift="day",
+                           current_people="张宇航", next_people="张岳军", long_day_people=[])
+    assert service.resolve_operating_readings("2026-11-10", "night") == {}
+    service.save_operating_readings("2026-11-11", "day", {"B6": "13.17", "G6": "8.62", "B7": 0, "G8": 25.6})
+    service.save_operating_readings("2026-11-11", "day", {"H9": 81.6})
+    service.save_operating_readings("2026-11-11", "night", {"B7": 9, "H9": None})
+    restarted = StationHReviewSelectionService({}, app_state_repository=AppStateRepository(app_dir=tmp_path))
+    assert restarted.resolve_operating_readings("2026-11-11", "day") == {
+        "B6": 13.17, "G6": 8.62, "B7": 0, "G8": 25.6, "H9": 81.6,
+    }
+    assert restarted.resolve_operating_readings("2026-11-12", "day") == {"B7": 9, "G8": 25.6, "H9": None}
+    assert restarted.get_selection("2026-11-11", "day")["current_people"] == ["张宇航"]
+    values = restarted.save_operating_readings("2026-11-11", "day", {"B6": None})
+    assert "B6" not in values and values["G6"] == 8.62
+
+
+@pytest.mark.parametrize("changes", [{"B7": 101}, {"B9": -1}, {"G8": float("nan")}, {"B6": True}, {"B10": 0}])
+def test_operating_readings_reject_invalid_patch_without_partial_save(tmp_path, changes):
+    service, _ = _service(tmp_path)
+    with pytest.raises(ValueError):
+        service.save_operating_readings("2026-11-11", "day", {"H8": 25.4, **changes})
+    assert service.resolve_operating_readings("2026-11-11", "day") == {}
+
+
+def test_h_readings_save_returns_same_shift_shared_fallback(tmp_path, monkeypatch):
+    service, _ = _service(tmp_path)
+    container = object()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
+    shared = {"B7": "13.17", "D7": "8.62"}
+    monkeypatch.setattr(review_routes, "_handover_cfg", lambda _: {})
+    monkeypatch.setattr(review_routes, "_build_station_h_review_selection_service", lambda _: service)
+    monkeypatch.setattr(review_routes, "_build_review_session_service", lambda _: SimpleNamespace(
+        get_outdoor_temperature_state=lambda **_: {"shared_blocks": {"outdoor_temperature": {"cells": shared}}},
+    ))
+    data = {"duty_date": "2026-11-11", "duty_shift": "day"}
+    save = review_routes.handover_review_station_h_save_operating_readings
+    payload = asyncio.run(save(request, {**data, "changes": {"G6": "9.3", "B7": 0}}))
+    assert payload["temperature_overrides"] == ["G6"]
+    assert payload["values"]["B6"] == "13.17"
+    assert payload["values"]["G6"] == 9.3
+    assert payload["values"]["B7"] == 0
+    assert payload["values"]["G8"] == 25.6
+    assert asyncio.run(save(request, {**data, "changes": {"G6": None}}))["values"]["G6"] == "8.62"
+    assert shared == {"B7": "13.17", "D7": "8.62"}
 
 
 def test_save_selection_filters_long_day_people_from_duty_fields(tmp_path):

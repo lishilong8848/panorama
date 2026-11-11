@@ -198,4 +198,49 @@ assert.deepEqual(previewCalls, [
 assert.deepEqual(page.state.value.training_preview_row_ids, []);
 assert.equal(page.attachmentRecordUrl.value, "https://example.test/record-preview");
 
+const readingCalls = [];
+let failReadings = true;
+globalThis.fetch = async (url, options) => {
+  const path = url.split("?")[0];
+  readingCalls.push(path);
+  let payload;
+  if (path.endsWith("/status")) {
+    payload = { ...recorded, operating_readings: { values: { B6: 13.17, G6: 8.62, B7: 6 } } };
+  } else if (path.endsWith("/operating-readings")) {
+    assert.deepEqual(JSON.parse(options.body), {
+      duty_date: batch.duty_date, duty_shift: batch.duty_shift, changes: { B7: "0" },
+    });
+    if (failReadings) {
+      return new Response(JSON.stringify({ detail: "状态库暂不可用" }), {
+        status: 503, headers: { "Content-Type": "application/json" },
+      });
+    }
+    payload = { values: { B6: 13.17, G6: 8.62, B7: 0 } };
+  } else if (path.endsWith("/upload")) {
+    payload = { job: { job_id: "job-readings" } };
+  } else if (path === "/api/jobs/job-readings") {
+    payload = { status: "success", result: { status: "success", record_url: "https://example.test/record-readings" } };
+  } else {
+    assert.fail(`Unexpected request: ${path}`);
+  }
+  return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
+};
+await page.refreshStatus();
+assert.equal(page.operatingGroups.flatMap((group) => group.fields).length, 9);
+assert.equal(page.operatingValues.value.B6, "13.17");
+page.setOperatingReading("B7", { target: { value: "0" } });
+await page.uploadStationHAttachment();
+assert.equal(page.operatingValues.value.B7, "0");
+assert.equal(page.operatingDirty.value, true);
+assert.match(page.operatingSaveError.value, /状态库暂不可用/);
+assert.equal(readingCalls.some((path) => path.endsWith("/upload")), false);
+failReadings = false;
+await page.uploadStationHAttachment();
+assert.equal(page.operatingDirty.value, false);
+assert.deepEqual(readingCalls.slice(-3), [
+  "/api/handover/review/station-h/operating-readings",
+  "/api/handover/review/station-h/upload",
+  "/api/jobs/job-readings",
+]);
+
 console.log("H station sections frontend checks passed");

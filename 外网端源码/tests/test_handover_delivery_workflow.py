@@ -360,6 +360,7 @@ def test_manual_h_upload_uses_saved_content_without_other_building_sessions(bita
     }
     service._station_h_review_selection_service = SimpleNamespace(
         get_selection=Mock(return_value=selection), resolve_selection=Mock(return_value=selection),
+        resolve_operating_readings=Mock(return_value={"B6": 13.17, "G6": 8.62, "B7": 0, "H9": 82.1}),
     )
     service._cloud_sheet_sync_service = HandoverAttachmentDeliveryService(
         {}, store=store, output_root=tmp_path / "supplement",
@@ -391,6 +392,8 @@ def test_manual_h_upload_uses_saved_content_without_other_building_sessions(bita
         assert sheet["D3"].value == "值班乙"
         assert sheet["B31"].value == "本班已保存培训"
         assert sheet["B12"].value is None
+        assert (sheet["B6"].value, sheet["G6"].value, sheet["B7"].value, sheet["H9"].value) == (13.17, 8.62, 0, 82.1)
+        assert (sheet["G7"].value, sheet["H7"].value, sheet["G8"].value) == ("配电室CRAC-01", "电池室CRAC-01", 25.6)
         assert len(sheet._images) == 1
         assert sheet["D19"].value == "第一条"
         continuation = workbook["分类续表"]
@@ -407,7 +410,8 @@ def test_station_h_upload_submits_selected_historical_shift_only(monkeypatch):
 
     start = Mock(return_value={"job_id": "job-h"})
     selected = {"current_people": ["值班甲"]}
-    selection_service = SimpleNamespace(get_selection=Mock(return_value=selected))
+    selection_service = SimpleNamespace(get_selection=Mock(return_value=selected),
+                                        resolve_operating_readings=Mock(return_value={}))
     monkeypatch.setattr(routes, "_handover_cfg", lambda _: {})
     monkeypatch.setattr(routes, "_start_handover_background_job", start)
     monkeypatch.setattr(routes, "_build_station_h_review_selection_service", lambda _: selection_service)
@@ -427,11 +431,15 @@ def test_station_h_upload_submits_selected_historical_shift_only(monkeypatch):
     selected["current_people"] = ["值班乙"]
     routes.handover_review_station_h_upload(request, payload)
     assert start.call_args.kwargs["dedupe_key"] != dedupe_key
+    updated_key = start.call_args.kwargs["dedupe_key"]
+    selection_service.resolve_operating_readings.return_value = {"B7": 15}
+    routes.handover_review_station_h_upload(request, payload)
+    assert start.call_args.kwargs["dedupe_key"] != updated_key
     assert start.call_args.kwargs["resource_keys"] == ["handover_station_h:2026-11-08|night"]
     with pytest.raises(routes.HTTPException) as error:
         routes.handover_review_station_h_upload(request, {"duty_date": "2026-11-31", "duty_shift": "night"})
     assert error.value.status_code == 400
-    assert start.call_count == 3
+    assert start.call_count == 4
 
 
 def test_ae_upload_supplements_no_longer_trigger_h_attachment():

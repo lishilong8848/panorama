@@ -3002,6 +3002,38 @@ button:disabled,
   grid-template-columns: minmax(0, 1fr);
 }
 
+.station-h-review-shell,
+.station-h-review-shell .review-current-view-section {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.station-h-review-shell > * {
+  min-width: 0;
+}
+
+.station-h-operating-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+  gap: 12px 18px;
+}
+
+.station-h-operating-group {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.station-h-operating-group h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.station-h-operating-group .review-input {
+  box-sizing: border-box;
+  width: 100%;
+}
+
 .station-h-review-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }

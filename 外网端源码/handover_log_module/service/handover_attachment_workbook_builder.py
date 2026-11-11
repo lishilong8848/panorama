@@ -18,6 +18,7 @@ import tempfile
 import uuid
 import warnings
 import zipfile
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -34,6 +35,7 @@ from openpyxl.utils.units import pixels_to_EMU
 from PIL import Image as PILImage
 
 from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
+from handover_log_module.core.station_h_operating_cells import STATION_H_CARRY_READING_CELLS
 
 STATION_H_DEFAULT_SHEET_TITLE = "H楼"
 STATION_H_TEMPLATE_FILE_NAME = "H楼交接班日志空模板.xlsx"
@@ -49,7 +51,7 @@ STATION_H_CELL_KEYS = frozenset(
         "H40", "H41", "H42", "H45", "H46", "H47", "H48",
         "B31", "D31", "E31", "F31", "G31",
     }
-)
+) | frozenset(STATION_H_CARRY_READING_CELLS)
 
 
 class HandoverAttachmentWorkbookError(RuntimeError):
@@ -64,6 +66,20 @@ def _source_root() -> Path:
 def default_station_h_template_path() -> Path:
     return _source_root() / STATION_H_TEMPLATE_FILE_NAME
 
+
+@lru_cache(maxsize=8)
+def _station_h_operating_defaults(path: Path, _mtime_ns: int) -> dict[str, Any]:
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        worksheet = workbook[STATION_H_DEFAULT_SHEET_TITLE] if STATION_H_DEFAULT_SHEET_TITLE in workbook else workbook.active
+        return {cell: worksheet[cell].value for cell in STATION_H_CARRY_READING_CELLS}
+    finally:
+        workbook.close()
+
+
+def read_station_h_operating_defaults(template_path: str | Path) -> dict[str, Any]:
+    path = _resolve_template_path(template_path)
+    return dict(_station_h_operating_defaults(path, path.stat().st_mtime_ns))
 
 def _resolve_template_path(template_path: str | Path) -> Path:
     path = Path(str(template_path or "").strip())

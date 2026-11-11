@@ -1798,6 +1798,11 @@ class ReviewFollowupTriggerService:
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[交接班][H楼附件] 审核页保存值读取失败，将使用排班兜底: {exc}")
             selection = {}
+        try:
+            operating_readings = self._station_h_review_selection_service.resolve_operating_readings(duty_date, duty_shift)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "status": "failed", "reason": "operating_readings_failed",
+                    "error": f"H楼运行数据读取失败，未生成附件: {exc}"}
         current_names = station_h_normalize_duty_people(selection.get("current_people", []))
         next_names = station_h_normalize_duty_people(selection.get("next_people", []))
 
@@ -1869,6 +1874,7 @@ class ReviewFollowupTriggerService:
             "F4": f4_value,
             "B6": dry_bulb,
             "G6": wet_bulb,
+            **operating_readings,
             **{cell: totals.get(cell, "") for cell in ("B12", "D12", "F12", "H12")},
             "B15": patrol_times[0],
             "B16": patrol_times[1],

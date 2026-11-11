@@ -806,6 +806,13 @@ export async function saveHandoverReviewStationHApi(payload = {}) {
   }, 30000);
 }
 
+export async function saveStationHOperatingReadingsApi(payload) {
+  return apiJsonWithTimeout("/api/handover/review/station-h/operating-readings", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  }, 15000);
+}
+
 export async function uploadHandoverReviewStationHApi(payload = {}) {
   return apiJsonWithTimeout("/api/handover/review/station-h/upload", {
     method: "POST",
