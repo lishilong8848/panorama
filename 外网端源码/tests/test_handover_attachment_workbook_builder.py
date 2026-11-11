@@ -107,12 +107,15 @@ def test_values_written_and_style_sheet_preserved(template: Path, tmp_path: Path
 
     assert result == Path(str(output.resolve())) and output.is_file()
     after = _snapshot(output)
-    assert {k: after[k] for k in ("merges", "styles", "row_heights", "column_widths", "print_area")} == {
-        k: before[k] for k in ("merges", "styles", "row_heights", "column_widths", "print_area")
+    assert {k: after[k] for k in ("merges", "styles", "column_widths", "print_area")} == {
+        k: before[k] for k in ("merges", "styles", "column_widths", "print_area")
     }
     workbook = openpyxl.load_workbook(output)
     try:
         sheet = workbook[SHEET_TITLE]
+        assert sheet["A1"].alignment.wrap_text
+        assert sheet["B16"].alignment.wrap_text
+        assert sheet.row_dimensions[2].height >= before["row_heights"][2]
         assert sheet["B2"].value == "2026年11月9日"
         assert sheet["F2"].value == "白班"
         assert sheet["B16"].value == "10:00"

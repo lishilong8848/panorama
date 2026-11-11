@@ -72,8 +72,9 @@ from handover_log_module.service.review_session_service import (
     reuse_generated_report_pair,
 )
 from handover_log_module.service.training_management_payload_builder import (
-    TrainingManagementPayloadBuilder, TRAINING_SECTION,
+    TrainingManagementPayloadBuilder, TRAINING_SECTION, append_training_rows,
 )
+from handover_log_module.service.station_h_training_preview_service import StationHTrainingPreviewService
 from handover_log_module.service.station_h_review_selection_service import (
     StationHSectionsConflictError,
     STATION_H_LONG_DAY_ROLE_BY_NAME,
@@ -230,6 +231,7 @@ _STATION_H_FOCUS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix
 _STATION_H_FOCUS_LOCK = threading.Lock()
 _REVIEW_LOCK_EXECUTOR = ThreadPoolExecutor(max_workers=5, thread_name_prefix="review-edit-lock")
 _STATION_H_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="station-h-status")
+_STATION_H_TRAINING_PREVIEW = StationHTrainingPreviewService()
 _STATION_H_FOCUS_FUTURE = None
 _STATION_H_FOCUS_REFRESH_AT = 0.0
 _REVIEW_SLOW_LOG_LOCK = threading.Lock()
@@ -1350,7 +1352,7 @@ def _attach_excel_sync_from_store(container, session: Dict[str, Any] | None) -> 
     return payload
 
 
-def _review_document_revision_from_store(container, session: Dict[str, Any] | None, *, fallback: int = 0) -> int:
+def _review_document_revision_from_store(container, session: Dict[str, Any] | None, *, fallback: int = 0, strict: bool = False) -> int:
     payload = session if isinstance(session, dict) else {}
     fallback_revision = int(fallback or payload.get("document_revision", 0) or payload.get("revision", 0) or 0)
     building = str(payload.get("building", "") or "").strip()
@@ -1362,7 +1364,9 @@ def _review_document_revision_from_store(container, session: Dict[str, Any] | No
             config=_handover_cfg(container),
             building=building,
         ).get_document(session_id)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise HTTPException(status_code=409, detail="暂时无法核对审核版本，请刷新后重试") from exc
         return fallback_revision
     if not isinstance(state, dict):
         return fallback_revision
@@ -3467,12 +3471,14 @@ def _build_review_display_state(
         capacity_disabled_reason = "当前没有可下载的交接班容量报表"
     elif str(capacity_state["status"]) != "ready":
         capacity_disabled_reason = ""
-    capacity_image_send_allowed = bool(session_payload) and has_capacity_file and not is_history_mode and not waiting_generation and not remote_editor_active and not capacity_image_sending
+    capacity_image_send_allowed = bool(session_payload) and has_output_file and has_capacity_file and not is_history_mode and not waiting_generation and not remote_editor_active and not capacity_image_sending
     capacity_image_send_disabled_reason = ""
     if not session_payload:
         capacity_image_send_disabled_reason = "当前没有可发送的交接班记录"
     elif not has_capacity_file:
         capacity_image_send_disabled_reason = "当前交接班容量报表尚未生成"
+    elif not has_output_file:
+        capacity_image_send_disabled_reason = "当前交接班日志尚未生成"
     elif is_history_mode:
         capacity_image_send_disabled_reason = "历史交接班日志不支持发送审核文本和容量表图片"
     elif waiting_generation:
@@ -4200,6 +4206,7 @@ def _station_h_status_payload(
     *,
     duty_date: str = "",
     duty_shift: str = "",
+    auto_refresh_training: bool = False,
 ) -> Dict[str, Any]:
     handover_cfg = _handover_cfg(container)
     duty_date_text, duty_shift_text = _resolve_review_duty_context(
@@ -4299,6 +4306,33 @@ def _station_h_status_payload(
             "print_block_reason": f"值班关注点加载失败: {exc}",
             "error": str(exc),
         }
+    # H楼培训管理：审核页加载（status GET）时自动拉取接口并与已保存记录合并展示——
+    # Preview only: only saving or uploading commits the new rows.
+    deleted_training_ids = set(resolved_selection.get("deleted_training_row_ids", []))
+    saved_training = [row for row in resolved_selection.get("training_rows", []) if row["row_id"] not in deleted_training_ids]
+    training_rows_out = saved_training
+    if auto_refresh_training:
+        try:
+            builder = TrainingManagementPayloadBuilder(handover_cfg)
+            items = _STATION_H_TRAINING_PREVIEW.read(
+                builder, duty_date=duty_date_text, emit_log=getattr(container, "add_system_log", lambda _text: None),
+            )
+            if items:
+                api_sections = builder.build(
+                    building="H楼", duty_date=duty_date_text,
+                    current_people=selected_current, next_people=selected_next,
+                    preloaded_items=items,
+                )
+                training_rows_out = append_training_rows(saved_training, [
+                    row for row in api_sections.get(TRAINING_SECTION, []) if row["row_id"] not in deleted_training_ids
+                ])
+        except Exception as exc:  # noqa: BLE001
+            if callable(getattr(container, "add_system_log", None)):
+                container.add_system_log(
+                    f"[交接班][H楼审核页] 培训接口自动拉取失败，已保留已保存培训内容: {exc}"
+                )
+            training_rows_out = saved_training
+    saved_training_ids = {row["row_id"] for row in saved_training}
     return {
         "ok": True,
         "building": "H楼",
@@ -4344,7 +4378,9 @@ def _station_h_status_payload(
             "retry_after_ms": 4000 if roster_refresh_pending or focus_refresh_pending else 0,
         },
         "duty_focus": duty_focus,
-        "training_rows": resolved_selection.get("training_rows", []),
+        "training_rows": training_rows_out,
+        "training_preview_row_ids": [row["row_id"] for row in training_rows_out if row["row_id"] not in saved_training_ids],
+        "deleted_training_row_ids": sorted(deleted_training_ids),
         # H楼业务分类填写区：section_schema 解析自 H楼模板（排除已由 training_rows 处理的“培训管理”），
         # sections 为已保存数据（规范化结构；未保存时各分类为空行，前端据此渲染可填写表格）。
         "section_schema": station_h_section_schema(),
@@ -4424,7 +4460,9 @@ def handover_review_station_h_status(
 ) -> Dict[str, Any]:
     container = request.app.state.container
     try:
-        return _station_h_status_payload(container, duty_date=duty_date, duty_shift=duty_shift)
+        return _station_h_status_payload(
+            container, duty_date=duty_date, duty_shift=duty_shift, auto_refresh_training=True,
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -4495,8 +4533,18 @@ def handover_review_station_h_save(
             },
         )
     selection_service = _build_station_h_review_selection_service(container)
+    training_preview_only = body.get("training_preview_only") is True
+    if training_preview_only and not isinstance(body.get("training_rows"), list):
+        raise HTTPException(status_code=400, detail="H楼培训预览数据格式无效")
     sections = body.get("sections") if "sections" in body else None
     base_sections_revision = body.get("base_sections_revision")
+    deleted_training_row_ids = body.get("deleted_training_row_ids", [])
+    unedited_training_row_ids = body.get("unedited_training_row_ids", [])
+    for row_ids in (deleted_training_row_ids, unedited_training_row_ids):
+        if not isinstance(row_ids, list) or len(row_ids) > 1000 or not all(
+            isinstance(value, str) and 0 < len(value) <= 200 for value in row_ids
+        ):
+            raise HTTPException(status_code=400, detail="H楼培训记录标识无效")
     if "sections" in body:
         if not isinstance(sections, dict):
             raise HTTPException(status_code=400, detail="H楼分类数据格式无效")
@@ -4513,6 +4561,9 @@ def handover_review_station_h_save(
             training_rows=body.get("training_rows"),
             sections=sections,
             base_sections_revision=base_sections_revision,
+            deleted_training_row_ids=deleted_training_row_ids,
+            unedited_training_row_ids=unedited_training_row_ids,
+            append_training_only=training_preview_only,
             source="manual",
         )
     except StationHSectionsConflictError as exc:
@@ -4523,7 +4574,7 @@ def handover_review_station_h_save(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if callable(getattr(container, "add_system_log", None)):
         container.add_system_log(
-            "[交接班][H楼审核页] 人员选择已保存 "
+            f"[交接班][H楼审核页] {'培训预览已保存' if training_preview_only else '审核内容已保存'} "
             f"batch={saved.get('batch_key', '-')}, "
             f"值班={saved.get('current_people_text', '-') or '-'}, "
             f"接班={saved.get('next_people_text', '-') or '-'}, "
@@ -4556,8 +4607,9 @@ def handover_review_station_h_refresh_training(
         )
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    deleted = set(selection.get("deleted_training_row_ids", []))
     return {"ok": True, "batch_key": station_h_build_batch_key(duty_date, duty_shift),
-            "training_rows": sections.get(TRAINING_SECTION, [])}
+            "training_rows": [row for row in sections.get(TRAINING_SECTION, []) if row["row_id"] not in deleted]}
 
 
 @router.post("/api/handover/review/station-h/signatures/refresh")
@@ -5843,6 +5895,24 @@ def handover_review_capacity_download(
     )
 
 
+def _review_capacity_send_state(service, target, container):
+    document_revision = _review_document_revision_from_store(container, target, strict=True)
+    manifest = _review_delivery_state(
+        service, {**target, "document_revision": document_revision},
+        job_service=getattr(container, "job_service", None),
+    )
+    if manifest.get("status") in HandoverDeliveryStateService.ACTIVE:
+        raise HTTPException(status_code=409, detail="本楼正在生成成品，请等待完成后再发送")
+    if manifest.get("artifacts_ready") and HandoverDeliveryStateService.artifacts_exist(manifest):
+        return manifest, manifest["generation_id"], document_revision
+    if not all(str(target.get(key) or "").strip() for key in ("output_file", "capacity_output_file")):
+        raise HTTPException(status_code=409, detail="交接班日志或容量报表尚未生成")
+    fingerprint = hashlib.sha256(json.dumps([
+        target.get("revision"), document_revision, target.get("output_file"), target.get("capacity_output_file"),
+    ]).encode("utf-8")).hexdigest()
+    return {}, f"direct:{fingerprint}", document_revision
+
+
 @router.post("/api/handover/review/{building_code}/capacity-image/prepare")
 def handover_review_capacity_image_prepare(
     building_code: str,
@@ -5865,14 +5935,17 @@ def handover_review_capacity_image_prepare(
     _ensure_review_not_regenerating(target, container)
     if not str(target.get("capacity_output_file", "") or "").strip():
         raise HTTPException(status_code=409, detail="当前交接班容量报表尚未生成")
-    manifest = _require_review_delivery(service, target) if building in HandoverDeliveryWorkflowService.BUILDINGS else {}
-    if manifest and payload.get("generation_id") is not None and payload["generation_id"] != manifest["generation_id"]:
+    _, generation_id, _ = (
+        _review_capacity_send_state(service, target, container)
+        if building in HandoverDeliveryWorkflowService.BUILDINGS else ({}, "", 0)
+    )
+    if payload.get("generation_id") and payload["generation_id"] != generation_id:
         raise HTTPException(status_code=409, detail="交接班成品版本已更新，请刷新后发送")
     token = _issue_capacity_image_send_token(
         building=building,
         session_id=session_id_text,
         client_id=client_id,
-        generation_id=manifest.get("generation_id", ""),
+        generation_id=generation_id,
     )
     container.add_system_log(
         f"[交接班][容量表图片发送] 已签发手动发送令牌 building={building}, session_id={session_id_text}, client_id={client_id or '-'}"
@@ -5882,6 +5955,7 @@ def handover_review_capacity_image_prepare(
         "building": building,
         "session_id": session_id_text,
         "send_token": token,
+        "generation_id": generation_id,
         "expires_in_sec": _CAPACITY_IMAGE_SEND_TOKEN_TTL_SEC,
     }
 
@@ -5907,8 +5981,11 @@ def handover_review_capacity_image_send(
     _ensure_latest_session_actionable_or_400(service, building=building, session_id=session_id_text)
     target = _load_target_session_or_404(service, building=building, session_id=session_id_text)
     _ensure_review_not_regenerating(target, container)
-    manifest = _require_review_delivery(service, target) if building in HandoverDeliveryWorkflowService.BUILDINGS else {}
-    if manifest and payload.get("generation_id") is not None and payload["generation_id"] != manifest["generation_id"]:
+    manifest, generation_id, document_revision = (
+        _review_capacity_send_state(service, target, container)
+        if building in HandoverDeliveryWorkflowService.BUILDINGS else ({}, "", 0)
+    )
+    if payload.get("generation_id") and payload["generation_id"] != generation_id:
         raise HTTPException(status_code=409, detail="交接班成品版本已更新，请刷新后发送")
     _ensure_review_not_regenerating(target, container)
     token_error = _verify_capacity_image_send_token(
@@ -5916,19 +5993,42 @@ def handover_review_capacity_image_send(
         building=building,
         session_id=session_id_text,
         client_id=client_id,
-        generation_id=manifest.get("generation_id", ""),
+        generation_id=generation_id,
     )
     if token_error:
         raise HTTPException(status_code=400, detail=token_error)
-    if manifest:
-        delivery_service = CapacityReportImageDeliveryService(
-            _handover_cfg(container), config_path=getattr(container, "config_path", None), review_service=service,
+    if building in HandoverDeliveryWorkflowService.BUILDINGS:
+        from handover_log_module.service.handover_delivery_prepare_service import (
+            HandoverDeliveryPrepareError, HandoverDeliveryPrepareRetryableError, HandoverDeliveryPrepareService,
         )
-        prepared = {**target, "capacity_output_file": manifest["paths"]["capacity"]}
-        return delivery_service.send_for_session(
-            prepared, building=building, client_id=client_id, manual_trigger=True,
-            prepared_artifacts=manifest["paths"], emit_log=container.add_system_log,
-        )
+
+        temp_root = None
+        try:
+            if not manifest:
+                temp_root = create_runtime_temp_dir(kind="handover_capacity_send")
+                manifest = HandoverDeliveryPrepareService(_handover_cfg(container)).prepare(
+                    session_id_text, expected_revision=int(target.get("revision", 0) or 0),
+                    expected_document_revision=document_revision, emit_log=container.add_system_log,
+                    temporary_root=temp_root,
+                )
+            latest = _load_target_session_or_404(service, building=building, session_id=session_id_text)
+            _ensure_review_not_regenerating(latest, container)
+            _, latest_generation, _ = _review_capacity_send_state(service, latest, container)
+            if latest_generation != generation_id:
+                raise HTTPException(status_code=409, detail="审核内容已更新，请重新点击发送")
+            delivery_service = CapacityReportImageDeliveryService(
+                _handover_cfg(container), config_path=getattr(container, "config_path", None), review_service=service,
+            )
+            prepared = {**latest, "capacity_output_file": manifest["paths"]["capacity"]}
+            return delivery_service.send_for_session(
+                prepared, building=building, client_id=client_id, manual_trigger=True,
+                prepared_artifacts=manifest["paths"], emit_log=container.add_system_log,
+            )
+        except (HandoverDeliveryPrepareError, HandoverDeliveryPrepareRetryableError, ReviewDocumentStateError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            if temp_root is not None:
+                cleanup_runtime_temp_dir(temp_root)
     if not str(target.get("capacity_output_file", "") or "").strip():
         return {
             "ok": False,

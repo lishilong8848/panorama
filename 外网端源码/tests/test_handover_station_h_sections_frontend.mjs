@@ -80,7 +80,7 @@ const schema = normalizeStationHSectionSchema([
 ]);
 assert.deepEqual(schema.map((s) => s.name), ["新事件处理", "三、注意事项交接"]);
 
-// 行数严格等于模板数据行数；越界行丢弃；缺列补空；值转字符串。
+// 已保存行数不受模板限制；缺列补空；值转字符串。
 const sections = normalizeStationHSections(
   {
     "新事件处理": [{ cells: { B: "一级", H: 42 } }, { cells: { B: "越界行" } }],
@@ -89,11 +89,11 @@ const sections = normalizeStationHSections(
   },
   schema,
 );
-assert.equal(sections["新事件处理"].length, 1, "新事件处理模板只有 1 行");
+assert.equal(sections["新事件处理"].length, 2);
 assert.deepEqual(sections["新事件处理"][0].cells, { B: "一级", H: "42" });
-assert.equal(sections["三、注意事项交接"].length, 3, "注意事项模板有 3 行");
+assert.equal(sections["三、注意事项交接"].length, 1);
 assert.deepEqual(sections["三、注意事项交接"][0].cells, { B: "常备1", H: "" });
-assert.deepEqual(sections["三、注意事项交接"][1].cells, { B: "", H: "" });
+assert.deepEqual(normalizeStationHSections({ "三、注意事项交接": [] }, schema)["三、注意事项交接"], []);
 assert.equal("不存在的分类" in sections, false, "schema 外的分类不纳入");
 
 // 空/非法输入 → 按 schema 产出全空行结构。
@@ -110,6 +110,13 @@ globalThis.fetch = async (_url, options) => {
 page.state.value.sections = structuredClone(empty);
 page.state.value.sections_revision = 7;
 page.form.value.sections = structuredClone(empty);
+page.addSectionRow(schema[0]);
+const added = page.form.value.sections["新事件处理"][1];
+page.toggleSectionPerson(added, "H", "张三");
+assert.equal(added.cells.H, "张三");
+assert.equal(page.sectionPersonActive(added, "H", "张三"), true);
+page.removeSectionRow("新事件处理", 1);
+assert.deepEqual(page.form.value.sections, empty);
 await page.saveSelection();
 assert.equal("sections" in requests[0], false, "未编辑的分类不得随其他内容提交");
 page.form.value.sections["新事件处理"][0].cells.B = "未保存内容";
@@ -148,5 +155,47 @@ assert.deepEqual(calls, ["/api/handover/review/station-h", "/api/handover/review
 assert.equal(page.attachmentUploading.value, false);
 assert.equal(page.attachmentRecordUrl.value, "https://example.test/record-h");
 assert.match(page.statusText.value, /已上传/);
+
+const automatic = { row_id: "training:auto-1", cells: { B: "新培训", D: "", E: "", F: "", G: "" } };
+const recorded = { batch, saved: true, training_rows: [] };
+const previewCalls = [];
+globalThis.fetch = async (url, options) => {
+  const path = url.split("?")[0];
+  previewCalls.push(path);
+  let payload;
+  if (path.endsWith("/status")) {
+    payload = { ...recorded, training_rows: [automatic], training_preview_row_ids: [automatic.row_id] };
+  } else if (path.endsWith("/signatures/refresh")) {
+    payload = { ...recorded, signature_refresh: { count: 1 } };
+  } else if (path === "/api/handover/review/station-h") {
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.training_rows, [automatic]);
+    assert.equal(body.training_preview_only, true);
+    assert.equal("current_people_text" in body, false);
+    assert.equal("sections" in body, false);
+    payload = { ...recorded, training_rows: [automatic] };
+  } else if (path.endsWith("/upload")) {
+    payload = { job: { job_id: "job-preview" } };
+  } else if (path === "/api/jobs/job-preview") {
+    payload = { status: "success", result: { status: "success", record_url: "https://example.test/record-preview" } };
+  } else {
+    assert.fail(`Unexpected request: ${path}`);
+  }
+  return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
+};
+await page.refreshStatus();
+assert.deepEqual(page.form.value.training_rows, [automatic]);
+await page.refreshSignatures();
+assert.deepEqual(page.form.value.training_rows, [automatic], "签名刷新不能清掉尚未保存的培训预览");
+await page.uploadStationHAttachment();
+assert.deepEqual(previewCalls, [
+  "/api/handover/review/station-h/status",
+  "/api/handover/review/station-h/signatures/refresh",
+  "/api/handover/review/station-h",
+  "/api/handover/review/station-h/upload",
+  "/api/jobs/job-preview",
+]);
+assert.deepEqual(page.state.value.training_preview_row_ids, []);
+assert.equal(page.attachmentRecordUrl.value, "https://example.test/record-preview");
 
 console.log("H station sections frontend checks passed");

@@ -351,7 +351,12 @@ def test_manual_h_upload_uses_saved_content_without_other_building_sessions(bita
     selection = {
         "current_people": ["值班甲", "值班乙"], "next_people": ["接班甲", "接班乙"],
         "long_day_people": ["长白甲", "长白乙"], "resolved_source": "current",
-        "training_rows": [{"cells": {"B": "本班已保存培训"}}],
+        "training_rows": [
+            {"cells": {"B": "本班已保存培训"}},
+            {"cells": {"B": "第二条培训", "F": "讲师甲"}},
+            {"cells": {"B": "第三条培训", "F": "讲师乙"}},
+        ],
+        "sections": {"新事件处理": [{"cells": {"D": "第一条"}}, {"cells": {"D": "第二条", "H": "值班乙"}}]},
     }
     service._station_h_review_selection_service = SimpleNamespace(
         get_selection=Mock(return_value=selection), resolve_selection=Mock(return_value=selection),
@@ -387,6 +392,12 @@ def test_manual_h_upload_uses_saved_content_without_other_building_sessions(bita
         assert sheet["B31"].value == "本班已保存培训"
         assert sheet["B12"].value is None
         assert len(sheet._images) == 1
+        assert sheet["D19"].value == "第一条"
+        continuation = workbook["分类续表"]
+        assert continuation["D3"].value == "第二条"
+        assert continuation["F3"].value == "值班乙"
+        assert (continuation["A7"].value, continuation["B7"].value, continuation["E7"].value) == (2, "第二条培训", "讲师甲")
+        assert (continuation["A8"].value, continuation["B8"].value, continuation["E8"].value) == (3, "第三条培训", "讲师乙")
     finally:
         workbook.close()
 

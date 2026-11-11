@@ -54,6 +54,95 @@ def test_latest_notice_not_first_notice_and_building_match():
     assert [r["row_id"] for r in build(service, building="H楼")] == ["training:3"]
 
 
+def test_preload_fetches_once_and_build_distributes_without_refetch():
+    # 一次拉取（含所有楼）→ 各楼 build 复用预加载结果，不再各自打接口
+    service, get = builder([
+        item("t-a", building="A楼"),
+        item("t-b", building="B楼"),
+        item("t-h", building="H楼"),
+    ])
+    preloaded = service.preload(duty_date="2026-10-27")
+    assert get.call_count == 1, "预加载只拉取一次"
+    assert set(preloaded) == {"t-a", "t-b", "t-h"}
+    a = build(service, preloaded_items=preloaded)  # building=A楼
+    b = build(service, building="B楼", preloaded_items=preloaded)
+    h = build(service, building="H楼", preloaded_items=preloaded)
+    assert get.call_count == 1, "各楼 build 复用预加载，未再打接口"
+    assert [r["row_id"] for r in a] == ["training:t-a"]
+    assert [r["row_id"] for r in b] == ["training:t-b"]
+    assert [r["row_id"] for r in h] == ["training:t-h"]
+    # 不传 preloaded_items → 回退自行拉取（向后兼容 H 交付/审核页刷新等单楼调用）
+    build(service)
+    assert get.call_count == 2
+
+
+def test_h_preview_reuses_one_fetch_across_dates_in_same_month():
+    from handover_log_module.service.station_h_training_preview_service import StationHTrainingPreviewService
+
+    service, get = builder([item(building="H楼")])
+    cache = StationHTrainingPreviewService()
+    first = cache.read(service, duty_date="2026-10-27", emit_log=Mock())
+    second = cache.read(service, duty_date="2026-10-28", emit_log=Mock())
+    assert first == second and "task-1" in first
+    get.assert_called_once()
+    assert not cache.read(service, duty_date="2026-09-28", emit_log=Mock())
+    get.assert_called_once()
+
+
+def test_h_preview_failure_cools_down_and_new_credentials_do_not_share_cache(monkeypatch):
+    from types import SimpleNamespace
+    from handover_log_module.service import station_h_training_preview_service
+
+    service, get = builder([item(building="H楼")])
+    get.side_effect = ValueError("培训接口失败")
+    now = 100
+    monkeypatch.setattr(station_h_training_preview_service, "time", SimpleNamespace(monotonic=lambda: now))
+    cache = station_h_training_preview_service.StationHTrainingPreviewService()
+    log = Mock()
+    assert not cache.read(service, duty_date="2026-10-27", emit_log=log)
+    now += 30
+    assert not cache.read(service, duty_date="2026-10-27", emit_log=log)
+    get.assert_called_once()
+    log.assert_called_once()
+    now += 31
+    get.side_effect = None
+    assert "task-1" in cache.read(service, duty_date="2026-10-27", emit_log=log)
+    other, other_get = builder([item(task_id="other", building="H楼")])
+    other.config["api_key"] = "another-test-key"
+    assert set(cache.read(other, duty_date="2026-10-27", emit_log=log)) == {"other"}
+    other_get.assert_called_once()
+
+
+def test_preload_skips_fetch_for_disabled_or_past_month():
+    disabled = TrainingManagementPayloadBuilder(
+        {"training_management_section": {"enabled": False, "api_key": "k"}},
+        http_get=Mock(), now=lambda: datetime(2026, 10, 27, tzinfo=BEIJING),
+    )
+    assert disabled.preload(duty_date="2026-10-27") == {}
+    disabled.http_get.assert_not_called()
+    # 非当月：预加载不拉取（返回 {}）；历史班次原有内容由 build 的当月校验保留
+    service, get = builder([item()])
+    assert service.preload(duty_date="2026-09-15") == {}
+    get.assert_not_called()
+
+
+def test_orchestrator_preload_training_items_returns_empty_on_failure(monkeypatch):
+    # 预加载失败必须返回 {}（而非 None）：None 会让各楼 build 回退为自行拉取，一次生成打多次接口。
+    from handover_log_module.service.handover_orchestrator import HandoverOrchestrator
+
+    orch = object.__new__(HandoverOrchestrator)
+    orch.config = {"training_management_section": {"enabled": True, "api_key": "k"}}
+
+    def boom(self, *, duty_date, emit_log=print):
+        raise ValueError("培训接口请求失败或超时")
+
+    monkeypatch.setattr(TrainingManagementPayloadBuilder, "preload", boom)
+    logs = []
+    result = orch._preload_training_items("2026-10-27", logs.append)
+    assert result == {}
+    assert any("批量预取失败" in message for message in logs)
+
+
 def test_duplicate_id_moved_to_another_date_is_not_added():
     service, _ = builder([item(), item(time="2026-10-28 08:00")])
     assert build(service) == []

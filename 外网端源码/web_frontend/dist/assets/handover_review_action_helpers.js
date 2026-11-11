@@ -623,7 +623,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     // Sending is always a manual click; generation never sends on its own.
     const gate = resolveDeliveryGate();
-    if (!gate.can_send) {
+    if (gate.is_busy) {
       statusText.value = deliveryConflictText(gate);
       return;
     }
@@ -657,7 +657,6 @@ export function createHandoverReviewActionHelpers(options = {}) {
       const prepared = await prepareHandoverReviewCapacityImageApi(buildingCode, {
         session_id: sessionId,
         client_id: reviewClientId,
-        generation_id: gate.delivery.generation_id,
         trigger_source: "capacity_image_send_button",
       });
       const sendToken = String(prepared?.send_token || "").trim();
@@ -667,7 +666,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
       const response = await sendHandoverReviewCapacityImageApi(buildingCode, {
         session_id: sessionId,
         client_id: reviewClientId,
-        generation_id: gate.delivery.generation_id,
+        generation_id: String(prepared?.generation_id || ""),
         trigger_source: "capacity_image_send_button",
         send_token: sendToken,
       });

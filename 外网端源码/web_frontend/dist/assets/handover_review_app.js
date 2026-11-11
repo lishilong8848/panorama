@@ -761,15 +761,28 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
         <div class="review-card-head">
           <h2>培训管理</h2>
           <div class="review-inline-actions">
-            <button type="button" class="btn btn-secondary btn-mini" :disabled="saving || trainingRefreshing" @click="addTrainingRow" title="新增培训">新增</button>
+            <button type="button" class="btn btn-secondary btn-mini" :disabled="sectionEditingDisabled" @click="addTrainingRow" title="新增培训">新增一行</button>
             <button type="button" class="btn btn-secondary btn-mini" :disabled="saving || trainingRefreshing || attachmentUploading" @click="refreshTraining">{{ trainingRefreshing ? '刷新中...' : '刷新' }}</button>
           </div>
         </div>
         <div class="review-table-wrap">
           <table class="review-table">
-            <thead><tr><th v-for="column in trainingColumns" :key="column.key">{{ column.label }}</th></tr></thead>
-            <tbody><tr v-for="row in form.training_rows" :key="row.row_id">
-              <td v-for="column in trainingColumns" :key="column.key"><textarea class="review-input" rows="2" v-model="row.cells[column.key]" :aria-label="column.label" :disabled="saving"></textarea></td>
+            <thead><tr><th v-for="column in trainingColumns" :key="column.key">{{ column.label }}</th><th class="review-col-action">操作</th></tr></thead>
+            <tbody><tr v-for="(row, rowIndex) in form.training_rows" :key="row.row_id">
+              <td v-for="column in trainingColumns" :key="column.key">
+                <textarea class="review-cell-input" rows="1" v-model="row.cells[column.key]" :aria-label="column.label" :disabled="sectionEditingDisabled"></textarea>
+                <details v-if="isSectionPersonColumn(column)" class="person-picker-details" @toggle="$event.target.open && loadSectionPeople()">
+                  <summary>选择人名</summary>
+                  <div class="person-chip-row">
+                    <button v-for="person in sectionPeople" :key="person" type="button" class="person-chip"
+                      :class="{ 'is-active': sectionPersonActive(row, column.key, person) }"
+                      :disabled="sectionEditingDisabled" @click="toggleSectionPerson(row, column.key, person)">{{ person }}</button>
+                  </div>
+                  <small v-if="sectionPeopleLoading" class="person-picker-hint">正在读取工程师目录...</small>
+                  <small v-else-if="sectionPeopleError" class="person-picker-hint tone-danger">{{ sectionPeopleError }}</small>
+                </details>
+              </td>
+              <td class="review-col-action"><button type="button" class="btn btn-danger btn-mini" :disabled="sectionEditingDisabled" @click="form.training_rows.splice(rowIndex, 1)">删除</button></td>
             </tr></tbody>
           </table>
           <p v-if="!form.training_rows.length" class="review-empty">暂无培训记录</p>
@@ -781,21 +794,49 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
       <article v-for="section in state.section_schema" :key="section.name" class="review-card station-h-section-card">
         <div class="review-card-head">
           <h2>{{ section.name }}</h2>
-          <span class="review-card-subtitle">按 H楼模板填写；某格留空则保留模板默认（如 / 占位、注意事项常备文本）。</span>
+          <div class="review-inline-actions">
+            <details v-if="section.columns.some(isSectionPersonColumn)" class="person-fill-toolbar" @toggle="$event.target.open && loadSectionPeople()">
+              <summary>批量填人</summary>
+              <div class="person-fill-panel">
+                <select class="review-person-select" multiple v-model="selectedSectionPeople[section.name]"
+                  :aria-label="section.name + ' 批量选择人名'" :disabled="sectionEditingDisabled || !sectionPeople.length">
+                  <option v-for="person in sectionPeople" :key="person" :value="person">{{ person }}</option>
+                </select>
+                <button class="btn btn-secondary btn-mini" type="button"
+                  :disabled="sectionEditingDisabled || !selectedSectionPeople[section.name]?.length" @click="fillSectionPeople(section)">填入本分类</button>
+              </div>
+              <small v-if="sectionPeopleLoading" class="person-picker-hint">正在读取工程师目录...</small>
+              <small v-else-if="sectionPeopleError" class="person-picker-hint tone-danger">{{ sectionPeopleError }}</small>
+            </details>
+            <button class="btn btn-secondary btn-mini" type="button" :disabled="sectionEditingDisabled" @click="addSectionRow(section)">新增一行</button>
+          </div>
         </div>
         <div class="review-table-wrap">
           <table class="review-table">
-            <thead><tr><th v-for="column in section.columns" :key="column.key">{{ column.label || column.key }}</th></tr></thead>
+            <thead><tr><th class="review-col-index">序号</th><th v-for="column in section.columns" :key="column.key">{{ column.label || column.key }}</th><th class="review-col-action">操作</th></tr></thead>
             <tbody>
               <tr v-for="(row, rowIndex) in (form.sections[section.name] || [])" :key="rowIndex">
+                <td class="review-col-index">{{ rowIndex + 1 }}</td>
                 <td v-for="column in section.columns" :key="column.key">
-                  <textarea class="review-input" rows="2" v-model="row.cells[column.key]"
+                  <textarea class="review-cell-input" rows="1" v-model="row.cells[column.key]"
                     :aria-label="section.name + ' 第' + (rowIndex + 1) + '行 ' + (column.label || column.key)"
-                    :disabled="saving"></textarea>
+                    :disabled="sectionEditingDisabled"></textarea>
+                  <details v-if="isSectionPersonColumn(column)" class="person-picker-details" @toggle="$event.target.open && loadSectionPeople()">
+                    <summary>选择人名</summary>
+                    <div class="person-chip-row">
+                      <button v-for="person in sectionPeople" :key="person" type="button" class="person-chip"
+                        :class="{ 'is-active': sectionPersonActive(row, column.key, person) }"
+                        :disabled="sectionEditingDisabled" @click="toggleSectionPerson(row, column.key, person)">{{ person }}</button>
+                    </div>
+                    <small v-if="sectionPeopleLoading" class="person-picker-hint">正在读取工程师目录...</small>
+                    <small v-else-if="sectionPeopleError" class="person-picker-hint tone-danger">{{ sectionPeopleError }}</small>
+                  </details>
                 </td>
+                <td class="review-col-action"><button type="button" class="btn btn-danger btn-mini" :disabled="sectionEditingDisabled" @click="removeSectionRow(section.name, rowIndex)">删除</button></td>
               </tr>
             </tbody>
           </table>
+          <p v-if="!form.sections[section.name]?.length" class="review-empty">暂无记录</p>
         </div>
       </article>
     </section>
@@ -1553,16 +1594,15 @@ function normalizeStationHSectionSchema(raw) {
     .filter((section) => section.name && section.columns.length);
 }
 
-// 按 schema 把已保存分类数据规范成 {name: [{cells:{key:str}}]}，行数严格等于模板数据行数。
+// 未保存的分类沿用模板行数；保存过的分类保留实际行数。
 function normalizeStationHSections(rawSections, rawSchema) {
   const schema = normalizeStationHSectionSchema(rawSchema);
   const source = rawSections && typeof rawSections === "object" ? rawSections : {};
   const result = {};
   for (const section of schema) {
-    const incoming = Array.isArray(source[section.name]) ? source[section.name] : [];
-    const rowCount = Math.max(1, section.rows.length);
+    const incoming = Array.isArray(source[section.name]) ? source[section.name] : section.rows.map(() => ({}));
     const rows = [];
-    for (let index = 0; index < rowCount; index += 1) {
+    for (let index = 0; index < incoming.length; index += 1) {
       const sourceRow = incoming[index] && typeof incoming[index] === "object" ? incoming[index] : {};
       const sourceCells = sourceRow.cells && typeof sourceRow.cells === "object" ? sourceRow.cells : {};
       const cells = {};
@@ -1622,6 +1662,8 @@ function normalizeStationHState(raw = {}) {
     candidate_source: raw?.candidate_source && typeof raw.candidate_source === "object" ? raw.candidate_source : {},
     duty_focus: normalizeStationHDutyFocus(raw?.duty_focus || {}),
     training_rows: Array.isArray(raw?.training_rows) ? cloneDeep(raw.training_rows) : [],
+    training_preview_row_ids: Array.isArray(raw?.training_preview_row_ids) ? raw.training_preview_row_ids : [],
+    deleted_training_row_ids: Array.isArray(raw?.deleted_training_row_ids) ? raw.deleted_training_row_ids : [],
     section_schema: normalizeStationHSectionSchema(raw?.section_schema),
     sections: normalizeStationHSections(raw?.sections, raw?.section_schema),
     sections_revision: Number(raw?.sections_revision || 0),
@@ -2479,6 +2521,67 @@ function mountHandoverStationHApp(Vue) {
       let dutyFocusPrintFrame = null;
       let dutyFocusPrintCleanupTimer = null;
       const signaturePreviewKeys = { handover: "", takeover: "" };
+      const selectedSectionPeople = ref({});
+      const sectionEngineers = ref([]);
+      const sectionPeopleLoading = ref(false);
+      const sectionPeopleError = ref("");
+      let sectionPeopleLoaded = false;
+      const sectionEditingDisabled = computed(() => saving.value || trainingRefreshing.value || attachmentUploading.value);
+      const sectionPeople = computed(() => splitPersonNames([
+        form.value.current_people_text, form.value.next_people_text, form.value.long_day_people_text,
+        ...Object.values(state.value.options).flat().map((item) => item.name), ...sectionEngineers.value,
+      ].join("、")));
+
+      async function loadSectionPeople() {
+        if (sectionPeopleLoaded || sectionPeopleLoading.value) return;
+        sectionPeopleLoading.value = true;
+        sectionPeopleError.value = "";
+        try {
+          const response = await getHandoverEngineerDirectoryApi();
+          const rows = Array.isArray(response?.rows) ? response.rows : [];
+          const sameBuilding = rows.filter((row) => String(row?.building || "").trim() === "H楼");
+          sectionEngineers.value = (sameBuilding.length ? sameBuilding : rows).map((row) => row.supervisor);
+          sectionPeopleLoaded = true;
+        } catch (error) {
+          sectionPeopleError.value = String(error?.message || "工程师目录读取失败");
+        } finally {
+          sectionPeopleLoading.value = false;
+        }
+      }
+
+      function isSectionPersonColumn(column) {
+        const label = normalizeHeaderLabel(column?.label);
+        return !label.includes("执行方") && ["跟进人", "执行人", "随工人", "参与人", "讲师"].some((word) => label.includes(word));
+      }
+
+      function sectionPersonActive(row, key, name) {
+        return hasPersonNameValue(row.cells[key], name);
+      }
+
+      function toggleSectionPerson(row, key, name) {
+        if (!sectionEditingDisabled.value) row.cells[key] = togglePersonNameValue(row.cells[key], name);
+      }
+
+      function addSectionRow(section) {
+        if (sectionEditingDisabled.value) return;
+        form.value.sections[section.name].push({ cells: Object.fromEntries(section.columns.map((column) => [column.key, ""])) });
+      }
+
+      function removeSectionRow(name, index) {
+        if (!sectionEditingDisabled.value) form.value.sections[name]?.splice(index, 1);
+      }
+
+      function fillSectionPeople(section) {
+        if (sectionEditingDisabled.value) return;
+        const column = section.columns.find(isSectionPersonColumn);
+        const names = selectedSectionPeople.value[section.name] || [];
+        if (!column || !names.length) return;
+        for (const row of form.value.sections[section.name] || []) {
+          if (Object.values(row.cells).some((value) => String(value || "").trim())) {
+            row.cells[column.key] = joinPersonNames(names);
+          }
+        }
+      }
 
       const batchText = computed(() => {
         const date = dutyDate.value || state.value.batch.duty_date || "-";
@@ -2529,7 +2632,7 @@ function mountHandoverStationHApp(Vue) {
         return "图片未生成";
       });
 
-      function applyState(raw) {
+      function applyState(raw, { keepTrainingPreview = false } = {}) {
         const normalized = normalizeStationHState(raw || {});
         const nextBatchKey = String(
           normalized.batch.batch_key
@@ -2550,7 +2653,17 @@ function mountHandoverStationHApp(Vue) {
           signaturePickerOpen.value = { handover: false, takeover: false };
           signaturePickerActive.value = { handover: 0, takeover: 0 };
         }
+        if (keepTrainingPreview && nextBatchKey && nextBatchKey === currentBatchKey) {
+          const savedIds = new Set(normalized.training_rows.map((row) => row.row_id));
+          const previewIds = new Set(state.value.training_preview_row_ids);
+          const deletedIds = new Set(normalized.deleted_training_row_ids);
+          const retained = state.value.training_rows.filter((row) =>
+            previewIds.has(row.row_id) && !savedIds.has(row.row_id) && !deletedIds.has(row.row_id));
+          normalized.training_rows = appendTrainingRows(normalized.training_rows, retained);
+          normalized.training_preview_row_ids = retained.map((row) => row.row_id);
+        }
         state.value = normalized;
+        selectedSectionPeople.value = Object.fromEntries(normalized.section_schema.map((section) => [section.name, []]));
         if (normalized.batch.duty_date) dutyDate.value = normalized.batch.duty_date;
         if (["day", "night"].includes(normalized.batch.duty_shift)) dutyShift.value = normalized.batch.duty_shift;
         form.value = {
@@ -2930,19 +3043,33 @@ function mountHandoverStationHApp(Vue) {
 
       async function saveSelection(options = {}) {
         const silent = Boolean(options?.silent);
+        const previewOnly = Boolean(options?.previewOnly);
         saving.value = true;
         errorText.value = "";
         if (!silent) statusText.value = "正在保存H楼审核内容...";
         try {
           const sectionsChanged = JSON.stringify(form.value.sections) !== JSON.stringify(state.value.sections);
+          const trainingIds = new Set(form.value.training_rows.map((row) => row.row_id));
+          const deletedTrainingIds = state.value.training_rows.map((row) => row.row_id).filter((id) => !trainingIds.has(id));
+          const baselineTraining = new Map(state.value.training_rows.map((row) => [row.row_id, JSON.stringify(row)]));
+          const uneditedTrainingIds = form.value.training_rows
+            .filter((row) => baselineTraining.get(row.row_id) === JSON.stringify(row)).map((row) => row.row_id);
+          const previewIds = new Set(state.value.training_preview_row_ids);
           const response = await saveHandoverReviewStationHApi({
             ...buildContextPayload(),
-            current_people_text: form.value.current_people_text,
-            next_people_text: form.value.next_people_text,
-            long_day_people_text: form.value.long_day_people_text,
-            duty_focus: buildDutyFocusPayload(form.value.duty_focus),
-            training_rows: form.value.training_rows,
-            ...(sectionsChanged ? { sections: form.value.sections, base_sections_revision: state.value.sections_revision } : {}),
+            ...(previewOnly ? {
+              training_preview_only: true,
+              training_rows: form.value.training_rows.filter((row) => previewIds.has(row.row_id)),
+            } : {
+              current_people_text: form.value.current_people_text,
+              next_people_text: form.value.next_people_text,
+              long_day_people_text: form.value.long_day_people_text,
+              duty_focus: buildDutyFocusPayload(form.value.duty_focus),
+              training_rows: form.value.training_rows,
+              ...(deletedTrainingIds.length ? { deleted_training_row_ids: deletedTrainingIds } : {}),
+              ...(uneditedTrainingIds.length ? { unedited_training_row_ids: uneditedTrainingIds } : {}),
+              ...(sectionsChanged ? { sections: form.value.sections, base_sections_revision: state.value.sections_revision } : {}),
+            }),
           });
           applyState(response);
           if (!silent) statusText.value = "H楼审核内容已保存。";
@@ -2962,7 +3089,11 @@ function mountHandoverStationHApp(Vue) {
         errorText.value = "";
         statusText.value = "正在保存并生成H楼附件...";
         try {
-          if ((hasUnsavedChanges.value || !state.value.saved) && !await saveSelection({ silent: true })) return;
+          if (hasUnsavedChanges.value || !state.value.saved) {
+            if (!await saveSelection({ silent: true })) return;
+          } else if (state.value.training_preview_row_ids.length) {
+            if (!await saveSelection({ silent: true, previewOnly: true })) return;
+          }
           const response = await uploadHandoverReviewStationHApi(buildContextPayload());
           const jobId = response?.job?.job_id;
           if (!jobId) throw new Error("未能提交H楼附件上传任务");
@@ -2997,7 +3128,7 @@ function mountHandoverStationHApp(Vue) {
         statusText.value = "正在读取两张签名表...";
         try {
           const response = await refreshHandoverReviewStationHSignaturesApi(buildContextPayload());
-          applyState(response);
+          applyState(response, { keepTrainingPreview: true });
           const count = Number.parseInt(String(response?.signature_refresh?.count || 0), 10) || 0;
           statusText.value = `签名目录已刷新，共读取 ${count} 位人员。`;
         } catch (error) {
@@ -3243,6 +3374,18 @@ function mountHandoverStationHApp(Vue) {
         trainingColumns: TRAINING_COLUMNS,
         refreshTraining,
         addTrainingRow,
+        sectionEditingDisabled,
+        sectionPeople,
+        sectionPeopleLoading,
+        sectionPeopleError,
+        selectedSectionPeople,
+        loadSectionPeople,
+        isSectionPersonColumn,
+        sectionPersonActive,
+        toggleSectionPerson,
+        addSectionRow,
+        removeSectionRow,
+        fillSectionPeople,
         signatureSearch,
         signaturePickerOpen,
         signaturePickerActive,

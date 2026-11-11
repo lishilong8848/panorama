@@ -6,11 +6,11 @@ H楼没有 A–E 那样的审核文档管线：其 H_handover.xlsx 在交付时�
 
 1. ``station_h_section_schema()``：分类 schema（名称 / 列 key+label / 模板数据行号），供前端渲染与保存；
 2. ``normalize_station_h_sections()``：把前端提交的数据规范成 ``{name: [{"cells": {col_key: str}}]}``，
-   行数与模板一致、列 key 合法，杜绝越界写入；
+   保留增删后的行数，只保留模板允许的列；
 3. ``build_station_h_section_cell_values()``：把已保存数据映射为“绝对单元格 -> 值”的字典，
    **仅含非空值**——空值不写，保留模板默认（``/`` 占位、注意事项常备文本、既有自动执行人）。
 
-关键安全约束：分类只填入模板既有数据行，**绝不插行/删行**，因此不会位移培训行(31)、
+关键安全约束：主表只填模板既有数据行，超出部分写分类续表，**不插行/删行**，因此不会位移培训行(31)、
 注意事项执行人(H40:H42)、页脚(H45:H48) 等既有扁平单元格。“培训管理”已由 training_rows 单独
 处理（写 B31..G31），在此排除，避免重复与冲突。
 """
@@ -34,6 +34,7 @@ from handover_log_module.service.handover_attachment_workbook_builder import (
 # 培训管理已由 H 审核页 training_rows 单独处理（写 B31..G31），不纳入分类填写区。
 STATION_H_EXCLUDED_SECTIONS = frozenset({"培训管理"})
 STATION_H_SECTION_HIDDEN_COLUMNS = ("I",)
+STATION_H_ATTENTION_SECTION = "三、注意事项交接"
 
 _schema_lock = threading.Lock()
 _cached_schema: Optional[List[Dict[str, Any]]] = None
@@ -103,7 +104,7 @@ def station_h_section_cells() -> frozenset:
 def normalize_station_h_sections(sections: Any) -> Dict[str, List[Dict[str, Any]]]:
     """规范前端提交的分类数据为 {name: [{"cells": {col_key: str}}]}。
 
-    行数严格等于模板数据行数、列 key 严格取自模板；越界行/非法列一律丢弃，值统一转字符串。
+    未填写的分类显示模板行数；已保存的分类保留实际行数（包括空列表）。
     """
     schema = station_h_section_schema()
     raw = sections if isinstance(sections, dict) else {}
@@ -112,10 +113,9 @@ def normalize_station_h_sections(sections: Any) -> Dict[str, List[Dict[str, Any]
         name = spec["name"]
         col_keys = [column["key"] for column in spec["columns"]]
         incoming = raw.get(name)
-        incoming_rows = incoming if isinstance(incoming, list) else []
+        incoming_rows = incoming if isinstance(incoming, list) else [{} for _ in spec["rows"]]
         rows: List[Dict[str, Any]] = []
-        for index in range(len(spec["rows"])):
-            source = incoming_rows[index] if index < len(incoming_rows) else {}
+        for source in incoming_rows:
             source_cells = source.get("cells", {}) if isinstance(source, dict) else {}
             if not isinstance(source_cells, dict):
                 source_cells = {}
@@ -128,8 +128,8 @@ def normalize_station_h_sections(sections: Any) -> Dict[str, List[Dict[str, Any]
     return result
 
 
-def build_station_h_section_cell_values(sections: Any) -> Dict[str, str]:
-    """把已保存分类数据映射为“绝对单元格 -> 值”，仅含非空值（空值保留模板默认，不覆盖）。"""
+def build_station_h_section_cell_values(sections: Any, *, clear_attention_defaults: bool = False) -> Dict[str, str]:
+    """把分类数据映射到固定位置；已保存的注意事项可显式清除模板默认。"""
     schema = {spec["name"]: spec for spec in station_h_section_schema()}
     normalized = normalize_station_h_sections(sections)
     result: Dict[str, str] = {}
@@ -138,19 +138,36 @@ def build_station_h_section_cell_values(sections: Any) -> Dict[str, str]:
         if not spec:
             continue
         for index, row_number in enumerate(spec["rows"]):
-            if index >= len(rows):
+            clear_default = clear_attention_defaults and name == STATION_H_ATTENTION_SECTION
+            if index >= len(rows) and not clear_default:
                 break
-            cells = rows[index].get("cells", {})
+            cells = rows[index].get("cells", {}) if index < len(rows) else {}
             for column in spec["columns"]:
                 value = str(cells.get(column["key"], "") or "").strip()
-                if value:
+                if value or clear_default:
                     result[f"{column['key']}{row_number}"] = value
     return result
+
+
+def station_h_section_overflow(sections: Any) -> List[Dict[str, Any]]:
+    normalized = normalize_station_h_sections(sections)
+    overflow = []
+    for spec in station_h_section_schema():
+        count = len(spec["rows"])
+        rows = [
+            (index, row["cells"])
+            for index, row in enumerate(normalized[spec["name"]][count:], start=count + 1)
+            if any(value.strip() for value in row["cells"].values())
+        ]
+        if rows:
+            overflow.append({"name": spec["name"], "columns": spec["columns"], "rows": rows})
+    return overflow
 
 
 __all__ = [
     "STATION_H_EXCLUDED_SECTIONS",
     "station_h_section_schema",
+    "station_h_section_overflow",
     "station_h_section_cells",
     "normalize_station_h_sections",
     "build_station_h_section_cell_values",

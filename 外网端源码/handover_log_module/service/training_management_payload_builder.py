@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -91,14 +92,23 @@ class TrainingManagementPayloadBuilder:
         self.http_get = http_get or requests.get
         self.now = now or (lambda: datetime.now(BEIJING))
 
-    def build(self, *, building: str, duty_date: str, current_people: Any, next_people: Any,
-              emit_log: Callable[[str], None] = print) -> dict[str, Any]:
-        target = date.fromisoformat(duty_date)
-        if not self.config.get("enabled", True):
-            return {TRAINING_SECTION: []}
-        if target.strftime("%Y-%m") != self.now().strftime("%Y-%m"):
-            raise ValueError("培训接口只提供当月数据；已保留该历史班次的培训内容")
-        api_key = str(self.config.get("api_key") or os.environ.get("HANDOVER_TRAINING_API_KEY", "")).strip()
+    def _api_key(self) -> str:
+        return str(self.config.get("api_key") or os.environ.get("HANDOVER_TRAINING_API_KEY", "")).strip()
+
+    def preview_cache_key(self, duty_date: str) -> tuple[str, str] | None:
+        month = date.fromisoformat(duty_date).strftime("%Y-%m")
+        key = self._api_key()
+        if not self.config.get("enabled", True) or month != self.now().strftime("%Y-%m") or not key or "*" in key:
+            return None
+        return month, hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+    def fetch_latest_by_id(self, *, emit_log: Callable[[str], None] = print) -> dict[str, tuple[datetime, dict[str, Any]]]:
+        """拉取一次接口（room=南通，一次返回所有楼），校验并按 taskId 取最新通知。
+
+        返回 ``{taskId: (notice_datetime, item)}``，供“每次生成只拉一次、按楼分发”复用。
+        失败抛 ValueError（调用方据此保留原有内容，不覆盖）。
+        """
+        api_key = self._api_key()
         if not api_key or "*" in api_key:
             raise ValueError("未配置培训接口密钥，请在后端 training_management_section.api_key 中配置")
         try:
@@ -132,6 +142,30 @@ class TrainingManagementPayloadBuilder:
             previous = latest_by_id.get(task_id)
             if previous is None or notice > previous[0]:
                 latest_by_id[task_id] = (notice, item)
+        return latest_by_id
+
+    def preload(self, *, duty_date: str, emit_log: Callable[[str], None] = print) -> dict[str, tuple[datetime, dict[str, Any]]]:
+        """生成前预加载一次（含所有楼），返回 latest_by_id 供各楼 build(preloaded_items=...) 复用。
+
+        禁用或目标日期非当月时返回 {}（不拉取）：非当月班次的原有内容由 build 的当月校验保留。
+        """
+        if not self.config.get("enabled", True):
+            return {}
+        target = date.fromisoformat(duty_date)
+        if target.strftime("%Y-%m") != self.now().strftime("%Y-%m"):
+            return {}
+        return self.fetch_latest_by_id(emit_log=emit_log)
+
+    def build(self, *, building: str, duty_date: str, current_people: Any, next_people: Any,
+              emit_log: Callable[[str], None] = print,
+              preloaded_items: dict[str, tuple[datetime, dict[str, Any]]] | None = None) -> dict[str, Any]:
+        target = date.fromisoformat(duty_date)
+        if not self.config.get("enabled", True):
+            return {TRAINING_SECTION: []}
+        if target.strftime("%Y-%m") != self.now().strftime("%Y-%m"):
+            raise ValueError("培训接口只提供当月数据；已保留该历史班次的培训内容")
+        # preloaded_items 由编排器“每次生成拉取一次”后按楼分发；为 None 时（H 交付、审核页刷新等单楼调用）自行拉取。
+        latest_by_id = self.fetch_latest_by_id(emit_log=emit_log) if preloaded_items is None else preloaded_items
         rows = []
         people = training_people(current_people, next_people)
         for task_id, (notice, item) in sorted(latest_by_id.items(), key=lambda pair: (pair[1][0], pair[0])):

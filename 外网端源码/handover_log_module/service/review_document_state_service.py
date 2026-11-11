@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from app.shared.utils.atomic_file import atomic_save_workbook
+from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
@@ -1190,6 +1191,7 @@ class ReviewDocumentStateService:
                 inventory_block=self._footer_defaults.build_inventory_block(rows),
                 emit_log=emit_log,
             )
+            wrap_and_fit_rows(ws)
             atomic_save_workbook(workbook, output_path, temp_suffix=".tmp")
         finally:
             workbook.close()

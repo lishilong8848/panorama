@@ -42,19 +42,10 @@
             v-if="showCapacityImageSendAction"
             class="btn btn-secondary btn-mini"
             @click="sendCurrentCapacityImage"
-            :disabled="capacityImageSendActionVm.disabled || attachmentDeliveryBusy || !attachmentDeliveryGate.can_send"
+            :disabled="capacityImageSendActionVm.disabled || attachmentDeliveryBusy"
             :title="capacityImageSendActionVm.disabledReason || ''"
           >
             {{ capacityImageSendActionVm.text }}
-          </button>
-          <button
-            v-if="showRegenerateAction"
-            class="btn btn-warning btn-mini"
-            @click="regenerateCurrentReview"
-            :disabled="regenerateActionVm.disabled || attachmentDeliveryBusy"
-            :title="regenerateActionVm.disabledReason || ''"
-          >
-            {{ regenerateActionVm.text }}
           </button>
           <a
             v-if="attachmentDeliveryRecordUrl"
@@ -206,7 +197,15 @@
 
     <section class="review-current-view-section" v-if="showRegenerateAction">
       <article class="review-card">
-        <div class="review-card-head"><h2>上传源文件生成</h2></div>
+        <div class="review-card-head">
+          <h2>源文件与生成</h2>
+          <button v-if="session" class="btn btn-warning btn-mini" type="button"
+            @click="regenerateCurrentReview"
+            :disabled="regenerateActionVm.disabled || attachmentDeliveryBusy"
+            :title="regenerateActionVm.disabledReason || ''">
+            {{ regenerateActionVm.text }}
+          </button>
+        </div>
         <div class="review-fixed-fields">
           <label class="review-field">
             <span class="review-field-label">交接班日志（李世龙）源文件</span>

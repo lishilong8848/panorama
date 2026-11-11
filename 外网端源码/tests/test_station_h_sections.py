@@ -48,7 +48,7 @@ def test_section_cells_cover_data_rows_and_exclude_training():
     assert "B31" not in cells and "G31" not in cells
 
 
-def test_normalize_drops_out_of_range_rows_and_unknown_columns():
+def test_normalize_retains_added_rows_and_drops_unknown_columns():
     normalized = normalize_station_h_sections({
         "新事件处理": [{"cells": {"B": "一级", "H": 42, "ZZZ": "x"}}, {"cells": {"B": "越界行"}}],
         "不存在的分类": [{"cells": {"B": "x"}}],
@@ -56,8 +56,9 @@ def test_normalize_drops_out_of_range_rows_and_unknown_columns():
     # 总是按 schema 产出全部 7 个分类；schema 外分类忽略
     assert set(normalized) == set(EXPECTED_SECTIONS)
     event = normalized["新事件处理"]
-    assert len(event) == 1  # 模板只有 1 行，越界行丢弃
+    assert len(event) == 2
     assert event[0]["cells"] == {"B": "一级", "C": "", "D": "", "F": "", "H": "42"}  # 非法列丢弃、缺列补空、值转字符串
+    assert event[1]["cells"]["B"] == "越界行"
     assert normalized["三、注意事项交接"] == [
         {"cells": {"B": "", "H": ""}}, {"cells": {"B": "", "H": ""}}, {"cells": {"B": "", "H": ""}},
     ]
@@ -136,22 +137,76 @@ def test_sections_revision_rejects_stale_editor_and_preserves_latest(tmp_path):
     assert cleared["sections"]["新事件处理"][0]["cells"]["D"] == ""
 
 
+def test_previous_shift_attention_inherits_but_deleted_rows_stay_deleted(tmp_path):
+    repository = AppStateRepository(app_dir=tmp_path)
+    repository.ensure_ready()
+    service = StationHReviewSelectionService({}, app_state_repository=repository)
+    people = dict(current_people="甲", next_people="乙", long_day_people=[])
+    attention = "三、注意事项交接"
+    rows = [{"cells": {"B": "上一班注意事项", "H": "甲"}}]
+    service.save_selection(duty_date="2026-11-09", duty_shift="night", sections={attention: rows}, **people)
+    context = dict(duty_date="2026-11-10", duty_shift="day")
+    assert service.resolve_selection(**context)["sections"][attention] == rows
+    service.save_selection(**context, sections={attention: []}, base_sections_revision=0, **people)
+    cleared = service.resolve_selection(**context)
+    assert cleared["sections"][attention] == []
+    assert build_station_h_section_cell_values(
+        cleared["sections"], clear_attention_defaults=cleared["attention_handover_saved"],
+    ) == {"B40": "", "H40": "", "B41": "", "H41": "", "B42": "", "H42": ""}
+    assert service.resolve_selection(duty_date="2026-11-10", duty_shift="night")["sections"][attention] == []
+
+
+def test_deleted_training_row_is_not_reinserted_on_save(tmp_path):
+    repository = AppStateRepository(app_dir=tmp_path)
+    repository.ensure_ready()
+    service = StationHReviewSelectionService({}, app_state_repository=repository)
+    args = dict(duty_date="2026-11-10", duty_shift="day", current_people="甲", next_people="乙", long_day_people=[])
+    row = {"row_id": "training:1", "cells": {"B": "培训"}}
+    service.save_selection(**args, training_rows=[row])
+    saved = service.save_selection(**args, training_rows=[], deleted_training_row_ids=["training:1"])
+    assert saved["training_rows"] == []
+    reopened = service.get_selection(args["duty_date"], args["duty_shift"])
+    assert reopened["deleted_training_row_ids"] == ["training:1"]
+    assert service.save_selection(**args, training_rows=[row], append_training_only=True)["training_rows"] == []
+
+
+def test_saving_unedited_training_preview_does_not_overwrite_newer_saved_edit(tmp_path):
+    repository = AppStateRepository(app_dir=tmp_path)
+    repository.ensure_ready()
+    service = StationHReviewSelectionService({}, app_state_repository=repository)
+    args = dict(duty_date="2026-11-10", duty_shift="day", current_people="甲", next_people="乙", long_day_people=[])
+    service.save_selection(**args, training_rows=[{"row_id": "training:1", "cells": {"B": "已编辑"}}])
+    saved = service.save_selection(**args, training_rows=[
+        {"row_id": "training:1", "cells": {"B": "旧的预览"}},
+        {"row_id": "training:2", "cells": {"B": "新培训"}},
+    ], unedited_training_row_ids=["training:1", "training:2"])
+    assert [row["cells"]["B"] for row in saved["training_rows"]] == ["已编辑", "新培训"]
+
+
 def test_section_cells_land_in_generated_workbook(tmp_path):
     """端到端：分类单元格经 build_station_h_workbook 真正写进 H_handover.xlsx；未填写分类保留模板默认。"""
     import openpyxl
     from handover_log_module.service.handover_attachment_workbook_builder import (
         build_station_h_workbook, default_station_h_template_path,
     )
+    from handover_log_module.service.station_h_section_schema import station_h_section_overflow
 
     template = default_station_h_template_path()
     if not template.is_file():
         pytest.skip("H楼模板不存在")
-    section_cells = build_station_h_section_cell_values({
-        "新事件处理": [{"cells": {"B": "一级", "C": "10:00", "D": "=1+1", "F": "已恢复", "H": "张三"}}],
+    sections = {
+        "新事件处理": [
+            {"cells": {"B": "一级", "C": "10:00", "D": "=1+1", "F": "已恢复", "H": "张三"}},
+            {"cells": {"B": "二级", "D": "=" + "需跟进长描述" * 36, "H": "王五"}},
+        ],
         "园区施工管理": [{"cells": {"B": "施工方A", "F": "进行中", "H": "李四"}}],
-    })
+    }
+    section_cells = build_station_h_section_cell_values(sections)
     out = tmp_path / "H_handover.xlsx"
-    build_station_h_workbook(template, out, {"B2": "2026年11月10日", "F2": "白班", **section_cells})
+    build_station_h_workbook(
+        template, out, {"B2": "2026年11月10日", "F2": "白班", **section_cells},
+        section_overflow=station_h_section_overflow(sections),
+    )
     workbook = openpyxl.load_workbook(str(out), data_only=False)
     try:
         ws = workbook["H楼"] if "H楼" in workbook.sheetnames else workbook.worksheets[0]
@@ -165,5 +220,12 @@ def test_section_cells_land_in_generated_workbook(tmp_path):
         assert ws["H28"].value == "李四"
         # 未填写的注意事项分类保留模板常备文本（未被空值清空）
         assert ws["B40"].value not in (None, "")
+        assert ws["D19"].alignment.wrap_text
+        continuation = workbook["分类续表"]
+        assert continuation["A3"].value == 2
+        assert continuation["D3"].data_type == "s"
+        assert continuation["F3"].value == "王五"
+        assert continuation["D3"].alignment.wrap_text
+        assert continuation.row_dimensions[3].height > 30
     finally:
         workbook.close()

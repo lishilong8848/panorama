@@ -45,7 +45,9 @@ from handover_log_module.service.station_h_review_selection_service import (
     station_h_normalize_duty_people,
 )
 from handover_log_module.service.station_h_duty_focus_service import StationHDutyFocusService
-from handover_log_module.service.station_h_section_schema import build_station_h_section_cell_values
+from handover_log_module.service.station_h_section_schema import (
+    build_station_h_section_cell_values, station_h_section_overflow,
+)
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
 )
@@ -1894,16 +1896,21 @@ class ReviewFollowupTriggerService:
                 selection["training_rows"] = latest_selection.get("training_rows", training_rows)
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][H楼培训管理] 读取失败，保留已保存培训内容: {exc}")
-        # H楼保留现有模板合并结构，多项培训在同一行各字段中按相同顺序换行。
         training_rows = selection.get("training_rows", [])
+        if isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
+            # Keep the template's fixed training row; the attachment continues on a separate sheet.
+            training_rows = training_rows[:1]
         if training_rows:
             cells.update({f"{column}31": "\n".join(str(row.get("cells", {}).get(column) or "")
                                                 for row in training_rows) for column in TRAINING_COLUMNS})
         # H楼业务分类：把已保存分类数据按模板既有数据行写入绝对单元格（仅非空值；空值保留模板默认，
         # 如 / 占位与注意事项常备文本）。在既有扁平单元格之后 update：操作者填写值（含 H40:H42 执行人）
-        # 覆盖自动默认，未填写则保留默认。只填既有行、绝不插行/删行，故不位移培训行(31)与页脚(45:48)。
+        # 主表只填既有行，超出模板的记录由附件构建器写入分类续表。
         try:
-            cells.update(build_station_h_section_cell_values(selection.get("sections", {})))
+            cells.update(build_station_h_section_cell_values(
+                selection.get("sections", {}),
+                clear_attention_defaults=bool(selection.get("attention_handover_saved")),
+            ))
         except Exception as exc:  # noqa: BLE001
             emit_log(f"[交接班][H楼附件] 业务分类数据映射失败，已跳过分类写入: {exc}")
         return {"ok": True, "cells": cells, "selection": selection,
@@ -2004,6 +2011,21 @@ class ReviewFollowupTriggerService:
                     f"[交接班][H楼附件] 值班关注点图片生成失败，H楼正文继续同步 "
                     f"batch={batch_key}, error={exc}"
                 )
+            overflow = []
+            if isinstance(self._cloud_sheet_sync_service, HandoverAttachmentDeliveryService):
+                selection = cell_result.get("selection", {})
+                overflow = station_h_section_overflow(selection.get("sections"))
+                extra_training = [
+                    (index, row["cells"])
+                    for index, row in enumerate(selection.get("training_rows", [])[1:], start=2)
+                    if any(value.strip() for value in row["cells"].values())
+                ]
+                if extra_training:
+                    overflow.append({
+                        "name": TRAINING_SECTION,
+                        "columns": [{"key": key, "label": label} for key, label in TRAINING_COLUMNS.items()],
+                        "rows": extra_training,
+                    })
             station_result = self._cloud_sheet_sync_service.sync_station_h_sheet(
                 batch_meta=latest_batch_meta,
                 cell_values=cell_result.get("cells", {}),
@@ -2014,6 +2036,7 @@ class ReviewFollowupTriggerService:
                 ),
                 emit_log=emit_log,
                 **({"is_current": is_current} if independent else {}),
+                **({"section_overflow": overflow} if overflow else {}),
             )
             if isinstance(station_result, dict):
                 station_result.setdefault("spreadsheet_token", token)
@@ -2050,12 +2073,17 @@ class ReviewFollowupTriggerService:
     def publish_station_h_attachment(self, *, batch_key, historical=False, emit_log=print, runtime=None):
         duty_date, duty_shift = self._review_service.parse_batch_key(batch_key)
         with attachment_record_lock(f"station-h:{batch_key}"):
-            saved = self._station_h_review_selection_service.get_selection(duty_date, duty_shift)
+            def current_selection():
+                return self._station_h_review_selection_service.resolve_selection(
+                    duty_date=duty_date, duty_shift=duty_shift,
+                )
+
+            saved = current_selection()
 
             def is_current():
                 if runtime is not None:
                     runtime.raise_if_cancelled()
-                return saved == self._station_h_review_selection_service.get_selection(duty_date, duty_shift)
+                return saved == current_selection()
 
             result = self._attach_station_h_sync_result(
                 batch_key=batch_key,

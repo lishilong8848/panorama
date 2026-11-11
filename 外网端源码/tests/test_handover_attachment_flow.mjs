@@ -176,7 +176,7 @@ function createHarness(overrides = {}) {
     },
     prepareHandoverReviewCapacityImageApi: async (building, body) => {
       calls.send.push({ step: "prepare", building, body });
-      return { send_token: "token-1" };
+      return { send_token: "token-1", generation_id: overrides.sendGenerationId || "gen-5" };
     },
     sendHandoverReviewCapacityImageApi: async (building, body) => {
       calls.send.push({ step: "send", building, body });
@@ -355,8 +355,8 @@ await test("download/send/regenerate are blocked while the building job is queue
     { expectedGenerationId: "gen-1" }).can_refresh, true);
 });
 
-await test("stale generation keeps send locked but download falls back to the raw file", async () => {
-  const harness = createHarness();
+await test("stale generation downloads the current file and sends only a fresh snapshot", async () => {
+  const harness = createHarness({ sendGenerationId: "direct:current" });
   harness.refs.attachmentDelivery.value = normalizeAttachmentDelivery({
     status: "ready",
     artifacts_ready: true,
@@ -376,9 +376,11 @@ await test("stale generation keeps send locked but download falls back to the ra
     "stale 成品 artifact is never served",
   );
 
-  // 发送审核文本/容量表图片仍要求当前版本成品就绪，过期时保持锁定。
+  // A stale attachment must not force the user to publish before manually sending.
   await harness.helpers.sendCurrentCapacityImage(async () => null);
-  assert.equal(harness.calls.send.length, 0);
+  assert.equal(harness.calls.send.length, 2);
+  assert.equal(harness.calls.send[0].body.generation_id, undefined);
+  assert.equal(harness.calls.send[1].body.generation_id, "direct:current");
 });
 
 await test("failed generation surfaces the error and permits a retry", async () => {
@@ -436,7 +438,7 @@ await test("send uses this generation and never fires during generation", async 
 
   await harness.helpers.sendCurrentCapacityImage(async () => null);
   assert.equal(harness.calls.send.length, 2);
-  assert.equal(harness.calls.send[0].body.generation_id, "gen-5");
+  assert.equal(harness.calls.send[0].body.generation_id, undefined);
   assert.equal(harness.calls.send[1].body.generation_id, "gen-5");
 
   // Generating never triggers a send by itself.

@@ -159,6 +159,7 @@ class HandoverDeliveryPrepareService:
         runtime: Any = None,
         *,
         expected_document_revision: int | None = None,
+        temporary_root: Path | None = None,
     ) -> Dict[str, Any]:
         def check_cancelled() -> None:
             if runtime is not None:
@@ -169,7 +170,7 @@ class HandoverDeliveryPrepareService:
         initial_session = self.review_service.get_session_by_id(session_id)
         if not isinstance(initial_session, dict):
             raise ReviewSessionNotFoundError("审核会话不存在")
-        self.document_state.ensure_document_for_session(initial_session)
+        self.document_state.ensure_document_for_session(initial_session, preserve_existing=True)
         snapshot = self._snapshot(session_id)
         session, state, shared = snapshot
         revision = int(session["revision"])
@@ -233,7 +234,7 @@ class HandoverDeliveryPrepareService:
             raise HandoverDeliveryPrepareRetryableError("容量Excel正在后台补写，请稍后重新提交")
 
         sources = {"log": Path(session["output_file"]), "capacity": Path(session["capacity_output_file"])}
-        session_root = _runtime_root(self.config) / "handover" / "delivery" / hashlib.sha256(
+        session_root = temporary_root or _runtime_root(self.config) / "handover" / "delivery" / hashlib.sha256(
             session_id.encode("utf-8")
         ).hexdigest()
         session_root.mkdir(parents=True, exist_ok=True)

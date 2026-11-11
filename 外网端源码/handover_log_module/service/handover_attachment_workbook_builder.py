@@ -3,7 +3,7 @@
 复制 ``H楼交接班日志空模板.xlsx``，把 ``cell_values`` 的值写入对应单元格，并按需
 把独立值班关注点图片放在 ``J2``；模板的合并区域、样式、行列尺寸与打印设置保留。
 
-* 只改 ``.value``；写入合并区域内坐标时落到该区域左上角，同一锚点出现不同值
+* 写入合并区域内坐标时落到该区域左上角，同一锚点出现不同值
   直接报错，不静默覆盖。
 * 图片按原始字节写入（不转码），等比缩放且宽度不超过 900px，锚定 ``J2``；浮动
   图片不改变行列尺寸，也不扩大打印范围。
@@ -26,11 +26,14 @@ import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from openpyxl.utils.exceptions import CellCoordinatesException
 from openpyxl.utils.units import pixels_to_EMU
 from PIL import Image as PILImage
+
+from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
 
 STATION_H_DEFAULT_SHEET_TITLE = "H楼"
 STATION_H_TEMPLATE_FILE_NAME = "H楼交接班日志空模板.xlsx"
@@ -183,6 +186,8 @@ def build_station_h_workbook(
     output_path: str | Path,
     cell_values: Mapping[str, Any],
     image_path: Optional[str | Path] = None,
+    *,
+    section_overflow: Optional[list[dict[str, Any]]] = None,
 ) -> Path:
     """基于 H楼模板生成填充后的工作簿，返回最终 ``output_path``。
 
@@ -207,14 +212,26 @@ def build_station_h_workbook(
                 workbook.worksheets[0].title = STATION_H_DEFAULT_SHEET_TITLE
             worksheet = workbook[STATION_H_DEFAULT_SHEET_TITLE]
             _write_values(worksheet, cell_values)
-            training_lines = max(
-                str(cell_values.get(f"{column}31") or "").count("\n") + 1 for column in "BDEFG"
-            )
-            if training_lines > 1:
-                row = worksheet.row_dimensions[31]
-                row.height = max(row.height or 0, min(409, 30 * training_lines))
+            wrap_and_fit_rows(worksheet)
             if image is not None:
                 _insert_duty_focus_image(worksheet, *image)
+            if section_overflow:
+                continuation = workbook.create_sheet("分类续表")
+                continuation.column_dimensions["A"].width = 8
+                for section in section_overflow:
+                    continuation.append([section["name"]])
+                    continuation.cell(continuation.max_row, 1).font = Font(bold=True)
+                    columns = section["columns"]
+                    continuation.append(["序号", *(column["label"] or column["key"] for column in columns)])
+                    for index, cells in section["rows"]:
+                        continuation.append([index, *(cells.get(column["key"], "") for column in columns)])
+                        for cell in continuation[continuation.max_row]:
+                            if isinstance(cell.value, str):
+                                cell.data_type = "s"
+                    for index in range(2, len(columns) + 2):
+                        continuation.column_dimensions[get_column_letter(index)].width = 28
+                    continuation.append([""])
+                wrap_and_fit_rows(continuation)
             return _atomic_save_workbook(workbook, output)
         finally:
             workbook.close()

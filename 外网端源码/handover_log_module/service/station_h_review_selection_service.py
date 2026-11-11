@@ -11,7 +11,9 @@ from typing import Any, Dict, Iterable, List, Sequence
 from app.core.app_state import AppStateRepository
 from pipeline_utils import get_app_dir
 from handover_log_module.service.training_management_payload_builder import normalize_training_rows, append_training_rows
-from handover_log_module.service.station_h_section_schema import normalize_station_h_sections
+from handover_log_module.service.station_h_section_schema import (
+    STATION_H_ATTENTION_SECTION, normalize_station_h_sections,
+)
 
 
 STATION_H_REVIEW_NAMESPACE = "station_h_review"
@@ -206,6 +208,8 @@ class StationHReviewSelectionService:
         training_rows: Any = None,
         sections: Any = None,
         base_sections_revision: int | None = None,
+        deleted_training_row_ids: list[str] | None = None,
+        unedited_training_row_ids: list[str] | None = None,
         append_training_only: bool = False,
         source: str = "manual",
     ) -> Dict[str, Any]:
@@ -247,14 +251,26 @@ class StationHReviewSelectionService:
             row = conn.execute("SELECT payload_json FROM runtime_kv WHERE namespace=? AND key=?",
                                (STATION_H_REVIEW_NAMESPACE, payload["batch_key"])).fetchone()
             latest = self._normalize_payload(json.loads(row["payload_json"])) if row else {}
+            latest_training = latest.get("training_rows", [])
             if append_training_only:
                 incoming = payload["training_rows"]
                 payload = {**(latest or payload), "updated_at": _now_text()}
-                payload["training_rows"] = append_training_rows(latest.get("training_rows", []), incoming)
+                payload["training_rows"] = append_training_rows(latest_training, incoming)
             elif training_rows is None:
-                payload["training_rows"] = deepcopy(latest.get("training_rows", []))
+                payload["training_rows"] = deepcopy(latest_training)
             else:
-                payload["training_rows"] = append_training_rows(payload["training_rows"], latest.get("training_rows", []))
+                unedited_ids = set(unedited_training_row_ids or [])
+                latest_by_id = {item["row_id"]: item for item in latest_training}
+                incoming = [
+                    latest_by_id.get(item["row_id"], item) if item["row_id"] in unedited_ids else item
+                    for item in payload["training_rows"]
+                ]
+                payload["training_rows"] = append_training_rows(incoming, latest_training)
+            deleted = set(latest.get("deleted_training_row_ids", []))
+            if not append_training_only:
+                deleted.update(deleted_training_row_ids or [])
+            payload["deleted_training_row_ids"] = sorted(deleted)
+            payload["training_rows"] = [item for item in payload["training_rows"] if item["row_id"] not in deleted]
             if duty_focus is None and latest:
                 payload["duty_focus"] = deepcopy(latest.get("duty_focus", {}))
             latest_sections = latest.get("sections") if latest else normalize_station_h_sections({})
@@ -263,6 +279,12 @@ class StationHReviewSelectionService:
                 payload["sections"] = latest_sections
             elif base_sections_revision is not None and base_sections_revision != latest_sections_revision:
                 raise StationHSectionsConflictError("H楼分类已被更新，请保留未保存的修改，刷新后再编辑")
+            payload["attention_handover_saved"] = bool(
+                latest.get("attention_handover_saved")
+                or (not append_training_only and isinstance(sections, dict)
+                    and STATION_H_ATTENTION_SECTION in sections
+                    and payload["sections"].get(STATION_H_ATTENTION_SECTION) != latest_sections.get(STATION_H_ATTENTION_SECTION))
+            )
             payload["sections_revision"] = latest_sections_revision + int(payload["sections"] != latest_sections)
             payload["training_rows"] = normalize_training_rows(payload["training_rows"])
             conn.execute("""INSERT INTO runtime_kv(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)
@@ -281,9 +303,7 @@ class StationHReviewSelectionService:
         exact = self.get_selection(duty_date_text, duty_shift_text)
         if exact is not None:
             exact["resolved_source"] = "current"
-            return exact
-
-        return self._normalize_payload(
+        selection = exact if exact is not None else self._normalize_payload(
             {
                 "duty_date": duty_date_text,
                 "duty_shift": duty_shift_text,
@@ -298,6 +318,24 @@ class StationHReviewSelectionService:
                 "updated_at": "",
             }
         )
+        if self._has_saved_attention(selection):
+            selection["attention_handover_saved"] = True
+        else:
+            for previous in self._previous_shift_candidates(duty_date_text, duty_shift_text):
+                prior = self.get_selection(previous["duty_date"], previous["duty_shift"])
+                if prior and self._has_saved_attention(prior):
+                    selection["sections"][STATION_H_ATTENTION_SECTION] = deepcopy(prior["sections"][STATION_H_ATTENTION_SECTION])
+                    selection["attention_handover_saved"] = True
+                    break
+        return selection
+
+    @staticmethod
+    def _has_saved_attention(selection: Dict[str, Any]) -> bool:
+        rows = selection.get("sections", {}).get(STATION_H_ATTENTION_SECTION)
+        return isinstance(rows, list) and (
+            bool(selection.get("attention_handover_saved")) or not rows
+            or any(value.strip() for row in rows for value in row["cells"].values())
+        )
 
     def _normalize_payload(self, payload: Dict[str, Any] | None) -> Dict[str, Any]:
         raw = payload if isinstance(payload, dict) else {}
@@ -306,6 +344,7 @@ class StationHReviewSelectionService:
         current_people = station_h_normalize_duty_people(raw.get("current_people", raw.get("current_people_text", "")))
         next_people = station_h_normalize_duty_people(raw.get("next_people", raw.get("next_people_text", "")))
         long_day_people = self._normalize_long_day_people(raw.get("long_day_people", raw.get("long_day_people_text", "")))
+        deleted_training = raw.get("deleted_training_row_ids")
         return {
             **raw,
             "duty_date": duty_date,
@@ -320,6 +359,7 @@ class StationHReviewSelectionService:
             "duty_focus": deepcopy(raw.get("duty_focus", {})) if isinstance(raw.get("duty_focus", {}), dict) else {},
             "sections": normalize_station_h_sections(raw.get("sections", {})),
             "sections_revision": int(raw.get("sections_revision", 0) or 0),
+            "deleted_training_row_ids": [item for item in deleted_training if isinstance(item, str)] if isinstance(deleted_training, list) else [],
             "updated_at": str(raw.get("updated_at", "") or "").strip(),
             "source": str(raw.get("source", "") or "").strip(),
             "resolved_source": str(raw.get("resolved_source", "") or "").strip(),

@@ -187,7 +187,7 @@ class HandoverAttachmentDeliveryService:
         return result
 
     def sync_station_h_sheet(self, *, batch_meta, cell_values, duty_focus_image_path=None,
-                             skip_values=False, emit_log=print, is_current=None):
+                             skip_values=False, emit_log=print, is_current=None, section_overflow=None):
         title = "H楼"
         if not self._enabled():
             return self._base(batch_meta, status="skipped", error="disabled", sheet_title=title)
@@ -210,12 +210,17 @@ class HandoverAttachmentDeliveryService:
             target = output / "H_handover.xlsx"
             # skip_values was a remote-cell optimization; attachments are always complete.
             try:
-                build_station_h_workbook(self.station_h_template_path(), target, cell_values, image_path=image)
+                build_station_h_workbook(
+                    self.station_h_template_path(), target, cell_values, image_path=image,
+                    section_overflow=section_overflow,
+                )
             except Exception as exc:
                 if image is None:
                     raise
                 image_error, image = str(exc), None
-                build_station_h_workbook(self.station_h_template_path(), target, cell_values, image_path=None)
+                build_station_h_workbook(
+                    self.station_h_template_path(), target, cell_values, section_overflow=section_overflow,
+                )
             files = {target.name: self._require_file(target, workbook=True)}
             if image is not None:
                 files[image.name] = image

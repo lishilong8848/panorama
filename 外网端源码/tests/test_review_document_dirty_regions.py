@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook, load_workbook
 
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
+from handover_log_module.repository.template_writer import copy_template_and_fill
 from handover_log_module.service.handover_xlsx_write_queue_service import HandoverXlsxWriteQueueService
 from handover_log_module.service.review_document_writer import ReviewDocumentWriter
 
@@ -118,6 +122,51 @@ def test_writer_syncs_fixed_cells_when_dirty_region_was_lost(tmp_path: Path) -> 
         assert reloaded.active["B4"].value == "长白岗：新值"
     finally:
         reloaded.close()
+
+
+@pytest.mark.parametrize("building", ["A楼", "B楼", "C楼", "D楼", "E楼"])
+def test_generated_log_wraps_merged_text_and_refits_after_review_save(tmp_path: Path, building: str) -> None:
+    template = Path(__file__).resolve().parents[1] / "交接班日志空模板.xlsx"
+    original = load_workbook_quietly(template)
+    try:
+        initial_height = original["交接班日志"].row_dimensions[4].height
+        cover_title = original["封面"]["A1"].value
+    finally:
+        original.close()
+
+    initial = "本班交接内容较长，需要自动换行。" * 5
+    config = {"template": {"source_path": str(template), "sheet_name": "交接班日志", "output_dir": str(tmp_path)}}
+    output = copy_template_and_fill(
+        building=building, template_cfg=config["template"], cell_values={"B4": initial},
+        date_ref=datetime(2026, 11, 10), duty_date="2026-11-10", duty_shift="day",
+    )
+    workbook = load_workbook(output)
+    try:
+        sheet = workbook["交接班日志"]
+        assert sheet["B4"].value == initial
+        assert sheet["B4"].alignment.wrap_text
+        assert "B4:D4" in sheet.merged_cells
+        fitted_height = sheet.row_dimensions[4].height
+        assert fitted_height > initial_height
+        assert workbook["封面"]["A1"].value == cover_title
+    finally:
+        workbook.close()
+
+    updated = initial + "\n" + "审核补充内容。" * 12
+    ReviewDocumentWriter(config).write(
+        output_file=str(output),
+        document={"title": "交接班日志", "fixed_blocks": [{"fields": [{"cell": "B4", "value": updated}]}]},
+        dirty_regions={"fixed_blocks": True},
+    )
+    workbook = load_workbook(output)
+    try:
+        sheet = workbook["交接班日志"]
+        assert sheet["B4"].value == updated
+        assert sheet["B4"].alignment.wrap_text
+        assert sheet.row_dimensions[4].height > fitted_height
+        assert "B4:D4" in sheet.merged_cells
+    finally:
+        workbook.close()
 
 
 def test_writer_trims_section_cell_boundary_whitespace() -> None:

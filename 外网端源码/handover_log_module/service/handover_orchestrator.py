@@ -92,6 +92,9 @@ class HandoverQueryContext:
     exercise_rows_by_building: ExerciseRowsByBuilding | None = None
     maintenance_rows_by_building: MaintenanceRowsByBuilding | None = None
     other_important_work_rows_by_building: OtherImportantWorkRowsByBuilding | None = None
+    # 培训接口“每次生成只拉取一次”的预加载结果（{taskId: (notice, item)}，含所有楼），按楼分发；
+    # None 表示未预加载（各楼 build 回退为自行拉取），{} 表示已拉取但无数据/预加载失败。
+    training_items: Dict[str, Any] | None = None
 
 
 class HandoverOrchestrator:
@@ -425,6 +428,10 @@ class HandoverOrchestrator:
                 )[0],
                 "[交接班][其他重要工作] 批量预取失败，后续按单楼兜底读取",
             ),
+            "training_items": (
+                lambda: self._preload_training_items(context.duty_date, emit_log),
+                "[交接班][培训管理] 批量预取失败，已按空培训继续（可在审核页刷新重试）",
+            ),
         }
         max_workers = min(4, max(1, len(task_specs)))
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="handover-prefetch") as executor:
@@ -448,6 +455,18 @@ class HandoverOrchestrator:
                     continue
                 setattr(context, name, payload)
         return context
+
+    def _preload_training_items(self, duty_date: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+        """生成前拉取一次培训接口（room=南通，一次返回所有楼），供各楼 build(preloaded_items=...) 复用。
+
+        失败按空处理（返回 {}）：不阻断生成，各楼培训留空，操作者可在审核页“刷新”重试。
+        返回 {} 而非 None，避免各楼 build 回退为自行拉取导致一次生成打多次接口。
+        """
+        try:
+            return TrainingManagementPayloadBuilder(self.config).preload(duty_date=duty_date, emit_log=emit_log)
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][培训管理] 批量预取失败，已按空培训继续，可在审核页刷新重试: {exc}")
+            return {}
 
     def _build_shift_roster_fixed_values(
         self,
@@ -1062,6 +1081,7 @@ class HandoverOrchestrator:
         exercise_rows_by_building: ExerciseRowsByBuilding | None = None,
         maintenance_rows_by_building: MaintenanceRowsByBuilding | None = None,
         other_important_work_rows_by_building: OtherImportantWorkRowsByBuilding | None = None,
+        training_items: Dict[str, Any] | None = None,
         long_day_values: Dict[str, str] | None = None,
         engineer_directory_records: List[Dict[str, str]] | None = None,
         alarm_selection_snapshot: Dict[str, Any] | None = None,
@@ -1163,6 +1183,7 @@ class HandoverOrchestrator:
                 combined_category_payloads.update(TrainingManagementPayloadBuilder(self.config).build(
                     building=building, duty_date=duty_date_text,
                     current_people=current_people_text, next_people=next_people_text, emit_log=emit_log,
+                    preloaded_items=training_items,
                 ))
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][培训管理] 自动读取失败，可在审核页刷新重试: {exc}")
@@ -1893,6 +1914,7 @@ class HandoverOrchestrator:
                     exercise_rows_by_building=query_context.exercise_rows_by_building,
                     maintenance_rows_by_building=query_context.maintenance_rows_by_building,
                     other_important_work_rows_by_building=query_context.other_important_work_rows_by_building,
+                    training_items=query_context.training_items,
                     long_day_values=query_context.long_day_values_by_building.get(building),
                     engineer_directory_records=query_context.engineer_directory_records,
                     alarm_selection_snapshot=alarm_selection_snapshot,
@@ -2199,6 +2221,7 @@ class HandoverOrchestrator:
                     exercise_rows_by_building=query_context.exercise_rows_by_building,
                     maintenance_rows_by_building=query_context.maintenance_rows_by_building,
                     other_important_work_rows_by_building=query_context.other_important_work_rows_by_building,
+                    training_items=query_context.training_items,
                     long_day_values=query_context.long_day_values_by_building.get(building),
                     engineer_directory_records=query_context.engineer_directory_records,
                     alarm_selection_snapshot=alarm_selection_snapshot,

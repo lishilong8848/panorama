@@ -12,6 +12,7 @@ from handover_log_module.core.footer_layout import (
     FOOTER_INVENTORY_COLUMNS,
     find_footer_inventory_layout,
 )
+from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
 
@@ -193,6 +194,7 @@ class FooterInventoryDefaultsService:
                 inventory_block=self.build_inventory_block(rows),
                 emit_log=emit_log,
             )
+            wrap_and_fit_rows(ws)
             atomic_save_workbook(workbook, output_path, temp_suffix=".tmp")
         finally:
             workbook.close()

@@ -135,6 +135,54 @@ def test_active_regeneration_rejects_file_actions_before_side_effects(monkeypatc
     verify_token.assert_not_called()
 
 
+@pytest.mark.parametrize("changed_during_preparation", [False, True])
+def test_manual_send_can_prepare_current_files_without_submission(monkeypatch, tmp_path, changed_during_preparation):
+    from handover_log_module.service import handover_delivery_prepare_service
+
+    session = _base_session(tmp_path)
+    container = _container()
+    service = Mock()
+    current_revision = 2
+    monkeypatch.setattr(routes, "_build_review_services", lambda _: (service, None, None, None))
+    monkeypatch.setattr(routes, "_build_review_document_state_service", lambda *a, **k: Mock())
+    monkeypatch.setattr(routes, "_resolve_building_or_404", lambda *a: "A楼")
+    monkeypatch.setattr(routes, "_load_target_session_or_404", lambda *a, **k: session)
+    monkeypatch.setattr(routes, "_ensure_latest_session_actionable_or_400", lambda *a, **k: None)
+    monkeypatch.setattr(routes, "_review_delivery_state", lambda *a, **k: {})
+    monkeypatch.setattr(routes, "_review_document_revision_from_store", lambda *_, **__: current_revision)
+    monkeypatch.setattr(routes, "_handover_cfg", lambda _: {})
+    temp_root = _mock_temp(monkeypatch, tmp_path)
+    paths = {"log": "log.xlsx", "capacity": "capacity.xlsx", "image": "capacity.png", "text": "handover.txt"}
+
+    def prepare_files(*_args, **kwargs):
+        nonlocal current_revision
+        assert kwargs["expected_document_revision"] == 2
+        assert kwargs["temporary_root"] == temp_root
+        if changed_during_preparation:
+            current_revision = 3
+        return {"paths": paths}
+
+    monkeypatch.setattr(handover_delivery_prepare_service, "HandoverDeliveryPrepareService",
+                        lambda _: Mock(prepare=prepare_files))
+    sender = Mock()
+    sender.send_for_session.return_value = {"ok": True, "status": "success"}
+    monkeypatch.setattr(routes, "CapacityReportImageDeliveryService", lambda *a, **k: sender)
+    payload = {"session_id": SESSION_ID, "client_id": "client-1", "trigger_source": "capacity_image_send_button"}
+    response = routes.handover_review_capacity_image_prepare("a", _request(container), payload)
+    assert response["generation_id"].startswith("direct:")
+    payload.update(send_token=response["send_token"], generation_id=response["generation_id"])
+
+    if changed_during_preparation:
+        with pytest.raises(HTTPException, match="审核内容已更新"):
+            routes.handover_review_capacity_image_send("a", _request(container), payload)
+        sender.send_for_session.assert_not_called()
+    else:
+        assert routes.handover_review_capacity_image_send("a", _request(container), payload)["ok"]
+        assert sender.send_for_session.call_args.kwargs["prepared_artifacts"] == paths
+        assert sender.send_for_session.call_args.kwargs["manual_trigger"] is True
+    routes.cleanup_runtime_temp_dir.assert_called_once_with(temp_root)
+
+
 def test_display_actions_recover_after_regeneration_and_other_sessions_remain_available(tmp_path):
     session = _base_session(tmp_path)
     active = {f"handover_review_regenerate:{SESSION_ID}": {"status": "queued"}}
