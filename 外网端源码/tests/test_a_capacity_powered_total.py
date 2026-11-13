@@ -1,5 +1,6 @@
 import copy
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -134,12 +135,12 @@ def test_review_save_and_download_keep_both_workbooks_at_same_total(tmp_path, mo
     workbook.save(capacity)
     workbook.close()
     service = HandoverCapacityReportService(config)
-    monkeypatch.setattr(service, "_query_capacity_water_summary", lambda **kwargs: {})
+    water_lookup = Mock(return_value={})
+    monkeypatch.setattr(service, "_query_capacity_water_summary", water_lookup)
     monkeypatch.setattr(service, "query_total_electricity_summary", lambda **kwargs: {})
     monkeypatch.setattr(service, "_fetch_weather_payload_for_duty_date", lambda **kwargs: {})
     monkeypatch.setattr(service, "_a_building_outdoor_cells_for_capacity", lambda **kwargs: {})
     monkeypatch.setattr(service, "_build_load_rate_values_for_sheet", lambda *args, **kwargs: ({}, "", {}))
-    monkeypatch.setattr(service, "build_capacity_overlay_signature", lambda **kwargs: {"signature": "offline"})
     for _ in range(2):
         tracked = service.extract_tracked_cells_from_review_document(state["document"])
         result = service.sync_overlay_for_existing_report_from_cells(
@@ -147,6 +148,7 @@ def test_review_save_and_download_keep_both_workbooks_at_same_total(tmp_path, mo
             capacity_output_file=str(capacity), shared_110kv={}, emit_log=lambda _text: None,
         )
         assert result["status"] == "ready", result
+        assert result["overlay_signature"]
         checked = load_workbook(capacity)
         try:
             sheet = checked["本班组"]
@@ -155,6 +157,7 @@ def test_review_save_and_download_keep_both_workbooks_at_same_total(tmp_path, mo
             assert sheet["AD58"].value == "=AC58/AB58"
         finally:
             checked.close()
+    assert water_lookup.call_count == 2
 
     document = copy.deepcopy(state["document"])
     document["capacity_room_inputs"]["rows"][6]["powered_cabinets"] = "5"

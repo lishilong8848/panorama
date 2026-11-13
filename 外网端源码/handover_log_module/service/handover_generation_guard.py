@@ -15,8 +15,16 @@ _SLOT_WAIT_TIMEOUT_SEC = 60
 
 @contextmanager
 def generation_lock(building, duty_date, duty_shift):
-    key = hashlib.sha256(f"{building}|{duty_date}|{duty_shift}".encode("utf-8")).hexdigest()
-    root = Path(tempfile.gettempdir()) / "panorama_handover_generation_locks"
+    with try_host_file_lock(f"{building}|{duty_date}|{duty_shift}", namespace="generation") as locked:
+        if not locked:
+            raise RuntimeError(f"{building} {duty_date}/{duty_shift} 正在生成，本次重复请求未执行，请等待原任务完成")
+        yield
+
+
+@contextmanager
+def try_host_file_lock(key: str, *, namespace: str):
+    key = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    root = Path(tempfile.gettempdir()) / f"panorama_handover_{namespace}_locks"
     root.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(root / f"{key}.lock"), os.O_CREAT | os.O_RDWR, 0o600)
     locked = False
@@ -35,8 +43,7 @@ def generation_lock(building, duty_date, duty_shift):
         except OSError as exc:
             if exc.errno not in {11, 13, 35, 36} and getattr(exc, "winerror", None) not in {32, 33, 36}:
                 raise
-            raise RuntimeError(f"{building} {duty_date}/{duty_shift} 正在生成，本次重复请求未执行，请等待原任务完成") from exc
-        yield
+        yield locked
     finally:
         try:
             if locked:

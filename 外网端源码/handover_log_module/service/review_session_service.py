@@ -933,6 +933,7 @@ class ReviewSessionService:
             "tracked_cells": list(_CAPACITY_SYNC_TRACKED_CELLS),
             "input_signature": str(merged.get("input_signature", "") or "").strip(),
             "overlay_signature": str(merged.get("overlay_signature", "") or "").strip(),
+            "download_snapshot": dict(merged["download_snapshot"]) if isinstance(merged.get("download_snapshot"), dict) else {},
         }
 
     @staticmethod

@@ -84,10 +84,11 @@ def test_snapshot_retries_only_while_copying_same_review_version(monkeypatch, tm
             src.write_bytes(b"second")
 
     monkeypatch.setattr(module.shutil, "copy2", rewrite_once)
-    monkeypatch.setattr(module.time, "sleep", Mock())
+    sleep = Mock()
+    monkeypatch.setattr(module, "time", SimpleNamespace(sleep=sleep))
     hashes = service._capture_sources(
         {"log": source}, {"log": copy}, check_version=Mock(), check_cancelled=Mock(), emit_log=Mock(),
     )
     assert copy.read_bytes() == b"second"
     assert hashes["log"] == module._digest(copy)
-    module.time.sleep.assert_called_once()
+    sleep.assert_called_once()

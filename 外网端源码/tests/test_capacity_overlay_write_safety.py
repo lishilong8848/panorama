@@ -7,6 +7,28 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
+
+
+def test_capacity_download_snapshot_requires_current_inputs_and_file(tmp_path, monkeypatch):
+    path = tmp_path / "capacity.xlsx"
+    path.write_bytes(b"first")
+    service = HandoverCapacityReportService({})
+    live = {"inputs": "same"}
+    monkeypatch.setattr(service, "download_inputs_signature", lambda **_: live["inputs"])
+    monkeypatch.setattr(
+        "handover_log_module.service.handover_capacity_report_service.time",
+        type("Clock", (), {"time": staticmethod(lambda: 110)})(),
+    )
+    snapshot = {"revision": 7, "inputs": "same", "file": service._capacity_file_fingerprint(str(path)), "verified_at": 100}
+    matches = service.download_snapshot_matches
+    assert matches(snapshot, revision=7, output_file=str(path))
+    assert not matches(snapshot, revision=8, output_file=str(path))
+    assert not matches({**snapshot, "verified_at": 1}, revision=7, output_file=str(path))
+    live["inputs"] = "changed"
+    assert not matches(snapshot, revision=7, output_file=str(path))
+    live["inputs"] = "same"
+    path.write_bytes(b"new file")
+    assert not matches(snapshot, revision=7, output_file=str(path))
 from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
 from handover_log_module.service.handover_xlsx_write_queue_service import HandoverXlsxWriteQueueService
 

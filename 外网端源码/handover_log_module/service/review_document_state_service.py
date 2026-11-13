@@ -865,6 +865,7 @@ class ReviewDocumentStateService:
                     document=document,
                     dirty_regions=dirty_regions,
                 )
+                written_stat = output_path.stat()
         except Exception as exc:  # noqa: BLE001
             if reconcile_sync_job:
                 store.finish_job(
@@ -889,6 +890,7 @@ class ReviewDocumentStateService:
                 success=True,
                 claimed_target_revision=expected_revision or revision,
                 synced_revision=revision,
+                written_excel=(output_file, str(written_stat.st_mtime_ns), written_stat.st_size),
             )
         else:
             sync = store.update_sync_state(

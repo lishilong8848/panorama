@@ -2229,6 +2229,42 @@ class HandoverCapacityReportService:
                 "mtime_ns": 0,
             }
 
+    def download_inputs_signature(
+        self, *, building, duty_date, duty_shift, handover_cells, shared_110kv,
+        cooling_pump_pressures, emit_log,
+    ) -> str:
+        outdoor = self._a_building_outdoor_cells_for_capacity(
+            building=building, duty_date=duty_date, duty_shift=duty_shift,
+            handover_cells=handover_cells, emit_log=emit_log,
+        )
+        previous_date, previous_shift = self._previous_duty_context(duty_date=duty_date, duty_shift=duty_shift)
+        previous = self._review_session_service.get_latest_session_for_context(
+            building=building, duty_date=previous_date, duty_shift=previous_shift,
+        )
+        payload = [
+            self.capacity_input_signature(handover_cells),
+            outdoor,
+            self._build_substation_110kv_values(shared_110kv),
+            self._build_cooling_pump_pressure_values(cooling_pump_pressures),
+            self._session_load_rates(previous if isinstance(previous, dict) else {}),
+        ]
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def download_snapshot_matches(self, snapshot, *, revision, output_file, require_fresh=True, **inputs) -> bool:
+        if not isinstance(snapshot, dict) or snapshot.get("revision") != revision or not snapshot.get("inputs"):
+            return False
+        try:
+            # Keep the same refresh horizon as the short water/electricity caches.
+            age = time.time() - float(snapshot.get("verified_at") or 0)
+            return (
+                (not require_fresh or 0 <= age < _CAPACITY_BATCH_CACHE_TTL_SEC)
+                and snapshot["file"].get("exists") is True
+                and snapshot["file"] == self._capacity_file_fingerprint(output_file)
+                and snapshot["inputs"] == self.download_inputs_signature(**inputs)
+            )
+        except Exception:
+            return False
+
     def build_capacity_overlay_signature(
         self,
         *,
@@ -2281,6 +2317,16 @@ class HandoverCapacityReportService:
             emit_log=emit_log,
             log_prefix="[交接班][容量报表][签名][补水罐总储备量]",
         )
+        return self._capacity_overlay_signature_result(
+            building=building, duty_date=duty_date, duty_shift=duty_shift,
+            capacity_output_file=capacity_output_file, input_signature=input_signature,
+            overlay_values=overlay_values, load_rate_payload=load_rate_payload, valid=valid, error=error,
+        )
+
+    def _capacity_overlay_signature_result(
+        self, *, building, duty_date, duty_shift, capacity_output_file, input_signature,
+        overlay_values, load_rate_payload, valid=True, error="",
+    ) -> Dict[str, Any]:
         signature_load_rates = {
             cell: load_rate_payload[cell]
             for cell in sorted(load_rate_payload)
@@ -2778,16 +2824,14 @@ class HandoverCapacityReportService:
         overlay_signature = ""
         try:
             overlay_signature = _text(
-                self.build_capacity_overlay_signature(
+                self._capacity_overlay_signature_result(
                     building=building,
                     duty_date=duty_date,
                     duty_shift=duty_shift,
-                    handover_cells=handover_cells,
                     capacity_output_file=capacity_output_file,
-                    shared_110kv=shared_110kv,
-                    cooling_pump_pressures=cooling_pump_pressures,
-                    client_id=client_id,
-                    emit_log=emit_log,
+                    input_signature=input_signature,
+                    overlay_values=overlay_values,
+                    load_rate_payload=load_rate_payload,
                 ).get("signature")
             )
         except Exception as exc:  # noqa: BLE001

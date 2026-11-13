@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict
 
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.handover_capacity_report_service import HandoverCapacityReportService
+from handover_log_module.service.handover_generation_guard import try_host_file_lock
 from handover_log_module.service.review_document_parser import ReviewDocumentParser
 from handover_log_module.service.review_document_state_service import (
     ReviewDocumentStateError,
@@ -29,12 +32,16 @@ def _text(value: Any) -> str:
     return str(value).strip()
 
 
+def _output_key(value: Any) -> str:
+    path = _text(value)
+    return os.path.normcase(str(Path(path).resolve())) if path else ""
+
+
 class HandoverXlsxWriteQueueService:
-    """Per-building persistent FIFO queue for handover review xlsx writes."""
+    """Bounded per-building workers; writes to the same workbook stay ordered."""
 
     _worker_guard = threading.Lock()
-    _workers: Dict[str, threading.Thread] = {}
-    _recovered_buildings: set[str] = set()
+    _workers: Dict[tuple[str, int], threading.Thread] = {}
 
     def __init__(
         self,
@@ -101,36 +108,24 @@ class HandoverXlsxWriteQueueService:
             document if isinstance(document, dict) else {}
         )
 
-    def _recover_running_once(self, building: str) -> None:
-        key = _text(building)
-        if not key:
-            return
-        with self._worker_guard:
-            if key in self._recovered_buildings:
-                return
-            self._recovered_buildings.add(key)
-        recovered = self._store(key).recover_xlsx_write_jobs_for_startup()
-        if recovered:
-            self.emit_log(f"[交接班][xlsx队列] 启动恢复 running 任务 building={key}, count={recovered}")
-
     def _start_worker(self, building: str) -> None:
         building_text = _text(building)
         if not building_text:
             return
-        self._recover_running_once(building_text)
-        key = building_text
+        store = self._store(building_text)
+        db_key = _output_key(store.db_path)
         with self._worker_guard:
-            existing = self._workers.get(key)
-            if existing is not None and existing.is_alive():
-                return
-            worker = threading.Thread(
-                target=self._worker_loop,
-                args=(building_text,),
-                name=f"handover-xlsx-write-{building_text}",
-                daemon=True,
-            )
-            self._workers[key] = worker
-            worker.start()
+            for slot in range(2):
+                key = (db_key, slot)
+                existing = self._workers.get(key)
+                if existing is not None and existing.is_alive():
+                    continue
+                worker = threading.Thread(
+                    target=self._worker_loop, args=(building_text, store, key),
+                    name=f"handover-xlsx-write-{building_text}-{slot}", daemon=True,
+                )
+                self._workers[key] = worker
+                worker.start()
 
     def enqueue_review_excel_sync(
         self,
@@ -161,6 +156,8 @@ class HandoverXlsxWriteQueueService:
                 "target_revision": revision,
                 "force_all_regions": bool(force_all_regions),
             },
+            dedupe_running_if_payload_matches=True,
+            target_key=_output_key(session.get("output_file")),
         )
         self.emit_log(
             f"[交接班][xlsx队列] 已入队 building={building}, task=review_excel_sync, "
@@ -168,7 +165,7 @@ class HandoverXlsxWriteQueueService:
             f"force_all_regions={bool(force_all_regions)}, job_id={job.get('job_id', '-')}"
         )
         self._start_worker(building)
-        return sync_state
+        return {**sync_state, "job_id": job["job_id"]}
 
     def enqueue_capacity_overlay_sync(
         self,
@@ -207,6 +204,7 @@ class HandoverXlsxWriteQueueService:
             dedupe_key=dedupe_key,
             payload=payload,
             dedupe_running_if_payload_matches=True,
+            target_key=_output_key(output_file),
         )
         self.emit_log(
             f"[交接班][xlsx队列] 已入队 building={building}, task=capacity_overlay_sync, "
@@ -255,65 +253,63 @@ class HandoverXlsxWriteQueueService:
         job = self.enqueue_barrier(building=building, session_id=session_id, reason=reason)
         return self.wait_for_job(building=building, job_id=_text(job.get("job_id")), timeout_sec=timeout_sec)
 
-    def _worker_loop(self, building: str) -> None:
-        store = self._store(building)
+    def _worker_loop(self, building: str, store: ReviewBuildingDocumentStore, key: tuple[str, int]) -> None:
+        db_key, slot = key
         try:
             while True:
                 try:
-                    job = store.claim_next_xlsx_write_job()
+                    # Only a slot lock owner can recover that slot's interrupted write.
+                    with try_host_file_lock(f"{db_key}|{slot}", namespace="xlsx_queue") as locked:
+                        if locked:
+                            recovered = store.recover_xlsx_write_jobs_for_startup(worker_slot=slot)
+                            if recovered:
+                                self.emit_log(f"[交接班][xlsx队列] 恢复中断任务 building={building}, slot={slot}, count={recovered}")
+                            while job := store.claim_next_xlsx_write_job(worker_slot=slot):
+                                self._run_claimed_job(building=building, store=store, job=job)
                 except Exception as exc:  # noqa: BLE001
                     self.emit_log(
                         f"[交接班][xlsx队列] worker领取任务异常，稍后重试 building={building}, error={exc}"
                     )
                     time.sleep(1.0)
                     continue
-                if not job:
-                    time.sleep(0.5)
-                    continue
-                started = time.perf_counter()
-                success = True
-                error = ""
-                try:
-                    self.emit_log(
-                        f"[交接班][xlsx队列] 开始 building={building}, job_id={job.get('job_id', '-')}, "
-                        f"task_type={job.get('task_type', '-')}"
-                    )
-                    self._execute_job(building=building, job=job)
-                except Exception as exc:  # noqa: BLE001
-                    success = False
-                    error = str(exc)
-                    self.emit_log(
-                        f"[交接班][xlsx队列] 失败 building={building}, job_id={job.get('job_id', '-')}, "
-                        f"task_type={job.get('task_type', '-')}, error={error}"
-                    )
-                finally:
-                    try:
-                        store.finish_xlsx_write_job(job_id=_text(job.get("job_id")), success=success, error=error)
-                    except Exception as exc:  # noqa: BLE001
-                        self.emit_log(
-                            f"[交接班][xlsx队列] 写回任务状态失败，已尝试恢复running任务 "
-                            f"building={building}, job_id={job.get('job_id', '-')}, error={exc}"
-                        )
-                        try:
-                            recovered = store.recover_xlsx_write_jobs_for_startup()
-                            if recovered:
-                                self.emit_log(
-                                    f"[交接班][xlsx队列] 已恢复running任务为pending building={building}, count={recovered}"
-                                )
-                        except Exception as recover_exc:  # noqa: BLE001
-                            self.emit_log(
-                                f"[交接班][xlsx队列] 恢复running任务失败 building={building}, error={recover_exc}"
-                            )
-                    elapsed_ms = int((time.perf_counter() - started) * 1000)
-                    self.emit_log(
-                        f"[交接班][xlsx队列] 完成 building={building}, job_id={job.get('job_id', '-')}, "
-                        f"task_type={job.get('task_type', '-')}, status={'success' if success else 'failed'}, elapsed_ms={elapsed_ms}"
-                    )
+                time.sleep(0.5)
         finally:
             with self._worker_guard:
-                current = self._workers.get(building)
+                current = self._workers.get(key)
                 if current is threading.current_thread():
-                    self._workers.pop(building, None)
+                    self._workers.pop(key, None)
+
+    def _run_claimed_job(self, *, building: str, store: ReviewBuildingDocumentStore, job: Dict[str, Any]) -> None:
+        started = time.perf_counter()
+        job_id = job["job_id"]
+        task_type = job["task_type"]
+        error = ""
+        success = True
+        self.emit_log(f"[交接班][xlsx队列] 开始 building={building}, job_id={job_id}, task_type={task_type}")
+        try:
+            target_key = job.get("target_key")
+            if target_key:
+                deadline = time.monotonic() + 30
+                while True:
+                    with try_host_file_lock(target_key, namespace="xlsx_target") as locked:
+                        if locked:
+                            self._execute_job(building=building, job=job)
+                            break
+                    if time.monotonic() >= deadline:
+                        raise HandoverXlsxWriteQueueTimeoutError("同一 Excel 正在写入，请稍后重试")
+                    time.sleep(0.1)
+            else:
+                self._execute_job(building=building, job=job)
+        except Exception as exc:  # noqa: BLE001
+            success = False
+            error = str(exc)
+            self.emit_log(f"[交接班][xlsx队列] 失败 building={building}, job_id={job_id}, task_type={task_type}, error={error}")
+        store.finish_xlsx_write_job(job_id=job_id, success=success, error=error)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self.emit_log(
+            f"[交接班][xlsx队列] 完成 building={building}, job_id={job_id}, "
+            f"task_type={task_type}, status={'success' if success else 'failed'}, elapsed_ms={elapsed_ms}"
+        )
 
     def _execute_job(self, *, building: str, job: Dict[str, Any]) -> None:
         task_type = _text(job.get("task_type")).lower()
@@ -326,6 +322,9 @@ class HandoverXlsxWriteQueueService:
         session = self.review_service.get_or_recover_session_by_id(session_id)
         if not isinstance(session, dict):
             raise ReviewSessionNotFoundError("review session not found")
+        path_field = "output_file" if task_type == "review_excel_sync" else "capacity_output_file"
+        if job.get("target_key") and job["target_key"] != _output_key(session.get(path_field)):
+            raise RuntimeError("交接班文件已重新生成，已跳过旧文件写入任务")
         if task_type == "review_excel_sync":
             self.document_state.force_sync_session_dict(
                 session,
@@ -374,18 +373,43 @@ class HandoverXlsxWriteQueueService:
             if isinstance(document.get("cooling_pump_pressures", {}), dict)
             else {}
         )
-        sync_payload = HandoverCapacityReportService(self.config).sync_overlay_for_existing_report_from_cells(
-            building=building,
-            duty_date=_text(session.get("duty_date")),
-            duty_shift=_text(session.get("duty_shift")).lower(),
-            handover_cells=tracked_cells,
-            capacity_output_file=_text(session.get("capacity_output_file")),
+        capacity_service = HandoverCapacityReportService(self.config)
+        inputs = dict(
+            building=building, duty_date=_text(session.get("duty_date")),
+            duty_shift=_text(session.get("duty_shift")).lower(), handover_cells=tracked_cells,
             shared_110kv=copy.deepcopy(shared_110kv) if isinstance(shared_110kv, dict) else {},
-            cooling_pump_pressures=copy.deepcopy(cooling_pump_pressures) if isinstance(cooling_pump_pressures, dict) else {},
-            client_id=_text(payload.get("client_id")),
+            cooling_pump_pressures=copy.deepcopy(cooling_pump_pressures),
             emit_log=self.emit_log,
         )
+        output_file = _text(session.get("capacity_output_file"))
+        sync = session.get("capacity_sync", {})
+        if expected_revision is not None and not payload.get("use_saved_shared_110kv") and isinstance(sync, dict) and sync.get("status") == "ready":
+            if capacity_service.download_snapshot_matches(
+                sync.get("download_snapshot"), revision=expected_revision, output_file=output_file, **inputs,
+            ):
+                return
+
+        def download_signature():
+            try:
+                return capacity_service.download_inputs_signature(**inputs)
+            except Exception:  # A missing dependency disables reuse, not the existing write path.
+                return ""
+
+        download_signature_before = download_signature()
+        sync_payload = capacity_service.sync_overlay_for_existing_report_from_cells(
+            **inputs,
+            capacity_output_file=output_file,
+            client_id=_text(payload.get("client_id")),
+        )
         sync_status = _text(sync_payload.get("status") if isinstance(sync_payload, dict) else "").lower()
+        after = download_signature() if sync_status == "ready" and download_signature_before else ""
+        if after and after == download_signature_before:
+            sync_payload["download_snapshot"] = {
+                "revision": int(session.get("revision", 0) or 0),
+                "inputs": download_signature_before,
+                "file": capacity_service._capacity_file_fingerprint(output_file),
+                "verified_at": time.time(),
+            }
         capacity_status = "success" if sync_status == "ready" else (sync_status or "failed")
         capacity_error = "" if sync_status == "ready" else _text(sync_payload.get("error") if isinstance(sync_payload, dict) else "")
         self.review_service.update_capacity_sync(
@@ -398,3 +422,5 @@ class HandoverXlsxWriteQueueService:
             raise RuntimeError(f"{capacity_error or '容量报表缺少必填数据'}；请在审核页补齐并保存后再提交")
         if sync_status not in {"ready", "pending_input"}:
             raise RuntimeError(capacity_error or "容量报表补写失败")
+        if expected_revision is not None and download_signature_before and after != download_signature_before:
+            raise RuntimeError("容量报表补写期间共享数据已更新，请重新下载")

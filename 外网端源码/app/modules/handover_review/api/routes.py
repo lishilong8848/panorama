@@ -3824,6 +3824,7 @@ def _stable_review_download_snapshot(
     session_id_text: str,
     kind: str,
     temp_kind: str,
+    file_is_current=None,
 ) -> tuple[Path, Path]:
     """返回前只读重查审核版本与源文件路径，一致才把文件拷成稳定副本返回（TOCTOU 防护）。
 
@@ -3841,6 +3842,7 @@ def _stable_review_download_snapshot(
         return (
             int(state.get("revision", 0) or 0) == expected_document_revision
             and str(state.get("source_excel_path", "") or "").strip() == expected_source_path
+            and (file_is_current is None or file_is_current(state))
         )
 
     def _reject(snapshot_dir: Path | None = None) -> None:
@@ -5751,9 +5753,36 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     if not output_file.exists() or not output_file.is_file():
         raise HTTPException(status_code=409, detail="交接班文件不存在，无法同步最新审核内容")
     download_warning = ""
+
+    def _log_file_matches(state):
+        try:
+            stat = output_file.stat()
+            source_state = existing_document_state or {}
+            return (
+                str(stat.st_mtime_ns) == state.get("source_excel_mtime") == source_state.get("source_excel_mtime")
+                and stat.st_size == state.get("source_excel_size") == source_state.get("source_excel_size")
+            )
+        except OSError:
+            return False
+
+    sync = document_state.attach_excel_sync(target).get("excel_sync", {}) if callable(getattr(document_state, "attach_excel_sync", None)) else {}
+    already_synced = (
+        sync.get("status") == "synced"
+        and sync.get("synced_revision") == current_document_revision
+        and _log_file_matches(existing_document_state or {})
+    )
+    if already_synced:
+        try:
+            already_synced = not writer.fixed_cells_need_sync_for_file(
+                output_file=str(output_file), document=(existing_document_state or {}).get("document", {}),
+            )
+        except Exception:
+            already_synced = False
     try:
         state = existing_document_state
-        if not isinstance(state, dict) or not callable(getattr(document_state, "attach_excel_sync", None)):
+        if already_synced:
+            pass
+        elif not isinstance(state, dict) or not callable(getattr(document_state, "attach_excel_sync", None)):
             document_state.force_sync_session_dict(target, reason="download", force_all_regions=True, preserve_existing=True)
         else:
             document_revision = int(state.get("revision", target.get("revision", 0)) or 0)
@@ -5765,19 +5794,20 @@ def handover_review_download(building_code: str, request: Request, session_id: s
                 review_service=service,
                 document_state=document_state,
             )
-            queue_service.enqueue_review_excel_sync(
+            queued = queue_service.enqueue_review_excel_sync(
                 target,
                 target_revision=document_revision,
                 force_all_regions=True,
             )
-            barrier = queue_service.wait_for_barrier(
+            if not queued.get("job_id"):
+                raise ReviewDocumentStateError(str(queued.get("error") or "交接班文件写入任务未入队"))
+            completed = queue_service.wait_for_job(
                 building=building,
-                session_id=session_id_text,
-                reason="download",
+                job_id=queued["job_id"],
                 timeout_sec=120,
             )
-            if str(barrier.get("status", "")).strip().lower() != "success":
-                download_warning = str(barrier.get("error", "") or "").strip() or "交接班文件写入队列失败"
+            if str(completed.get("status", "")).strip().lower() != "success":
+                raise ReviewDocumentStateError(str(completed.get("error") or "交接班文件写入队列失败"))
             latest_sync = document_state.attach_excel_sync(target).get("excel_sync", {})
             latest_status = str(latest_sync.get("status", "") if isinstance(latest_sync, dict) else "").strip().lower()
             latest_synced_revision = int(latest_sync.get("synced_revision", 0) or 0) if isinstance(latest_sync, dict) else 0
@@ -5821,6 +5851,7 @@ def handover_review_download(building_code: str, request: Request, session_id: s
         expected_document_revision=current_document_revision,
         expected_source_path=str(target.get("output_file", "") or "").strip(),
         building=building, session_id_text=session_id_text, kind="成品", temp_kind="handover_log_download",
+        file_is_current=_log_file_matches if already_synced else None,
     )
     container.add_system_log(
         f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}, "
@@ -5888,6 +5919,39 @@ def handover_review_capacity_download(
 
     tracked_cells = _extract_capacity_tracked_cells(document)
     expected_input_signature = HandoverCapacityReportService.capacity_input_signature(tracked_cells)
+    sync_snapshot = target.get("capacity_sync") or {}
+    snapshot = sync_snapshot.get("download_snapshot") if isinstance(sync_snapshot, dict) else None
+
+    def _capacity_file_matches(_state, *, require_fresh=True):
+        if not snapshot or sync_snapshot.get("status") != "ready":
+            return False
+        try:
+            capacity_service = HandoverCapacityReportService(_handover_cfg(container))
+            shared = service.get_substation_110kv_state(batch_key=str(target.get("batch_key") or ""), client_id=client_id)
+            return capacity_service.download_snapshot_matches(
+                snapshot, revision=current_document_revision, output_file=output_file_text,
+                require_fresh=require_fresh,
+                building=building, duty_date=str(target.get("duty_date") or ""),
+                duty_shift=str(target.get("duty_shift") or "").lower(), handover_cells=tracked_cells,
+                shared_110kv=shared.get("shared_blocks", {}).get("substation_110kv", {}),
+                cooling_pump_pressures=document.get("cooling_pump_pressures") or {},
+                emit_log=container.add_system_log,
+            )
+        except Exception:
+            return False
+
+    if _capacity_file_matches(None):
+        snapshot_path, snapshot_dir = _stable_review_download_snapshot(
+            container=container, document_state=document_state, target=target, output_file=output_file,
+            expected_document_revision=current_document_revision, expected_source_path=expected_source_path,
+            building=building, session_id_text=session_id_text, kind="容量报表", temp_kind="handover_capacity_download",
+            file_is_current=_capacity_file_matches,
+        )
+        return FileResponse(
+            snapshot_path, filename=output_file.name,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            background=BackgroundTask(cleanup_runtime_temp_dir, snapshot_dir),
+        )
     try:
         queue_service = _build_xlsx_write_queue_service(
             container,
@@ -5943,8 +6007,14 @@ def handover_review_capacity_download(
             f"expected={expected_input_signature}, actual={result_input_signature}"
         )
         raise HTTPException(status_code=409, detail=detail)
+    sync_snapshot = sync_payload
+    snapshot = sync_payload.get("download_snapshot")
     target = refreshed_target
     refreshed_output_file_text = str(target.get("capacity_output_file", "") or output_file_text).strip()
+    if refreshed_output_file_text != output_file_text:
+        raise HTTPException(status_code=409, detail="容量报表文件已重新生成，请重新下载")
+    if snapshot and not _capacity_file_matches(None, require_fresh=False):
+        raise HTTPException(status_code=409, detail="容量报表的审核或共享数据已更新，请重新下载")
     output_file = Path(refreshed_output_file_text)
     if not refreshed_output_file_text or not output_file.exists() or not output_file.is_file():
         detail = "容量报表补写完成但文件不存在，请重新生成"
@@ -5958,6 +6028,7 @@ def handover_review_capacity_download(
         container=container, document_state=document_state, target=target, output_file=output_file,
         expected_document_revision=current_document_revision, expected_source_path=expected_source_path,
         building=building, session_id_text=session_id_text, kind="容量报表", temp_kind="handover_capacity_download",
+        file_is_current=(lambda state: _capacity_file_matches(state, require_fresh=False)) if snapshot else None,
     )
 
     container.add_system_log(

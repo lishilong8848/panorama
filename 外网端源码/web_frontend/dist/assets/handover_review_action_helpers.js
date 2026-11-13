@@ -543,7 +543,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     downloading.value = true;
     errorText.value = "";
-    statusText.value = "正在下载本楼班次附件成品...";
+    statusText.value = "正在检查交接班日志是否为最新版，必要时补写后下载...";
     try {
       const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,
@@ -595,7 +595,7 @@ export function createHandoverReviewActionHelpers(options = {}) {
     }
     capacityDownloading.value = true;
     errorText.value = "";
-    statusText.value = "正在下载本楼容量表成品...";
+    statusText.value = "正在检查容量表是否为最新版，必要时补写后下载...";
     try {
       const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,

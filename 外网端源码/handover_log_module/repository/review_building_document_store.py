@@ -230,12 +230,15 @@ class ReviewBuildingDocumentStore:
                 error TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                finished_at TEXT NOT NULL DEFAULT ''
+                finished_at TEXT NOT NULL DEFAULT '',
+                target_key TEXT NOT NULL DEFAULT '',
+                worker_slot INTEGER NOT NULL DEFAULT -1
             );
             CREATE INDEX IF NOT EXISTS idx_xlsx_write_jobs_status
                 ON xlsx_write_jobs(status, created_at);
             CREATE INDEX IF NOT EXISTS idx_xlsx_write_jobs_dedupe
                 ON xlsx_write_jobs(task_type, dedupe_key, status);
+            BEGIN IMMEDIATE;
             """
         )
         columns = {
@@ -262,6 +265,10 @@ class ReviewBuildingDocumentStore:
             conn.execute("ALTER TABLE xlsx_write_jobs ADD COLUMN error TEXT NOT NULL DEFAULT ''")
         if "finished_at" not in xlsx_columns:
             conn.execute("ALTER TABLE xlsx_write_jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
+        if "target_key" not in xlsx_columns:
+            conn.execute("ALTER TABLE xlsx_write_jobs ADD COLUMN target_key TEXT NOT NULL DEFAULT ''")
+        if "worker_slot" not in xlsx_columns:
+            conn.execute("ALTER TABLE xlsx_write_jobs ADD COLUMN worker_slot INTEGER NOT NULL DEFAULT -1")
 
     @staticmethod
     def _row_to_document(row: sqlite3.Row | None) -> Dict[str, Any] | None:
@@ -845,6 +852,7 @@ class ReviewBuildingDocumentStore:
         claimed_target_revision: int,
         synced_revision: int = 0,
         error: str = "",
+        written_excel: tuple[str, str, int] | None = None,
     ) -> Dict[str, Any]:
         self.ensure_ready()
         now = _now_text()
@@ -859,6 +867,13 @@ class ReviewBuildingDocumentStore:
             ).fetchone()
             current_target_revision = int(current_row["target_revision"] or 0) if current_row is not None else 0
             if success:
+                if written_excel:
+                    path, mtime, size = written_excel
+                    conn.execute(
+                        """UPDATE review_documents SET source_excel_mtime=?, source_excel_size=?
+                           WHERE session_id=? AND revision=? AND source_excel_path=?""",
+                        (mtime, size, session_id, actual_synced_revision, path),
+                    )
                 next_synced_revision = max(current_synced_revision, actual_synced_revision)
                 if current_row is not None and current_target_revision > next_synced_revision:
                     conn.execute(
@@ -945,6 +960,7 @@ class ReviewBuildingDocumentStore:
             "created_at": str(row["created_at"] or ""),
             "updated_at": str(row["updated_at"] or ""),
             "finished_at": str(row["finished_at"] or ""),
+            "target_key": str(row["target_key"] or "") if "target_key" in row.keys() else "",
         }
 
     def enqueue_xlsx_write_job(
@@ -955,6 +971,7 @@ class ReviewBuildingDocumentStore:
         dedupe_key: str = "",
         payload: Dict[str, Any] | None = None,
         dedupe_running_if_payload_matches: bool = False,
+        target_key: str = "",
     ) -> Dict[str, Any]:
         self.ensure_ready()
         task_type_text = str(task_type or "").strip().lower()
@@ -962,7 +979,8 @@ class ReviewBuildingDocumentStore:
             raise ValueError(f"unsupported xlsx write task_type: {task_type}")
         session_id_text = str(session_id or "").strip()
         dedupe_key_text = str(dedupe_key or "").strip()
-        payload_text = _json_dumps(payload if isinstance(payload, dict) else {})
+        next_payload = dict(payload) if isinstance(payload, dict) else {}
+        payload_text = _json_dumps(next_payload)
         now = _now_text()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -973,13 +991,24 @@ class ReviewBuildingDocumentStore:
                       FROM xlsx_write_jobs
                      WHERE task_type=?
                        AND dedupe_key=?
+                       AND target_key=?
                        AND status='pending'
                      ORDER BY created_at DESC
                      LIMIT 1
                     """,
-                    (task_type_text, dedupe_key_text),
+                    (task_type_text, dedupe_key_text, target_key),
                 ).fetchone()
                 if pending is not None:
+                    if task_type_text == "review_excel_sync":
+                        previous_payload = _json_loads(pending["payload_json"], {})
+                        next_payload["target_revision"] = max(
+                            int(previous_payload.get("target_revision") or 0),
+                            int(next_payload.get("target_revision") or 0),
+                        )
+                        next_payload["force_all_regions"] = bool(
+                            previous_payload.get("force_all_regions") or next_payload.get("force_all_regions")
+                        )
+                        payload_text = _json_dumps(next_payload)
                     conn.execute(
                         """
                         UPDATE xlsx_write_jobs
@@ -1003,12 +1032,13 @@ class ReviewBuildingDocumentStore:
                           FROM xlsx_write_jobs
                          WHERE task_type=?
                            AND dedupe_key=?
+                           AND target_key=?
                            AND status='running'
                            AND payload_json=?
                          ORDER BY created_at DESC
                          LIMIT 1
                         """,
-                        (task_type_text, dedupe_key_text, payload_text),
+                        (task_type_text, dedupe_key_text, target_key, payload_text),
                     ).fetchone()
                     if running is not None:
                         return self._row_to_xlsx_job(running) or {}
@@ -1017,8 +1047,8 @@ class ReviewBuildingDocumentStore:
                 """
                 INSERT INTO xlsx_write_jobs(
                     job_id, building, session_id, task_type, dedupe_key,
-                    payload_json, status, attempts, error, created_at, updated_at, finished_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    payload_json, status, attempts, error, created_at, updated_at, finished_at, target_key
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     job_id,
@@ -1033,29 +1063,42 @@ class ReviewBuildingDocumentStore:
                     now,
                     now,
                     "",
+                    target_key,
                 ),
             )
             row = conn.execute("SELECT * FROM xlsx_write_jobs WHERE job_id=?", (job_id,)).fetchone()
             return self._row_to_xlsx_job(row) or {}
 
-    def claim_next_xlsx_write_job(self) -> Dict[str, Any] | None:
+    def claim_next_xlsx_write_job(self, *, worker_slot: int = 0) -> Dict[str, Any] | None:
         self.ensure_ready()
         now = _now_text()
+        with self.connect(read_only=True) as conn:
+            if conn.execute("SELECT 1 FROM xlsx_write_jobs WHERE status='pending' LIMIT 1").fetchone() is None:
+                return None
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            running = conn.execute(
-                "SELECT job_id FROM xlsx_write_jobs WHERE status='running' LIMIT 1"
-            ).fetchone()
-            if running is not None:
-                return None
+            # Legacy jobs without a path and explicit barriers keep their old exclusivity.
             row = conn.execute(
                 """
-                SELECT *
-                  FROM xlsx_write_jobs
-                 WHERE status='pending'
-                 ORDER BY created_at ASC, updated_at ASC
+                SELECT candidate.*
+                  FROM xlsx_write_jobs AS candidate
+                 WHERE candidate.status='pending'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM xlsx_write_jobs WHERE status='running' AND worker_slot=?
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM xlsx_write_jobs AS other
+                        WHERE (other.status='running'
+                               OR (other.status='pending' AND other.rowid < candidate.rowid))
+                          AND (other.task_type='barrier' OR candidate.task_type='barrier'
+                               OR other.target_key='' OR candidate.target_key=''
+                               OR other.target_key=candidate.target_key
+                               OR (other.session_id=candidate.session_id AND other.task_type=candidate.task_type))
+                   )
+                 ORDER BY candidate.rowid
                  LIMIT 1
-                """
+                """,
+                (worker_slot,),
             ).fetchone()
             if row is None:
                 return None
@@ -1065,15 +1108,13 @@ class ReviewBuildingDocumentStore:
                 UPDATE xlsx_write_jobs
                    SET status='running',
                        attempts=attempts+1,
+                       worker_slot=?,
                        updated_at=?,
                        error=''
                  WHERE job_id=?
                    AND status='pending'
-                   AND NOT EXISTS (
-                       SELECT 1 FROM xlsx_write_jobs WHERE status='running'
-                   )
                 """,
-                (now, job_id),
+                (worker_slot, now, job_id),
             )
             claimed = conn.execute(
                 "SELECT * FROM xlsx_write_jobs WHERE job_id=? AND status='running'",
@@ -1104,26 +1145,31 @@ class ReviewBuildingDocumentStore:
             row = conn.execute("SELECT * FROM xlsx_write_jobs WHERE job_id=?", (job_id_text,)).fetchone()
             return self._row_to_xlsx_job(row)
 
-    def recover_xlsx_write_jobs_for_startup(self) -> int:
+    def recover_xlsx_write_jobs_for_startup(self, *, worker_slot: int) -> int:
         self.ensure_ready()
         now = _now_text()
+        where = """
+            (status='running' AND (worker_slot=? OR (worker_slot=-1 AND ?=0)))
+            OR (status='failed' AND (worker_slot=? OR (worker_slot=-1 AND ?=0))
+                AND error LIKE '%TaskEngineDatabase 已关闭%' AND attempts < 5)
+        """
+        args = (worker_slot,) * 4
+        with self.connect(read_only=True) as conn:
+            if conn.execute(f"SELECT 1 FROM xlsx_write_jobs WHERE {where} LIMIT 1", args).fetchone() is None:
+                return 0
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
-                """
+                f"""
                 UPDATE xlsx_write_jobs
                    SET status='pending',
                        error='',
                        updated_at=?,
-                       finished_at=''
-                 WHERE status='running'
-                    OR (
-                        status='failed'
-                        AND error LIKE '%TaskEngineDatabase 已关闭%'
-                        AND attempts < 5
-                    )
+                       finished_at='',
+                       worker_slot=-1
+                 WHERE {where}
                 """,
-                (now,),
+                (now, *args),
             )
             return int(cursor.rowcount or 0)
 

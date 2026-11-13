@@ -237,9 +237,25 @@ async function readDownloadError(response) {
 }
 
 async function triggerBrowserDownload(url, fallbackName = "") {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 270000);
+  try {
+    return await fetchBrowserDownload(url, fallbackName, controller.signal);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("下载等待超时。文件可能仍在后台同步，请稍后重试。");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function fetchBrowserDownload(url, fallbackName, signal) {
   const response = await window.fetch(String(url || ""), {
     method: "GET",
     cache: "no-store",
+    signal,
   });
   if (!response.ok) {
     const detail = await readDownloadError(response);

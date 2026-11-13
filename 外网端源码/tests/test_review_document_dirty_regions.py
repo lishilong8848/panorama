@@ -203,6 +203,7 @@ def test_download_full_sync_overrides_pending_incremental_sync(tmp_path: Path) -
         target_revision=3,
         force_all_regions=True,
     )
+    queue.enqueue_review_excel_sync(session, target_revision=4, force_all_regions=False)
 
     store = ReviewBuildingDocumentStore(config=config, building="A楼")
     with store.connect(read_only=True) as conn:
@@ -217,7 +218,9 @@ def test_download_full_sync_overrides_pending_incremental_sync(tmp_path: Path) -
         ).fetchall()
 
     assert len(rows) == 1
-    assert json.loads(rows[0]["payload_json"])["force_all_regions"] is True
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["force_all_regions"] is True
+    assert payload["target_revision"] == 4
 
 
 def test_capacity_overlay_reuses_identical_running_job(tmp_path: Path) -> None:

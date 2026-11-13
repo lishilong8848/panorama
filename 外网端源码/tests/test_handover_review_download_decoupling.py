@@ -473,6 +473,67 @@ def test_capacity_download_passes_expected_document_revision(monkeypatch, tmp_pa
     assert kwargs.get("expected_document_revision") == 7
 
 
+def test_capacity_download_reuses_fresh_verified_file(monkeypatch, tmp_path):
+    session = _base_session(tmp_path)
+    session["capacity_output_file"] = str(_make_xlsx(tmp_path / "verified_capacity.xlsx"))
+    session["capacity_sync"] = {"status": "ready", "download_snapshot": {"revision": 7}}
+    service, _, queue = _patch_capacity_route(
+        monkeypatch, tmp_path, session=session, document_revision=7,
+    )
+    service.get_substation_110kv_state = Mock(return_value={"shared_blocks": {}})
+    monkeypatch.setattr(routes, "_handover_cfg", lambda _: {})
+    matches = Mock(return_value=True)
+    monkeypatch.setattr(HandoverCapacityReportService, "download_snapshot_matches", matches)
+    _mock_temp(monkeypatch, tmp_path)
+
+    response = routes.handover_review_capacity_download("a", _request(_container()), SESSION_ID)
+    _assert_valid_xlsx(Path(response.path))
+    queue.enqueue_capacity_overlay_sync.assert_not_called()
+    assert matches.call_count == 3
+
+
+def test_log_download_reuses_same_revision_and_file(monkeypatch, tmp_path):
+    session = _base_session(tmp_path, revision=7)
+    stat = Path(session["output_file"]).stat()
+    state = {
+        "revision": 7, "source_excel_path": session["output_file"],
+        "source_excel_mtime": str(stat.st_mtime_ns), "source_excel_size": stat.st_size,
+    }
+    service, document_state, queue = _patch_capacity_route(
+        monkeypatch, tmp_path, session=session, document_revision=7, peek_state=state,
+    )
+    document_state.ensure_document_for_session.return_value = state
+    document_state.attach_excel_sync = Mock(return_value={"excel_sync": {"status": "synced", "synced_revision": 7}})
+    writer = SimpleNamespace(fixed_cells_need_sync_for_file=Mock(return_value=False))
+    monkeypatch.setattr(routes, "_build_review_services", lambda _c: (service, None, writer, None))
+    _mock_temp(monkeypatch, tmp_path)
+
+    response = routes.handover_review_download("a", _request(_container()), SESSION_ID)
+    _assert_valid_xlsx(Path(response.path))
+    assert not hasattr(queue, "enqueue_review_excel_sync")
+    writer.fixed_cells_need_sync_for_file.assert_called_once()
+
+
+def test_log_download_waits_only_for_its_write_job(monkeypatch, tmp_path):
+    session = _base_session(tmp_path, revision=7)
+    service, document_state, queue = _patch_capacity_route(monkeypatch, tmp_path, session=session, document_revision=7)
+    document_state.ensure_document_for_session.return_value = {"revision": 7, "document": {}}
+    document_state.attach_excel_sync = Mock(side_effect=[
+        {"excel_sync": {"status": "pending", "synced_revision": 6}},
+        {"excel_sync": {"status": "synced", "synced_revision": 7}},
+    ])
+    writer = SimpleNamespace(fixed_cells_need_sync_for_file=Mock(return_value=False))
+    monkeypatch.setattr(routes, "_build_review_services", lambda _c: (service, None, writer, None))
+    queue.enqueue_review_excel_sync = Mock(return_value={"job_id": "log-write"})
+    queue.wait_for_barrier = Mock(side_effect=AssertionError("download must not wait for the whole building"))
+    _mock_temp(monkeypatch, tmp_path)
+
+    response = routes.handover_review_download("a", _request(_container()), SESSION_ID)
+    _assert_valid_xlsx(Path(response.path))
+    queue.wait_for_job.assert_called_once_with(building="A楼", job_id="log-write", timeout_sec=120)
+    queue.wait_for_barrier.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # TOCTOU：补写/同步完成到返回前若有人保存新版，拒绝旧下载
 # ---------------------------------------------------------------------------
