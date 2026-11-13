@@ -19,6 +19,8 @@ DUTY = {"duty_date": "2026-11-09", "duty_shift": "day"}
 BATCH = "2026-11-09|day"
 BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
 ATTACHMENTS = "交接班日志"
+BUILDING_FIELD = "楼栋"
+STATION_110_LABEL = "110站"
 
 
 def _workbook(note):
@@ -35,6 +37,14 @@ def _workbook(note):
     return buffer.getvalue()
 
 
+def _record_for(records, building):
+    label = HandoverDailyReportBitableExportService._building_text(building)
+    for record in records:
+        if str(record["fields"].get(BUILDING_FIELD, "") or "") == label:
+            return record
+    raise AssertionError(f"没有楼栋={building!r}(label={label!r})的记录，现有={[r['fields'].get(BUILDING_FIELD) for r in records]}")
+
+
 @pytest.fixture
 def offline_delivery(tmp_path, monkeypatch):
     forbidden = Mock(side_effect=AssertionError("Live client, credentials or network access"))
@@ -46,20 +56,24 @@ def offline_delivery(tmp_path, monkeypatch):
         "_global_paths": {"runtime_state_root": str(tmp_path / "runtime")},
         "daily_report_bitable_export": {"target": {"app_token": "test-base", "table_id": "test-table"}},
     }
-    record = {"record_id": "recBatch", "fields": {
-        "日期": DUTY["duty_date"],
-        "班次": "白班",
-        ATTACHMENTS: [{"name": f"{b}_{role}.xlsx", "file_token": f"{b}-{role}"}
-                      for b in BUILDINGS for role in ("handover", "capacity")],
-    }}
-    known = {item["file_token"]: item for item in record["fields"][ATTACHMENTS]}
+    # 每楼各自记录：110 站补传时新建「楼栋=110站」记录，不再写进 A–E 共享记录。
+    records: list[dict] = []
+    known: dict = {}
     uploaded = []
+    seq = {"n": 0}
     client = Mock()
-    client.list_fields.return_value = [{"field_name": ATTACHMENTS, "type": 17}]
-    client.list_records.side_effect = lambda **_: [deepcopy(record)]
-    client.get_record_by_id.side_effect = lambda **_: deepcopy(record)
-    client.batch_create_records.side_effect = AssertionError("Unexpected new record")
-    client.batch_delete_records.side_effect = AssertionError("Unexpected record deletion")
+    client.list_fields.return_value = [
+        {"field_name": ATTACHMENTS, "type": 17}, {"field_name": BUILDING_FIELD, "type": 3},
+    ]
+
+    def create(*, fields_list, **_):
+        responses = []
+        for fields in fields_list:
+            seq["n"] += 1
+            record = {"record_id": f"rec{seq['n']}", "fields": deepcopy(fields)}
+            records.append(record)
+            responses.append({"data": {"records": [deepcopy(record)]}})
+        return responses
 
     def upload_attachment(*, file_name, content, mime_type):
         token = f"110-{len(uploaded) + 1}"
@@ -68,18 +82,25 @@ def offline_delivery(tmp_path, monkeypatch):
         return token
 
     def update_record(*, table_id, record_id, fields):
-        assert record_id == record["record_id"]
-        record["fields"].update({**fields, ATTACHMENTS: [known[item["file_token"]] for item in fields[ATTACHMENTS]]})
+        target = next(record for record in records if record["record_id"] == record_id)
+        fields = deepcopy(fields)
+        if ATTACHMENTS in fields:
+            fields[ATTACHMENTS] = [known[item["file_token"]] for item in fields[ATTACHMENTS]]
+        target["fields"].update(fields)
 
+    client.list_records.side_effect = lambda **_: [deepcopy(record) for record in records]
+    client.get_record_by_id.side_effect = lambda *, record_id, **_: deepcopy(
+        next(record for record in records if record["record_id"] == record_id))
+    client.batch_create_records.side_effect = create
+    client.batch_delete_records.side_effect = AssertionError("Unexpected record deletion")
     client.upload_attachment_bytes.side_effect = upload_attachment
     client.update_record.side_effect = update_record
     service = Handover110StationUploadService(config)
     service._attachment_delivery_service = HandoverAttachmentDeliveryService(
         config, client=client, output_root=tmp_path / "attachments",
     )
-    yield service, HandoverDeliveryStateService(config), client, record, uploaded
+    yield service, HandoverDeliveryStateService(config), client, records, uploaded
     forbidden.assert_not_called()
-    client.batch_create_records.assert_not_called()
     client.batch_delete_records.assert_not_called()
 
 
@@ -125,9 +146,12 @@ def test_110_waits_for_uploaded_and_ready_in_the_same_batch(offline_delivery, la
     assert not result["cloud_batch"].get("spreadsheet_token")
 
 
+def _station_110_token(records):
+    return f"bitable:{_record_for(records, STATION_110_LABEL)['record_id']}"
+
+
 def test_110_followup_sends_original_and_reupload_replaces_it(offline_delivery):
-    service, state, client, record, uploaded = offline_delivery
-    base_attachments = deepcopy(record["fields"][ATTACHMENTS])
+    service, state, client, records, uploaded = offline_delivery
     original = _workbook("第一版")
     first = service.upload(**DUTY, filename="第一版.xlsm", content=original)["upload"]
     assert first["cloud_sync"]["status"] == "pending"
@@ -145,19 +169,22 @@ def test_110_followup_sends_original_and_reupload_replaces_it(offline_delivery):
     revised = _workbook("第二版")
     second = service.upload(**DUTY, filename="第二版.xlsx", content=revised)["upload"]
     assert second["cloud_sync"]["status"] == "success"
-    assert second["cloud_sync"]["spreadsheet_token"] == "bitable:recBatch"
+    # 110 站补传进「楼栋=110站」的独立记录，token 指向该记录
+    assert second["cloud_sync"]["spreadsheet_token"] == _station_110_token(records)
     assert second["stored_path"] != first["stored_path"]
     assert Path(first["stored_path"]).read_bytes() == original
     assert Path(second["stored_path"]).read_bytes() == revised
     assert uploaded == [("110_original.xlsm", original), ("110_original.xlsx", revised)]
-    assert record["fields"][ATTACHMENTS] == base_attachments + [
+    # 110站记录只含 110 原件；同名 .xlsm→.xlsx 为同一交付物的替换
+    assert _record_for(records, STATION_110_LABEL)["fields"][ATTACHMENTS] == [
         {"name": "110_original.xlsx", "file_token": "110-2"},
     ]
+    assert _record_for(records, STATION_110_LABEL)["fields"][BUILDING_FIELD] == STATION_110_LABEL
     assert client.update_record.call_count == 2
 
 
 def test_110_prior_sheet_sync_does_not_skip_delivery_to_new_attachment_record(offline_delivery):
-    service, state, _, _, uploaded = offline_delivery
+    service, state, _, records, uploaded = offline_delivery
     original = _workbook("旧云表曾同步")
     upload = service.upload(**DUTY, filename="110.xlsx", content=original)["upload"]
     service._save_state(BATCH, {**upload, "cloud_sync": {
@@ -170,17 +197,18 @@ def test_110_prior_sheet_sync_does_not_skip_delivery_to_new_attachment_record(of
     result = service.sync_existing_upload_to_cloud(batch_key=BATCH)
 
     assert result["status"] == "success"
-    assert result["upload"]["cloud_sync"]["spreadsheet_token"] == "bitable:recBatch"
+    assert result["upload"]["cloud_sync"]["spreadsheet_token"] == _station_110_token(records)
     assert uploaded == [("110_original.xlsx", original)]
 
 
 def test_110_attachment_transfer_failure_preserves_existing_record(offline_delivery):
-    service, state, client, record, _ = offline_delivery
+    service, state, client, records, _ = offline_delivery
     for building in BUILDINGS:
         _set_building(state, building)
     cached = _register_batch(service)
     first = service.upload(**DUTY, filename="110.xlsx", content=_workbook("已交付"))["upload"]
     assert first["cloud_sync"]["status"] == "success"
+    record = _record_for(records, STATION_110_LABEL)
     old_record = deepcopy(record)
     client.reset_mock()
     transfer = client.upload_attachment_bytes.side_effect

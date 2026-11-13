@@ -40,6 +40,7 @@ from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import
     start_waiting_bridge_job,
 )
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
+from app.modules.shared_bridge.service.alarm_event_page_export_service import daily_scheduled_bucket_for_time
 from app.modules.shared_bridge.service.runtime_status_coordinator import RuntimeStatusCoordinator
 from app.modules.shared_bridge.service.shared_source_cache_service import is_accessible_cached_file_path
 from app.modules.scheduler.api.handover_routes import router as handover_scheduler_router
@@ -1952,20 +1953,21 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             return False, detail
 
         try:
-            cached_entries = [
-                item
+            cached_by_building = {
+                item["building"]: item
                 for item in bridge_service.get_day_metric_by_date_cache_entries(
                     selected_dates=[target_date],
                     buildings=target_buildings,
                 )
-                if str(item.get("file_path", "") or "").strip()
-            ]
-            expected_count = len(target_buildings)
-            if len(cached_entries) < expected_count:
+                if item.get("building") in target_buildings
+                and item.get("duty_date") == target_date
+                and _source_cache_entry_file_ready(item)
+            }
+            cached_entries = [cached_by_building[building] for building in target_buildings if building in cached_by_building]
+            if len(cached_entries) < len(target_buildings):
                 container.add_system_log(
                     "[12项独立上传调度] 按日共享缓存未齐全，外网端不写共享索引，等待内网补采同步"
                 )
-            if len(cached_entries) < expected_count:
                 dedupe_key = f"day_metric_upload:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
                 job, bridge_task = start_waiting_bridge_job(
                     job_service=container.job_service,
@@ -2287,7 +2289,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
 
         try:
             target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
-            selection = bridge_service.get_alarm_event_upload_selection()
+            if not target_buildings:
+                return False, "未配置告警源文件楼栋"
+            target_bucket_key = daily_scheduled_bucket_for_time()
+            selection = bridge_service.get_alarm_event_upload_selection(required_bucket=target_bucket_key)
             selected_entries = [
                 item
                 for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
@@ -2300,18 +2305,6 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             }
             missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
             if missing_buildings:
-                target_bucket_key = str(
-                    selection.get("target_bucket_key", "")
-                    or selection.get("current_bucket", "")
-                    or selection.get("selection_reference_date", "")
-                    or ""
-                ).strip()
-                current_alarm_bucket = getattr(bridge_service, "current_alarm_event_bucket", None)
-                if callable(current_alarm_bucket):
-                    try:
-                        target_bucket_key = str(current_alarm_bucket() or "").strip() or target_bucket_key
-                    except Exception:
-                        pass
                 waiting_job, waiting_task = start_waiting_bridge_job(
                     job_service=container.job_service,
                     bridge_service=bridge_service,
@@ -2320,6 +2313,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     worker_payload={
                         "resume_kind": "shared_bridge_alarm_event_upload",
                         "mode": "full",
+                        "required_alarm_bucket": target_bucket_key,
                     },
                     resource_keys=["alarm_upload:global"],
                     priority="scheduler",
@@ -2330,7 +2324,8 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     bridge_create_name="create_alarm_event_upload_task",
                     bridge_kwargs={
                         "mode": "full",
-                        "target_bucket_key": target_bucket_key or None,
+                        "target_bucket_key": target_bucket_key,
+                        "requested_by": "alarm_upload_scheduler",
                     },
                 )
                 task_id = str(waiting_task.get("task_id", "") or "-").strip() or "-"
@@ -2355,7 +2350,11 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     emit_log(text)
 
             try:
-                result = bridge_service.upload_alarm_event_source_cache_full_to_bitable(emit_log=_combined_log)
+                result = bridge_service.upload_alarm_event_source_cache_full_to_bitable(
+                    emit_log=_combined_log, required_bucket=target_bucket_key,
+                )
+                if result.get("status") == "skipped":
+                    return result
                 accepted = bool(result.get("accepted"))
                 reason = str(result.get("reason", "") or "").strip()
                 if not accepted:

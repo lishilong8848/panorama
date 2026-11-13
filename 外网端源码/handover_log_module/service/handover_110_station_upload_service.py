@@ -960,12 +960,15 @@ class Handover110StationUploadService:
             synced_identity = _runtime_path_identity(self.config, cloud_sync.get("source_file", ""))
             cloud_token = str(cloud_sync.get("spreadsheet_token", "") or "").strip()
             batch_token = str(batch_meta.get("spreadsheet_token", "") or "").strip()
+            # 按楼栋拆分后，110 站写入「楼栋=110站」的独立记录，其 token 不再等于 batch 级 token；
+            # 该记录按 日期+班次+110站 稳定，A–E 重发不影响它。幂等只需：已成功 + 源文件未变 +
+            # 110 已同步到某多维记录（cloud_token 为 bitable:）+ 批次已进入多维附件模式（batch_token 为 bitable:）。
             if (
                 str(cloud_sync.get("status", "") or "").strip().lower() == "success"
                 and stored_identity
                 and stored_identity == synced_identity
                 and cloud_token.startswith("bitable:")
-                and cloud_token == batch_token
+                and batch_token.startswith("bitable:")
             ):
                 emit_log(f"[交接班][110站附件] 同一文件已同步成功，本次跳过 batch={target_batch}")
                 return {

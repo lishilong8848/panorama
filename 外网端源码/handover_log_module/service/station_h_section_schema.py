@@ -1,18 +1,21 @@
 """H楼交接班日志“业务分类”（sections）模板解析与单元格映射。
 
-H楼没有 A–E 那样的审核文档管线：其 H_handover.xlsx 在交付时由扁平单元格字典
-（``_build_station_h_cell_values`` → ``build_station_h_workbook``）基于模板生成。本模块从
-``H楼交接班日志空模板.xlsx`` 解析出可填写的业务分类，提供三件事：
+H楼没有 A–E 那样的审核文档管线：其 H_handover.xlsx 在交付时由
+``_build_station_h_cell_values`` → ``build_station_h_workbook`` 基于模板生成。本模块从
+``H楼交接班日志空模板.xlsx`` 解析出可填写的业务分类，提供：
 
-1. ``station_h_section_schema()``：分类 schema（名称 / 列 key+label / 模板数据行号），供前端渲染与保存；
-2. ``normalize_station_h_sections()``：把前端提交的数据规范成 ``{name: [{"cells": {col_key: str}}]}``，
-   保留增删后的行数，只保留模板允许的列；
-3. ``build_station_h_section_cell_values()``：把已保存数据映射为“绝对单元格 -> 值”的字典，
-   **仅含非空值**——空值不写，保留模板默认（``/`` 占位、注意事项常备文本、既有自动执行人）。
+1. ``station_h_section_schema()``：前端可填写分类 schema（名称 / 列 key+label / 模板数据行号，
+   **排除培训管理**——培训由审核页 training_rows 单独渲染）；
+2. ``station_h_build_section_specs()``：**含培训管理**的全部分类构建规格（带 title/header/数据行号），
+   供附件工作簿按模板行序定位、插行与顺延锚点；
+3. ``normalize_station_h_sections()``：把前端提交的数据规范成 ``{name: [{"cells": {col_key: str}}]}``；
+4. ``build_station_h_section_rows()``：把已保存分类 + 培训记录整理成 ``{分类名: [ {列key: 值} ]}``，
+   供附件构建器**逐行渲染**（每条记录主表各占一行）；
+5. ``build_station_h_section_cell_values()`` / ``station_h_section_overflow()``：旧的“固定行 + 分类续表”
+   映射，仅供**云表（在线表格）兼容路径**使用；附件（xlsx）路径已改为逐行插行，不再写分类续表。
 
-关键安全约束：主表只填模板既有数据行，超出部分写分类续表，**不插行/删行**，因此不会位移培训行(31)、
-注意事项执行人(H40:H42)、页脚(H45:H48) 等既有扁平单元格。“培训管理”已由 training_rows 单独
-处理（写 B31..G31），在此排除，避免重复与冲突。
+附件路径关键行为：各分类（含培训）按记录数在主表插行/删行，其后培训行、注意事项执行人(H40:H42)、
+页脚(H45:H48) 等锚点与打印区域由构建器动态顺延；“三、注意事项交接”执行人为空时自动填当班人员第一个。
 """
 from __future__ import annotations
 
@@ -38,6 +41,11 @@ STATION_H_ATTENTION_SECTION = "三、注意事项交接"
 
 _schema_lock = threading.Lock()
 _cached_schema: Optional[List[Dict[str, Any]]] = None
+_cached_build_specs: Optional[List[Dict[str, Any]]] = None
+
+TRAINING_SECTION_NAME = "培训管理"
+STATION_H_ATTENTION_EXECUTOR_COLUMN = "H"
+STATION_H_FOOTER_TITLE = "交接确认"
 
 
 def _load_station_h_sheet() -> Tuple[Any, Any]:
@@ -89,6 +97,97 @@ def station_h_section_schema() -> List[Dict[str, Any]]:
         if _cached_schema is None:
             _cached_schema = _parse_schema()
         return _cached_schema
+
+
+def _parse_build_specs() -> List[Dict[str, Any]]:
+    """解析**全部**分类（含培训管理），供附件工作簿按记录数插行渲染。
+
+    与 ``station_h_section_schema`` 的区别：包含培训管理、并额外携带 title_row /
+    header_row / template_data_row，以便构建器按模板行序定位、插行与顺延锚点。
+    """
+    workbook, worksheet = _load_station_h_sheet()
+    if worksheet is None:
+        return []
+    try:
+        specs: List[Dict[str, Any]] = []
+        for section in parse_category_sections(worksheet):
+            columns = build_section_logical_columns(
+                worksheet, section, hidden_columns=list(STATION_H_SECTION_HIDDEN_COLUMNS),
+            )
+            specs.append(
+                {
+                    "name": section.name,
+                    "title_row": section.title_row,
+                    "header_row": section.header_row,
+                    "template_data_row": section.template_data_row,
+                    "columns": [
+                        {"key": col.key, "label": col.label, "source_cols": list(col.source_cols)}
+                        for col in columns
+                    ],
+                    "rows": list(range(section.start_row, section.end_row + 1)),
+                }
+            )
+        specs.sort(key=lambda spec: spec["template_data_row"])
+        return specs
+    finally:
+        workbook.close()
+
+
+def station_h_build_section_specs() -> List[Dict[str, Any]]:
+    """全部 H楼分类（含培训管理）的构建规格，按模板数据行升序，解析自模板并缓存。"""
+    global _cached_build_specs
+    with _schema_lock:
+        if _cached_build_specs is None:
+            _cached_build_specs = _parse_build_specs()
+        return _cached_build_specs
+
+
+def build_station_h_section_rows(
+    sections: Any,
+    training_rows: Any,
+) -> Dict[str, List[Dict[str, str]]]:
+    """把审核页保存的分类数据 + 培训记录整理成 ``{分类名: [ {列key: 值} ]}``（按模板分类顺序）。
+
+    规则（对应「每条记录在主表各占一行」）：
+    * 只返回**已保存**的分类：``sections`` 里出现的分类名。未保存的分类不出现在结果里，
+      构建器保留其模板默认（``/`` 占位、注意事项常备文本），不插行不删行。
+    * 已保存的分类返回其全部记录（含空串），记录条数即该分类在主表应占的行数；
+      构建器据此插行/删行，使「新增一条 = 主表新增一行」。
+    * 培训管理由 ``training_rows`` 提供（列 key B/D/E/F/G），有记录才返回。
+    * 注意事项执行人（H 列）的自动填充由构建器用 ``attention_executor`` 兜底，本函数不强填。
+    """
+    specs = station_h_build_section_specs()
+    raw = sections if isinstance(sections, dict) else {}
+    training = training_rows if isinstance(training_rows, list) else []
+    result: Dict[str, List[Dict[str, str]]] = {}
+    for spec in specs:
+        name = spec["name"]
+        col_keys = [column["key"] for column in spec["columns"]]
+        if name == TRAINING_SECTION_NAME:
+            records: List[Dict[str, str]] = []
+            for row in training:
+                cells = row.get("cells", {}) if isinstance(row, dict) else {}
+                if not isinstance(cells, dict):
+                    cells = {}
+                if not any(str(cells.get(key, "") or "").strip() for key in col_keys):
+                    continue
+                records.append({key: str(cells.get(key, "") or "") for key in col_keys})
+            if records:
+                result[name] = records
+            continue
+        if name not in raw:
+            # 未保存：保留模板默认，交由构建器不动这个分类。
+            continue
+        incoming = raw.get(name)
+        incoming_rows = incoming if isinstance(incoming, list) else []
+        records = []
+        for source in incoming_rows:
+            source_cells = source.get("cells", {}) if isinstance(source, dict) else {}
+            if not isinstance(source_cells, dict):
+                source_cells = {}
+            records.append({key: str(source_cells.get(key, "") or "") for key in col_keys})
+        result[name] = records
+    return result
 
 
 def station_h_section_cells() -> frozenset:
@@ -166,7 +265,13 @@ def station_h_section_overflow(sections: Any) -> List[Dict[str, Any]]:
 
 __all__ = [
     "STATION_H_EXCLUDED_SECTIONS",
+    "STATION_H_ATTENTION_SECTION",
+    "STATION_H_ATTENTION_EXECUTOR_COLUMN",
+    "STATION_H_FOOTER_TITLE",
+    "TRAINING_SECTION_NAME",
     "station_h_section_schema",
+    "station_h_build_section_specs",
+    "build_station_h_section_rows",
     "station_h_section_overflow",
     "station_h_section_cells",
     "normalize_station_h_sections",

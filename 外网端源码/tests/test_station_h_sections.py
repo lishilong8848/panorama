@@ -1,7 +1,9 @@
 """H楼审核页“业务分类”后端回归：模板解析 schema、单元格集合、规范化、交付映射、KV 存取。
 
-分类只填模板既有数据行（不插行/删行），交付时仅写非空单元格（空值保留模板默认），
-“培训管理”排除（已由 training_rows 单独处理）。
+附件（xlsx）交付时各分类（含培训管理）按记录数在主表**逐行渲染**（新增一条即新增一行，
+超出模板行则插行、少于则删行），页脚与打印区自动顺延，不再写“分类续表”第二张表；
+未保存的分类保留模板默认（``/`` 占位、注意事项常备文本）。“三、注意事项交接”执行人
+为空时自动填当班人员第一个。云表（在线表格）兼容路径仍按模板固定行写扁平单元格。
 """
 from __future__ import annotations
 
@@ -184,12 +186,12 @@ def test_saving_unedited_training_preview_does_not_overwrite_newer_saved_edit(tm
 
 
 def test_section_cells_land_in_generated_workbook(tmp_path):
-    """端到端：分类单元格经 build_station_h_workbook 真正写进 H_handover.xlsx；未填写分类保留模板默认。"""
+    """端到端：分类记录经 build_station_h_workbook 在主表**逐行**写入；每条记录各占一行，未填分类保留模板默认。"""
     import openpyxl
     from handover_log_module.service.handover_attachment_workbook_builder import (
         build_station_h_workbook, default_station_h_template_path,
     )
-    from handover_log_module.service.station_h_section_schema import station_h_section_overflow
+    from handover_log_module.service.station_h_section_schema import build_station_h_section_rows
 
     template = default_station_h_template_path()
     if not template.is_file():
@@ -201,31 +203,133 @@ def test_section_cells_land_in_generated_workbook(tmp_path):
         ],
         "园区施工管理": [{"cells": {"B": "施工方A", "F": "进行中", "H": "李四"}}],
     }
-    section_cells = build_station_h_section_cell_values(sections)
+    section_rows = build_station_h_section_rows(sections, [])
     out = tmp_path / "H_handover.xlsx"
     build_station_h_workbook(
-        template, out, {"B2": "2026年11月10日", "F2": "白班", **section_cells},
-        section_overflow=station_h_section_overflow(sections),
+        template, out, {"B2": "2026年11月10日", "F2": "白班"},
+        section_rows=section_rows, attention_executor="赵六",
     )
     workbook = openpyxl.load_workbook(str(out), data_only=False)
     try:
         ws = workbook["H楼"] if "H楼" in workbook.sheetnames else workbook.worksheets[0]
+        # 新事件处理 2 条记录 → 主表 2 行（19、20），每条各占一行，不再挤一行/不再进续表
+        assert ws["A19"].value == 1
         assert ws["B19"].value == "一级"
         assert ws["C19"].value == "10:00"
         assert ws["D19"].value == "=1+1"      # D:E 合并，写锚点 D19
         assert ws["D19"].data_type == "s"
         assert ws["F19"].value == "已恢复"    # F:G 合并，写锚点 F19
         assert ws["H19"].value == "张三"
-        assert ws["B28"].value == "施工方A"
-        assert ws["H28"].value == "李四"
-        # 未填写的注意事项分类保留模板常备文本（未被空值清空）
-        assert ws["B40"].value not in (None, "")
-        assert ws["D19"].alignment.wrap_text
-        continuation = workbook["分类续表"]
-        assert continuation["A3"].value == 2
-        assert continuation["D3"].data_type == "s"
-        assert continuation["F3"].value == "王五"
-        assert continuation["D3"].alignment.wrap_text
-        assert continuation.row_dimensions[3].height > 30
+        assert ws["A20"].value == 2           # 第 2 条记录 = 主表新增一行
+        assert ws["B20"].value == "二级"
+        assert ws["H20"].value == "王五"
+        assert ws["D20"].alignment.wrap_text
+        # 园区施工管理因上方新事件插了 1 行，整体顺延到行 29
+        assert ws["B29"].value == "施工方A"
+        assert ws["H29"].value == "李四"
+        # 未填写的注意事项分类保留模板常备文本，执行人自动填当班第一个（赵六），整体顺延 +1 到行 41-43
+        assert ws["B41"].value not in (None, "")
+        assert ws["H41"].value == "赵六"
+        assert ws["H42"].value == "赵六"
+        assert ws["H43"].value == "赵六"
+        # 彻底去掉「分类续表」第二张工作表
+        assert "分类续表" not in workbook.sheetnames
+        # 打印区域随插行动态覆盖到页脚（模板 50 行 + 净增 1 行）
+        assert str(ws.print_area).endswith("$H$51")
+    finally:
+        workbook.close()
+
+
+def test_training_records_render_one_row_each(tmp_path):
+    """培训管理多条记录在主表逐行渲染（行31起），不再用换行挤进单个单元格。"""
+    import openpyxl
+    from handover_log_module.service.handover_attachment_workbook_builder import (
+        build_station_h_workbook, default_station_h_template_path,
+    )
+    from handover_log_module.service.station_h_section_schema import build_station_h_section_rows
+
+    template = default_station_h_template_path()
+    if not template.is_file():
+        pytest.skip("H楼模板不存在")
+    training_rows = [
+        {"row_id": "training:1", "cells": {"B": "消防培训", "D": "14:00", "E": "实操", "F": "王五", "G": "全员"}},
+        {"row_id": "training:2", "cells": {"B": "安全培训", "D": "15:00", "E": "理论", "F": "赵六", "G": "A组"}},
+    ]
+    section_rows = build_station_h_section_rows({}, training_rows)
+    out = tmp_path / "H_training.xlsx"
+    build_station_h_workbook(template, out, {"B2": "2026年11月10日"}, section_rows=section_rows)
+    workbook = openpyxl.load_workbook(str(out), data_only=False)
+    try:
+        ws = workbook["H楼"] if "H楼" in workbook.sheetnames else workbook.worksheets[0]
+        # 培训管理模板数据行=31；2 条记录 → 行 31、32（插 1 行）
+        assert ws["A31"].value == 1
+        assert ws["B31"].value == "消防培训"
+        assert ws["G31"].value == "全员"
+        assert ws["A32"].value == 2
+        assert ws["B32"].value == "安全培训"
+        assert ws["F32"].value == "赵六"
+        # 单元格内不含换行拼接（不再挤一行）
+        assert "\n" not in str(ws["B31"].value or "")
+        assert "分类续表" not in workbook.sheetnames
+    finally:
+        workbook.close()
+
+
+def test_build_station_h_handover_log_workbook_renders_sections(tmp_path, monkeypatch):
+    """打印链路：build_station_h_handover_log_workbook 用当前保存态生成逐行渲染、带打印预设的工作簿。"""
+    import openpyxl
+    from types import SimpleNamespace
+    from handover_log_module.service import review_followup_trigger_service as followup_module
+    from handover_log_module.service.handover_attachment_workbook_builder import default_station_h_template_path
+
+    if not default_station_h_template_path().is_file():
+        pytest.skip("H楼模板不存在")
+
+    service = object.__new__(followup_module.ReviewFollowupTriggerService)
+    service._review_service = SimpleNamespace(build_batch_key=lambda d, s: f"{d}|{s}")
+    monkeypatch.setattr(service, "_list_batch_sessions_resilient", lambda batch_key, emit_log: [], raising=False)
+    cell_result = {
+        "ok": True,
+        "cells": {"B2": "2026年11月12日", "F2": "白班", "C3": "值班甲", "H45": "接班甲", "H46": "接班甲",
+                  "H47": "接班甲", "H48": "接班甲"},
+        "section_rows": {
+            "新事件处理": [
+                {"B": "一级", "C": "10:00", "D": "跳闸", "F": "已处理", "H": "值班甲"},
+                {"B": "二级", "C": "11:00", "D": "告警", "F": "处理中", "H": "值班乙"},
+            ],
+            "培训管理": [{"B": "消防培训", "D": "14:00", "E": "实操", "F": "王五", "G": "全员"}],
+        },
+        "attention_executor": "值班甲",
+    }
+    monkeypatch.setattr(service, "_build_station_h_cell_values", lambda **_kw: cell_result, raising=False)
+    service._cloud_sheet_sync_service = SimpleNamespace()  # 非附件交付服务 → 用默认模板路径
+
+    out = tmp_path / "H_print.xlsx"
+    result = service.build_station_h_handover_log_workbook(
+        duty_date="2026-11-12", duty_shift="day", output_path=out, emit_log=lambda _m: None,
+    )
+    assert result == out and out.is_file()
+    workbook = openpyxl.load_workbook(str(out), data_only=False)
+    try:
+        ws = workbook["H楼"]
+        # 头部固定区不受插行影响
+        assert ws["B2"].value == "2026年11月12日"
+        assert ws["C3"].value == "值班甲"
+        # 新事件 2 条 → 行 19、20
+        assert ws["D19"].value == "跳闸"
+        assert ws["D20"].value == "告警"
+        # 培训 1 条，因新事件插 1 行顺延到行 32
+        assert ws["B32"].value == "消防培训"
+        # 注意事项未保存：保留模板默认文本，执行人自动填当班第一个（值班甲），顺延 +1 到行 41
+        assert ws["B41"].value not in (None, "")
+        assert ws["H41"].value == "值班甲"
+        # 页脚「清点确认人（接班）」顺延 +1 到行 46，仍为接班甲
+        assert ws["H46"].value == "接班甲"
+        # 打印预设烘焙进工作簿，打印区随插行覆盖到页脚
+        assert ws.page_setup.orientation == "portrait"
+        assert ws.sheet_properties.pageSetUpPr.fitToPage is True
+        assert ws.page_setup.fitToWidth == 1 and ws.page_setup.fitToHeight == 1
+        assert str(ws.print_area).endswith("$H$51")
+        assert "分类续表" not in workbook.sheetnames
     finally:
         workbook.close()

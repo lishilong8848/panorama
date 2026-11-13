@@ -1469,6 +1469,8 @@ class SharedBridgeStore:
                 request_payload["required_query_end"] or "-",
             ]
         )
+        if requested_by == "alarm_upload_scheduler":
+            dedupe_key += "|scheduled"
         with self.connect() as conn:
             conn.execute(
                 """

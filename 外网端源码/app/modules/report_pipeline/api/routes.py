@@ -2202,6 +2202,7 @@ def _run_external_chiller_mode_upload_shared_flow(
     container,
     config: Dict[str, Any],
     emit_log: Callable[[str], None],
+    scheduled: bool = False,
 ) -> Dict[str, Any]:
     bridge_service = _shared_bridge_service_or_raise(container)
     target_buildings = bridge_service.get_source_cache_buildings()
@@ -2227,6 +2228,12 @@ def _run_external_chiller_mode_upload_shared_flow(
         max_selection_age_hours=1.0,
     ), verify_files=False)
     cached_entries = selection["selected_entries"]
+    if scheduled and selection["can_proceed"]:
+        batch = _parse_hour_bucket(selection["best_bucket_key"])
+        if batch is None or any(_parse_hour_bucket(item.get("bucket_key")) != batch for item in cached_entries):
+            detail = "等待最新制冷模式参数批次的全部楼栋到位，不混用不同时间的源文件"
+            emit_log(f"[制冷模式参数上传] {detail}")
+            return {"status": "waiting_shared_bridge", "waiting_reason": detail}
     emit_log(
         "[制冷模式参数上传] 共享缓存最新索引读取完成: "
         f"bucket={selection.get('best_bucket_key') or '-'}, "
@@ -2304,18 +2311,25 @@ def _run_external_chiller_mode_upload_shared_flow(
     state_key = f"{target['app_token']}:{target['table_id']}"
     repository = container.app_state_repository
     versions = {}
+    source_versions = {}
     for item in cached_entries:
         building = str(item.get("building") or "").strip()
         bucket = _parse_hour_bucket(item.get("bucket_key") or selection["best_bucket_key"])
         if not building or building in versions or bucket is None:
             raise RuntimeError("制冷模式共享索引缺少有效楼栋或批次时间，未上传")
         versions[building] = bucket.strftime("%Y-%m-%d %H:%M")
+        source_versions[building] = [
+            versions[building], str(item.get("entry_id") or ""), str(item.get("updated_at") or ""),
+            str(item.get("file_path") or ""),
+        ]
     if set(versions) != set(target_buildings):
         raise RuntimeError("制冷模式共享索引未覆盖全部目标楼栋，未上传")
     bucket_text = max(versions.values())
     state_namespace = "chiller_mode_upload_watermark"
     previous = repository.get_runtime_kv(state_namespace, state_key) or {}
     old_versions = previous.get("versions") or {}
+    if scheduled and previous.get("completed_sources") == source_versions:
+        return {"status": "skipped", "summary": f"制冷模式参数批次 {bucket_text} 已上传"}
     regressed = [building for building, value in versions.items() if str(old_versions.get(building) or "") > value]
     if regressed:
         detail = f"已处理更新的制冷模式源文件，跳过含旧文件的批次 {bucket_text}: {','.join(regressed)}"
@@ -2328,13 +2342,16 @@ def _run_external_chiller_mode_upload_shared_flow(
         nonlocal write_started
         if not write_started:
             # Record before the first mutation so a restart cannot replay an older batch.
-            repository.put_runtime_kv(state_namespace, state_key, {"versions": {**old_versions, **versions}})
+            repository.put_runtime_kv(state_namespace, state_key, {**previous, "versions": {**old_versions, **versions}})
             write_started = True
 
     try:
-        return service.continue_from_source_units(
+        result = service.continue_from_source_units(
             source_units=source_units, emit_log=emit_log, cfg=cfg, before_write=before_write,
         )
+        if result.get("status") == "ok":
+            repository.put_runtime_kv(state_namespace, state_key, {"versions": versions, "completed_sources": source_versions})
+        return result
     except FeishuTokenConnectTimeout as exc:
         if write_started:
             raise
@@ -2366,7 +2383,7 @@ def _run_chiller_mode_job(container, emit_log, *, scheduled: bool) -> Dict[str, 
         if _deployment_role_mode(container) != "external":
             raise RuntimeError("当前不是外网端，已停止制冷模式参数上传")
         result = _raise_if_chiller_mode_upload_failed(_run_external_chiller_mode_upload_shared_flow(
-            container=container, config=_runtime_config(container), emit_log=emit_log,
+            container=container, config=_runtime_config(container), emit_log=emit_log, scheduled=scheduled,
         ))
         status = str(result.get("status") or "success")
         detail = str(result.get("summary") or result.get("waiting_reason") or "")

@@ -7,6 +7,7 @@ import {
   confirmHandoverReviewApi,
   downloadHandoverReviewStationHSignaturePreviewApi,
   downloadHandoverReviewStationHDutyFocusImageApi,
+  downloadHandoverReviewStationHHandoverLogPrintApi,
   getHandoverEngineerDirectoryApi,
   getHandoverInspectionAccessApi,
   getJobApi,
@@ -672,6 +673,9 @@ const HANDOVER_REVIEW_STATION_H_TEMPLATE = `
           </button>
           <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading || !canPrintDutyFocus" :title="dutyFocusPrintReason" @click="printDutyFocus">
             {{ printing ? "准备打印..." : "打印值班关注点" }}
+          </button>
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading" title="按当前保存内容生成排好版的交接班日志并调用打印" @click="printHandoverLog">
+            {{ printing ? "准备打印..." : "打印交接班日志" }}
           </button>
           <button class="btn btn-secondary btn-mini" type="button" :disabled="loading || saving || signatureRefreshing || printing || attachmentUploading" @click="saveSelection">
             {{ saving ? "保存中..." : "保存全部" }}
@@ -3355,9 +3359,10 @@ function mountHandoverStationHApp(Vue) {
         dutyFocusPrintFrame = null;
       }
 
-      function printDutyFocusImage(imageUrl) {
+      function printDutyFocusImage(imageUrl, title = "值班关注点") {
         const normalizedUrl = String(imageUrl || "").trim();
-        if (!normalizedUrl) return Promise.reject(new Error("值班关注点成品图片尚未生成"));
+        const docTitle = String(title || "值班关注点").trim();
+        if (!normalizedUrl) return Promise.reject(new Error(`${docTitle}成品图片尚未生成`));
         cleanupDutyFocusPrintFrame();
         return new Promise((resolve, reject) => {
           const frame = document.createElement("iframe");
@@ -3386,7 +3391,7 @@ function mountHandoverStationHApp(Vue) {
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <title>值班关注点</title>
+    <title>${docTitle}</title>
     <style>
       @page { size: A4 portrait; margin: 0; }
       * { box-sizing: border-box; }
@@ -3395,10 +3400,10 @@ function mountHandoverStationHApp(Vue) {
       img { display: block; width: 194mm; height: 281mm; object-fit: contain; }
     </style>
   </head>
-  <body><img id="duty-focus-print-image" alt="值班关注点" /></body>
+  <body><img id="duty-focus-print-image" alt="${docTitle}" /></body>
 </html>`);
           printDocument.close();
-          printDocument.title = `值班关注点_${dutyDate.value || ""}_${dutyShift.value || ""}`;
+          printDocument.title = `${docTitle}_${dutyDate.value || ""}_${dutyShift.value || ""}`;
           const image = printDocument.getElementById("duty-focus-print-image");
           if (!image) {
             cleanupDutyFocusPrintFrame();
@@ -3468,6 +3473,38 @@ function mountHandoverStationHApp(Vue) {
           errorText.value = String(error?.message || error || "调用值班关注点打印失败");
           statusText.value = "";
         } finally {
+          printing.value = false;
+        }
+      }
+
+      async function printHandoverLog() {
+        if (printing.value || attachmentUploading.value) return;
+        printing.value = true;
+        errorText.value = "";
+        statusText.value = "正在生成排好版的交接班日志并调用打印...";
+        let objectUrl = "";
+        try {
+          if (hasUnsavedChanges.value) {
+            const saved = await saveSelection({ silent: true });
+            if (!saved) {
+              statusText.value = "";
+              return;
+            }
+          }
+          const blob = await downloadHandoverReviewStationHHandoverLogPrintApi({
+            duty_date: dutyDate.value,
+            duty_shift: dutyShift.value,
+            _t: Date.now(),
+          });
+          objectUrl = URL.createObjectURL(blob);
+          await printDutyFocusImage(objectUrl, "交接班日志");
+          statusText.value = "已调用浏览器打印，可在系统打印窗口中确认。";
+        } catch (error) {
+          cleanupDutyFocusPrintFrame();
+          errorText.value = String(error?.message || error || "调用交接班日志打印失败");
+          statusText.value = "";
+        } finally {
+          if (objectUrl) window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
           printing.value = false;
         }
       }
@@ -3543,6 +3580,7 @@ function mountHandoverStationHApp(Vue) {
         refreshSignatures,
         regenerateDutyFocusImage,
         printDutyFocus,
+        printHandoverLog,
         saveSelection,
         onDutyChange,
         hasName,

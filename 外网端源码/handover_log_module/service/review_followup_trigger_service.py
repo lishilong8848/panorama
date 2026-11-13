@@ -45,8 +45,11 @@ from handover_log_module.service.station_h_review_selection_service import (
     station_h_normalize_duty_people,
 )
 from handover_log_module.service.station_h_duty_focus_service import StationHDutyFocusService
+from handover_log_module.service.handover_attachment_workbook_builder import (
+    build_station_h_workbook, default_station_h_template_path,
+)
 from handover_log_module.service.station_h_section_schema import (
-    build_station_h_section_cell_values, station_h_section_overflow,
+    build_station_h_section_cell_values, build_station_h_section_rows,
 )
 from handover_log_module.service.source_data_attachment_bitable_export_service import (
     SourceDataAttachmentBitableExportService,
@@ -1518,13 +1521,16 @@ class ReviewFollowupTriggerService:
                     if isinstance(cloud_result.get("details", {}), dict)
                     else {}
                 )
+                # 每楼各自记录：session 级 token/url 用本楼记录（details 优先），回退 batch 代表值。
+                building_token = str(detail.get("spreadsheet_token", "") or "").strip() or spreadsheet_token
+                building_url = str(detail.get("spreadsheet_url", "") or detail.get("record_url", "") or "").strip() or spreadsheet_url
                 payload = {
                     **previous,
                     "attempted": True,
                     "success": True,
                     "status": "success",
-                    "spreadsheet_token": spreadsheet_token,
-                    "spreadsheet_url": spreadsheet_url,
+                    "spreadsheet_token": building_token,
+                    "spreadsheet_url": building_url,
                     "spreadsheet_title": spreadsheet_title,
                     "sheet_title": previous["sheet_title"] or building,
                     "synced_revision": revision,
@@ -1881,7 +1887,11 @@ class ReviewFollowupTriggerService:
             "H15": current_first,
             "H16": current_second,
         }
-        for cell in ("H40", "H41", "H42", "H45", "H46", "H47", "H48"):
+        # 「三、注意事项交接」执行人(H40:H42)自动填**当班人员第一个**；
+        # 页脚「工具及物品交接清点·清点确认人（接班）」(H45:H48)仍为接班人员第一个。
+        for cell in ("H40", "H41", "H42"):
+            cells[cell] = current_first
+        for cell in ("H45", "H46", "H47", "H48"):
             cells[cell] = next_first
         if not independent:
             try:
@@ -1903,23 +1913,27 @@ class ReviewFollowupTriggerService:
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][H楼培训管理] 读取失败，保留已保存培训内容: {exc}")
         training_rows = selection.get("training_rows", [])
-        if isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
-            # Keep the template's fixed training row; the attachment continues on a separate sheet.
-            training_rows = training_rows[:1]
-        if training_rows:
-            cells.update({f"{column}31": "\n".join(str(row.get("cells", {}).get(column) or "")
-                                                for row in training_rows) for column in TRAINING_COLUMNS})
-        # H楼业务分类：把已保存分类数据按模板既有数据行写入绝对单元格（仅非空值；空值保留模板默认，
-        # 如 / 占位与注意事项常备文本）。在既有扁平单元格之后 update：操作者填写值（含 H40:H42 执行人）
-        # 主表只填既有行，超出模板的记录由附件构建器写入分类续表。
+        # 附件（xlsx）路径：各分类（含培训管理）按记录数在主表逐行渲染，由构建器据 section_rows 插行/删行，
+        # 不再截断培训、也不再挤进行31一个单元格、不再写「分类续表」。
         try:
-            cells.update(build_station_h_section_cell_values(
-                selection.get("sections", {}),
-                clear_attention_defaults=bool(selection.get("attention_handover_saved")),
-            ))
+            section_rows = build_station_h_section_rows(selection.get("sections", {}), training_rows)
         except Exception as exc:  # noqa: BLE001
-            emit_log(f"[交接班][H楼附件] 业务分类数据映射失败，已跳过分类写入: {exc}")
+            emit_log(f"[交接班][H楼附件] 分类逐行数据整理失败，回退固定行写入: {exc}")
+            section_rows = None
+        # 云表（在线表格）兼容路径：仍按模板固定行写扁平单元格（培训多条沿用换行合并到行31）。
+        if not isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
+            if training_rows:
+                cells.update({f"{column}31": "\n".join(str(row.get("cells", {}).get(column) or "")
+                                                    for row in training_rows) for column in TRAINING_COLUMNS})
+            try:
+                cells.update(build_station_h_section_cell_values(
+                    selection.get("sections", {}),
+                    clear_attention_defaults=bool(selection.get("attention_handover_saved")),
+                ))
+            except Exception as exc:  # noqa: BLE001
+                emit_log(f"[交接班][H楼附件] 业务分类数据映射失败，已跳过分类写入: {exc}")
         return {"ok": True, "cells": cells, "selection": selection,
+                "section_rows": section_rows, "attention_executor": current_first,
                 "warning": cabinet_result.get("error", "") if independent and not cabinet_result.get("ok") else ""}
 
     def _persist_station_h_sync_result(self, *, batch_key: str, sync_result: Dict[str, Any]) -> None:
@@ -2017,21 +2031,12 @@ class ReviewFollowupTriggerService:
                     f"[交接班][H楼附件] 值班关注点图片生成失败，H楼正文继续同步 "
                     f"batch={batch_key}, error={exc}"
                 )
-            overflow = []
+            section_rows = None
+            attention_executor = ""
             if isinstance(self._cloud_sheet_sync_service, HandoverAttachmentDeliveryService):
-                selection = cell_result.get("selection", {})
-                overflow = station_h_section_overflow(selection.get("sections"))
-                extra_training = [
-                    (index, row["cells"])
-                    for index, row in enumerate(selection.get("training_rows", [])[1:], start=2)
-                    if any(value.strip() for value in row["cells"].values())
-                ]
-                if extra_training:
-                    overflow.append({
-                        "name": TRAINING_SECTION,
-                        "columns": [{"key": key, "label": label} for key, label in TRAINING_COLUMNS.items()],
-                        "rows": extra_training,
-                    })
+                # 附件路径：分类（含培训）按记录逐行渲染，执行人兜底=当班第一个；不再写「分类续表」。
+                section_rows = cell_result.get("section_rows")
+                attention_executor = str(cell_result.get("attention_executor", "") or "")
             station_result = self._cloud_sheet_sync_service.sync_station_h_sheet(
                 batch_meta=latest_batch_meta,
                 cell_values=cell_result.get("cells", {}),
@@ -2042,10 +2047,14 @@ class ReviewFollowupTriggerService:
                 ),
                 emit_log=emit_log,
                 **({"is_current": is_current} if independent else {}),
-                **({"section_overflow": overflow} if overflow else {}),
+                **({"section_rows": section_rows} if section_rows is not None else {}),
+                **({"attention_executor": attention_executor} if section_rows is not None else {}),
             )
             if isinstance(station_result, dict):
-                station_result.setdefault("spreadsheet_token", token)
+                # 幂等比较用的是 batch 级 token；按楼栋拆分后 H 写入自己的记录，其 _record_meta 带的是
+                # H 记录 token。这里把用于「已同步过一次」判定的 spreadsheet_token 统一成 batch token
+                # （independent 手动上传时 token 为空，保留 H 记录 token 供前端链接）；record_url 仍指向 H 记录。
+                station_result["spreadsheet_token"] = token or str(station_result.get("spreadsheet_token", "") or "")
                 if cell_result.get("warning"):
                     station_result["warning"] = f"机柜汇总已留空：{cell_result['warning']}"
                 if signature:
@@ -2115,6 +2124,53 @@ class ReviewFollowupTriggerService:
                         },
                     )
             return result
+
+    def build_station_h_handover_log_workbook(
+        self, *, duty_date: str, duty_shift: str, output_path, emit_log: Callable[[str], None] = print,
+    ) -> Path:
+        """按当前已保存的审核内容生成 H楼交接班日志工作簿（各分类逐行、含打印预设），返回 ``output_path``。
+
+        用于「打印交接班日志」：不上传、不触发培训接口拉取（``independent=True``），只读当前保存态。
+        数据未就绪时抛 ``RuntimeError``，调用方转成 4xx/5xx。
+        """
+        batch_key = self._review_service.build_batch_key(duty_date, duty_shift)
+        if not batch_key:
+            raise RuntimeError("缺少有效的日期/班次，无法生成交接班日志")
+        sessions = self._list_batch_sessions_resilient(batch_key, emit_log=emit_log)
+        cell_result = self._build_station_h_cell_values(
+            batch_key=batch_key, sessions=sessions, emit_log=emit_log, independent=True,
+        )
+        if not bool(cell_result.get("ok", False)):
+            raise RuntimeError(str(cell_result.get("error") or "H楼交接班日志数据未就绪，无法打印"))
+        delivery = getattr(self, "_cloud_sheet_sync_service", None)
+        template = (
+            delivery.station_h_template_path()
+            if isinstance(delivery, HandoverAttachmentDeliveryService)
+            else default_station_h_template_path()
+        )
+        build_station_h_workbook(
+            template, output_path, cell_result.get("cells", {}),
+            section_rows=cell_result.get("section_rows"),
+            attention_executor=str(cell_result.get("attention_executor", "") or ""),
+        )
+        return Path(output_path)
+
+    def render_station_h_handover_log_png(
+        self, *, duty_date: str, duty_shift: str, emit_log: Callable[[str], None] = print,
+    ) -> bytes:
+        """生成 H楼交接班日志的打印用 PNG（工作簿→LibreOffice PDF→单页 PNG），供前端自动弹打印框。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="station_h_log_print_") as temp_dir:
+            workbook_path = Path(temp_dir) / "H_handover.xlsx"
+            self.build_station_h_handover_log_workbook(
+                duty_date=duty_date, duty_shift=duty_shift, output_path=workbook_path, emit_log=emit_log,
+            )
+            pdf_path = self._station_h_duty_focus_service.build_print_pdf(workbook_path=workbook_path)
+            try:
+                return self._station_h_duty_focus_service._render_pdf_to_png_bytes(pdf_path)
+            finally:
+                Path(pdf_path).unlink(missing_ok=True)
 
     def _attachment_manifests(self, batch_key):
         if not isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
@@ -2465,6 +2521,10 @@ class ReviewFollowupTriggerService:
         except Exception as exc:  # noqa: BLE001
             sync_result = {"status": "failed", "error": str(exc)}
             emit_log(f"[交接班][ABCDEH工作内容附件] 同步异常 batch={batch_key}, error={exc}")
+        if isinstance(sync_result, dict):
+            # 与 H 补充同步一致：幂等比较用 batch 级 token（按楼栋拆分后 abcdeh 写入独立记录，
+            # 其 _record_meta 带的是自身记录 token，不再等于 batch token）。
+            sync_result["spreadsheet_token"] = token or str(sync_result.get("spreadsheet_token", "") or "")
         result["abcdeh_work_content_sync"] = sync_result
         status = str(sync_result.get("status", "")).strip().lower()
         if status in {"success", "failed"}:

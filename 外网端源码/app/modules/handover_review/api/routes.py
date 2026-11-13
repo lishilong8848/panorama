@@ -4757,6 +4757,34 @@ def handover_review_station_h_print_duty_focus(
     )
 
 
+@router.get("/api/handover/review/station-h/handover-log/print")
+@_dedicated_review_endpoint
+def handover_review_station_h_print_handover_log(
+    request: Request,
+    duty_date: str = "",
+    duty_shift: str = "",
+) -> Response:
+    """生成 H楼交接班日志的打印用图片（已预设打印配置、各分类逐行），供审核页「打印交接班日志」自动弹打印框。"""
+    container = request.app.state.container
+    handover_cfg = _handover_cfg(container)
+    duty_date_text, duty_shift_text = _normalize_duty_context(duty_date, duty_shift)
+    if not duty_date_text or not duty_shift_text:
+        duty_date_text, duty_shift_text = _current_handover_duty_context(handover_cfg)
+    followup = _build_review_followup_service(container)
+    emit_log = getattr(container, "add_system_log", print)
+    try:
+        png_bytes = followup.render_station_h_handover_log_png(
+            duty_date=duty_date_text, duty_shift=duty_shift_text, emit_log=emit_log,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"交接班日志打印图片生成失败: {exc}") from exc
+    if not png_bytes:
+        raise HTTPException(status_code=500, detail="交接班日志打印图片生成后为空")
+    return Response(content=png_bytes, media_type="image/png")
+
+
 @router.post("/api/handover/review/station-h/duty-focus/image/regenerate")
 @_dedicated_review_endpoint
 def handover_review_station_h_regenerate_duty_focus_image(

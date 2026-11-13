@@ -133,6 +133,24 @@ def test_stale_building_fallback_does_not_overwrite_its_newer_data(tmp_path, mon
     upload.assert_called_once()
 
 
+def test_scheduled_upload_waits_for_same_batch_and_skips_completed_batch(tmp_path, monkeypatch):
+    mixed = _selection("2026-11-11 13:20")
+    mixed["selected_entries"].append({"building": "B楼", "bucket_key": "2026-11-11 13:10", "file_path": "B-old.json"})
+    complete = _selection("2026-11-11 13:20")
+    complete["selected_entries"].append({"building": "B楼", "bucket_key": "2026-11-11 13:20", "file_path": "B.json"})
+    container = _container(tmp_path, monkeypatch, [mixed, complete, complete])
+    container.bridge.get_source_cache_buildings = lambda: ["A楼", "B楼"]
+    upload = Mock(side_effect=lambda **kwargs: kwargs["before_write"]() or {"status": "ok"})
+    monkeypatch.setattr(routes.ChillerModeUploadService, "continue_from_source_units", upload)
+
+    assert routes._run_chiller_mode_job(container, lambda _: None, scheduled=True)["status"] == "waiting_shared_bridge"
+    upload.assert_not_called()
+    assert routes._run_chiller_mode_job(container, lambda _: None, scheduled=True)["status"] == "ok"
+    container.app_state_repository = AppStateRepository(runtime_config=container.runtime_config, app_dir=tmp_path)
+    assert routes._run_chiller_mode_job(container, lambda _: None, scheduled=True)["status"] == "skipped"
+    upload.assert_called_once()
+
+
 @pytest.mark.parametrize("after_write", [False, True])
 def test_non_retryable_errors_remain_terminal(tmp_path, monkeypatch, after_write):
     container = _container(tmp_path, monkeypatch, [_selection("2026-11-11 13:20")])

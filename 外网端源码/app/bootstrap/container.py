@@ -583,7 +583,7 @@ class AppContainer:
         return ApschedulerSchedulerFacade(
             scheduler_key="wet_bulb_collection",
             feature="wet_bulb_collection",
-            scheduler_cfg=scheduler_cfg,
+            scheduler_cfg={"minute_offset": 35, **scheduler_cfg},
             runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.wet_bulb_collection_scheduler_callback or self._wet_bulb_collection_scheduler_run_callback,
@@ -954,14 +954,18 @@ class AppContainer:
     def _submit_energy_report_upload(self, source: str) -> tuple[bool, str]:
         from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
         from app.modules.report_pipeline.service.energy_report_upload_service import (
-            FEATURE, EnergyReportUploadService, pending_periods,
+            FEATURE, SOURCE_WAIT_REASON, EnergyReportSourcePending, EnergyReportUploadService,
+            defer_source_retry, energy_report_check_open, pending_periods, source_manifest, source_retry_due,
         )
 
         if self._configured_deployment_snapshot().get("role_mode") != "external":
             return False, "skip:disabled"
         if self.runtime_config.get("energy_report_upload", {}).get("enabled", True) is not True:
             return False, "skip:disabled"
-        periods = pending_periods(self.runtime_config, datetime.now())
+        now = datetime.now()
+        if not energy_report_check_open(now):
+            return False, "skip:before_energy_report_check"
+        periods = pending_periods(self.runtime_config, now)
         if not periods:
             return False, "skip:already_not_due_or_completed"
         try:
@@ -970,16 +974,46 @@ class AppContainer:
             self.add_system_log("[月度能耗报表上传] 等待配置中心填写飞书鉴权")
             return False, "skip:disabled"
         service = EnergyReportUploadService(self.runtime_config)
+        active = {period: self.job_service.find_active_job_by_dedupe_key(f"{FEATURE}:{period}") for period in periods}
+        if any(job and job.get("wait_reason") != SOURCE_WAIT_REASON for job in active.values()):
+            return False, "skip:busy"
+
+        def source_log(text: str) -> None:
+            self.add_system_log(text, suppress_alert_upload=True)
+
         for period in periods:
+            if not source_retry_due(self.runtime_config, period, datetime.now()):
+                continue
+            dedupe_key = f"{FEATURE}:{period}"
+            waiting_job = active[period]
             try:
-                service.source_paths(period, request_missing=True, log=self.add_system_log)
+                paths = service.source_paths(period, request_missing=True, log=source_log)
+            except EnergyReportSourcePending as exc:
+                retry = defer_source_retry(self.runtime_config, period, str(exc), now=datetime.now())
+                if not waiting_job:
+                    waiting_job = self.job_service.create_waiting_worker_job(
+                        name=f"月度能耗报表上传 {period}", worker_handler=FEATURE,
+                        worker_payload={"period": period}, resource_keys=["network:external", FEATURE],
+                        priority="scheduler", feature=FEATURE, dedupe_key=dedupe_key, submitted_by="scheduler",
+                        wait_reason=SOURCE_WAIT_REASON, summary=retry["summary"],
+                    ).to_dict()
+                source_log(f"[月度能耗报表上传] {period} {retry['summary']}：{exc}")
+                if retry["alert"]:
+                    self.job_service.fail_waiting_job(
+                        waiting_job["job_id"], error_text=f"{period} 内网源文件持续未就绪：{exc}；已保留月份，后续自动重试",
+                    )
+                continue
             except (OSError, RuntimeError, ValueError) as exc:
                 self.add_system_log(f"[月度能耗报表上传] 等待内网源文件 {period}: {exc}")
                 continue
+            payload = {"period": period, "source_manifest": source_manifest(paths)}
+            if waiting_job:
+                job = self.job_service.resume_waiting_worker_job(waiting_job["job_id"], worker_payload=payload)
+                return True, job.job_id
             job = self.job_service.start_worker_job(
                 name=f"月度能耗报表上传 {period}", worker_handler=FEATURE,
-                worker_payload={"period": period}, resource_keys=["network:external", FEATURE], priority="scheduler",
-                feature=FEATURE, dedupe_key=f"{FEATURE}:{period}", submitted_by="scheduler",
+                worker_payload=payload, resource_keys=["network:external", FEATURE], priority="scheduler",
+                feature=FEATURE, dedupe_key=dedupe_key, submitted_by="scheduler",
             )
             return True, job.job_id
         return False, "skip:source_not_ready"
@@ -991,7 +1025,6 @@ class AppContainer:
                 scheduler_cfg={"enabled": True, "interval_minutes": 5},
                 runtime_state_root=self._runtime_state_root_text(), emit_log=self.add_system_log,
                 run_callback=self._submit_energy_report_upload,
-                is_busy=self._job_busy_for_feature_prefixes("energy_report_upload"),
                 orchestrator=self.ensure_scheduler_orchestrator(), schedule_kind="interval",
                 source_name="月度能耗报表上传",
             )

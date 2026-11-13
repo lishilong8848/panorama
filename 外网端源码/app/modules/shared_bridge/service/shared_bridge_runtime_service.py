@@ -26,6 +26,7 @@ from app.modules.report_pipeline.service.monthly_cache_continue_service import r
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
+from app.modules.shared_bridge.service.alarm_event_page_export_service import daily_scheduled_bucket_for_time
 from app.modules.shared_bridge.service.shared_bridge_runtime_mirror_store import SharedBridgeRuntimeMirrorStore
 from app.modules.shared_bridge.service.shared_source_cache_service import (
     FAMILY_ALARM_EVENT,
@@ -465,6 +466,13 @@ class SharedBridgeRuntimeService:
             raise RuntimeError("共享目录中没有可继续上传的12项源文件")
         selected_dates = self._normalize_text_list(internal_result.get("selected_dates", []))
         buildings = self._normalize_text_list(internal_result.get("selected_buildings", []))
+        if task.get("requested_by") == "scheduler":
+            selected_dates = self._normalize_text_list(request.get("selected_dates", []))
+            buildings = self.get_source_cache_buildings()
+            expected = {(day, building) for day in selected_dates for building in buildings}
+            actual = {(item["duty_date"], item["building"]) for item in source_units}
+            if not expected or actual != expected or len(source_units) != len(expected):
+                raise RuntimeError("12项定时任务共享源文件未齐全或批次不匹配")
         if not selected_dates:
             selected_dates = self._normalize_text_list(request.get("selected_dates", []))
         if not buildings:
@@ -934,6 +942,8 @@ class SharedBridgeRuntimeService:
                     "required_query_end": request.get("required_query_end"),
                 }
             )
+            if task.get("requested_by") == "alarm_upload_scheduler":
+                bridge_kwargs["requested_by"] = "alarm_upload_scheduler"
         elif feature == "handover_cache_fill":
             get_or_create_name = "get_or_create_handover_cache_fill_task"
             create_name = "create_handover_cache_fill_task"
@@ -1237,9 +1247,14 @@ class SharedBridgeRuntimeService:
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         mode = str(task.get("mode", "") or request.get("mode", "") or "").strip().lower() or "full"
         building = str(request.get("building", "") or "").strip()
+        required_bucket = (
+            str(request.get("target_bucket_key") or "").strip()
+            if task.get("requested_by") == "alarm_upload_scheduler" else ""
+        )
         selection = self.get_alarm_event_upload_selection(
             building=building if mode == "single_building" else "",
             require_fresh=True,
+            **({"required_bucket": required_bucket} if required_bucket else {}),
         )
         target_buildings = [building] if mode == "single_building" and building else self.get_source_cache_buildings()
         if not target_buildings:
@@ -1261,6 +1276,7 @@ class SharedBridgeRuntimeService:
                 "resume_kind": "shared_bridge_alarm_event_upload",
                 "mode": mode,
                 "building": building or None,
+                **({"required_alarm_bucket": required_bucket} if required_bucket else {}),
                 "bridge_task_id": task_id,
             },
             "summary": "共享文件已到位，正在继续上传告警信息",
@@ -5568,7 +5584,24 @@ class SharedBridgeRuntimeService:
                 results.append({"building": building, "accepted": False, "running": False, "error": str(exc)})
         return {"ok": accepted > 0, "accepted_count": accepted, "results": results}
 
-    def get_alarm_event_upload_selection(self, *, building: str = "", require_fresh: bool = False) -> Dict[str, Any]:
+    def get_alarm_event_upload_selection(
+        self, *, building: str = "", require_fresh: bool = False, required_bucket: str = "",
+    ) -> Dict[str, Any]:
+        if required_bucket:
+            buildings = self._http_source_cache_buildings([building] if building else None)
+            by_building = {}
+            for entry in self.get_latest_source_cache_entries(
+                source_family=FAMILY_ALARM_EVENT, buildings=buildings, bucket_key=required_bucket,
+                require_fresh=require_fresh,
+            ):
+                name = entry.get("building")
+                if name in buildings and entry.get("bucket_kind") == "latest" and entry.get("bucket_key") == required_bucket:
+                    by_building.setdefault(name, entry)
+            return {
+                "selected_entries": list(by_building.values()),
+                "selection_reference_date": required_bucket[:10],
+                "missing_both_days_buildings": [name for name in buildings if name not in by_building],
+            }
         if self._http_bridge_should_try():
             http_selection = self._http_alarm_event_upload_selection(building=building, require_fresh=require_fresh)
             if http_selection is not None:
@@ -5634,10 +5667,15 @@ class SharedBridgeRuntimeService:
         self,
         *,
         emit_log=None,
+        required_bucket: str = "",
     ) -> Dict[str, Any]:
         if self._source_cache_service is None:
             return {"accepted": False, "reason": "disabled"}
-        selection_override = self.get_alarm_event_upload_selection(require_fresh=True)
+        if required_bucket and required_bucket != daily_scheduled_bucket_for_time():
+            return {"accepted": True, "status": "skipped", "reason": "superseded_alarm_batch"}
+        selection_override = self.get_alarm_event_upload_selection(
+            require_fresh=True, **({"required_bucket": required_bucket} if required_bucket else {}),
+        )
         if self._http_bridge_forced() and str(selection_override.get("error", "") or "").strip():
             return {
                 "accepted": False,
@@ -8903,6 +8941,7 @@ class SharedBridgeRuntimeService:
             for marker in (
                 "source-index ready 条目未经内网端文件存在性校验",
                 "共享源文件未齐全",
+                "告警共享文件补采后仍缺失楼栋",
                 "共享文件未齐全",
                 "共享缓存未齐全",
                 "历史缓存未齐全",
@@ -8973,6 +9012,13 @@ class SharedBridgeRuntimeService:
             bridge_task_id = str(snapshot.get("bridge_task_id", "") or "").strip()
             if not job_id:
                 continue
+            if snapshot.get("feature") == "alarm_event_upload":
+                payload = self._job_service.load_job_stage_payload(job_id) or {}
+                required_bucket = str(payload.get("required_alarm_bucket") or "").strip()
+                if required_bucket and required_bucket != daily_scheduled_bucket_for_time():
+                    self._job_service.cancel_job(job_id)
+                    self._emit_system_log(f"[共享桥接] 告警批次 {required_bucket} 已过期，结束旧等待任务 {job_id}")
+                    continue
             if not bridge_task_id:
                 self._reissue_unbound_waiting_job(snapshot)
                 continue

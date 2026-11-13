@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import uuid
 from datetime import datetime, timedelta
@@ -12,12 +13,13 @@ from typing import Any
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
-from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
+from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient, InternalBridgeHttpError
 from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from app.shared.utils.xlsx_archive import validate_xlsx_archive
 
 
 FEATURE = "energy_report_upload"
+SOURCE_WAIT_REASON = "waiting:energy_report_source"
 TARGET_TOKEN = "HScCwZt9QiqPCUkSrHjcbBL1ngb"
 TABLE_ID = "tblZEGGCmrdQH162"
 BUILDINGS = ("A楼", "B楼", "C楼", "D楼", "E楼")
@@ -28,10 +30,68 @@ ATTACHMENTS = {
 FIELD_TYPES = {"月份": 1, "楼栋": 1, **dict.fromkeys(ATTACHMENTS.values(), 17), "同步标识": 1}
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _QUEUE_LOCK = threading.Lock()
+_SOURCE_RETRY_DELAYS = (300, 600, 900)
+_SOURCE_ALERT_AFTER = 1800
+_REQUIRED_SOURCES = tuple((building, family) for building in BUILDINGS for family in ATTACHMENTS)
+
+
+class EnergyReportSourcePending(FileNotFoundError):
+    pass
+
+
+def _is_transient_bridge_error(error: InternalBridgeHttpError) -> bool:
+    message = str(error).lower()
+    if message.startswith("内网端 http 返回 "):
+        return message.removeprefix("内网端 http 返回 ").split(":", 1)[0] in {"429", "502", "503", "504"}
+    return any(word in message for word in (
+        "timed out", "timeout", "超时", "busy", "正在处理其他请求", "正在排队",
+        "retry_after_sec", "connection reset", "connection refused", "remote end closed",
+        "10054", "10061", "temporarily unavailable",
+    ))
+
+
+def _file_version(stat) -> tuple[int, int]:
+    return stat.st_size, stat.st_mtime_ns
+
+
+def source_manifest(paths) -> list[dict[str, Any]]:
+    manifest = []
+    for (building, family), path in paths.items():
+        try:
+            version = list(_file_version(path.stat()))
+        except OSError:
+            version = None  # The worker will check again and request repair if needed.
+        manifest.append({"building": building, "family": family, "path": str(path.absolute()), "version": version})
+    return manifest
+
+
+def _parse_manifest(manifest):
+    paths = {}
+    if not isinstance(manifest, list):
+        raise ValueError("月度能耗报表文件清单格式无效")
+    for item in manifest:
+        if not isinstance(item, dict) or not all(isinstance(item.get(key), str) for key in ("building", "family", "path")):
+            raise ValueError("月度能耗报表文件清单格式无效")
+        key = (item["building"], item["family"])
+        path = Path(item["path"])
+        if key not in _REQUIRED_SOURCES or key in paths or not path.is_absolute() or path.suffix.lower() != ".xlsx":
+            raise ValueError("月度能耗报表文件清单包含无效文件或重复楼栋报表")
+        version = item.get("version")
+        if version is not None and (not isinstance(version, list) or len(version) != 2
+                                    or any(type(value) is not int for value in version)):
+            raise ValueError("月度能耗报表文件清单版本无效")
+        paths[key] = (path, tuple(version) if version is not None else None)
+    if set(paths) != set(_REQUIRED_SOURCES) or len({path for path, _ in paths.values()}) != len(paths):
+        raise ValueError("月度能耗报表文件清单必须包含五楼十份不同文件")
+    return paths
+
+
+def energy_report_check_open(now: datetime) -> bool:
+    return now >= now.replace(hour=9, minute=5, second=0, microsecond=0)
 
 
 def due_period(now: datetime) -> str:
-    if now < now.replace(day=1, hour=8, minute=30, second=0, microsecond=0):
+    if now.day == 1 and not energy_report_check_open(now):
         return ""
     return (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
 
@@ -60,6 +120,38 @@ def _queue_path(config):
 def _validate_period(period: str) -> None:
     if datetime.strptime(period, "%Y-%m").strftime("%Y-%m") != period:
         raise ValueError("月度能耗报表月份必须为 YYYY-MM")
+
+
+def _source_retry_path(config, period):
+    _validate_period(period)
+    return _state_path(config).with_name(f"energy_report_upload_source_retry_{period}.json")
+
+
+def source_retry_due(config, period, now: datetime) -> bool:
+    retry = load_cached_json(_source_retry_path(config, period), {}, encoding="utf-8")
+    return now.timestamp() >= retry.get("next_at", 0)
+
+
+def defer_source_retry(config, period, detail, *, now: datetime | None = None) -> dict[str, Any]:
+    now = (now or datetime.now()).timestamp()
+    path = _source_retry_path(config, period)
+    with _QUEUE_LOCK:
+        old = load_cached_json(path, {}, encoding="utf-8")
+        first_at = old.get("first_at", now)
+        count = old.get("count", 0)
+        delay = _SOURCE_RETRY_DELAYS[min(count, len(_SOURCE_RETRY_DELAYS) - 1)]
+        alert = now - first_at >= _SOURCE_ALERT_AFTER and not old.get("alerted")
+        next_at = now + delay
+        save_cached_json(path, {
+            "first_at": first_at, "count": count + 1, "next_at": next_at,
+            "alerted": bool(alert or old.get("alerted")),
+        }, encoding="utf-8")
+    return {
+        "status": "waiting_resource", "wait_reason": SOURCE_WAIT_REASON, "period": period,
+        "summary": f"等待内网源文件；约 {delay // 60} 分钟后重试",
+        "detail": detail,
+        "alert": alert,
+    }
 
 
 def pending_periods(config, now: datetime) -> tuple[str, ...]:
@@ -178,17 +270,30 @@ class EnergyReportUploadService:
                 )
                 log(f"[月度能耗报表上传] 已请求内网补采 period={period}, family={family}, buildings={','.join(buildings)}, force={force}, accepted={result.get('accepted', 0)}")
             except RuntimeError as exc:
-                log(f"[月度能耗报表上传] 内网补采请求失败，后续重试: {exc}")
+                log(f"[月度能耗报表上传] 内网补采请求未完成，后续重试: {exc}")
 
     def source_paths(self, period: str, *, request_missing: bool = False, log=lambda _: None) -> dict[tuple[str, str], Path]:
         _validate_period(period)
         bridge = self._bridge()
-        required = [(building, family) for building in BUILDINGS for family in ATTACHMENTS]
-        replies = bridge.source_index_batch([
-            {"source_family": family, "building": building, "bucket_kind": "latest",
-             "bucket_or_date": period, "status": "ready", "limit": 5}
-            for building, family in required
-        ])
+        required = _REQUIRED_SOURCES
+        try:
+            replies = bridge.source_index_batch([
+                {"source_family": family, "building": building, "bucket_kind": "latest",
+                 "bucket_or_date": period, "status": "ready", "limit": 5}
+                for building, family in required
+            ])
+        except InternalBridgeHttpError as exc:
+            if _is_transient_bridge_error(exc):
+                raise EnergyReportSourcePending(str(exc)) from exc
+            raise
+        if len(replies) != len(required):
+            raise EnergyReportSourcePending("内网源文件索引返回不完整，暂不补采")
+        for reply in replies:
+            if not reply.get("ok"):
+                error = InternalBridgeHttpError(str(reply.get("error") or "内网源文件索引查询未完成"))
+                if _is_transient_bridge_error(error) or str(error).endswith("source-index batch result missing"):
+                    raise EnergyReportSourcePending(str(error)) from error
+                raise error
         config = self.config.get("shared_bridge", {})
         root = config.get("external_root_dir") or config.get("root_dir")
         found = {}
@@ -215,7 +320,7 @@ class EnergyReportUploadService:
                                 validate_xlsx_archive(path)
                             except Exception as exc:
                                 invalid.add(key)
-                                log(f"[月度能耗报表上传] 工作簿校验失败: {building}/{ATTACHMENTS[family]}: {exc}")
+                                log(f"[月度能耗报表上传] 工作簿未通过校验: {building}/{ATTACHMENTS[family]}: {exc}")
                                 continue
                         found[key] = path
                         invalid.discard(key)
@@ -227,7 +332,7 @@ class EnergyReportUploadService:
             if request_missing:
                 self._request_repairs(bridge, period, set(required) - found.keys() - invalid, force=False, log=log)
                 self._request_repairs(bridge, period, invalid, force=True, log=log)
-            raise FileNotFoundError(f"{period} 月度能耗报表未齐: {'、'.join(missing)}")
+            raise EnergyReportSourcePending(f"{period} 月度能耗报表未齐: {'、'.join(missing)}")
         if len(set(found.values())) != len(required):
             raise ValueError("月度能耗报表索引重复指向同一文件")
         return found
@@ -253,18 +358,48 @@ class EnergyReportUploadService:
         fields = row["fields"] if row else {}
         return _text(fields.get("同步标识")) == digest and all(fields.get(name) for name in ATTACHMENTS.values())
 
-    def run(self, period: str, *, log, check_cancel=lambda: None) -> dict[str, Any]:
-        paths = self.source_paths(period)
+    def _validated_files(self, period, paths, *, log, check_cancel):
         files = {}
-        for key, path in paths.items():
+        missing, invalid, changed = set(), set(), set()
+        for key, (path, expected_version) in paths.items():
             check_cancel()
             try:
-                content = path.read_bytes()
+                with path.open("rb") as handle:
+                    version = _file_version(os.fstat(handle.fileno()))
+                    content = handle.read()
+                if _file_version(path.stat()) != version:
+                    changed.add(key)
+                    continue
+            except OSError as exc:
+                missing.add(key)
+                log(f"[月度能耗报表上传] 源文件暂不可读 {key[0]}/{ATTACHMENTS[key[1]]}: {exc}")
+                continue
+            try:
                 validate_xlsx_archive(BytesIO(content))
             except Exception as exc:
-                self._request_repairs(self._bridge(), period, {key}, force=True, log=log)
-                raise ValueError(f"月度能耗报表文件无效: {path.name}，未写入飞书") from exc
+                invalid.add(key)
+                log(f"[月度能耗报表上传] 工作簿未通过校验 {key[0]}/{ATTACHMENTS[key[1]]}: {exc}")
+                continue
+            if expected_version is not None and expected_version != version:
+                changed.add(key)
+                continue
             files[key] = (path.name, content)
+        if missing or invalid or changed:
+            check_cancel()
+            if missing or invalid:
+                bridge = self._bridge()
+                self._request_repairs(bridge, period, missing, force=False, log=log)
+                self._request_repairs(bridge, period, invalid, force=True, log=log)
+            detail = "、".join(f"{b}/{ATTACHMENTS[f]}" for b, f in _REQUIRED_SOURCES if (b, f) in missing | invalid | changed)
+            raise EnergyReportSourcePending(f"{period} 月度能耗报表缺失、损坏或已变化: {detail}，未写入飞书")
+        return files
+
+    def run(self, period: str, *, log, check_cancel=lambda: None, manifest=None) -> dict[str, Any]:
+        _validate_period(period)
+        paths = _parse_manifest(manifest) if manifest is not None else {
+            key: (path, None) for key, path in self.source_paths(period, request_missing=True, log=log).items()
+        }
+        files = self._validated_files(period, paths, log=log, check_cancel=check_cancel)
         check_cancel()
         self.ensure_schema()
         client = self.client()
@@ -317,5 +452,6 @@ class EnergyReportUploadService:
                 raise RuntimeError(f"{period} 月度能耗报表回查未确认: {'、'.join(missing)}")
         save_cached_json(_completion_path(self.config, period), {"period": period, "table_id": TABLE_ID}, encoding="utf-8")
         pending_path.unlink(missing_ok=True)
+        _source_retry_path(self.config, period).unlink(missing_ok=True)
         log(f"[月度能耗报表上传] 完成 period={period}, 更新={changed}, 复用={len(BUILDINGS) - changed}")
         return {"status": "success", "period": period, "updated_buildings": changed}

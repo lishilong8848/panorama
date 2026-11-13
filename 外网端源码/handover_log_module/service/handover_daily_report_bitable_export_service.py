@@ -38,6 +38,7 @@ class HandoverDailyReportBitableExportService:
                 "year": "年度",
                 "date": "日期",
                 "shift": "班次",
+                "building": "楼栋",
                 "report_link": "交接班日报",
             },
         }
@@ -70,6 +71,7 @@ class HandoverDailyReportBitableExportService:
             ("year", "年度"),
             ("date", "日期"),
             ("shift", "班次"),
+            ("building", "楼栋"),
             ("report_link", "交接班日报"),
         ):
             fields[key] = str(fields.get(key, default) or default).strip() or default
@@ -146,6 +148,25 @@ class HandoverDailyReportBitableExportService:
     @staticmethod
     def _shift_text(duty_shift: str) -> str:
         return "白班" if str(duty_shift or "").strip().lower() == "day" else "夜班"
+
+    # 多维表「楼栋」单选字段的规范选项文本：A楼/B楼/C楼/D楼/E楼/H楼 + 110站。
+    STATION_110_BUILDING_LABEL = "110站"
+    _BUILDING_LABEL_ALIASES = {
+        "110": "110站", "110站": "110站", "110kv": "110站", "110KV": "110站",
+        "110kv变电站": "110站", "110KV变电站": "110站",
+    }
+
+    @classmethod
+    def _building_text(cls, building: str) -> str:
+        """把内部楼栋标识规范成多维表「楼栋」单选的选项文本。
+
+        A–E、H 楼内部标识与选项文本一致（``A楼``…``H楼``）；110 站内部多用 ``110``，
+        统一规范成 ``110站``。未知值原样返回（去空白），由调用方保证合法。
+        """
+        text = str(building or "").strip()
+        if not text:
+            return ""
+        return cls._BUILDING_LABEL_ALIASES.get(text, cls._BUILDING_LABEL_ALIASES.get(text.lower(), text))
 
     @staticmethod
     def _year_text(duty_date: str) -> str:
@@ -324,10 +345,15 @@ class HandoverDailyReportBitableExportService:
         duty_date: str,
         duty_shift: str,
         cfg: Dict[str, Any],
+        building: str | None = None,
     ) -> List[str]:
         fields = cfg.get("fields", {})
         target_date_ms = self._midnight_timestamp_ms(duty_date)
         target_shift = self._shift_text(duty_shift)
+        # building=None 时不按楼栋过滤（兼容旧调用）；提供时要求「楼栋」单选文本精确匹配。
+        match_building = building is not None
+        target_building = self._building_text(building) if match_building else ""
+        building_field = fields.get("building", "楼栋")
         matched: List[str] = []
         for item in existing_records:
             if not isinstance(item, dict):
@@ -338,8 +364,15 @@ class HandoverDailyReportBitableExportService:
                 continue
             shift_text = self._normalize_select_text(payload_fields.get(fields.get("shift", "班次")))
             date_ms = self._normalize_date_to_midnight_ms(payload_fields.get(fields.get("date", "日期")))
-            if shift_text == target_shift and date_ms == target_date_ms:
-                matched.append(record_id)
+            if shift_text != target_shift or date_ms != target_date_ms:
+                continue
+            if match_building:
+                record_building = self._building_text(
+                    self._normalize_select_text(payload_fields.get(building_field))
+                )
+                if record_building != target_building:
+                    continue
+            matched.append(record_id)
         return matched
 
     def export_record(
@@ -348,6 +381,7 @@ class HandoverDailyReportBitableExportService:
         duty_date: str,
         duty_shift: str,
         spreadsheet_url: str,
+        building: str = "",
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cfg = self._normalize_cfg()
@@ -379,11 +413,13 @@ class HandoverDailyReportBitableExportService:
             filter_formula=(f'AND(CurrentValue.[{date_field}]>=TODATE("{duty_date}"), '
                             f'CurrentValue.[{date_field}]<TODATE("{end_day}"))'),
         )
+        building_text = self._building_text(building)
         matched_ids = self._match_existing_record_ids(
             existing_records=existing_records,
             duty_date=duty_date,
             duty_shift=duty_shift,
             cfg=cfg,
+            building=building_text,
         )
 
         fields = cfg.get("fields", {})
@@ -399,6 +435,9 @@ class HandoverDailyReportBitableExportService:
                 cfg=cfg,
             ),
         }
+        if building_text:
+            # 「楼栋」为单选字段，按选项文本写入（与班次同为字符串选项）。
+            payload_fields[fields.get("building", "楼栋")] = building_text
         if matched_ids:
             for record_id in matched_ids:
                 last_update_error = ""

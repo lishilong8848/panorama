@@ -109,21 +109,35 @@ class HandoverDeliveryWorkflowService:
                         "uploaded_buildings": [], "failed_buildings": [], "skipped_buildings": []}
             date, shift = batch_key.split("|")
             store = HandoverAttachmentStore(self.config)
-            record = store.ensure_record(date, shift)
-            url = record["record_url"]
-            token = f"bitable:{record['record_id']}"
+            # batch 级 token 用稳定代理值（不绑定单一记录），供 H/110/abcdeh 补充同步「已同步过一次」门控；
+            # 每楼各自的多维记录 token/url 存在 session 级 cloud_sheet_sync 与 details 里。
+            token = f"bitable:{batch_key}"
             changed, failed = [], []
-            existing_names = set(record.get("attachment_names", []))
+            details: dict[str, dict[str, str]] = {}
+            representative_url = ""
 
             def filenames(name):
                 return (f"{name}_handover.xlsx", f"{name}_capacity.xlsx")
 
-            def already_uploaded(name, row):
-                return row.get("status") == "uploaded" and row.get("record_url") == url and set(filenames(name)) <= existing_names
-
             for name in candidates:
                 row = manifests[name]
-                if already_uploaded(name, row):
+                try:
+                    # 每楼各自记录：ensure_record(date,shift,楼栋) 找/建本楼记录并写本楼日报链接。
+                    record = store.ensure_record(date, shift, name)
+                except Exception as exc:
+                    failed.append({"building": name, "error": str(exc)})
+                    emit_log(f"[交接班][班次附件] {name} 记录准备失败: {exc}")
+                    if isinstance(exc, FeishuBitableRateLimited):
+                        break
+                    continue
+                url = record["record_url"]
+                building_token = f"bitable:{record['record_id']}"
+                details[name] = {"record_id": record["record_id"], "record_url": url,
+                                 "spreadsheet_token": building_token, "spreadsheet_url": url}
+                existing_names = set(record.get("attachment_names", []))
+                if (row.get("status") == "uploaded" and row.get("record_url") == url
+                        and set(filenames(name)) <= existing_names):
+                    representative_url = representative_url or url
                     continue
 
                 def is_current():
@@ -135,11 +149,12 @@ class HandoverDeliveryWorkflowService:
                         raise RuntimeError(f"{name} 已准备成品缺失，请重新生成")
                     pair = dict(zip(filenames(name), (row["paths"]["log"], row["paths"]["capacity"])))
                     store.upload_files(
-                        date, shift, pair, is_current=is_current, expected_record_id=record["record_id"],
+                        date, shift, pair, building=name, is_current=is_current,
+                        expected_record_id=record["record_id"],
                     )
                     updated = self.review.update_cloud_sheet_sync(
                         session_id=row["session_id"], expected_revision=row["revision"], cloud_sheet_sync={
-                            "status": "success", "spreadsheet_token": token, "spreadsheet_url": url,
+                            "status": "success", "spreadsheet_token": building_token, "spreadsheet_url": url,
                             "synced_revision": row["revision"],
                         },
                     )
@@ -147,7 +162,7 @@ class HandoverDeliveryWorkflowService:
                         raise RuntimeError("审核内容已变更，请重新提交")
                     self.state.update(row["session_id"], row["generation_id"], status="uploaded",
                                       artifacts_ready=True, record_url=url, upload_error="")
-                    existing_names.update(pair)
+                    representative_url = representative_url or url
                     changed.append(name)
                 except Exception as exc:
                     failed.append({"building": name, "error": str(exc)})
@@ -160,7 +175,11 @@ class HandoverDeliveryWorkflowService:
                     if isinstance(exc, FeishuBitableRateLimited):
                         break
             current = self._current_batch(batch_key)
-            completed = [name for name in self.BUILDINGS if already_uploaded(name, current.get(name, {}))]
+
+            def is_completed(name, row):
+                return row.get("status") == "uploaded" and bool(row.get("record_url"))
+
+            completed = [name for name in self.BUILDINGS if is_completed(name, current.get(name, {}))]
             missing = [name for name in self.BUILDINGS if name not in completed]
             status = "partial_failed" if failed and completed else "failed" if failed else (
                 "pending" if not building and missing else "ok"
@@ -170,14 +189,14 @@ class HandoverDeliveryWorkflowService:
                 previous = {}
             meta = {
                 **previous, "status": "success" if not missing else "prepared",
-                "spreadsheet_token": token, "spreadsheet_url": url,
+                "spreadsheet_token": token, "spreadsheet_url": representative_url,
                 "spreadsheet_title": "班次交接班附件",
             }
             self.review.register_cloud_batch(batch_key=batch_key, duty_date=date, duty_shift=shift, cloud_batch=meta)
             signature = hashlib.sha256("|".join(current[b]["generation_id"] for b in self.BUILDINGS).encode()).hexdigest() if not missing else ""
-            return {**meta, "status": status, "record_id": record["record_id"], "record_url": url,
+            return {**meta, "status": status, "record_id": "", "record_url": representative_url,
                     "all_buildings_uploaded": not missing, "missing_buildings": missing,
-                    "completed_buildings": completed,
+                    "completed_buildings": completed, "details": details,
                     "pending_buildings": [{"building": name, "reason": "waiting_for_upload"} for name in missing
                                           if name not in {item["building"] for item in failed}],
                     "attachment_generation_signature": signature,

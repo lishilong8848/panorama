@@ -121,10 +121,19 @@ def test_monthly_schedule_runs_day_one_and_retries_incomplete(monkeypatch, tmp_p
     monkeypatch.setattr(cache, "get_enabled_buildings", lambda: ["A楼", "E楼"])
     monkeypatch.setattr(cache, "_run_latest_source_steps_by_building", pipeline)
     monkeypatch.setattr(cache, "_latest_refresh_existing_entry", ready)
-    cache._run_energy_report_files_if_due(datetime(2026, 11, 1, 7, 59, 59))
+    cache._run_energy_report_files_if_due(datetime(2026, 11, 1, 8, 34, 59))
     pipeline.assert_not_called()
 
-    due = datetime(2026, 11, 1, 8)
+    due = datetime(2026, 11, 1, 8, 35)
+    from app.shared.runtime.building_browser_locks import acquire_building_browser_lock, release_building_browser_lock
+
+    assert acquire_building_browser_lock("A楼", owner="system_screenshot_capture", timeout_sec=0)
+    try:
+        cache._run_energy_report_files_if_due(due)
+        pipeline.assert_not_called()
+    finally:
+        release_building_browser_lock("A楼")
+
     cache._run_energy_report_files_if_due(due)
     assert [(family, period) for family, period, _ in pipeline.call_args.kwargs["steps"]] == [
         (PUE, "2026-10"), (FEEDER, "2026-10"),

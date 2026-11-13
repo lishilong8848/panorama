@@ -27,11 +27,11 @@ import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
-from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from openpyxl.utils.exceptions import CellCoordinatesException
 from openpyxl.utils.units import pixels_to_EMU
+from openpyxl.worksheet.properties import PageSetupProperties
 from PIL import Image as PILImage
 
 from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
@@ -42,6 +42,25 @@ STATION_H_TEMPLATE_FILE_NAME = "H楼交接班日志空模板.xlsx"
 STATION_H_DUTY_FOCUS_IMAGE_CELL = "J2"
 STATION_H_DUTY_FOCUS_IMAGE_MAX_WIDTH_PX = 900
 _IMAGE_CELL_PADDING_PX = 2
+
+# H楼交接班日志打印预设：纵向 A4、缩放成单页。打印区域按最终行数动态锁定日志正文，
+# 分类插行后仍覆盖到页脚。模板本身没有任何打印设置，导致每次打印都要手工重设；
+# 这里在生成时烘焙进去，下载/上传/打印的 H_handover.xlsx 都自带正确打印配置。
+STATION_H_PRINT_LAST_COLUMN = "H"
+STATION_H_PRINT_DEFAULT_LAST_ROW = 50
+STATION_H_PRINT_ORIENTATION = "portrait"
+STATION_H_PRINT_PAPER_SIZE = 9  # openpyxl Worksheet.PAPERSIZE_A4
+
+
+def _apply_station_h_print_setup(worksheet: Any, *, last_row: int = STATION_H_PRINT_DEFAULT_LAST_ROW) -> None:
+    """给 H楼日志正文工作表烘焙固定打印配置（不改动列宽/合并区域；行高由 wrap 逻辑负责）。"""
+    final_row = max(1, int(last_row or STATION_H_PRINT_DEFAULT_LAST_ROW))
+    worksheet.print_area = f"A1:{STATION_H_PRINT_LAST_COLUMN}{final_row}"
+    worksheet.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    worksheet.page_setup.orientation = STATION_H_PRINT_ORIENTATION
+    worksheet.page_setup.paperSize = STATION_H_PRINT_PAPER_SIZE
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.page_setup.fitToHeight = 1
 
 # 与 HandoverCloudSheetSyncService.STATION_H_ALLOWED_CELLS 保持一致；另允许培训行 B31:G31。
 STATION_H_CELL_KEYS = frozenset(
@@ -197,23 +216,145 @@ def _atomic_save_workbook(workbook: Any, output_path: Path) -> Path:
     return output_path
 
 
+def _write_cell(worksheet: Any, coordinate: str, value: Any) -> None:
+    """写单个单元格；字符串强制 data_type='s'，避免 openpyxl 误判类型。"""
+    cell = worksheet[coordinate]
+    cell.value = value
+    if isinstance(value, str):
+        cell.data_type = "s"
+
+
+def _row_of(coordinate: str) -> int:
+    return _parse_cell(coordinate)[0]
+
+
+def _render_station_h_sections(
+    worksheet: Any,
+    section_rows: Mapping[str, list[dict[str, Any]]],
+    *,
+    attention_executor: str = "",
+) -> tuple[int, int, int]:
+    """按记录数在主表**插行/删行**渲染各分类，使「新增一条 = 主表新增一行」。
+
+    返回 ``(total_delta, first_title_row, footer_start_row)``（均为模板坐标）：
+    * ``total_delta``：相对模板净增/减的行数，供页脚与打印区顺延；
+    * ``first_title_row``：第一个分类标题行（其上是头部固定区，不顺延）；
+    * ``footer_start_row``：页脚起始行（模板坐标，其下整体顺延 total_delta）。
+
+    规则：
+    * ``section_rows`` 里出现的分类＝已保存，渲染其全部记录（ desired=max(1,记录数) ），
+      记录数多于模板行则插行、少于则删行；未出现的分类保留模板默认，不插不删。
+    * 培训管理同样按记录逐行渲染（不再挤进行31一个单元格）。
+    * 「三、注意事项交接」执行人（H 列）为空时自动填 ``attention_executor``（当班人员第一个）。
+    * 每条记录行首列 A 写序号（1..N）。
+    """
+    from handover_log_module.repository.section_writer import (
+        _delete_rows_like_excel,
+        _insert_rows_like_excel,
+    )
+    from handover_log_module.service.station_h_section_schema import (
+        STATION_H_ATTENTION_EXECUTOR_COLUMN,
+        STATION_H_ATTENTION_SECTION,
+        station_h_build_section_specs,
+    )
+
+    noop_log = lambda _message: None  # noqa: E731
+    specs = station_h_build_section_specs()
+    if not specs:
+        return 0, 1, int(worksheet.max_row or 1) + 1
+
+    rows_in = section_rows if isinstance(section_rows, Mapping) else {}
+    first_title_row = int(specs[0]["title_row"])
+    footer_start_row = max(int(spec["rows"][-1]) for spec in specs) + 1
+
+    # 1) 每个分类的目标行数（模板坐标）与增减量
+    plan: list[dict[str, Any]] = []
+    for spec in specs:
+        template_rows = [int(r) for r in spec["rows"]]
+        start_row, end_row = template_rows[0], template_rows[-1]
+        baseline = end_row - start_row + 1
+        if spec["name"] in rows_in:
+            records = [rec for rec in rows_in[spec["name"]] if isinstance(rec, dict)]
+            desired = max(1, len(records))
+        else:
+            records = None
+            desired = baseline  # 保留模板默认，不插不删
+        plan.append({
+            "spec": spec, "records": records, "start_row": start_row, "end_row": end_row,
+            "baseline": baseline, "desired": desired, "delta": desired - baseline,
+        })
+
+    # 2) 自底向上插行/删行（用模板坐标；下方已处理，上方坐标不受影响）
+    for entry in sorted(plan, key=lambda item: item["start_row"], reverse=True):
+        delta = entry["delta"]
+        if delta > 0:
+            _insert_rows_like_excel(
+                worksheet, insert_at=entry["end_row"] + 1, amount=delta,
+                template_row=entry["end_row"], emit_log=noop_log,
+            )
+        elif delta < 0:
+            _delete_rows_like_excel(
+                worksheet, delete_at=entry["start_row"] + entry["desired"], amount=-delta,
+                emit_log=noop_log,
+            )
+
+    # 3) 计算每个分类插删后的最终起始行，并写记录
+    total_delta = sum(entry["delta"] for entry in plan)
+    for index, entry in enumerate(plan):
+        offset_above = sum(other["delta"] for other in plan[:index])
+        final_start = entry["start_row"] + offset_above
+        spec = entry["spec"]
+        columns = spec["columns"]
+        is_attention = spec["name"] == STATION_H_ATTENTION_SECTION
+        if entry["records"] is None:
+            # 未保存：保留模板内容；仅注意事项兜底填执行人。
+            if is_attention and str(attention_executor or "").strip():
+                for row in range(final_start, final_start + entry["desired"]):
+                    coord = f"{STATION_H_ATTENTION_EXECUTOR_COLUMN}{row}"
+                    existing = str(worksheet[coord].value or "").strip()
+                    if not existing:
+                        _write_cell(worksheet, coord, str(attention_executor).strip())
+            continue
+        executor = str(attention_executor or "").strip()
+        for i in range(entry["desired"]):
+            row = final_start + i
+            record = entry["records"][i] if i < len(entry["records"]) else {}
+            _write_cell(worksheet, f"A{row}", i + 1)
+            for column in columns:
+                key = column["key"]
+                value = record.get(key, "")
+                value = "" if value is None else str(value)
+                if is_attention and key == STATION_H_ATTENTION_EXECUTOR_COLUMN and not value.strip() and executor:
+                    value = executor
+                _write_cell(worksheet, f"{key}{row}", value)
+    return total_delta, first_title_row, footer_start_row
+
+
 def build_station_h_workbook(
     template_path: str | Path,
     output_path: str | Path,
     cell_values: Mapping[str, Any],
     image_path: Optional[str | Path] = None,
     *,
-    section_overflow: Optional[list[dict[str, Any]]] = None,
+    section_rows: Optional[Mapping[str, list[dict[str, Any]]]] = None,
+    attention_executor: str = "",
 ) -> Path:
     """基于 H楼模板生成填充后的工作簿，返回最终 ``output_path``。
 
-    ``cell_values`` 形如 ``{"B2": 2026年11月9日, "F2": "白班"}``；``image_path`` 为
-    独立值班关注点图片，插入 ``J2``。失败时旧目标文件保持不变。
+    ``cell_values`` 为扁平绝对单元格字典（头部固定区 + 页脚区）。当提供 ``section_rows``
+    时，各业务分类（含培训管理、注意事项）按记录数在主表**逐行渲染**（新增一条即新增一行），
+    其后所有页脚锚点与打印区域自动顺延；``cell_values`` 中落在分类区的坐标被忽略（以
+    ``section_rows`` 为准）。``attention_executor`` 为注意事项执行人自动填充值（当班人员第一个）。
+    ``image_path`` 为独立值班关注点图片，插入 ``J2``。失败时旧目标文件保持不变。
     """
     template = _resolve_template_path(template_path)
     output = _resolve_output_path(output_path)
     if template == output:
         raise HandoverAttachmentWorkbookError("输出路径不能与模板路径相同")
+    if not isinstance(cell_values, Mapping):
+        raise HandoverAttachmentWorkbookError(
+            f"cell_values 必须是 Mapping，收到 {type(cell_values).__name__}"
+        )
     image = _read_image(image_path) if str(image_path or "").strip() else None
 
     with warnings.catch_warnings():
@@ -227,27 +368,32 @@ def build_station_h_workbook(
                     )
                 workbook.worksheets[0].title = STATION_H_DEFAULT_SHEET_TITLE
             worksheet = workbook[STATION_H_DEFAULT_SHEET_TITLE]
-            _write_values(worksheet, cell_values)
+            template_max_row = int(worksheet.max_row or 1)
+            if section_rows is None:
+                # 兼容旧调用：无分类数据时按扁平字典整体写入（不插行）。
+                _write_values(worksheet, cell_values)
+                total_delta, first_title_row, footer_start_row = 0, template_max_row + 1, template_max_row + 1
+            else:
+                flat = dict(cell_values)
+                total_delta, first_title_row, footer_start_row = _render_station_h_sections(
+                    worksheet, section_rows, attention_executor=attention_executor,
+                )
+                # 头部固定区（分类标题行之上）按模板坐标写；页脚区顺延 total_delta。
+                for coordinate, value in flat.items():
+                    row = _row_of(coordinate)
+                    if row < first_title_row:
+                        _write_cell(worksheet, coordinate, value)
+                    elif row >= footer_start_row:
+                        column_letter = "".join(ch for ch in coordinate if ch.isalpha())
+                        _write_cell(worksheet, f"{column_letter}{row + total_delta}", value)
+                    # 分类区坐标忽略：以 section_rows 渲染结果为准
             wrap_and_fit_rows(worksheet)
+            _apply_station_h_print_setup(
+                worksheet,
+                last_row=max(template_max_row, STATION_H_PRINT_DEFAULT_LAST_ROW) + total_delta,
+            )
             if image is not None:
                 _insert_duty_focus_image(worksheet, *image)
-            if section_overflow:
-                continuation = workbook.create_sheet("分类续表")
-                continuation.column_dimensions["A"].width = 8
-                for section in section_overflow:
-                    continuation.append([section["name"]])
-                    continuation.cell(continuation.max_row, 1).font = Font(bold=True)
-                    columns = section["columns"]
-                    continuation.append(["序号", *(column["label"] or column["key"] for column in columns)])
-                    for index, cells in section["rows"]:
-                        continuation.append([index, *(cells.get(column["key"], "") for column in columns)])
-                        for cell in continuation[continuation.max_row]:
-                            if isinstance(cell.value, str):
-                                cell.data_type = "s"
-                    for index in range(2, len(columns) + 2):
-                        continuation.column_dimensions[get_column_letter(index)].width = 28
-                    continuation.append([""])
-                wrap_and_fit_rows(continuation)
             return _atomic_save_workbook(workbook, output)
         finally:
             workbook.close()
@@ -259,6 +405,10 @@ __all__ = [
     "STATION_H_DEFAULT_SHEET_TITLE",
     "STATION_H_DUTY_FOCUS_IMAGE_CELL",
     "STATION_H_DUTY_FOCUS_IMAGE_MAX_WIDTH_PX",
+    "STATION_H_PRINT_LAST_COLUMN",
+    "STATION_H_PRINT_DEFAULT_LAST_ROW",
+    "STATION_H_PRINT_ORIENTATION",
+    "STATION_H_PRINT_PAPER_SIZE",
     "STATION_H_TEMPLATE_FILE_NAME",
     "build_station_h_workbook",
     "default_station_h_template_path",

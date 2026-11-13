@@ -940,6 +940,39 @@ export async function downloadHandoverReviewStationHDutyFocusImageApi(params = {
   }
 }
 
+export function buildHandoverReviewStationHHandoverLogPrintUrl(params = {}) {
+  return appendQuery("/api/handover/review/station-h/handover-log/print", params);
+}
+
+export async function downloadHandoverReviewStationHHandoverLogPrintApi(params = {}) {
+  const url = buildHandoverReviewStationHHandoverLogPrintUrl(params);
+  const timeout = buildTimeoutSignal(240000, url);
+  try {
+    const resp = await fetch(url, timeout.signal ? { signal: timeout.signal } : {});
+    if (!resp.ok) {
+      const text = await resp.text();
+      let detail = String(text || "").trim();
+      try {
+        const parsed = detail ? JSON.parse(detail) : {};
+        detail = String(parsed?.detail || parsed?.error || detail).trim();
+      } catch {
+        // Keep the plain response body.
+      }
+      throw new Error(detail || `交接班日志打印图片生成失败（HTTP ${resp.status}）`);
+    }
+    const blob = await resp.blob();
+    if (!blob.size) throw new Error("交接班日志打印图片为空");
+    return blob;
+  } catch (error) {
+    if (timeout.didTimeout() || error?.name === "TimeoutError") {
+      throw new Error("交接班日志打印图片生成超时，请稍后重试");
+    }
+    throw error;
+  } finally {
+    timeout.dispose();
+  }
+}
+
 export async function parseHandoverReview110StationFileApi(form) {
   const resp = await fetch("/api/handover/review/110-station/parse", {
     method: "POST",

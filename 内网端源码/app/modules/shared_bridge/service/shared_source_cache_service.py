@@ -7247,8 +7247,12 @@ class SharedSourceCacheService:
         return (now_dt.date() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     def _run_energy_report_files_if_due(self, when: datetime | None = None) -> None:
+        from app.shared.runtime.building_browser_locks import building_browser_lock_snapshot
+
         now = when or datetime.now()
-        if now < now.replace(day=1, hour=8, minute=0, second=0, microsecond=0) or self._stop_event.is_set():
+        if now < now.replace(hour=8, minute=35, second=0, microsecond=0) or self._stop_event.is_set():
+            return
+        if building_browser_lock_snapshot()["locked_buildings"]:
             return
         period = energy_report_period(FAMILY_PUE_CONFIRMATION, now=now)
         buildings = self._family_buildings(FAMILY_PUE_CONFIRMATION)
@@ -7410,6 +7414,8 @@ class SharedSourceCacheService:
             self._emit(f"[共享缓存] 每日全景平台月报源文件自动下载异常 business_date={business_date}, error={error_text}")
 
     def _run_top5_monthly_report_file_if_due(self, when: datetime | None = None, *, force: bool = False) -> None:
+        from app.shared.runtime.building_browser_locks import building_browser_lock_snapshot
+
         if not self._top5_monthly_source_download_enabled:
             return
         now_dt = when or datetime.now()
@@ -7417,6 +7423,8 @@ class SharedSourceCacheService:
             if now_dt.day < self._top5_monthly_source_download_day:
                 return
             if now_dt.day == self._top5_monthly_source_download_day and now_dt.time() < self._top5_monthly_source_download_time:
+                return
+            if building_browser_lock_snapshot()["locked_buildings"]:
                 return
         period_date = self._top5_monthly_report_period_date(now_dt)
         period = period_date[:7]

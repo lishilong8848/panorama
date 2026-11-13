@@ -83,13 +83,13 @@ class HandoverAttachmentStore:
                 if self.request_interval:
                     time.sleep(self.request_interval)
 
-    def _lock_key(self, date, shift):
-        return f"{self.target['app_token']}|{self.table_id}|{date}|{shift}"
+    def _lock_key(self, date, shift, building=""):
+        return f"{self.target['app_token']}|{self.table_id}|{date}|{shift}|{self.exporter._building_text(building)}"
 
     def record_url(self, record_id):
         return f"https://vnet.feishu.cn/base/{self.target['app_token']}?table={self.table_id}&record={record_id}"
 
-    def _records(self, date, shift):
+    def _records(self, date, shift, building=""):
         start = datetime.strptime(date, "%Y-%m-%d")
         if shift not in {"day", "night"}:
             raise ValueError("班次必须为 day 或 night")
@@ -99,37 +99,45 @@ class HandoverAttachmentStore:
             table_id=self.table_id, page_size=500, max_records=0,
             filter_formula=f'AND(CurrentValue.[{field}]>=TODATE("{date}"), CurrentValue.[{field}]<TODATE("{end}"))',
         )
+        building_text = self.exporter._building_text(building)
         ids = self.exporter._match_existing_record_ids(
             existing_records=records, duty_date=date, duty_shift=shift, cfg=self.cfg,
+            building=building_text,
         )
         return sorted((r for r in records if r.get("record_id") in ids), key=lambda r: r["record_id"])
 
-    def _ensure_locked(self, date, shift):
+    def _ensure_locked(self, date, shift, building=""):
         fields_meta = self._call(self.client.list_fields, table_id=self.table_id)
         if not any(f.get("field_name") == self.FIELD and int(f.get("type", 0)) == 17 for f in fields_meta):
             raise ValueError(f"目标表缺少附件字段：{self.FIELD}")
-        records = self._records(date, shift)
+        building_text = self.exporter._building_text(building)
+        records = self._records(date, shift, building)
         if records:
             return records[0]
         fields = self.cfg["fields"]
-        responses = self._call(self.client.batch_create_records, table_id=self.table_id, fields_list=[{
+        create_fields = {
             fields["year"]: self.exporter._year_text(date),
             fields["date"]: self.exporter._midnight_timestamp_ms(date),
             fields["shift"]: self.exporter._shift_text(shift),
-        }], batch_size=1)
+        }
+        if building_text:
+            # 「楼栋」单选字段：每楼各自一条记录（A楼…H楼 / 110站）。
+            create_fields[fields.get("building", "楼栋")] = building_text
+        responses = self._call(self.client.batch_create_records, table_id=self.table_id,
+            fields_list=[create_fields], batch_size=1)
         for response in responses:
             for record in response.get("data", {}).get("records", []):
                 if record.get("record_id"):
                     return record
         # Do not blindly create again if the server accepted a write with an incomplete response.
-        records = self._records(date, shift)
+        records = self._records(date, shift, building)
         if not records:
             raise RuntimeError("班次记录创建结果尚未可见，请稍后重试，未重复创建")
         return records[0]
 
-    def ensure_record(self, date, shift):
-        with attachment_record_lock(self._lock_key(date, shift)):
-            record = self._ensure_locked(date, shift)
+    def ensure_record(self, date, shift, building=""):
+        with attachment_record_lock(self._lock_key(date, shift, building)):
+            record = self._ensure_locked(date, shift, building)
             record_id = record["record_id"]
             url = self.record_url(record_id)
             fields = record.get("fields", {})
@@ -145,7 +153,8 @@ class HandoverAttachmentStore:
                                      if isinstance(item, dict)],
             }
 
-    def upload_files(self, date, shift, files, *, is_current=None, expected_record_id="", required_existing_names=()):
+    def upload_files(self, date, shift, files, *, building="", is_current=None, expected_record_id="",
+                     required_existing_names=()):
         """files maps stable attachment names to completed local artifacts."""
         if not files:
             raise ValueError("没有可上传的成品附件")
@@ -167,18 +176,20 @@ class HandoverAttachmentStore:
             return {"file_token": token, "name": name}
 
         uploaded = [transfer(item) for item in files.items()]
-        with attachment_record_lock(self._lock_key(date, shift)):
+        building_text = self.exporter._building_text(building)
+        with attachment_record_lock(self._lock_key(date, shift, building)):
             if is_current is not None and not is_current():
                 raise RuntimeError("成品版本已更新，旧版本未写入附件记录")
-            record_id = expected_record_id or self._ensure_locked(date, shift)["record_id"]
+            record_id = expected_record_id or self._ensure_locked(date, shift, building)["record_id"]
             current = self._call(self.client.get_record_by_id, table_id=self.table_id, record_id=record_id)
             fields = current.get("fields")
             if current.get("record_id") != record_id or not isinstance(fields, dict):
                 raise ValueError("未能读取目标班次记录，未覆盖原附件")
             if not self.exporter._match_existing_record_ids(
                 existing_records=[current], duty_date=date, duty_shift=shift, cfg=self.cfg,
+                building=building_text,
             ):
-                raise RuntimeError("班次记录日期或班次已变化，未覆盖原附件")
+                raise RuntimeError("班次记录日期、班次或楼栋已变化，未覆盖原附件")
             old = fields.get(self.FIELD)
             if old is None:
                 old = []

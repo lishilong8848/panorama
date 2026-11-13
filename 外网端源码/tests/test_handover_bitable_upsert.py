@@ -132,3 +132,29 @@ def test_cabinet_remote_write_failure_is_preserved_for_retry():
     assert result["status"] == "failed"
     assert result["details"]["A楼"]["uploaded_revision"] == 0
     assert "timeout" in result["details"]["A楼"]["error"]
+
+
+def test_daily_report_record_is_keyed_by_building():
+    """日报也按楼栋拆：不同楼栋各建一条带「楼栋」单选值的记录；同楼栋复用并更新链接。"""
+    client = Client()
+    service = HandoverDailyReportBitableExportService({})
+    service._new_client = lambda _: client
+    run = lambda building, url: service.export_record(
+        duty_date=DATE, duty_shift="day", spreadsheet_url=url, building=building, emit_log=lambda _: None,
+    )
+    a_first = run("A楼", "https://example.test/a1")
+    h_first = run("H楼", "https://example.test/h1")
+    assert a_first["record_id"] != h_first["record_id"]
+    assert client.created == 2
+    a_rec = next(r for r in client.records if r["record_id"] == a_first["record_id"])
+    h_rec = next(r for r in client.records if r["record_id"] == h_first["record_id"])
+    assert a_rec["fields"]["楼栋"] == "A楼" and h_rec["fields"]["楼栋"] == "H楼"
+    # 同楼栋再次写入 → 复用记录、只更新链接，不新建
+    a_second = run("A楼", "https://example.test/a2")
+    assert a_second["record_id"] == a_first["record_id"]
+    assert client.created == 2
+    assert a_rec["fields"]["交接班日报"]["link"] == "https://example.test/a2"
+    # 110 内部标识规范到「110站」记录
+    station = run("110", "https://example.test/110")
+    station_rec = next(r for r in client.records if r["record_id"] == station["record_id"])
+    assert station_rec["fields"]["楼栋"] == "110站"

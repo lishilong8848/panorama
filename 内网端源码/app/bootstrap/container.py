@@ -543,7 +543,7 @@ class AppContainer:
             runtime_state_root=runtime_state_root,
             emit_log=self.add_system_log,
             run_callback=self.alarm_rule_export_scheduler_callback or self._alarm_rule_export_scheduler_run_callback,
-            is_busy=lambda: False,
+            is_busy=self._alarm_rule_export_is_busy,
             thread_name="alarm-rule-export-monthly-scheduler",
             source_name="告警规则导出",
         )
@@ -582,20 +582,21 @@ class AppContainer:
         )
 
     def _system_screenshot_capture_is_busy(self) -> bool:
-        if getattr(self._system_screenshot_capture_run_lock, "locked", lambda: False)():
+        return (
+            self._alarm_rule_export_run_lock.locked()
+            or self._system_screenshot_capture_run_lock.locked()
+            or self._browser_source_is_busy()
+        )
+
+    def _alarm_rule_export_is_busy(self) -> bool:
+        return self._system_screenshot_capture_is_busy()
+
+    def _browser_source_is_busy(self) -> bool:
+        from app.shared.runtime.building_browser_locks import building_browser_lock_snapshot
+
+        if building_browser_lock_snapshot()["locked_buildings"]:
             return True
         service = getattr(self, "shared_bridge_service", None)
-        source_cache = getattr(service, "_source_cache_service", None)
-        if source_cache is not None and hasattr(source_cache, "get_health_snapshot"):
-            try:
-                snapshot = source_cache.get_health_snapshot(mode="internal_light")
-                current_hour = snapshot.get("current_hour_refresh", {}) if isinstance(snapshot, dict) else {}
-                daily_source = snapshot.get("daily_source_refresh", {}) if isinstance(snapshot, dict) else {}
-                if bool(current_hour.get("running")) or bool(daily_source.get("running")):
-                    return True
-            except Exception:
-                # busy 判断必须轻量且不能影响调度线程；读取失败时交给浏览器池状态继续判断。
-                pass
         pool = getattr(service, "_internal_download_pool", None) or get_internal_download_browser_pool()
         if pool is not None and hasattr(pool, "get_health_snapshot"):
             try:
@@ -750,6 +751,9 @@ class AppContainer:
             return
 
         def _worker() -> None:
+            if self._alarm_rule_export_is_busy():
+                self.add_system_log("[告警规则导出调度] 启动补查遇到浏览器忙碌，交给调度继续检查")
+                return
             self.add_system_log("[告警规则导出调度] 启动检查：本月文件未齐全，开始检查页面已有文件或创建导出")
             ok, detail = self._alarm_rule_export_scheduler_run_callback("启动补查")
             if self.alarm_rule_export_scheduler:

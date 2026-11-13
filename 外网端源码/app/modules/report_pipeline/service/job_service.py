@@ -40,6 +40,8 @@ _PREWRITE_RETRY_POLICY = "prewrite_retry"
 _PREWRITE_RETRY_REASON = "waiting:feishu_auth"
 _PREWRITE_RETRY_DELAYS = (60, 120, 300)
 _PREWRITE_RETRY_WINDOW = 1800
+_ENERGY_REPORT_HANDLER = "energy_report_upload"
+_ENERGY_SOURCE_WAIT = "waiting:energy_report_source"
 
 
 def _exception_detail(exc: BaseException) -> str:
@@ -707,7 +709,7 @@ class JobService:
         if status not in {"queued", "waiting_resource"}:
             return False
         wait_reason = str(candidate.wait_reason or "").strip().lower()
-        if status == "waiting_resource" and wait_reason in {"waiting:shared_bridge", _PREWRITE_RETRY_REASON}:
+        if status == "waiting_resource" and wait_reason in {"waiting:shared_bridge", _PREWRITE_RETRY_REASON, _ENERGY_SOURCE_WAIT}:
             return False
         return True
 
@@ -1551,7 +1553,28 @@ class JobService:
         wait_reason = str(job.wait_reason or "").strip().lower()
         if previous_status != "waiting_resource":
             return False
-        return wait_reason == "waiting:shared_bridge"
+        return wait_reason == "waiting:shared_bridge" or (
+            stage.worker_handler == _ENERGY_REPORT_HANDLER and wait_reason == _ENERGY_SOURCE_WAIT
+        )
+
+    def _park_energy_report_worker(self, job: JobState, stage: StageState, result: Any) -> bool:
+        if not (
+            stage.worker_handler == _ENERGY_REPORT_HANDLER and isinstance(result, dict)
+            and result.get("status") == "waiting_resource" and result.get("wait_reason") == _ENERGY_SOURCE_WAIT
+        ):
+            return False
+        if job.cancel_requested or stage.cancel_requested:
+            self._mark_cancelled_before_run_locked(job, stage)
+            return True
+        job.status = stage.status = "waiting_resource"
+        job.wait_reason = _ENERGY_SOURCE_WAIT
+        job.summary = stage.summary = str(result.get("summary") or "等待内网源文件")
+        job.result = stage.result = result
+        job.wait_started_monotonic = time.monotonic()
+        stage.worker_status = "stopped"
+        if self._shutting_down:
+            self._shutdown_job_states[job.job_id] = (job.status, job.wait_reason)
+        return True
 
     def _restore_legacy_handover_generation_intent(self, job: JobState, stage: StageState, payload_path: Path) -> None:
         if not job.name.startswith("生成当前班次交接班及容量表 "):
@@ -1729,6 +1752,10 @@ class JobService:
                                 stage.error = detail
                                 stage.summary = detail
                                 stage.finished_at = job.finished_at
+                            elif self._park_energy_report_worker(
+                                job, stage, worker_result.get("payload", worker_result.get("result")),
+                            ):
+                                pass
                             else:
                                 result_payload = worker_result.get("payload", worker_result.get("result"))
                                 job.status = "success"
@@ -1946,6 +1973,7 @@ class JobService:
             for job in self._ordered_jobs()
             if job.status in {"queued", "waiting_resource"}
             and not self._in_prewrite_backoff(job)
+            and job.wait_reason != _ENERGY_SOURCE_WAIT
             and self._job_network_side(job) == side
             and float(job.wait_started_monotonic or 0) > 0
         ]
@@ -1959,6 +1987,7 @@ class JobService:
             for job in self._ordered_jobs()
             if job.status in {"queued", "waiting_resource"}
             and not self._in_prewrite_backoff(job)
+            and job.wait_reason != _ENERGY_SOURCE_WAIT
             and self._job_network_side(job) in {"internal", "external"}
         ]
         if not waiting_jobs:
@@ -1992,6 +2021,7 @@ class JobService:
             for job in self._ordered_jobs()
             if job.status in {"queued", "waiting_resource"} and self._job_network_side(job) == "external"
             and not self._in_prewrite_backoff(job)
+            and job.wait_reason != _ENERGY_SOURCE_WAIT
         )
         if running_pipeline:
             self._network_window_current_side = "pipeline"
@@ -2840,7 +2870,7 @@ class JobService:
                     event_type="recovery",
                     level="info",
                     payload={
-                        "action": "preserve_waiting_shared_bridge",
+                        "action": "preserve_waiting_energy_source" if job.wait_reason == _ENERGY_SOURCE_WAIT else "preserve_waiting_shared_bridge",
                         "summary": str(job.summary or "等待内网补采同步").strip() or "等待内网补采同步",
                         "timestamp": self._now_text(),
                     },
@@ -3099,13 +3129,23 @@ class JobService:
             if str(job.status or "").strip().lower() != "waiting_resource":
                 return job
             stage = self._get_primary_stage(job)
-            if str(job.wait_reason or "").strip().lower() != "waiting:shared_bridge":
+            energy_wait = stage.worker_handler == _ENERGY_REPORT_HANDLER and job.wait_reason == _ENERGY_SOURCE_WAIT
+            if not energy_wait and str(job.wait_reason or "").strip().lower() != "waiting:shared_bridge":
+                return job
+            if energy_wait and job.thread is not None and not job.done_event.is_set():
                 return job
             payload_path = self._task_engine_store.resolve_stage_payload_path(job.job_id, stage.stage_id)
             if isinstance(worker_payload, dict):
                 merged_payload = self._merge_waiting_resume_payload_metadata(job, payload_path, worker_payload)
                 self._task_engine_store.persist_stage_payload(job.job_id, stage.stage_id, self._json_ready(merged_payload))
+            if energy_wait:
+                config_snapshot = self._capture_config_snapshot()
+                if config_snapshot is not None:
+                    self._task_engine_store.persist_config_snapshot(job.job_id, config_snapshot)
             job.status = "queued"
+            if energy_wait:
+                job.done_event.clear()
+                job.result = None
             job.wait_reason = ""
             job.summary = str(summary or "").strip()
             job.error = ""
@@ -3119,13 +3159,14 @@ class JobService:
             stage.finished_at = ""
             stage.result = None
             stage.cancel_requested = False
-            self._append_log(job, "[共享桥接] 共享文件已到位，正在继续处理")
+            self._append_log(job, "[月度能耗报表上传] 源文件已齐，正在继续处理" if energy_wait
+                             else "[共享桥接] 共享文件已到位，正在继续处理")
             self._persist_job_snapshot(job)
             self._record_job_event(
                 job,
                 stage_id=stage.stage_id,
                 stream="job",
-                event_type="shared_bridge_resume",
+                event_type="energy_source_resume" if energy_wait else "shared_bridge_resume",
                 level="info",
                 payload={"summary": job.summary, "bridge_task_id": job.bridge_task_id, "timestamp": self._now_text()},
             )
@@ -3154,6 +3195,7 @@ class JobService:
             "scheduler_submitted_at",
             "scheduler_stale_after",
             "skip_if_batch_fully_generated_and_sent",
+            "required_alarm_bucket",
         ):
             if key not in merged and key in original:
                 merged[key] = original.get(key)

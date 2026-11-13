@@ -2720,6 +2720,8 @@ class SharedBridgeRuntimeService:
                 str(required_query_end or "").strip() or "-",
             ]
         )
+        if requested_by == "alarm_upload_scheduler":
+            dedupe_key += "|scheduled"
         existing = self._store.find_active_task_by_dedupe_key(dedupe_key)
         if existing:
             return existing
@@ -5755,6 +5757,8 @@ class SharedBridgeRuntimeService:
             target_buildings = [item for item in target_buildings if item]
             required_query_start_dt = self._parse_datetime_text(request.get("required_query_start", ""))
             required_query_end_dt = self._parse_datetime_text(request.get("required_query_end", ""))
+            target_bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self.current_alarm_event_bucket()
+            strict_batch = task.get("requested_by") == "alarm_upload_scheduler"
 
             def _entry_covers_required_window(entry: Dict[str, Any]) -> bool:
                 if required_query_end_dt is None:
@@ -5768,9 +5772,23 @@ class SharedBridgeRuntimeService:
                     return False
                 return True
 
-            selection = self._source_cache_service.get_alarm_event_upload_selection(
-                building=building if mode == "single_building" else "",
-            )
+            def _select_alarm_entries() -> Dict[str, Any]:
+                if not strict_batch:
+                    return self._source_cache_service.get_alarm_event_upload_selection(
+                        building=building if mode == "single_building" else "",
+                    )
+                entries = self._source_cache_service.get_latest_ready_entries(
+                    source_family=FAMILY_ALARM_EVENT, buildings=target_buildings, bucket_key=target_bucket_key,
+                )
+                return {
+                    "selected_entries": [
+                        item for item in entries
+                        if item.get("bucket_key") == target_bucket_key and item.get("bucket_kind") == "latest"
+                    ],
+                    "selection_reference_date": target_bucket_key[:10],
+                }
+
+            selection = _select_alarm_entries()
             selected_entries = [
                 item
                 for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])
@@ -5783,7 +5801,6 @@ class SharedBridgeRuntimeService:
                 and _entry_covers_required_window(item)
             }
             missing_buildings = [item for item in target_buildings if item and item not in ready_buildings]
-            target_bucket_key = str(request.get("target_bucket_key", "") or "").strip() or self.current_alarm_event_bucket()
             filled_entries: List[Dict[str, Any]] = []
             if missing_buildings:
                 emit_log(
@@ -5798,9 +5815,7 @@ class SharedBridgeRuntimeService:
                     )
                     if isinstance(filled, dict):
                         filled_entries.append(dict(filled))
-                selection = self._source_cache_service.get_alarm_event_upload_selection(
-                    building=building if mode == "single_building" else "",
-                )
+                selection = _select_alarm_entries()
                 selected_entries = [
                     item
                     for item in (selection.get("selected_entries", []) if isinstance(selection.get("selected_entries", []), list) else [])

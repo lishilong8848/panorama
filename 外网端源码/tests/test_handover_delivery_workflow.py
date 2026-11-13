@@ -10,6 +10,9 @@ from handover_log_module.service import handover_delivery_workflow_service as wo
 from handover_log_module.service.handover_attachment_store import HandoverAttachmentStore
 from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
 from handover_log_module.service.handover_attachment_delivery_service import HandoverAttachmentDeliveryService
+from handover_log_module.service.handover_daily_report_bitable_export_service import (
+    HandoverDailyReportBitableExportService,
+)
 from handover_log_module.service import review_followup_trigger_service as followup_module
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableRateLimited
 
@@ -17,19 +20,40 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableRateL
 BATCH = "2026-11-09|day"
 DATE, SHIFT = BATCH.split("|")
 FIELD = HandoverAttachmentStore.FIELD
+BUILDING_FIELD = "楼栋"
+
+
+def _building_label(building):
+    return HandoverDailyReportBitableExportService._building_text(building)
+
+
+def _record_for(records, building=""):
+    """按「楼栋」单选文本取对应记录；building="" 取无楼栋的记录（兼容旧单记录调用）。"""
+    label = _building_label(building)
+    for record in records:
+        if str(record["fields"].get(BUILDING_FIELD, "") or "") == label:
+            return record
+    raise AssertionError(f"没有楼栋={building!r}(label={label!r})的记录，现有={[r['fields'].get(BUILDING_FIELD) for r in records]}")
 
 
 @pytest.fixture
 def bitable():
     client = Mock()
-    client.list_fields.return_value = [{"field_name": FIELD, "type": 17}]
-    record = {"record_id": "recTest", "fields": {"日期": DATE, "班次": "白班"}}
-    records = []
+    client.list_fields.return_value = [
+        {"field_name": FIELD, "type": 17}, {"field_name": BUILDING_FIELD, "type": 3},
+    ]
+    records: list[dict] = []
     known = {}
+    seq = {"n": 0}
 
-    def create(**_):
-        records.append(record)
-        return [{"data": {"records": [deepcopy(record)]}}]
+    def create(*, fields_list, **_):
+        responses = []
+        for fields in fields_list:
+            seq["n"] += 1
+            record = {"record_id": f"rec{seq['n']}", "fields": deepcopy(fields)}
+            records.append(record)
+            responses.append({"data": {"records": [deepcopy(record)]}})
+        return responses
 
     def upload(*, file_name, content, **_):
         token = f"token:{file_name}:{content.hex()}"
@@ -37,28 +61,33 @@ def bitable():
         return token
 
     def update(*, record_id, fields, **_):
-        assert record_id == record["record_id"]
+        target = next(record for record in records if record["record_id"] == record_id)
         fields = deepcopy(fields)
         if FIELD in fields:
             fields[FIELD] = [known[item["file_token"]] for item in fields[FIELD]]
-        record["fields"].update(fields)
+        target["fields"].update(fields)
+
+    def get_by_id(*, record_id, **_):
+        return deepcopy(next(record for record in records if record["record_id"] == record_id))
 
     client.batch_create_records.side_effect = create
     client.list_records.side_effect = lambda **_: deepcopy(records)
-    client.get_record_by_id.side_effect = lambda **_: deepcopy(record)
+    client.get_record_by_id.side_effect = get_by_id
     client.upload_attachment_bytes.side_effect = upload
     client.update_record.side_effect = update
     client.batch_delete_records.side_effect = AssertionError("must not delete records")
-    return HandoverAttachmentStore({"daily_report_bitable_export": {"target": {
+    store = HandoverAttachmentStore({"daily_report_bitable_export": {"target": {
         "app_token": "test-base", "table_id": "test-table",
-    }}}, client=client), client, record
+    }}}, client=client)
+    return store, client, records
 
 
 def test_attachment_update_replaces_only_same_deliverable_and_reuses_record(bitable, tmp_path):
-    store, client, record = bitable
+    store, client, records = bitable
     local = tmp_path / "data.xlsx"
     local.write_bytes(b"original")
     created = store.ensure_record(DATE, SHIFT)
+    record = _record_for(records, "")
     store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local, "H_handover.xlsx": local})
     local.write_bytes(b"revised")
     store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local})
@@ -72,10 +101,11 @@ def test_attachment_update_replaces_only_same_deliverable_and_reuses_record(bita
 
 
 def test_failed_transfer_or_stale_generation_never_updates_attachment_field(bitable, tmp_path):
-    store, client, record = bitable
+    store, client, records = bitable
     local = tmp_path / "data.xlsx"
     local.write_bytes(b"content")
     store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local})
+    record = _record_for(records, "")
     original = deepcopy(record)
     client.update_record.reset_mock()
     with pytest.raises(RuntimeError, match="旧版本"):
@@ -88,13 +118,14 @@ def test_failed_transfer_or_stale_generation_never_updates_attachment_field(bita
 
 
 def test_attachment_does_not_replace_record_moved_to_another_shift(bitable, tmp_path):
-    store, client, record = bitable
+    store, client, records = bitable
     local = tmp_path / "data.xlsx"
     local.write_bytes(b"content")
     existing = store.ensure_record(DATE, SHIFT)
+    record = _record_for(records, "")
     record["fields"]["班次"] = "夜班"
     client.update_record.reset_mock()
-    with pytest.raises(RuntimeError, match="日期或班次已变化"):
+    with pytest.raises(RuntimeError, match="已变化"):
         store.upload_files(DATE, SHIFT, {"H_handover.xlsx": local}, expected_record_id=existing["record_id"])
     client.update_record.assert_not_called()
 
@@ -113,7 +144,7 @@ def test_cooldown_is_shared_by_stores_for_the_same_table(bitable, tmp_path):
 
 
 def test_each_floor_publishes_independently_and_only_reuploads_changed_pair(tmp_path, monkeypatch, bitable):
-    store, client, record = bitable
+    store, client, records = bitable
     workflow = object.__new__(workflow_module.HandoverDeliveryWorkflowService)
     workflow.config = {}
     workflow.state = HandoverDeliveryStateService({"paths": {"runtime_state_root": tmp_path}})
@@ -143,7 +174,8 @@ def test_each_floor_publishes_independently_and_only_reuploads_changed_pair(tmp_
     assert first["uploaded_buildings"] == ["A楼"]
     assert first["missing_buildings"] == list(workflow.BUILDINGS[1:])
     assert not first["all_buildings_uploaded"]
-    assert len(record["fields"][FIELD]) == 2
+    # 每楼各自记录：A楼记录只含 A楼 的 2 个文件（handover+capacity）
+    assert len(_record_for(records, "A楼")["fields"][FIELD]) == 2
 
     for row in sessions[1:]:
         ready(row, "first")
@@ -152,7 +184,9 @@ def test_each_floor_publishes_independently_and_only_reuploads_changed_pair(tmp_
             lambda b: workflow.publish_ready_batch(BATCH, lambda _: None, building=b), workflow.BUILDINGS[1:],
         ))
     assert sum(result["all_buildings_uploaded"] for result in results) == 1
-    assert len(record["fields"][FIELD]) == 10
+    # 5 楼各自一条记录，每条只含本楼 2 个文件（不再全塞一条）
+    assert len(records) == 5
+    assert all(len(_record_for(records, b)["fields"][FIELD]) == 2 for b in workflow.BUILDINGS)
     assert all(workflow.state.for_session(row)["status"] == "uploaded" for row in sessions)
 
     sessions[0]["revision"] = 2
@@ -162,17 +196,18 @@ def test_each_floor_publishes_independently_and_only_reuploads_changed_pair(tmp_
     client.upload_attachment_bytes.reset_mock()
     assert workflow.publish_ready_batch(BATCH, lambda _: None)["uploaded_buildings"] == ["A楼"]
     assert client.upload_attachment_bytes.call_count == 2
-    assert len(record["fields"][FIELD]) == 10
-    client.batch_create_records.assert_called_once()
+    assert len(_record_for(records, "A楼")["fields"][FIELD]) == 2
+    # 5 楼各建一条记录，A楼改版复用原记录不新建
+    assert client.batch_create_records.call_count == 5
 
-    original = deepcopy(record["fields"][FIELD])
+    original = deepcopy(_record_for(records, "A楼")["fields"][FIELD])
     sessions[0]["revision"] = 3
     ready(sessions[0], "third")
     client.upload_attachment_bytes.side_effect = OSError("mock upload failure")
     failed = workflow.publish_ready_batch(BATCH, lambda _: None, building="A楼")
     assert failed["status"] == "partial_failed"
     assert failed["failed_buildings"][0]["building"] == "A楼"
-    assert record["fields"][FIELD] == original
+    assert _record_for(records, "A楼")["fields"][FIELD] == original
     assert workflow.state.for_session(sessions[0])["upload_error"] == "mock upload failure"
     assert all(workflow.state.for_session(row)["status"] == "uploaded" for row in sessions[1:])
 
@@ -291,7 +326,7 @@ def test_supplement_reuploads_after_building_generation_changes():
 def test_h_attachment_creates_batch_and_replaces_only_h_files(bitable, tmp_path):
     from PIL import Image
 
-    store, client, record = bitable
+    store, client, records = bitable
     source = tmp_path / "local.xlsx"
     source.write_bytes(b"mock prepared Excel")
     service = HandoverAttachmentDeliveryService(
@@ -307,21 +342,27 @@ def test_h_attachment_creates_batch_and_replaces_only_h_files(bitable, tmp_path)
     )
 
     assert sent["status"] == "success" and sent["duty_focus_image_synced"]
-    assert {item["name"] for item in record["fields"][FIELD]} == {"H_handover.xlsx", "H_duty_focus.png"}
+    # H楼附件进「楼栋=H楼」的独立记录，只含 H 的两个文件
+    h_record = _record_for(records, "H楼")
+    assert h_record["fields"][BUILDING_FIELD] == "H楼"
+    assert {item["name"] for item in h_record["fields"][FIELD]} == {"H_handover.xlsx", "H_duty_focus.png"}
     client.batch_create_records.assert_called_once()
+    # A楼/110 走各自（无楼栋）记录，与 H楼记录相互独立
     store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": source, "110_original.xlsx": source})
-    first = {item["name"]: item["file_token"] for item in record["fields"][FIELD]}
+    other_record = _record_for(records, "")
+    other_first = {item["name"]: item["file_token"] for item in other_record["fields"][FIELD]}
+    first = {item["name"]: item["file_token"] for item in h_record["fields"][FIELD]}
     second = service.sync_station_h_sheet(
         batch_meta=meta, cell_values={"B2": DATE, "F2": "白班", "C3": "新值班人员"},
         duty_focus_image_path=image,
     )
-    assert second["record_id"] == sent["record_id"]
-    latest = {item["name"]: item["file_token"] for item in record["fields"][FIELD]}
-    assert set(latest) == set(first)
-    assert latest["H_handover.xlsx"] != first["H_handover.xlsx"]
-    assert latest["A楼_handover.xlsx"] == first["A楼_handover.xlsx"]
-    assert latest["110_original.xlsx"] == first["110_original.xlsx"]
-    client.batch_create_records.assert_called_once()
+    assert second["record_id"] == sent["record_id"]  # 复用 H楼记录，不新建
+    latest = {item["name"]: item["file_token"] for item in h_record["fields"][FIELD]}
+    assert set(latest) == set(first) == {"H_handover.xlsx", "H_duty_focus.png"}
+    assert latest["H_handover.xlsx"] != first["H_handover.xlsx"]  # 仅替换 H 正文
+    # H 重传不影响其它楼栋记录
+    assert {item["name"]: item["file_token"] for item in other_record["fields"][FIELD]} == other_first
+    assert client.batch_create_records.call_count == 2  # H楼 + 无楼栋各一条
     client.update_record.reset_mock()
     stale = service.sync_station_h_sheet(
         batch_meta=meta, cell_values={"B2": DATE, "F2": "白班"}, duty_focus_image_path=image, is_current=lambda: False,
@@ -338,7 +379,7 @@ def test_manual_h_upload_uses_saved_content_without_other_building_sessions(bita
     from PIL import Image
     from openpyxl import load_workbook
 
-    store, client, record = bitable
+    store, client, records = bitable
     service = object.__new__(followup_module.ReviewFollowupTriggerService)
     service.config = {}
     service._review_service = SimpleNamespace(
@@ -383,24 +424,28 @@ def test_manual_h_upload_uses_saved_content_without_other_building_sessions(bita
     assert service._station_h_duty_focus_service.build_status.call_args.kwargs["historical"] is True
     service._review_service.register_cloud_batch.assert_called_once()
     assert service._review_service.register_cloud_batch.call_args.kwargs["update_latest"] is False
-    assert {item["name"] for item in record["fields"][FIELD]} == {"H_handover.xlsx", "H_duty_focus.png"}
+    assert {item["name"] for item in _record_for(records, "H楼")["fields"][FIELD]} == {"H_handover.xlsx", "H_duty_focus.png"}
     training.assert_not_called()
     workbook = load_workbook(result["source_file"])
     try:
         sheet = workbook["H楼"]
         assert sheet["C3"].value == "值班甲"
         assert sheet["D3"].value == "值班乙"
-        assert sheet["B31"].value == "本班已保存培训"
         assert sheet["B12"].value is None
         assert (sheet["B6"].value, sheet["G6"].value, sheet["B7"].value, sheet["H9"].value) == (13.17, 8.62, 0, 82.1)
         assert (sheet["G7"].value, sheet["H7"].value, sheet["G8"].value) == ("配电室CRAC-01", "电池室CRAC-01", 25.6)
-        assert len(sheet._images) == 1
+        # 值班关注点图片不再嵌入日志表，只作为独立附件（上面已断言记录含 H_duty_focus.png）
+        assert len(sheet._images) == 0
+        # 新事件处理 2 条记录 → 主表逐行（19、20），不再进「分类续表」
         assert sheet["D19"].value == "第一条"
-        continuation = workbook["分类续表"]
-        assert continuation["D3"].value == "第二条"
-        assert continuation["F3"].value == "值班乙"
-        assert (continuation["A7"].value, continuation["B7"].value, continuation["E7"].value) == (2, "第二条培训", "讲师甲")
-        assert (continuation["A8"].value, continuation["B8"].value, continuation["E8"].value) == (3, "第三条培训", "讲师乙")
+        assert sheet["D20"].value == "第二条"
+        assert sheet["H20"].value == "值班乙"
+        # 培训管理 3 条记录 → 主表逐行；因上方新事件插了 1 行，整体顺延到 32/33/34
+        assert sheet["B32"].value == "本班已保存培训"
+        assert (sheet["B33"].value, sheet["F33"].value) == ("第二条培训", "讲师甲")
+        assert (sheet["B34"].value, sheet["F34"].value) == ("第三条培训", "讲师乙")
+        # 彻底去掉「分类续表」第二张工作表
+        assert "分类续表" not in workbook.sheetnames
     finally:
         workbook.close()
 
@@ -458,3 +503,55 @@ def test_ae_upload_supplements_no_longer_trigger_h_attachment():
     service._attach_abcdeh_work_content_sync_result_after_final_building_upload.assert_called_once()
     service._attach_station_110_transformer_bitable_result.assert_called_once()
     service._attach_station_110_sync_result.assert_called_once()
+
+
+def test_building_text_maps_station_labels():
+    text = HandoverDailyReportBitableExportService._building_text
+    assert text("A楼") == "A楼" and text("H楼") == "H楼"
+    assert text("110") == "110站" and text("110站") == "110站" and text("110KV") == "110站"
+    assert text("") == "" and text(None) == ""
+
+
+def test_each_building_uploads_into_its_own_record_with_building_field(bitable, tmp_path):
+    """按楼栋拆分：每楼 ensure_record/upload_files 各自建一条带「楼栋」单选值的记录，互不混淆。"""
+    store, client, records = bitable
+    local = tmp_path / "data.xlsx"
+    local.write_bytes(b"payload")
+
+    created = {}
+    for building in ("A楼", "H楼", "110站"):
+        created[building] = store.ensure_record(DATE, SHIFT, building)
+        store.upload_files(DATE, SHIFT, {f"{building}_handover.xlsx": local}, building=building)
+
+    # 三条记录各不相同，且各带正确「楼栋」单选文本
+    ids = {created[b]["record_id"] for b in created}
+    assert len(ids) == 3
+    for building in ("A楼", "H楼", "110站"):
+        record = _record_for(records, building)
+        assert record["fields"][BUILDING_FIELD] == building
+        assert record["record_id"] == created[building]["record_id"]
+        # 各楼记录只含本楼文件
+        assert {item["name"] for item in record["fields"][FIELD]} == {f"{building}_handover.xlsx"}
+        # 各楼日报链接指向自己的记录
+        assert record["fields"]["交接班日报"]["link"] == created[building]["record_url"]
+
+    # 110 内部标识 "110" 规范到 "110站" 记录（同一条，不新建）
+    assert store.ensure_record(DATE, SHIFT, "110")["record_id"] == created["110站"]["record_id"]
+    # 无楼栋（building=""）为另一条独立记录，不与任何楼栋记录混淆
+    none_record = store.ensure_record(DATE, SHIFT, "")
+    assert none_record["record_id"] not in ids
+    assert str(_record_for(records, "")["fields"].get(BUILDING_FIELD, "") or "") == ""
+
+
+def test_upload_files_rejects_record_whose_building_changed(bitable, tmp_path):
+    """目标记录的「楼栋」在上传期间被改动时拒绝覆盖，避免写错楼记录。"""
+    store, client, records = bitable
+    local = tmp_path / "data.xlsx"
+    local.write_bytes(b"payload")
+    existing = store.ensure_record(DATE, SHIFT, "A楼")
+    _record_for(records, "A楼")["fields"][BUILDING_FIELD] = "B楼"  # 记录被改成别的楼栋
+    client.update_record.reset_mock()
+    with pytest.raises(RuntimeError, match="楼栋已变化"):
+        store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local}, building="A楼",
+                           expected_record_id=existing["record_id"])
+    client.update_record.assert_not_called()

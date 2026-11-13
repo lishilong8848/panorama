@@ -439,7 +439,10 @@ def handle_alarm_event_upload(
                 emit_log=emit_log,
             )
         else:
-            result = runtime.upload_alarm_event_source_cache_full_to_bitable(emit_log=emit_log)
+            required_bucket = str(payload.get("required_alarm_bucket") or "").strip()
+            result = runtime.upload_alarm_event_source_cache_full_to_bitable(
+                emit_log=emit_log, **({"required_bucket": required_bucket} if required_bucket else {}),
+            )
         accepted = bool(result.get("accepted"))
         reason = str(result.get("reason", "") or "").strip().lower()
         if not accepted:
@@ -694,13 +697,24 @@ def handle_alarm_rule_export_upload(
 
 
 def handle_energy_report_upload(config, payload, emit_log, runtime=None):
-    from app.modules.report_pipeline.service.energy_report_upload_service import EnergyReportUploadService
+    from app.modules.report_pipeline.service.energy_report_upload_service import (
+        EnergyReportSourcePending, EnergyReportUploadService, defer_source_retry,
+    )
 
     check_cancel = runtime.raise_if_cancelled if runtime is not None else (lambda: None)
     check_cancel()
-    return EnergyReportUploadService(config).run(
-        str(payload.get("period") or ""), log=emit_log, check_cancel=check_cancel,
-    )
+    period = str(payload.get("period") or "")
+    try:
+        return EnergyReportUploadService(config).run(
+            period, log=emit_log, check_cancel=check_cancel, manifest=payload.get("source_manifest"),
+        )
+    except EnergyReportSourcePending as exc:
+        check_cancel()
+        result = defer_source_retry(config, period, str(exc))
+        emit_log(f"[月度能耗报表上传] {period} {result['summary']}：{exc}")
+        if result["alert"]:
+            return {**result, "status": "failed", "error": f"{period} 内网源文件持续未就绪：{exc}；已保留月份，后续自动重试"}
+        return result
 
 
 def handle_system_screenshot_upload(

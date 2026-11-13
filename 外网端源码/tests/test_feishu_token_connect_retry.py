@@ -59,7 +59,7 @@ def test_energy_report_auth_timeout_leaves_month_pending_without_writes(monkeypa
     )
     config = {"paths": {"runtime_state_root": str(tmp_path)}}
     service = energy.EnergyReportUploadService(config, bitable=bitable)
-    monkeypatch.setattr(service, "source_paths", lambda _: {})
+    monkeypatch.setattr(service, "source_paths", lambda _, **__: {})
     now = datetime(2026, 11, 9, 7, 5)
     assert energy.pending_periods(config, now) == ("2026-10",)
     with pytest.raises(module.FeishuTokenConnectTimeout, match="test timeout"):

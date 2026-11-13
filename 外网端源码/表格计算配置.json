@@ -110,18 +110,18 @@
         "enabled": true,
         "auto_start_in_gui": true,
         "run_times": [
-          "00:05:00",
-          "02:05:00",
-          "04:05:00",
-          "06:05:00",
-          "08:05:00",
-          "10:05:00",
-          "12:05:00",
-          "14:05:00",
-          "16:05:00",
-          "18:05:00",
-          "20:05:00",
-          "22:05:00"
+          "00:20:00",
+          "02:20:00",
+          "04:20:00",
+          "06:20:00",
+          "08:20:00",
+          "10:20:00",
+          "12:20:00",
+          "14:20:00",
+          "16:20:00",
+          "18:20:00",
+          "20:20:00",
+          "22:20:00"
         ],
         "catch_up_if_missed": false,
         "retry_failed_in_same_period": true
@@ -4542,6 +4542,7 @@
         "enabled": true,
         "auto_start_in_gui": true,
         "interval_minutes": 60,
+        "minute_offset": 15,
         "check_interval_sec": 30,
         "retry_failed_on_next_tick": true,
         "state_file": "day_metric_upload_scheduler_state.json"
@@ -4626,6 +4627,7 @@
         "enabled": true,
         "auto_start_in_gui": true,
         "interval_minutes": 10,
+        "minute_offset": 7,
         "check_interval_sec": 30,
         "retry_failed_on_next_tick": true,
         "state_file": "chiller_mode_upload_scheduler_state.json"
@@ -4712,8 +4714,8 @@
       "scheduler": {
         "enabled": false,
         "auto_start_in_gui": false,
-        "day_of_month": 1,
-        "run_time": "04:30:00",
+        "day_of_month": 2,
+        "run_time": "10:15:00",
         "check_interval_sec": 30,
         "catch_up_if_missed": true,
         "retry_failed_in_same_period": true,
@@ -4749,7 +4751,7 @@
       "scheduler": {
         "enabled": true,
         "auto_start_in_gui": true,
-        "run_time": "02:30:00",
+        "run_time": "01:10:00",
         "check_interval_sec": 30,
         "catch_up_if_missed": true,
         "retry_failed_in_same_period": true,
@@ -4855,7 +4857,7 @@
       "scheduler": {
         "enabled": true,
         "auto_start_in_gui": true,
-        "run_time": "08:10:00",
+        "run_time": "08:25:00",
         "check_interval_sec": 30,
         "catch_up_if_missed": false,
         "retry_failed_in_same_period": true,
@@ -4967,6 +4969,7 @@
         "check_interval_sec": 30,
         "enabled": true,
         "interval_minutes": 60,
+        "minute_offset": 35,
         "retry_failed_on_next_tick": true,
         "state_file": "wet_bulb_collection_scheduler_state.json"
       },

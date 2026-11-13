@@ -50,7 +50,11 @@ def wrap_and_fit_rows(worksheet: Worksheet) -> None:
                 max(1, math.ceil(sum(2 if east_asian_width(char) in {"W", "F"} else 1 for char in line) / units))
                 for line in str(cell.value).split("\n")
             )
-            height = max(default_height, lines * font_size * 1.35 + 4)
+            # 只有当单元格文字确实超出宽度、需要换行到多行时才抬高「这一行」。
+            # 单行内容（lines <= 1）保持模板原高，绝不批量调整所有行高；列宽也从不在此改动。
+            if lines <= 1:
+                continue
+            height = lines * font_size * 1.35 + 4
             remaining = height - sum(row_height(index) for index in range(cell.row + 1, max_row + 1))
             if remaining > row_height(cell.row):
                 worksheet.row_dimensions[cell.row].height = min(409, remaining)

@@ -9,8 +9,8 @@ def test_alarm_rule_upload_scheduler_defaults_are_monthly_and_enabled():
     scheduler = DEFAULT_CONFIG_V3["features"]["alarm_rule_export_upload"]["scheduler"]
     assert scheduler["enabled"] is True
     assert scheduler["auto_start_in_gui"] is True
-    assert scheduler["day_of_month"] == 3
-    assert scheduler["run_time"] == "09:00:00"
+    assert scheduler["day_of_month"] == 2
+    assert scheduler["run_time"] == "10:15:00"
     assert scheduler["catch_up_if_missed"] is False
 
 
@@ -33,6 +33,6 @@ def test_alarm_rule_upload_scheduler_reuses_monthly_facade(monkeypatch):
     result = AppContainer._build_alarm_rule_export_upload_scheduler(fake)
     assert result["scheduler_key"] == "alarm_rule_export_upload"
     assert result["schedule_kind"] == "monthly"
-    assert result["scheduler_cfg"]["day_of_month"] == 3
-    assert result["scheduler_cfg"]["run_time"] == "09:00:00"
+    assert result["scheduler_cfg"]["day_of_month"] == 2
+    assert result["scheduler_cfg"]["run_time"] == "10:15:00"
 

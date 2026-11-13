@@ -18,7 +18,6 @@ from handover_log_module.service.handover_attachment_store import HandoverAttach
 from handover_log_module.service.handover_attachment_workbook_builder import (
     build_station_h_workbook,
     default_station_h_template_path,
-    STATION_H_DUTY_FOCUS_IMAGE_CELL,
 )
 
 
@@ -168,16 +167,14 @@ class HandoverAttachmentDeliveryService:
             self._save_atomic(target, lambda temporary: shutil.copyfile(source, temporary))
         return target
 
-    def _upload(self, meta, files, *, require_buildings=True, is_current=None):
+    def _upload(self, meta, files, *, building, require_buildings=True, is_current=None):
         self._reject_cloud_token(meta, allow_missing=not require_buildings)
         date, shift = self._context(meta)
         options = {"is_current": is_current} if is_current is not None else {}
+        # 按「日期+班次+楼栋」各自记录上传：upload_files 内部 ensure_record(date,shift,building)
+        # 找/建本楼记录（楼栋单选）。不再用 batch token 当记录ID、不再要求其它楼栋文件同记录。
         record = self._attachment_store().upload_files(
-            date, shift, files, expected_record_id=str(meta.get("spreadsheet_token") or "").removeprefix("bitable:"),
-            required_existing_names={
-                f"{building}_{kind}.xlsx"
-                for building in self.MANAGED_BUILDINGS for kind in ("handover", "capacity")
-            } if require_buildings else (),
+            date, shift, files, building=building,
             **options,
         )
         result = self._base(meta, status="success")
@@ -187,7 +184,8 @@ class HandoverAttachmentDeliveryService:
         return result
 
     def sync_station_h_sheet(self, *, batch_meta, cell_values, duty_focus_image_path=None,
-                             skip_values=False, emit_log=print, is_current=None, section_overflow=None):
+                             skip_values=False, emit_log=print, is_current=None,
+                             section_rows=None, attention_executor=""):
         title = "H楼"
         if not self._enabled():
             return self._base(batch_meta, status="skipped", error="disabled", sheet_title=title)
@@ -208,28 +206,21 @@ class HandoverAttachmentDeliveryService:
             else:
                 image_error = "duty_focus_image_missing"
             target = output / "H_handover.xlsx"
-            # skip_values was a remote-cell optimization; attachments are always complete.
-            try:
-                build_station_h_workbook(
-                    self.station_h_template_path(), target, cell_values, image_path=image,
-                    section_overflow=section_overflow,
-                )
-            except Exception as exc:
-                if image is None:
-                    raise
-                image_error, image = str(exc), None
-                build_station_h_workbook(
-                    self.station_h_template_path(), target, cell_values, section_overflow=section_overflow,
-                )
+            # 值班关注点图片**不再嵌入日志表**，只作为独立附件上传到「交接班日志」字段；
+            # 因此日志工作簿构建不再涉及图片，也无需“嵌入失败重试”。
+            build_station_h_workbook(
+                self.station_h_template_path(), target, cell_values,
+                section_rows=section_rows, attention_executor=attention_executor,
+            )
             files = {target.name: self._require_file(target, workbook=True)}
             if image is not None:
                 files[image.name] = image
-            result = self._upload(batch_meta, files, require_buildings=False, is_current=is_current)
+            result = self._upload(batch_meta, files, building="H楼", require_buildings=False, is_current=is_current)
             result.update(sheet_title=title, source_file=str(target), h_values_status="success",
                           duty_focus_image_synced=image is not None,
                           duty_focus_image_status="success" if image is not None else "failed",
                           duty_focus_image_error=image_error,
-                          duty_focus_image_cell=STATION_H_DUTY_FOCUS_IMAGE_CELL if image is not None else "",
+                          duty_focus_image_cell="",  # 图片不再嵌入日志表，无单元格锚点
                           duty_focus_image_sha256=hashlib.sha256(image.read_bytes()).hexdigest() if image is not None else "")
             if image_error:
                 result.update(status="partial_failed", success=False, error=image_error)
@@ -256,7 +247,8 @@ class HandoverAttachmentDeliveryService:
                 self._save_atomic(target, workbook.save)
             finally:
                 workbook.close()
-            result = self._upload(batch_meta, {target.name: self._require_file(target, workbook=True)})
+            # ABCDEH工作内容是跨 A–E+H 的合并汇总文件，无单一楼栋：building="" → 各自独立记录（楼栋留空）。
+            result = self._upload(batch_meta, {target.name: self._require_file(target, workbook=True)}, building="")
             result.update(sheet_title=title, source_file=str(target), synced_row_count=rows, synced_column_count=cols)
             return result
         except Exception as exc:
@@ -270,7 +262,7 @@ class HandoverAttachmentDeliveryService:
         try:
             self._reject_cloud_token(batch_meta)
             source = self._require_file(source_file, workbook=True)
-            result = self._upload(batch_meta, {f"110_original{source.suffix.lower()}": source})
+            result = self._upload(batch_meta, {f"110_original{source.suffix.lower()}": source}, building="110站")
             result.update(sheet_title=title, source_file=str(source), output_file=str(source))
             return result
         except Exception as exc:
