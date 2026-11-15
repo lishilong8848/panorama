@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import io
 import json
 from types import SimpleNamespace
@@ -9,6 +9,32 @@ from app.modules.report_pipeline.service import energy_report_upload_service as 
 from app.modules.report_pipeline.service import job_service as jobs_module
 from app.modules.report_pipeline.service.job_service import JobService, JobState
 from app.worker.task_handlers import HANDLER_REGISTRY
+
+
+def test_energy_scheduler_starts_and_allows_source_wait_to_retry(tmp_path):
+    orchestrator = Mock(timezone=timezone.utc)
+    orchestrator.get_job.return_value = None
+    jobs = JobService()
+    energy_job = JobState(job_id="energy", name="月度能耗报表上传", feature=module.FEATURE,
+                          status="waiting_resource", wait_reason=module.SOURCE_WAIT_REASON)
+    jobs._jobs[energy_job.job_id] = energy_job
+    container = SimpleNamespace(
+        energy_report_upload_scheduler=None, job_service=jobs, add_system_log=Mock(),
+        _runtime_state_root_text=lambda: str(tmp_path), _submit_energy_report_upload=Mock(),
+        ensure_scheduler_orchestrator=lambda: orchestrator,
+    )
+
+    try:
+        AppContainer.start_energy_report_upload_scheduler(container)
+        scheduler = container.energy_report_upload_scheduler
+        assert scheduler.feature == module.FEATURE
+        orchestrator.add_job.assert_called_once()
+        assert not scheduler.is_busy()
+        energy_job.status = "running"
+        assert scheduler.is_busy()
+    finally:
+        if container.energy_report_upload_scheduler is not None:
+            container.energy_report_upload_scheduler.stop()
 
 
 def test_scheduler_does_not_submit_until_files_are_ready(monkeypatch, tmp_path):

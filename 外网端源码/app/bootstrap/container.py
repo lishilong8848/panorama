@@ -1025,6 +1025,10 @@ class AppContainer:
                 scheduler_cfg={"enabled": True, "interval_minutes": 5},
                 runtime_state_root=self._runtime_state_root_text(), emit_log=self.add_system_log,
                 run_callback=self._submit_energy_report_upload,
+                # Let the callback retry jobs that are still waiting for source files.
+                is_busy=lambda: self.job_service.has_active_jobs_for_feature_prefixes(
+                    ("energy_report_upload",), include_waiting=False,
+                ),
                 orchestrator=self.ensure_scheduler_orchestrator(), schedule_kind="interval",
                 source_name="月度能耗报表上传",
             )
