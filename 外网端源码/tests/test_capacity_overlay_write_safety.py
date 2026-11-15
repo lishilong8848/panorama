@@ -57,6 +57,39 @@ def test_incomplete_overlay_does_not_modify_existing_report(tmp_path) -> None:
         checked.close()
 
 
+def test_overlay_does_not_save_unchanged_workbook(tmp_path, monkeypatch):
+    path = tmp_path / "capacity.xlsx"
+    service = HandoverCapacityReportService({})
+    workbook = Workbook()
+    workbook.active.merge_cells("B1:C1")
+    workbook.save(path)
+    workbook.close()
+
+    overlay = {"C1": "measured", "D1": ""}
+    monkeypatch.setattr(service, "_validate_capacity_overlay_inputs", lambda *_: (True, ""))
+    monkeypatch.setattr(service, "_build_capacity_overlay_values", lambda **_: dict(overlay))
+    monkeypatch.setattr(service, "_build_load_rate_values_for_sheet", lambda *_, **__: ({}, "", {}))
+    monkeypatch.setattr(service, "_inject_capacity_water_reserve_value", lambda *_, **__: None)
+
+    def sync():
+        return service.sync_overlay_for_existing_report_from_cells(
+            building="A楼", duty_date="2026-08-13", duty_shift="day",
+            handover_cells={}, capacity_output_file=str(path), shared_110kv={}, emit_log=lambda _: None,
+        )
+
+    assert sync()["status"] == "ready"
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    assert sync()["status"] == "ready"
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    overlay["C1"] = "updated"
+    assert sync()["status"] == "ready"
+    checked = load_workbook(path)
+    try:
+        assert checked.active["B1"].value == "updated"
+    finally:
+        checked.close()
+
+
 def test_delivery_overlay_keeps_its_inputs_when_an_autosave_overlay_is_queued(tmp_path, monkeypatch):
     queue = HandoverXlsxWriteQueueService({"_global_paths": {"runtime_state_root": str(tmp_path)}})
     monkeypatch.setattr(queue, "_start_worker", lambda _building: None)

@@ -158,4 +158,16 @@ def test_inspection_point_modal_info_dirty_close_and_save(directory):
       assert.deepEqual(puts[0].body.points, {'7_0_1': '新备注'});
       assert.equal(b.draft.value, null, '保存成功后关闭悬浮窗');
       assert.equal(b.message.value, '已保存');
+
+      // A local point is created without entering any source point ID.
+      b.editPoint();
+      Object.assign(b.draft.value, {sourceKind: 'fixed_value', fixedValue: '0', note: '固定读数'});
+      Object.assign(b.draft.value.target, {workbook: '电气巡检表', sheet: '设备', cell: 'B6'});
+      await b.saveDraft();
+      assert.equal(puts.length, 2);
+      const payload = puts[1].body;
+      const key = Object.keys(payload.points).find(id => id.startsWith('local_'));
+      assert.match(key, /^local_[0-9a-f]{32}$/);
+      assert.deepEqual(payload.status_rules[key], {type: '直接填充', source_kind: 'fixed_value', fixed_value: '0'});
+      assert.equal(payload.targets[key].cell, 'B6');
     ''')

@@ -4,7 +4,9 @@ import json
 
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
 from app.modules.inspection_data.service.point_correction import CORRECTION_RULE_FIELD, normalize_correction_rules
-from app.modules.inspection_data.service.point_status import STATUS_FIELDS, normalize_status_rules
+from app.modules.inspection_data.service.point_status import (
+    FIXED_VALUE_FIELD, INTERVAL_FIELD, LOCAL_POINT_ID, SOURCE_FIELD, STATUS_FIELDS, normalize_status_rules, status_fields,
+)
 
 
 POINT_CONFIG_TABLES = {"D楼": "tblU0q6LvNjpMIN1", "E楼": "tblrUhk1NAmTg1a2"}
@@ -38,7 +40,10 @@ def _index(records):
     return rows, blank_ids
 
 
-def _expected_rows(groups, *, include_explicit_enable=False, include_corrections=False):
+_OPTIONAL_FIELDS = (SOURCE_FIELD, FIXED_VALUE_FIELD, INTERVAL_FIELD)
+
+
+def _expected_rows(groups, *, include_explicit_enable=False, include_corrections=False, optional_fields=()):
     desired = {}
     for family, group in groups.items():
         discipline = INSPECTION_SOURCE_CONTRACTS[family]["discipline"]
@@ -47,7 +52,8 @@ def _expected_rows(groups, *, include_explicit_enable=False, include_corrections
             point = baseline.get(point_id, {})
             target = group.get("targets", {}).get(point_id, {})
             desired[discipline, point_id] = {
-                "专业": discipline, "测点ID": point_id, "测点名称": point.get("name", ""),
+                "专业": discipline, "测点ID": point_id,
+                "测点名称": points.get(point_id, "") if LOCAL_POINT_ID.fullmatch(point_id) else point.get("name", ""),
                 "测点路径": point.get("path", ""), "基线测点": point_id in baseline,
                 "启用": point_id not in remove, "测点备注": points.get(point_id, ""),
                 "目标巡检表": target.get("workbook", ""), "目标工作表": target.get("sheet", ""),
@@ -59,6 +65,8 @@ def _expected_rows(groups, *, include_explicit_enable=False, include_corrections
                 elif point_id in remove or point_id in group.get("explicitly_disabled", ()):
                     desired[discipline, point_id][EXPLICIT_ENABLE_FIELD] = False
             status = group.get("status_rules", {}).get(point_id, {})
+            metadata = status_fields(status, None)
+            desired[discipline, point_id].update({field: metadata.get(field, "") for field in optional_fields})
             if include_corrections:
                 rules = group.get("correction_rules", {}).get(point_id)
                 desired[discipline, point_id][CORRECTION_RULE_FIELD] = json.dumps(rules, separators=(",", ":")) if rules else ""
@@ -92,6 +100,11 @@ def read_point_config_bitable(config, *, client=None):
             if discipline not in families:
                 raise ValueError(f"{building} 飞书巡检测点配置专业无效")
             fields = row["fields"]
+            if LOCAL_POINT_ID.fullmatch(point_id):
+                if fields.get("启用") is not True:
+                    continue
+                if fields.get("基线测点") is True:
+                    raise ValueError(f"{building} 本地巡检项不能标为采集基线")
             group = groups.setdefault(families[discipline], {"points": {}, "remove": [], "baseline": {}})
             if fields.get("基线测点") is True:
                 group["baseline"][point_id] = {"name": _text(fields.get("测点名称")), "path": _text(fields.get("测点路径"))}
@@ -111,6 +124,12 @@ def read_point_config_bitable(config, *, client=None):
             if kind or any(encoded.values()):
                 try:
                     rule = {"type": kind, **{key: json.loads(value) if value else [] for key, value in encoded.items()}}
+                    if source := _text(fields.get(SOURCE_FIELD)):
+                        rule["source_kind"] = source
+                    if fixed := _text(fields.get(FIXED_VALUE_FIELD)):
+                        rule["fixed_value"] = fixed
+                    if intervals := _text(fields.get(INTERVAL_FIELD)):
+                        rule["intervals"] = json.loads(intervals)
                     normalized = normalize_status_rules({point_id: rule}, {point_id})
                 except (ValueError, TypeError, json.JSONDecodeError) as exc:
                     raise ValueError(f"{building} 测点 {point_id} 状态规则无效") from exc
@@ -161,9 +180,17 @@ def sync_point_config_bitable(config, settings, *, buildings=None, initialize=Fa
             missing[CORRECTION_RULE_FIELD] = 1
         if not primary or any(existing.get(k, t) != t for k, t in _FIELD_TYPES.items()) or (missing and not initialize):
             raise ValueError(f"{building} 飞书巡检测点配置表字段不匹配")
+        optional_fields = {field for field in _OPTIONAL_FIELDS if field in existing}
+        for group in settings.get(building, {}).values():
+            for rule in group.get("status_rules", {}).values():
+                optional_fields.update(set(status_fields(rule, None)) & set(_OPTIONAL_FIELDS))
+        if any(existing.get(field, 1) != 1 for field in optional_fields):
+            raise ValueError(f"{building} 飞书巡检配置扩展字段必须是文本")
+        missing.update({field: 1 for field in optional_fields if field not in existing})
         current, blank = _index(client.list_records(table, max_records=0))
         desired = _expected_rows(settings.get(building, {}), include_explicit_enable=explicit_type == 7,
-                                 include_corrections=has_corrections or correction_type == 1)
+                                 include_corrections=has_corrections or correction_type == 1,
+                                 optional_fields=sorted(optional_fields))
         if not desired:
             raise ValueError(f"{building} 没有可保存的测点配置")
         plans[building] = (table, primary, missing, current, blank, desired)

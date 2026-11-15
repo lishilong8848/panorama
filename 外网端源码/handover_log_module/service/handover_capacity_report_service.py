@@ -464,7 +464,7 @@ def _build_merged_anchor_map(sheet: Any) -> Dict[str, str]:
     return anchor_map
 
 
-def _write_cells_with_merged_support(sheet: Any, cell_values: Dict[str, Any]) -> None:
+def _write_cells_with_merged_support(sheet: Any, cell_values: Dict[str, Any]) -> bool:
     merged_anchor_map = _build_merged_anchor_map(sheet)
     resolved_values: Dict[str, Any] = {}
     source_coords: Dict[str, str] = {}
@@ -480,8 +480,15 @@ def _write_cells_with_merged_support(sheet: Any, cell_values: Dict[str, Any]) ->
             )
         resolved_values[resolved_cell] = value
         source_coords[resolved_cell] = normalized_cell
+    changed = False
     for resolved_cell, value in resolved_values.items():
-        sheet[resolved_cell] = value
+        cell = sheet[resolved_cell]
+        before = (cell.value, cell.data_type)
+        if before == (None, "n") and value == "":
+            continue
+        cell.value = value
+        changed |= before != (cell.value, cell.data_type)
+    return changed
 
 
 class HandoverCapacityReportService:
@@ -2044,10 +2051,15 @@ class HandoverCapacityReportService:
         return output
 
     @staticmethod
-    def _apply_load_rate_number_format(sheet) -> None:
+    def _apply_load_rate_number_format(sheet) -> bool:
+        changed = False
         for row_idx in _CAPACITY_LOAD_RATE_ROWS:
-            sheet[f"J{row_idx}"].number_format = _CAPACITY_PERCENT_NUMBER_FORMAT
-            sheet[f"M{row_idx}"].number_format = _CAPACITY_PERCENT_NUMBER_FORMAT
+            for col in ("J", "M"):
+                cell = sheet[f"{col}{row_idx}"]
+                if cell.number_format != _CAPACITY_PERCENT_NUMBER_FORMAT:
+                    cell.number_format = _CAPACITY_PERCENT_NUMBER_FORMAT
+                    changed = True
+        return changed
 
     def _build_load_rate_values_for_sheet(
         self,
@@ -2800,10 +2812,14 @@ class HandoverCapacityReportService:
                     emit_log=emit_log,
                     log_prefix="[交接班][容量报表][补写][补水罐总储备量]",
                 )
-                _write_cells_with_merged_support(sheet, overlay_values)
-                sheet[_CAPACITY_WATER_RESERVE_CELL].number_format = _CAPACITY_WATER_RESERVE_NUMBER_FORMAT
-                self._apply_load_rate_number_format(sheet)
-                atomic_save_workbook(workbook, capacity_output_path)
+                values_changed = _write_cells_with_merged_support(sheet, overlay_values)
+                water_cell = sheet[_CAPACITY_WATER_RESERVE_CELL]
+                water_format_changed = water_cell.number_format != _CAPACITY_WATER_RESERVE_NUMBER_FORMAT
+                if water_format_changed:
+                    water_cell.number_format = _CAPACITY_WATER_RESERVE_NUMBER_FORMAT
+                load_rate_format_changed = self._apply_load_rate_number_format(sheet)
+                if values_changed or water_format_changed or load_rate_format_changed:
+                    atomic_save_workbook(workbook, capacity_output_path)
             finally:
                 workbook.close()
         except Exception as exc:  # noqa: BLE001

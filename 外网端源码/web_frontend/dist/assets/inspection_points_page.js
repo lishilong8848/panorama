@@ -113,13 +113,13 @@ const TEMPLATE = `
           <header class="inspection-point-modal-head">
             <div class="inspection-point-modal-heading">
               <p class="inspection-point-modal-kicker">{{ draftTitle }}</p>
-              <h2 class="inspection-point-modal-title">{{ (draft.info && draft.info.name) || draft.id || '新测点' }}</h2>
+              <h2 class="inspection-point-modal-title">{{ (draft.info && draft.info.name) || (draft.sourceKind === 'collected' ? draft.id : draft.note) || '新测点' }}</h2>
             </div>
             <button class="inspection-point-modal-close" type="button" :disabled="saving" aria-label="关闭" @click="requestCloseDraft">×</button>
           </header>
 
           <div v-if="draft.info" class="inspection-point-modal-info" aria-label="测点当前信息">
-            <div class="inspection-point-info-item"><span>测点 ID</span><strong>{{ draft.info.id }}</strong></div>
+            <div v-if="draft.sourceKind === 'collected'" class="inspection-point-info-item"><span>测点 ID</span><strong>{{ draft.info.id }}</strong></div>
             <div class="inspection-point-info-item"><span>最新值</span><strong>{{ draft.info.displayValue }}<em v-if="draft.info.rawDisplay">原始 {{ draft.info.rawDisplay }} · 已修正</em></strong></div>
             <div class="inspection-point-info-item"><span>状态</span><strong>{{ draft.info.status || '—' }}</strong></div>
             <div class="inspection-point-info-item"><span>采样时间</span><strong>{{ draft.info.sampleTime || '暂无采样' }}</strong></div>
@@ -130,27 +130,45 @@ const TEMPLATE = `
           </div>
 
           <div class="inspection-point-modal-body">
-        <label class="review-field"><span class="review-field-label">测点 ID</span>
+        <label class="review-field"><span class="review-field-label">测点来源</span>
+          <select class="review-input" v-model="draft.sourceKind" :disabled="saving || Boolean(draft.originalId)">
+            <option value="collected">内网采集</option>
+            <option value="fixed_status">固定状态</option>
+            <option value="fixed_value">固定数值</option>
+            <option value="manual_status">手工巡检状态</option>
+          </select>
+        </label>
+        <label v-if="draft.sourceKind === 'collected'" class="review-field"><span class="review-field-label">测点 ID</span>
           <input class="review-input" v-model.trim="draft.id" :disabled="saving" required maxlength="100" />
         </label>
-        <label class="review-field"><span class="review-field-label">测点备注</span>
+        <label class="review-field"><span class="review-field-label">{{ draft.sourceKind === 'collected' ? '测点备注' : '巡检项名称 / 备注' }}</span>
           <input class="review-input" v-model="draft.note" :disabled="saving" maxlength="500" />
+        </label>
+        <label v-if="draft.sourceKind === 'fixed_status'" class="review-field"><span class="review-field-label">固定状态</span>
+          <select class="review-input" v-model="draft.fixedValue" :disabled="saving" required>
+            <option value="">请选择</option><option>√</option><option>×</option><option>△</option>
+          </select>
+        </label>
+        <label v-if="draft.sourceKind === 'fixed_value'" class="review-field"><span class="review-field-label">固定数值</span>
+          <input class="review-input" v-model.trim="draft.fixedValue" inputmode="decimal" :disabled="saving" maxlength="48" required />
         </label>
         <label class="review-field inspection-point-enable"><span class="review-field-label">用户主动启用</span>
           <span><input type="checkbox" v-model="draft.explicitlyEnabled" :disabled="saving" /> 在巡检中启用该测点</span>
         </label>
-        <label class="review-field"><span class="review-field-label">目标单元格类型</span>
+        <label v-if="draft.sourceKind === 'collected'" class="review-field"><span class="review-field-label">目标单元格类型</span>
           <select class="review-input" v-model="draft.status.type" :disabled="saving">
             <option value="">未设置</option><option value="直接填充">直接填充</option><option value="状态">状态格（√ 正常／× 异常／△ 未运行）</option>
           </select>
         </label>
-        <template v-if="draft.status.type === '状态'">
+        <template v-if="draft.sourceKind === 'collected' && draft.status.type === '状态'">
           <p class="review-status-line review-status-info inspection-status-hint">三个实时映射均留空时，可在灯塔选择状态并供后续巡检复用；每轮仍需确认。</p>
           <label v-for="item in statusFields" :key="item.key" class="review-field"><span class="review-field-label">{{ item.label }}</span>
             <textarea class="review-input" v-model="draft.status[item.key]" :disabled="saving" rows="2" placeholder="每行填写一个原始值"></textarea>
+            <textarea class="review-input" v-model="draft.intervalText[item.key]" :disabled="saving" rows="2"
+              :aria-label="item.label + '区间'" placeholder="数值区间，每行 最小值,最大值（含端点）"></textarea>
           </label>
         </template>
-        <div class="review-field inspection-correction-rules">
+        <div v-if="draft.sourceKind === 'collected'" class="review-field inspection-correction-rules">
           <span class="review-field-label">数值修正规则<span class="inspection-correction-count">{{ countCorrectionRules(draft.correctionRules) }} / {{ correctionMaxRules }} 条</span></span>
           <p class="review-status-line review-status-info inspection-status-hint">原始读数保留不变；下次上传时按上述区间（含端点）使用修正后的有效值。</p>
           <div v-for="(ruleRow, index) in draft.correctionRules" :key="index" class="inspection-correction-row">
@@ -201,7 +219,7 @@ const TEMPLATE = `
         <div class="inspection-point-row inspection-point-columns" aria-hidden="true"><span>测点</span><span>备注</span><span>最新值</span><span>操作</span></div>
         <div v-for="row in pageRows" :key="row.id" class="inspection-point-row" :class="{'inspection-point-excluded': row.excluded}">
           <div class="inspection-point-name"><strong>{{ row.name || row.id }}</strong>
-            <small>{{ row.id }}<template v-if="row.excluded"> · 已排除</template></small>
+            <small>{{ row.sourceLabel || row.id }}<template v-if="row.excluded"> · 已排除</template></small>
             <small v-if="row.path">{{ row.path }}</small>
           </div>
           <div class="inspection-point-note">{{ row.note || '—' }}<small v-if="!row.excluded && !row.targetComplete" class="inspection-point-incomplete">位置待完善</small><span v-if="row.correctionCount" class="inspection-point-badge" :title="'已设置 ' + row.correctionCount + ' 条数值修正规则'">修正 {{ row.correctionCount }}</span><small v-if="row.target">{{ row.target.workbook }} · {{ row.target.sheet }} · {{ formatTarget(row.target) }}</small></div>
@@ -269,13 +287,17 @@ export function mountInspectionPointsPage(Vue) {
           const rule = group.value.status_rules?.[row.id];
           let status = "";
           if (rule?.type === "状态") {
-            const raw = row.raw_value;
-            status = raw != null && raw !== "" ? (rule.normal?.includes(raw) ? "√" : rule.abnormal?.includes(raw) ? "×" : rule.not_running?.includes(raw) ? "△" : "待核对") : "待核对";
+            const raw = row.corrected_value ?? row.raw_value;
+            status = row.status || (raw != null && raw !== "" ? (rule.normal?.includes(raw) ? "√" : rule.abnormal?.includes(raw) ? "×" : rule.not_running?.includes(raw) ? "△" : "待核对") : "待核对");
           }
           const target = group.value.targets?.[row.id], excluded = group.value.remove.includes(row.id);
           const corrected = row.corrected_value, hasCorrected = corrected != null && corrected !== "";
           const rawDisplay = rule?.type ? (row.raw_value ?? "") : row.value;
-          return { ...row, status, displayValue: hasCorrected ? corrected : rawDisplay,
+          const sourceLabel = {fixed_status: "固定状态", fixed_value: "固定数值", manual_status: "手工巡检"}[rule?.source_kind]
+            || (row.id.startsWith("local_") ? "本地巡检项" : "");
+          const name = sourceLabel ? group.value.points[row.id] || sourceLabel : row.name;
+          if (rule?.source_kind === "fixed_status") status = rule.fixed_value;
+          return { ...row, name, sourceLabel, status, displayValue: rule?.fixed_value ?? (hasCorrected ? corrected : rawDisplay),
             rawDisplay: hasCorrected ? (row.raw_value ?? row.value ?? "") : "",
             note: group.value.points[row.id] || "", target, excluded, targetComplete: isTargetComplete(target),
             correctionCount: excluded ? 0 : countCorrectionRules(group.value.correction_rules?.[row.id]) };
@@ -354,6 +376,9 @@ export function mountInspectionPointsPage(Vue) {
           min: String(item?.min ?? ""), max: String(item?.max ?? ""), value: String(item?.value ?? ""),
         }));
         draft.value = { id: row?.id || "", note: row?.note || "", originalId: row?.id || "",
+          sourceKind: rule.source_kind || "collected", fixedValue: rule.fixed_value || "",
+          intervalText: Object.fromEntries(STATUS_FIELDS.map(item => [item.key,
+            (rule.intervals || []).filter(interval => interval.status === item.key).map(interval => interval.min + "," + interval.max).join("\n")])),
           explicitlyEnabled: (group.value.explicitly_enabled || []).includes(row?.id),
           originalExplicitlyEnabled: (group.value.explicitly_enabled || []).includes(row?.id),
           status: { type: rule.type === "数值" ? "直接填充" : (rule.type || ""), ...Object.fromEntries(STATUS_FIELDS.map(item => [item.key, (rule[item.key] || []).join("\n")])) },
@@ -382,6 +407,7 @@ export function mountInspectionPointsPage(Vue) {
         if (!row) return "";
         return JSON.stringify({
           id: row.id, note: row.note, explicitlyEnabled: row.explicitlyEnabled,
+          sourceKind: row.sourceKind, fixedValue: row.fixedValue, intervalText: row.intervalText,
           status: row.status, correctionRules: row.correctionRules, target: row.target,
         });
       }
@@ -449,16 +475,22 @@ export function mountInspectionPointsPage(Vue) {
       async function saveDraft() {
         const row = draft.value;
         if (!row) return;
-        if (!POINT_ID.test(row.id)) { settingsError.value = "测点 ID 格式无效"; return; }
+        const local = row.sourceKind !== "collected";
+        if (!local && !POINT_ID.test(row.id)) { settingsError.value = "测点 ID 格式无效"; return; }
         const roundCells = { ...row.target.round_cells };
         if (row.target.sheet === COLD_SHEET) {
           for (const item of ROUND_FIELDS) roundCells[item.key] = roundCells.day_1;
         }
-        if (row.target.workbook && (!row.target.sheet || (!row.target.cell && !Object.values(roundCells).some(Boolean)))) {
+        if ((local || row.target.workbook) && (!row.target.workbook || !row.target.sheet || (!row.target.cell && !Object.values(roundCells).some(Boolean)))) {
           settingsError.value = "请选择工作表并填写目标单元格";
           return;
         }
-        const parsed = parseCorrectionRows(row.correctionRules);
+        if (local && !row.note.trim()) { settingsError.value = "请填写巡检项名称"; return; }
+        if (local && !row.id.startsWith("local_")) {
+          const bytes = window.crypto.getRandomValues(new Uint8Array(16));
+          row.id = "local_" + Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+        }
+        const parsed = local ? { rules: [] } : parseCorrectionRows(row.correctionRules);
         if (parsed.error) { settingsError.value = parsed.error; return; }
         const points = { ...group.value.points }, targets = { ...group.value.targets };
         const statusRules = { ...group.value.status_rules }, correctionRules = { ...(group.value.correction_rules || {}) };
@@ -477,9 +509,22 @@ export function mountInspectionPointsPage(Vue) {
           if (!remove.includes(row.originalId)) remove.push(row.originalId);
         }
         points[row.id] = row.note;
-        if (row.status.type) {
+        if (local) {
+          statusRules[row.id] = { type: row.sourceKind === "fixed_value" ? "直接填充" : "状态",
+            source_kind: row.sourceKind, ...(row.sourceKind === "manual_status" ? {} : { fixed_value: row.fixedValue }) };
+        } else if (row.status.type) {
           const rule = { type: row.status.type };
           for (const item of STATUS_FIELDS) rule[item.key] = row.status.type === "状态" ? row.status[item.key].split(/\r?\n/).filter(value => value !== "") : [];
+          if (row.status.type === "状态") {
+            rule.intervals = [];
+            for (const item of STATUS_FIELDS) {
+              for (const line of row.intervalText[item.key].split(/\r?\n/).filter(value => value.trim())) {
+                const bounds = line.split(/[,，]/).map(value => value.trim());
+                if (bounds.length !== 2 || bounds.some(value => !value)) { settingsError.value = "状态区间请按每行「最小值,最大值」填写"; return; }
+                rule.intervals.push({ min: bounds[0], max: bounds[1], status: item.key });
+              }
+            }
+          }
           statusRules[row.id] = rule;
         } else delete statusRules[row.id];
         if (row.target.workbook) targets[row.id] = { ...row.target, round_cells: roundCells };
@@ -499,10 +544,10 @@ export function mountInspectionPointsPage(Vue) {
         if (excluded) { delete points[row.id]; delete targets[row.id]; delete statusRules[row.id]; delete correctionRules[row.id]; }
         else if (group.value.baseline && !Object.hasOwn(group.value.baseline, row.id)) points[row.id] = "";
         const remove = group.value.remove.filter(id => id !== row.id);
-        if (excluded) remove.push(row.id);
+        if (excluded && !row.id.startsWith("local_")) remove.push(row.id);
         const explicitlyEnabled = (group.value.explicitly_enabled || []).filter(id => !excluded || id !== row.id);
-        const explicitlyDisabled = [...(group.value.explicitly_disabled || [])];
-        if (excluded && (group.value.explicitly_enabled || []).includes(row.id) && !explicitlyDisabled.includes(row.id)) explicitlyDisabled.push(row.id);
+        const explicitlyDisabled = (group.value.explicitly_disabled || []).filter(id => !excluded || !row.id.startsWith("local_") || id !== row.id);
+        if (excluded && !row.id.startsWith("local_") && (group.value.explicitly_enabled || []).includes(row.id) && !explicitlyDisabled.includes(row.id)) explicitlyDisabled.push(row.id);
         if (await persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled, correctionRules) && draft.value?.id === row.id) draft.value = null;
       }
       function returnToReview(event) {

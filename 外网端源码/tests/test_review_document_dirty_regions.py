@@ -124,6 +124,26 @@ def test_writer_syncs_fixed_cells_when_dirty_region_was_lost(tmp_path: Path) -> 
         reloaded.close()
 
 
+def test_fixed_cell_download_check_handles_sparse_cells_and_formula_values(tmp_path: Path) -> None:
+    output_file = tmp_path / "handover.xlsx"
+    workbook = Workbook()
+    workbook.active["B4"] = "reviewed"
+    workbook.active["D32"] = "=SUM(1,2)"
+    workbook.save(output_file)
+    workbook.close()
+
+    writer = ReviewDocumentWriter({})
+    fields = [
+        {"cell": "B4", "value": "reviewed"},
+        {"cell": "D32", "value": "=SUM(1,2)"},
+        {"cell": "F42", "value": ""},
+    ]
+    document = {"fixed_blocks": [{"fields": fields}]}
+    assert not writer.fixed_cells_need_sync_for_file(output_file=str(output_file), document=document)
+    fields[-1]["value"] = "not yet written"
+    assert writer.fixed_cells_need_sync_for_file(output_file=str(output_file), document=document)
+
+
 @pytest.mark.parametrize("building", ["A楼", "B楼", "C楼", "D楼", "E楼"])
 def test_generated_log_wraps_merged_text_and_refits_after_review_save(tmp_path: Path, building: str) -> None:
     template = Path(__file__).resolve().parents[1] / "交接班日志空模板.xlsx"

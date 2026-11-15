@@ -19,6 +19,7 @@ from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS
 from app.config.inspection_data_config import INSPECTION_SOURCE_CONTRACTS as SOURCE_FAMILIES
 from app.config.inspection_data_config import inspection_hour_bucket
 from app.modules.inspection_data.service.point_correction import CORRECTED_VALUE_FIELD, corrected_samples
+from app.modules.inspection_data.service.point_status import FIXED_VALUE_FIELD, INTERVAL_FIELD, LOCAL_POINT_ID, SOURCE_FIELD, status_fields
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
@@ -57,6 +58,7 @@ POINT_TARGET_FIELDS = {"workbook": "目标巡检表", "sheet": "目标工作表"
 POINT_DETAIL_TYPES.update(dict.fromkeys(POINT_TARGET_FIELDS.values(), 1))
 POINT_DETAIL_TYPES.update(dict.fromkeys(INSPECTION_ROUND_FIELDS.values(), 1))
 POINT_DETAIL_TYPES[CORRECTED_VALUE_FIELD] = 1
+POINT_DETAIL_TYPES.update(dict.fromkeys((SOURCE_FIELD, FIXED_VALUE_FIELD, INTERVAL_FIELD), 1))
 INSPECTION_BATCH_PREFIX = "INSPECTION_BATCH_V1:"
 
 
@@ -547,7 +549,6 @@ class InspectionDataUploadService:
     @staticmethod
     def _point_detail_rows(entry: dict, discipline: str, notes: dict, targets: dict | None = None,
                            status_rules: dict | None = None, corrections: dict[int, str] | None = None) -> list[dict]:
-        from app.modules.inspection_data.service.point_status import status_fields
         rows = []
         position = device = ""
         sample_time = int(datetime.strptime(entry["value_time"], "%Y-%m-%d %H:%M:%S")
@@ -583,6 +584,28 @@ class InspectionDataUploadService:
                 **{field: target.get("round_cells", {}).get(key, "")
                    for key, field in INSPECTION_ROUND_FIELDS.items() if "round_cells" in target},
                 "采样时间": sample_time, "数据完整性": "完整" if _text(raw) else "缺少源数据",
+            })
+        return rows
+
+    @staticmethod
+    def _local_point_rows(building: str, discipline: str, group: dict) -> list[dict]:
+        rows = []
+        excluded = set(group.get("remove", ()))
+        for point_id, note in group.get("points", {}).items():
+            if not LOCAL_POINT_ID.fullmatch(point_id) or point_id in excluded:
+                continue
+            rule = group["status_rules"][point_id]
+            target = group["targets"][point_id]
+            manual = rule["source_kind"] == "manual_status"
+            rows.append({
+                "记录类型": "测点明细", "楼栋": building, "专业": discipline,
+                "设备编号": note, "测点名称": note, "巡检表单": target["workbook"],
+                "测点ID": point_id, "测点备注": note, "测点值": rule.get("fixed_value", ""),
+                "测点原始值": "", "数据完整性": "缺少源数据" if manual else "完整",
+                **status_fields(rule, None),
+                **{field: target[key] for key, field in POINT_TARGET_FIELDS.items() if key in target},
+                **{field: target["round_cells"].get(key, "")
+                   for key, field in INSPECTION_ROUND_FIELDS.items() if "round_cells" in target},
             })
         return rows
 
@@ -736,9 +759,11 @@ class InspectionDataUploadService:
                 source_time = int(datetime.strptime(entry["query_end"], "%Y-%m-%d %H:%M:%S")
                                   .replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
                 source_name = f"巡检接口/{entry['report_name']}"
+                local_rows = self._local_point_rows(building, contract["discipline"], group)
                 combined["rows"].extend({"记录类型": "设备巡检", **r, "源文件时间": source_time, "源文件": source_name}
                                         for r in [*p["rows"], *point_rows])
-                combined["point_count"] += len(point_rows)
+                combined["rows"].extend(local_rows)
+                combined["point_count"] += len(point_rows) + len(local_rows)
                 for key in ("valid_points", "matched_devices", "missing_devices"):
                     combined[key] += p[key]
                 combined["diagnostics"].extend(f"{contract['label']}: {item}" for item in p["diagnostics"])

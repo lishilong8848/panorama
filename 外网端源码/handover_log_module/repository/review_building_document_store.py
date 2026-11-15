@@ -232,7 +232,8 @@ class ReviewBuildingDocumentStore:
                 updated_at TEXT NOT NULL,
                 finished_at TEXT NOT NULL DEFAULT '',
                 target_key TEXT NOT NULL DEFAULT '',
-                worker_slot INTEGER NOT NULL DEFAULT -1
+                worker_slot INTEGER NOT NULL DEFAULT -1,
+                download_priority INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_xlsx_write_jobs_status
                 ON xlsx_write_jobs(status, created_at);
@@ -269,6 +270,8 @@ class ReviewBuildingDocumentStore:
             conn.execute("ALTER TABLE xlsx_write_jobs ADD COLUMN target_key TEXT NOT NULL DEFAULT ''")
         if "worker_slot" not in xlsx_columns:
             conn.execute("ALTER TABLE xlsx_write_jobs ADD COLUMN worker_slot INTEGER NOT NULL DEFAULT -1")
+        if "download_priority" not in xlsx_columns:
+            conn.execute("ALTER TABLE xlsx_write_jobs ADD COLUMN download_priority INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _row_to_document(row: sqlite3.Row | None) -> Dict[str, Any] | None:
@@ -972,6 +975,7 @@ class ReviewBuildingDocumentStore:
         payload: Dict[str, Any] | None = None,
         dedupe_running_if_payload_matches: bool = False,
         target_key: str = "",
+        download_priority: bool = False,
     ) -> Dict[str, Any]:
         self.ensure_ready()
         task_type_text = str(task_type or "").strip().lower()
@@ -979,6 +983,7 @@ class ReviewBuildingDocumentStore:
             raise ValueError(f"unsupported xlsx write task_type: {task_type}")
         session_id_text = str(session_id or "").strip()
         dedupe_key_text = str(dedupe_key or "").strip()
+        priority = int(bool(download_priority and target_key and task_type_text != "barrier"))
         next_payload = dict(payload) if isinstance(payload, dict) else {}
         payload_text = _json_dumps(next_payload)
         now = _now_text()
@@ -1014,11 +1019,12 @@ class ReviewBuildingDocumentStore:
                         UPDATE xlsx_write_jobs
                            SET session_id=?,
                                payload_json=?,
+                               download_priority=MAX(download_priority, ?),
                                error='',
                                updated_at=?
                          WHERE job_id=?
                         """,
-                        (session_id_text, payload_text, now, str(pending["job_id"] or "")),
+                        (session_id_text, payload_text, priority, now, str(pending["job_id"] or "")),
                     )
                     row = conn.execute(
                         "SELECT * FROM xlsx_write_jobs WHERE job_id=?",
@@ -1047,8 +1053,9 @@ class ReviewBuildingDocumentStore:
                 """
                 INSERT INTO xlsx_write_jobs(
                     job_id, building, session_id, task_type, dedupe_key,
-                    payload_json, status, attempts, error, created_at, updated_at, finished_at, target_key
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    payload_json, status, attempts, error, created_at, updated_at, finished_at, target_key,
+                    download_priority
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     job_id,
@@ -1064,6 +1071,7 @@ class ReviewBuildingDocumentStore:
                     now,
                     "",
                     target_key,
+                    priority,
                 ),
             )
             row = conn.execute("SELECT * FROM xlsx_write_jobs WHERE job_id=?", (job_id,)).fetchone()
@@ -1095,7 +1103,7 @@ class ReviewBuildingDocumentStore:
                                OR other.target_key=candidate.target_key
                                OR (other.session_id=candidate.session_id AND other.task_type=candidate.task_type))
                    )
-                 ORDER BY candidate.rowid
+                 ORDER BY candidate.download_priority DESC, candidate.rowid
                  LIMIT 1
                 """,
                 (worker_slot,),

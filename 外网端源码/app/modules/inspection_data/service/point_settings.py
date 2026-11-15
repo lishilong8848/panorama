@@ -12,7 +12,7 @@ from pathlib import Path
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.inspection_data.service.point_correction import normalize_correction_rules
-from app.modules.inspection_data.service.point_status import normalize_status_rules
+from app.modules.inspection_data.service.point_status import LOCAL_POINT_ID, normalize_status_rules
 from app.shared.utils.atomic_file import atomic_write_text
 
 
@@ -88,7 +88,7 @@ def load_or_restore_point_settings(config):
         for building, groups in settings.items():
             for group in groups.values():
                 ids = set(group["baseline"]) | set(group["points"]) | set(group["remove"])
-                if any(len(i) > 100 or not _POINT_ID.fullmatch(i) for i in ids):
+                if any(not _valid_config_id(i) for i in ids):
                     raise ValueError("飞书巡检测点配置含无效 ID，未恢复配置")
                 group["remove"].sort()
                 _validate_effective_count(group["baseline"], group["points"], group["remove"])
@@ -100,6 +100,8 @@ def load_or_restore_point_settings(config):
                 if "correction_rules" in group:
                     group["correction_rules"] = normalize_correction_rules(
                         group["correction_rules"], (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
+                _validate_local_points(group["points"], group.get("targets", {}), group.get("status_rules", {}),
+                                       group.get("correction_rules", {}))
             _validate_target_collisions(groups)
         _save_settings(config, settings)
         return settings
@@ -148,7 +150,7 @@ def _normalize_targets(building, points, targets):
             if any(not valid_cell(value) for value in used):
                 raise ValueError("目标必须为本楼巡检表中的有效工作表和单元格，例如 B6")
             if sheet == "暖通冷机系统巡检表":
-                if len(set(used)) > 1:
+                if len(set(used) | ({cell} if cell else set())) > 1:
                     raise ValueError("暖通冷机系统巡检表只能配置一个固定位置")
                 if used:
                     rounds = dict.fromkeys(INSPECTION_ROUND_FIELDS, used[0])
@@ -189,11 +191,11 @@ def query_rules(settings):
     result = {}
     for building, groups in (settings or {}).items():
         for family, group in (groups or {}).items():
-            baseline_keys = set(group.get("baseline", {}) or {})
-            point_keys = set(group.get("points", {}) or {})
+            baseline_keys = {i for i in group.get("baseline", {}) if not LOCAL_POINT_ID.fullmatch(i)}
+            point_keys = {i for i in group.get("points", {}) if not LOCAL_POINT_ID.fullmatch(i)}
             normalized = {
                 "add": sorted({str(i).strip() for i in (point_keys - baseline_keys)}),
-                "remove": sorted({str(i).strip() for i in (group.get("remove", []) or [])}),
+                "remove": sorted({str(i).strip() for i in (group.get("remove", []) or []) if not LOCAL_POINT_ID.fullmatch(i)}),
             }
             if "baseline" in group:
                 normalized["baseline"] = sorted({str(i).strip() for i in baseline_keys})
@@ -242,8 +244,21 @@ def initialize_point_baseline(config, datasets):
 
 
 def _validate_effective_count(baseline, points, remove):
-    if not 1 <= len((set(baseline) | set(points)) - set(remove)) <= 2000:
+    ids = (set(baseline) | set(points)) - set(remove)
+    if not 1 <= sum(not LOCAL_POINT_ID.fullmatch(i) for i in ids) <= 2000:
         raise ValueError("每个楼栋专业必须保留 1–2000 个测点")
+
+
+def _valid_config_id(value):
+    return isinstance(value, str) and len(value) <= 100 and bool(_POINT_ID.fullmatch(value) or LOCAL_POINT_ID.fullmatch(value))
+
+
+def _validate_local_points(points, targets, status_rules, corrections):
+    for point_id, note in points.items():
+        if LOCAL_POINT_ID.fullmatch(point_id) and (
+            not note.strip() or point_id not in targets or point_id not in status_rules or point_id in corrections
+        ):
+            raise ValueError("固定或手工巡检项必须有说明和目标格，且不能设置数值修正")
 
 
 def sync_point_settings(config, settings, *, bridge=None):
@@ -452,7 +467,7 @@ def save_point_group(config, *, building, family, points, remove, expected_group
         raise ValueError("巡检测点只支持 D/E 楼的电气和暖通")
     if not isinstance(points, dict) or not isinstance(remove, list) or len(points) > 1000 or len(remove) > 1000:
         raise ValueError("巡检测点列表格式无效或超出限制")
-    if any(not isinstance(i, str) or len(i) > 100 or not _POINT_ID.fullmatch(i) for i in [*points, *remove]):
+    if any(not _valid_config_id(i) for i in [*points, *remove]):
         raise ValueError("巡检测点ID格式无效")
     if any(not isinstance(note, str) or len(note) > 500 for note in points.values()):
         raise ValueError("巡检测点备注必须为不超过500字的文本")
@@ -487,6 +502,7 @@ def save_point_group(config, *, building, family, points, remove, expected_group
         if correction_rules is None:
             correction_rules = {i: rules for i, rules in current.get("correction_rules", {}).items() if i in active_ids}
         correction_rules = normalize_correction_rules(correction_rules, active_ids)
+        _validate_local_points(points, targets, status_rules, correction_rules)
         if "baseline" in current:
             _validate_effective_count(current["baseline"], points, remove)
         if points or remove or "baseline" in current:

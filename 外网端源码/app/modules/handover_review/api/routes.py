@@ -5798,6 +5798,7 @@ def handover_review_download(building_code: str, request: Request, session_id: s
                 target,
                 target_revision=document_revision,
                 force_all_regions=True,
+                download_priority=True,
             )
             if not queued.get("job_id"):
                 raise ReviewDocumentStateError(str(queued.get("error") or "交接班文件写入任务未入队"))
@@ -5963,6 +5964,7 @@ def handover_review_capacity_download(
             tracked_cells=tracked_cells,
             client_id=str(client_id or "").strip(),
             expected_document_revision=current_document_revision,
+            download_priority=True,
         )
         completed_job = queue_service.wait_for_job(
             building=building,

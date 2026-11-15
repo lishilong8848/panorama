@@ -133,6 +133,7 @@ class HandoverXlsxWriteQueueService:
         *,
         target_revision: int | None = None,
         force_all_regions: bool = False,
+        download_priority: bool = False,
     ) -> Dict[str, Any]:
         building = _text(session.get("building"))
         session_id = _text(session.get("session_id"))
@@ -158,6 +159,7 @@ class HandoverXlsxWriteQueueService:
             },
             dedupe_running_if_payload_matches=True,
             target_key=_output_key(session.get("output_file")),
+            download_priority=download_priority,
         )
         self.emit_log(
             f"[交接班][xlsx队列] 已入队 building={building}, task=review_excel_sync, "
@@ -175,6 +177,7 @@ class HandoverXlsxWriteQueueService:
         client_id: str = "",
         use_saved_shared_110kv: bool = False,
         expected_document_revision: int | None = None,
+        download_priority: bool = False,
     ) -> Dict[str, Any]:
         building = _text(session.get("building"))
         session_id = _text(session.get("session_id"))
@@ -205,6 +208,7 @@ class HandoverXlsxWriteQueueService:
             payload=payload,
             dedupe_running_if_payload_matches=True,
             target_key=_output_key(output_file),
+            download_priority=download_priority,
         )
         self.emit_log(
             f"[交接班][xlsx队列] 已入队 building={building}, task=capacity_overlay_sync, "

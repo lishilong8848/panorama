@@ -14,8 +14,8 @@ def _store(tmp_path):
     return ReviewBuildingDocumentStore(config={"_global_paths": {"runtime_state_root": str(tmp_path)}}, building="A楼")
 
 
-def _enqueue(store, task_type, key="", session="day"):
-    return store.enqueue_xlsx_write_job(task_type=task_type, session_id=session, target_key=key)
+def _enqueue(store, task_type, key="", session="day", **kwargs):
+    return store.enqueue_xlsx_write_job(task_type=task_type, session_id=session, target_key=key, **kwargs)
 
 
 def _finish(store, job):
@@ -58,6 +58,36 @@ def test_slot_recovery_keeps_other_live_write_and_legacy_job_exclusive(tmp_path)
     assert store.claim_next_xlsx_write_job(worker_slot=1)["job_id"] == capacity["job_id"]
     assert store.recover_xlsx_write_jobs_for_startup(worker_slot=0) == 1
     assert store.get_xlsx_write_job(capacity["job_id"])["status"] == "running"
+
+
+def test_download_reuses_pending_job_and_prioritizes_it_over_unrelated_writes(tmp_path):
+    store = _store(tmp_path)
+    background = _enqueue(store, "capacity_overlay_sync", "other.xlsx")
+    original = _enqueue(store, "review_excel_sync", "log.xlsx", dedupe_key="day")
+    promoted = _enqueue(store, "review_excel_sync", "log.xlsx", dedupe_key="day", download_priority=True)
+    later_save = _enqueue(store, "review_excel_sync", "log.xlsx", dedupe_key="day")
+
+    assert promoted["job_id"] == original["job_id"] == later_save["job_id"]
+    assert store.claim_next_xlsx_write_job()["job_id"] == original["job_id"]
+    assert store.claim_next_xlsx_write_job(worker_slot=1)["job_id"] == background["job_id"]
+
+
+def test_download_priority_does_not_bypass_same_path_or_existing_barrier(tmp_path):
+    store = _store(tmp_path)
+    older_write = _enqueue(store, "capacity_overlay_sync", "report.xlsx")
+    download = _enqueue(store, "capacity_overlay_sync", "report.xlsx", download_priority=True)
+    barrier = _enqueue(store, "barrier")
+    later_download = _enqueue(store, "review_excel_sync", "log.xlsx", download_priority=True)
+
+    assert store.claim_next_xlsx_write_job()["job_id"] == older_write["job_id"]
+    assert store.claim_next_xlsx_write_job(worker_slot=1) is None
+    _finish(store, older_write)
+    assert store.claim_next_xlsx_write_job()["job_id"] == download["job_id"]
+    _finish(store, download)
+    assert store.claim_next_xlsx_write_job()["job_id"] == barrier["job_id"]
+    assert store.claim_next_xlsx_write_job(worker_slot=1) is None
+    _finish(store, barrier)
+    assert store.claim_next_xlsx_write_job()["job_id"] == later_download["job_id"]
 
 
 def test_migrates_existing_queue_with_pending_rows(tmp_path):

@@ -3,6 +3,7 @@
 from typing import Any, Dict, List
 
 import openpyxl
+from openpyxl.utils.cell import coordinate_to_tuple
 
 from app.shared.utils.atomic_file import atomic_save_workbook
 from handover_log_module.core.fixed_cell_overrides import apply_forced_fixed_cell_values
@@ -73,11 +74,28 @@ class ReviewDocumentWriter:
         return False
 
     def fixed_cells_need_sync_for_file(self, *, output_file: str, document: Dict[str, Any]) -> bool:
+        expected = {
+            coordinate_to_tuple(cell): value
+            for cell, value in self._fixed_cells_from_document(document).items()
+        }
+        if not expected:
+            return False
+        min_row = min(row for row, _ in expected)
+        max_row = max(row for row, _ in expected)
+        min_col = min(col for _, col in expected)
+        max_col = max(col for _, col in expected)
         workbook = load_workbook_quietly(output_file, read_only=True, data_only=False)
         try:
             sheet_name = self._sheet_name()
             ws = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
-            return self._fixed_cells_need_sync(ws, self._fixed_cells_from_document(document))
+            # Random cell lookup on a read-only worksheet replays the XML stream.
+            rows = ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col, values_only=True)
+            for row, values in enumerate(rows, start=min_row):
+                for col, current in enumerate(values, start=min_col):
+                    key = (row, col)
+                    if key in expected and ("" if current is None else str(current)) != expected.pop(key):
+                        return True
+            return any(expected.values())
         finally:
             workbook.close()
 

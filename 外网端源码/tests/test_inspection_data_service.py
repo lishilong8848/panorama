@@ -746,6 +746,28 @@ def test_split_result_reports_four_files_and_both_timestamps(tmp_path, monkeypat
         assert cloud.events == []
 
 
+def test_local_manual_point_is_included_in_verified_upload_batch(tmp_path, monkeypatch):
+    service, cloud, _ = prepared(tmp_path, monkeypatch)
+    from app.modules.inspection_data.service.point_settings import _save_settings
+
+    point_id = "local_" + "c" * 32
+    _save_settings(service.runtime_config, {"D楼": {"electrical_inspection_family": {
+        "points": {point_id: "滴漏人工检查"}, "remove": [],
+        "targets": {point_id: {"workbook": "电气巡检表", "sheet": "柴油", "cell": "C6"}},
+        "status_rules": {point_id: {"type": "状态", "source_kind": "manual_status"}},
+    }}})
+    monkeypatch.setattr(module, "sync_point_settings", Mock())
+    result = service.run()
+    table = module.DEFAULT_CONFIG["tables"]["D楼"]
+    records = cloud.rows[table]
+    row, = [r["fields"] for r in records if r["fields"].get("测点ID") == point_id]
+    assert row["测点来源"] == "manual_status"
+    assert row["状态判定"] == "待核对"
+    assert row.get("采样时间") is None
+    marker = module.validate_inspection_batch(records, building="D楼", upload_time=row["上传日期"])
+    assert marker["point_count"] == result["results"]["D楼"]["point_count"]
+
+
 def test_fixed_family_mapping_ignores_legacy_and_crossmapped_config(tmp_path):
     internal = SnapshotSources(inspection_datasets(tmp_path))
     service = InspectionDataUploadService({'inspection_data_upload': {

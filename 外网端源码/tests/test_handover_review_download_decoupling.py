@@ -471,6 +471,7 @@ def test_capacity_download_passes_expected_document_revision(monkeypatch, tmp_pa
 
     kwargs = queue_service.enqueue_capacity_overlay_sync.call_args.kwargs
     assert kwargs.get("expected_document_revision") == 7
+    assert kwargs.get("download_priority") is True
 
 
 def test_capacity_download_reuses_fresh_verified_file(monkeypatch, tmp_path):
@@ -530,6 +531,7 @@ def test_log_download_waits_only_for_its_write_job(monkeypatch, tmp_path):
 
     response = routes.handover_review_download("a", _request(_container()), SESSION_ID)
     _assert_valid_xlsx(Path(response.path))
+    assert queue.enqueue_review_excel_sync.call_args.kwargs["download_priority"] is True
     queue.wait_for_job.assert_called_once_with(building="A楼", job_id="log-write", timeout_sec=120)
     queue.wait_for_barrier.assert_not_called()
 
