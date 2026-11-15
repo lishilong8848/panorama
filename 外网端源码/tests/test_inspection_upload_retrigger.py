@@ -1,6 +1,7 @@
 """补派闭环回归：标记持久、成功回查后 ack、回执只记实际版本、关停与节流。"""
 from __future__ import annotations
 
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from app.modules.inspection_data.service.point_settings import (
     read_inspection_upload_retrigger,
     request_inspection_upload_retrigger,
 )
+from app.modules.report_pipeline.service.job_service import JobService
 from app.worker import task_handlers
 from app.worker.task_handlers import HANDLER_REGISTRY
 
@@ -28,6 +30,48 @@ def _save(config, tag):
     point_settings._save_settings(
         config, {"D楼": {"electrical_inspection_family": {"points": {tag: "备注"}, "remove": []}}})
     return point_settings.current_point_settings_revision(config)
+
+
+def test_worker_reads_web_settings_and_clears_web_marker_from_a_different_directory(tmp_path, monkeypatch):
+    web_dir = tmp_path / "web"
+    worker_dir = tmp_path / "worker"
+    web_dir.mkdir()
+    worker_dir.mkdir()
+    config = _config(".runtime")
+
+    monkeypatch.chdir(worker_dir)
+    old_revision = _save(config, "old")
+    point_settings.record_inspection_upload_revision(config, old_revision)
+
+    monkeypatch.chdir(web_dir)
+    new_revision = _save(config, "new")
+    request_inspection_upload_retrigger(config, "配置保存")
+    service = JobService()
+    service.configure_task_engine(runtime_config=config, app_dir=worker_dir,
+                                  config_snapshot_getter=lambda: config)
+    monkeypatch.setattr(service, "_launch_existing_worker_job", lambda *a, **kw: None)
+    try:
+        job = service.start_worker_job("巡检补传", worker_handler="inspection_data_upload",
+                                       worker_payload={"retrigger": True})
+        other_job = service.start_worker_job("其他任务", worker_handler="other")
+        jobs = worker_dir / ".runtime" / "task_engine" / "jobs"
+        snapshot = json.loads((jobs / job.job_id / "config_snapshot.json").read_text(encoding="utf-8"))
+        other_snapshot = json.loads((jobs / other_job.job_id / "config_snapshot.json").read_text(encoding="utf-8"))
+
+        monkeypatch.chdir(worker_dir)
+        assert point_settings.load_point_settings_with_revision(snapshot)[1] == new_revision
+        calls = _fake_service(monkeypatch, [{"status": "success", "settings_revision": new_revision}])
+        result = task_handlers.handle_inspection_data_upload(snapshot, {"retrigger": True}, lambda _: None)
+        assert result["settings_revision"] == new_revision
+        assert calls == [1]
+        assert point_settings.last_inspection_upload_revision(config) == old_revision
+        assert other_snapshot["paths"]["runtime_state_root"] == config["paths"]["runtime_state_root"] == ".runtime"
+
+        monkeypatch.chdir(web_dir)
+        assert point_settings.last_inspection_upload_revision(config) == new_revision
+        assert read_inspection_upload_retrigger(config) is None
+    finally:
+        service.shutdown_task_engine()
 
 
 def _fake_service(monkeypatch, results):

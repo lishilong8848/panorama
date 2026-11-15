@@ -3069,6 +3069,11 @@ class JobService:
             )
             config_snapshot = self._capture_config_snapshot()
             if isinstance(config_snapshot, dict):
+                if normalized_handler == "inspection_data_upload":
+                    # 巡检测点和补传标记由 Web 进程保存。Worker 从源码目录启动时，
+                    # 要继续读取 Web 所用的状态目录，避免把旧版本误判为已覆盖。
+                    paths = config_snapshot.setdefault("paths", {})
+                    paths["runtime_state_root"] = str(Path(paths.get("runtime_state_root") or ".runtime").resolve())
                 self._task_engine_store.persist_config_snapshot(job_id, config_snapshot)
             self._persist_job_snapshot(job, config_snapshot=config_snapshot)
             if job.status == "waiting_resource":
