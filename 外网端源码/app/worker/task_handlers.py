@@ -778,9 +778,10 @@ def handle_inspection_data_upload(
         marker = read_inspection_upload_retrigger(config)
         current_revision = current_point_settings_revision(config)
         last_revision = last_inspection_upload_revision(config)
-        if marker is not None and isinstance(marker.get("revision"), int) \
-                and isinstance(last_revision, int) and marker["revision"] <= last_revision:
-            ack_inspection_upload_retrigger(config, last_revision)
+        if (marker is not None and not marker.get("force_id")
+                and isinstance(marker.get("revision"), int) and isinstance(last_revision, int)
+                and marker["revision"] <= last_revision
+                and ack_inspection_upload_retrigger(config, last_revision)):
             emit_log("[巡检数据处理] 补派标记的请求已由最近一次上传覆盖，本次补派跳过")
             return {"status": "skipped", "reason": "配置已由最近一次上传覆盖"}
         if marker is None and not dry_run and current_revision and last_revision == current_revision:
@@ -800,6 +801,8 @@ def handle_inspection_data_upload(
     inspection_log("[巡检数据处理] 正在核对测点配置和本时段内网数据")
 
     def run_once():
+        marker_at_start = read_inspection_upload_retrigger(config) or {}
+        force_id = marker_at_start.get("force_id")
         result = InspectionDataUploadService(config).run(
             source_date=payload.get("source_date") or None,
             source_bucket_key=str(payload.get("source_bucket_key") or ""),
@@ -814,7 +817,8 @@ def handle_inspection_data_upload(
                 # skipped/失败/缺失权威快照版本一律不写回执、不动标记。
                 try:
                     record_inspection_upload_revision(config, uploaded_revision)
-                    ack_inspection_upload_retrigger(config, uploaded_revision)
+                    if not (force_id and result.get("handover_pressure_read_failed")):
+                        ack_inspection_upload_retrigger(config, uploaded_revision, covered_force_id=force_id)
                 except (OSError, ValueError):
                     emit_log("[巡检数据处理] 上传修订号记录失败，不影响本次上传结果")
         return result
@@ -825,7 +829,7 @@ def handle_inspection_data_upload(
         # 临时失败、取消、跨时段退出直接抛出：标记原样保留，
         # 由补派巡检在队列空闲后按最新待传版本接手。
         result = run_once()
-        if dry_run or retriggers >= max_retriggers:
+        if dry_run or retriggers >= max_retriggers or result.get("handover_pressure_read_failed"):
             break
         if read_inspection_upload_retrigger(config) is None:
             break
@@ -1283,6 +1287,14 @@ def handle_handover_prepare_delivery(config, payload, emit_log, runtime=None):
             payload["session_id"], payload["generation_id"], payload["expected_revision"], emit_log,
             runtime=runtime, expected_document_revision=payload.get("document_revision"),
         )
+    from app.modules.inspection_data.service.handover_inspection_inputs import record_pressure_confirmation
+
+    try:
+        session = workflow.review.get_session_by_id(manifest["session_id"]) or {}
+        if session.get("revision") == manifest.get("revision"):
+            record_pressure_confirmation(workflow.config, session, manifest.get("document_revision"))
+    except Exception as exc:  # noqa: BLE001
+        emit_log(f"[交接班][巡检压力] 本轮确认登记失败: {type(exc).__name__}")
     emit_log(f"[交接班][成品] 本楼文件、图片和文本已就绪 session={manifest['session_id']}")
     followup = ReviewFollowupTriggerService(workflow.config)
     result = followup.publish_attachment_delivery(
@@ -1340,6 +1352,17 @@ def handle_handover_confirm_all(
         service.list_batch_sessions(batch_key), emit_log, confirm_unconfirmed=True, runtime=runtime,
     )
     updated_sessions = service.list_batch_sessions(batch_key)
+    from app.modules.inspection_data.service.handover_inspection_inputs import record_pressure_confirmation
+
+    for session in updated_sessions:
+        if session.get("building") not in {"D楼", "E楼"} or not session.get("confirmed"):
+            continue
+        try:
+            manifest = workflow.state.for_session(session)
+            if manifest.get("artifacts_ready") and manifest.get("revision") == session.get("revision"):
+                record_pressure_confirmation(workflow.config, session, manifest.get("document_revision"))
+        except Exception as exc:  # noqa: BLE001
+            emit_log(f"[交接班][巡检压力] 本轮确认登记失败: {type(exc).__name__}")
     batch_status = service.get_batch_status(batch_key)
     emit_log(
         f"[交接班][审核一键全确认] batch={batch_key}, sessions={len(updated_sessions)}, all_confirmed={bool(batch_status.get('all_confirmed', False))}"

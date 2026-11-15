@@ -18,6 +18,8 @@ from app.config.inspection_data_config import INSPECTION_DATA_UPLOAD_DEFAULTS as
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS
 from app.config.inspection_data_config import INSPECTION_SOURCE_CONTRACTS as SOURCE_FAMILIES
 from app.config.inspection_data_config import inspection_hour_bucket
+from app.modules.inspection_data.service.chiller_operating_points import HVAC_FAMILY, operation_rows, report_operating_controls
+from app.modules.inspection_data.service.handover_inspection_inputs import handover_inspection_rows
 from app.modules.inspection_data.service.point_correction import CORRECTED_VALUE_FIELD, corrected_samples
 from app.modules.inspection_data.service.point_status import FIXED_VALUE_FIELD, INTERVAL_FIELD, LOCAL_POINT_ID, SOURCE_FIELD, status_fields
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
@@ -737,6 +739,9 @@ class InspectionDataUploadService:
             except Exception as exc:
                 log(f"[巡检数据处理] 飞书测点配置待同步: {exc}")
         sources = self._sources(date, log, cancel, source_bucket_key, point_settings)
+        hvac = {building: entries[HVAC_FAMILY] for building, entries in sources.items()}
+        report_controls = report_operating_controls(self._internal, self.runtime_config, hvac, log)
+        operating_buildings = set()
         parsed = {}
         catalog = load_catalog()
         for building in self.cfg["buildings"]:
@@ -762,8 +767,13 @@ class InspectionDataUploadService:
                 local_rows = self._local_point_rows(building, contract["discipline"], group)
                 combined["rows"].extend({"记录类型": "设备巡检", **r, "源文件时间": source_time, "源文件": source_name}
                                         for r in [*p["rows"], *point_rows])
-                combined["rows"].extend(local_rows)
-                combined["point_count"] += len(point_rows) + len(local_rows)
+                operating = (operation_rows(building, entry["value_time"], point_rows,
+                                            group.get("operating_rules"), report_controls.get(building))
+                             if family == HVAC_FAMILY else [])
+                if operating:
+                    operating_buildings.add(building)
+                combined["rows"].extend([*local_rows, *operating])
+                combined["point_count"] += len(point_rows) + len(local_rows) + len(operating)
                 for key in ("valid_points", "matched_devices", "missing_devices"):
                     combined[key] += p[key]
                 combined["diagnostics"].extend(f"{contract['label']}: {item}" for item in p["diagnostics"])
@@ -777,8 +787,23 @@ class InspectionDataUploadService:
                 for item in p["diagnostics"][:10]:
                     log(f"[巡检数据处理] {building}/{contract['label']} {item}")
             parsed[building] = combined
+        cancel()
+        pressure_failures = []
+        extra = handover_inspection_rows(
+            self.runtime_config, self._internal,
+            hvac,
+            {building: item["rows"] for building, item in parsed.items()}, log,
+            pressure_failures=pressure_failures,
+            skip_buildings=operating_buildings,
+        )
+        for building, extra_rows in extra.items():
+            parsed[building]["rows"].extend(extra_rows)
+            parsed[building]["point_count"] += len(extra_rows)
+            if extra_rows:
+                log(f"[巡检数据处理] {building} 交接班补充测点={len(extra_rows)}")
         source_metadata = {"source_families": copy.deepcopy(DEFAULT_CONFIG["source_families"]),
-                           "source_file_count": sum(len(p["sources"]) for p in parsed.values())}
+                           "source_file_count": sum(len(p["sources"]) for p in parsed.values()),
+                           **({"handover_pressure_read_failed": pressure_failures} if pressure_failures else {})}
         if dry_run:
             return {"status": "success", "dry_run": True, "source_date": date,
                     "settings_revision": settings_revision,

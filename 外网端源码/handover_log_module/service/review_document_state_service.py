@@ -10,6 +10,9 @@ from app.shared.utils.atomic_file import atomic_save_workbook
 from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
+from app.modules.inspection_data.service.handover_inspection_inputs import (
+    PRESSURE_EDITS, PRESSURE_TOUCHED, WORKBOOKS, public_review_document, record_pressure_edits,
+)
 from handover_log_module.repository.review_building_document_store import ReviewBuildingDocumentStore
 from handover_log_module.service.cabinet_power_defaults_service import CabinetPowerDefaultsService
 from handover_log_module.service.capacity_report_common import _SECONDARY_PUMP_LAYOUT
@@ -208,7 +211,7 @@ class ReviewDocumentStateService:
         state = self.ensure_document_for_session(session, preserve_existing=preserve_existing)
         session_with_sync = self.attach_excel_sync(session)
         session_with_sync["revision"] = int(state.get("revision", session_with_sync.get("revision", 0)) or 0)
-        document = state.get("document", {}) if isinstance(state.get("document", {}), dict) else {}
+        document = public_review_document(state.get("document")) if isinstance(state.get("document"), dict) else {}
         document = self.attach_cooling_pump_pressures(document=document, session=session_with_sync)
         document = self.attach_capacity_room_inputs(document=document, session=session_with_sync)
         return document, session_with_sync
@@ -708,6 +711,17 @@ class ReviewDocumentStateService:
         document, total_changed = self._capacity_room_inputs.apply_powered_total_to_document(document, building=building)
         if total_changed:
             dirty_regions = {**dirty_regions, "fixed_blocks": True}
+        touched = document.pop(PRESSURE_TOUCHED, None)
+        document.pop(PRESSURE_EDITS, None)
+        if building in WORKBOOKS:
+            previous = (self.peek_document_state(session) or {}).get("document") or {}
+            if not isinstance(touched, dict) or not dirty_regions.get("cooling_pump_pressures"):
+                touched = {}
+            baseline = (
+                self.attach_cooling_pump_pressures(document=previous, session=session).get("cooling_pump_pressures", {})
+                if touched else {}
+            )
+            record_pressure_edits(session, previous, document, baseline, touched=touched)
         try:
             return self._store(self._building(session)).save_document(
                 session=session,

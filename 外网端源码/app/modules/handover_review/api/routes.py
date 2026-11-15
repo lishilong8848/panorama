@@ -27,6 +27,7 @@ from app.shared.utils.report_source_json import validate_report_source_json
 from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir, create_runtime_temp_dir
 
 from app.config.handover_segment_store import building_code_from_name, handover_building_segment_path
+from app.modules.inspection_data.service.handover_inspection_inputs import public_review_document
 from app.config.settings_loader import (
     get_handover_building_segment,
     load_settings,
@@ -857,7 +858,7 @@ def _load_existing_review_document_snapshot(
         return {}, _attach_excel_sync_from_store(container, payload), False
     if not isinstance(state, dict):
         return {}, _attach_excel_sync_from_store(container, payload), False
-    document = state.get("document", {}) if isinstance(state.get("document", {}), dict) else {}
+    document = public_review_document(state.get("document")) if isinstance(state.get("document"), dict) else {}
     resolved_session = _attach_excel_sync_from_store(container, payload)
     try:
         resolved_session["session_revision"] = int(payload.get("revision", 0) or 0)
@@ -6738,7 +6739,7 @@ def handover_review_save(
         if isinstance(saved_document_state_for_cache, dict):
             state_document = saved_document_state_for_cache.get("document", {})
             if isinstance(state_document, dict):
-                saved_document_for_response = state_document
+                saved_document_for_response = public_review_document(state_document)
             _review_document_cache_put(
                 building=building,
                 signature=_review_document_signature(

@@ -101,6 +101,27 @@ const TEMPLATE = `
         </select>
         <button class="btn btn-primary btn-mini" type="button" :disabled="!settingsReady || saving" @click="editPoint()">添加测点</button>
       </div>
+      <div v-if="family === 'hvac_inspection_family'">
+        <button class="btn btn-secondary btn-mini" type="button" :disabled="!settingsReady || saving || !!draft"
+          :aria-expanded="!!operatingDraft" @click="toggleOperatingRules">冷机表联动测点</button>
+        <form v-if="operatingDraft" @submit.prevent="saveOperatingRules" class="inspection-points-content">
+          <p>填写已核验的动环 ID。二次泵频率大于 10 Hz 时视为运行，留空的设备待核对。</p>
+          <div class="inspection-point-form">
+            <label v-for="unit in 6" class="review-field" :key="'mode-' + unit">
+              {{ unit }}号制冷单元模式
+              <input class="review-input" v-model.trim="operatingDraft.unit_modes[unit]" placeholder="测点 ID" maxlength="100" :disabled="saving" />
+            </label>
+            <label v-for="unit in 6" class="review-field" :key="'pump-' + unit">
+              {{ unit }}号二次泵频率
+              <input class="review-input" v-model.trim="operatingDraft.secondary_frequencies[unit]" placeholder="测点 ID" maxlength="100" :disabled="saving" />
+            </label>
+          </div>
+          <div>
+            <button class="btn btn-primary btn-mini" type="submit" :disabled="saving">保存联动测点</button>
+            <button class="btn btn-secondary btn-mini" type="button" :disabled="saving" @click="toggleOperatingRules">取消</button>
+          </div>
+        </form>
+      </div>
       <div class="inspection-points-summary">
         <span>测点 {{ filteredRows.length }} 项</span><span>最近采样：{{ sampleTime || '暂无采样' }}</span>
         <button v-if="settingsError" class="btn btn-secondary btn-mini" type="button" :disabled="settingsBusy || saving" @click="loadSettings">重新读取设置</button>
@@ -262,6 +283,7 @@ export function mountInspectionPointsPage(Vue) {
       const settings = ref({}), datasets = ref({}), draft = ref(null), draftBaseline = ref(""), targetOptions = ref({});
       const latestBusy = ref(false), settingsBusy = ref(false), settingsReady = ref(false), saving = ref(false);
       const latestError = ref(""), settingsError = ref(""), message = ref("");
+      const operatingDraft = ref(null);
       const controller = new AbortController();
       const group = computed(() => settings.value[family.value] || { points: {}, remove: [] });
       const liveSampleTime = computed(() => datasets.value[family.value]?.sample_time || "");
@@ -339,6 +361,7 @@ export function mountInspectionPointsPage(Vue) {
         try {
           const response = await getBuildingInspectionPointSettingsApi(code, { signal: controller.signal });
           settings.value = response.settings;
+          operatingDraft.value = null;
           targetOptions.value = response.target_options || {};
           settingsReady.value = true;
           page.value = Math.min(page.value, pageCount.value);
@@ -365,11 +388,13 @@ export function mountInspectionPointsPage(Vue) {
       function selectFamily(next) {
         if (next === family.value || saving.value || (draft.value && !window.confirm("放弃未保存的测点修改？"))) return;
         family.value = next;
+        operatingDraft.value = null;
         page.value = 1;
         draft.value = null;
         message.value = "";
       }
       function editPoint(row) {
+        operatingDraft.value = null;
         if (draft.value && !window.confirm("放弃未保存的测点修改？")) return;
         const rule = group.value.status_rules?.[row?.id] || {};
         const correctionRules = (group.value.correction_rules?.[row?.id] || []).map(item => ({
@@ -450,7 +475,27 @@ export function mountInspectionPointsPage(Vue) {
         if (positions.length) return ROUND_FIELDS.filter(item => cells[item.key]).map(item => `${item.label} ${cells[item.key]}`).join(" · ");
         return target.cell ? `历史位置 ${target.cell}` : "未设置位置";
       }
-      async function persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled, correctionRules) {
+      function toggleOperatingRules() {
+        if (operatingDraft.value) {
+          operatingDraft.value = null;
+          return;
+        }
+        const rules = group.value.operating_rules || {};
+        operatingDraft.value = {
+          unit_modes: { ...rules.unit_modes },
+          secondary_frequencies: { ...rules.secondary_frequencies },
+        };
+      }
+      async function saveOperatingRules() {
+        if (!operatingDraft.value) return;
+        const rules = Object.fromEntries(Object.entries(operatingDraft.value).map(([kind, controls]) => [
+          kind, Object.fromEntries(Object.entries(controls).filter(([, id]) => id)),
+        ]));
+        const { points, remove, targets, status_rules, explicitly_enabled, explicitly_disabled, correction_rules } = group.value;
+        const saved = await persist(points, remove, targets, status_rules, explicitly_enabled, explicitly_disabled, correction_rules, rules);
+        if (saved) operatingDraft.value = null;
+      }
+      async function persist(points, remove, targets, statusRules, explicitlyEnabled, explicitlyDisabled, correctionRules, operatingRules) {
         if (!settingsReady.value || saving.value || settingsBusy.value) return false;
         saving.value = true;
         message.value = "";
@@ -459,6 +504,7 @@ export function mountInspectionPointsPage(Vue) {
           const response = await putBuildingInspectionPointSettingsApi(code, {
             family: family.value, points, remove, targets, status_rules: statusRules, correction_rules: correctionRules,
             explicitly_enabled: explicitlyEnabled, explicitly_disabled: explicitlyDisabled, expected_group: group.value,
+            operating_rules: operatingRules,
           });
           settings.value = response.settings;
           message.value = response.message;
@@ -566,6 +612,7 @@ export function mountInspectionPointsPage(Vue) {
         coldSheet: COLD_SHEET, emptyRoundCells, formatTarget,
         draft, draftTitle, targetOptions, settingsReady, settingsBusy, latestBusy, saving, settingsError, latestError, message, returnUrl,
         loadSettings, loadLatest, selectFamily, editPoint, saveDraft, setExcluded, returnToReview, requestCloseDraft,
+        operatingDraft, toggleOperatingRules, saveOperatingRules,
         addCorrectionRule, removeCorrectionRule, clearCorrectionRules, isEmptyCorrectionRules, countCorrectionRules, correctionRowsFull };
     },
   }).mount("#app");

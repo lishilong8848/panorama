@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
+from app.modules.inspection_data.service.chiller_operating_points import CONTROL_GROUPS, OPERATING_ROLE_FIELD
 from app.modules.inspection_data.service.point_correction import CORRECTION_RULE_FIELD, normalize_correction_rules
 from app.modules.inspection_data.service.point_status import (
     FIXED_VALUE_FIELD, INTERVAL_FIELD, LOCAL_POINT_ID, SOURCE_FIELD, STATUS_FIELDS, normalize_status_rules, status_fields,
@@ -43,11 +44,13 @@ def _index(records):
 _OPTIONAL_FIELDS = (SOURCE_FIELD, FIXED_VALUE_FIELD, INTERVAL_FIELD)
 
 
-def _expected_rows(groups, *, include_explicit_enable=False, include_corrections=False, optional_fields=()):
+def _expected_rows(groups, *, include_explicit_enable=False, include_corrections=False, include_operating_roles=False, optional_fields=()):
     desired = {}
     for family, group in groups.items():
         discipline = INSPECTION_SOURCE_CONTRACTS[family]["discipline"]
         baseline, points, remove = group.get("baseline", {}), group["points"], set(group["remove"])
+        roles = {point_id: f"{role}:{number}" for role, controls in group.get("operating_rules", {}).items()
+                 for number, point_id in controls.items()}
         for point_id in sorted(set(baseline) | set(points) | remove):
             point = baseline.get(point_id, {})
             target = group.get("targets", {}).get(point_id, {})
@@ -64,6 +67,8 @@ def _expected_rows(groups, *, include_explicit_enable=False, include_corrections
                     desired[discipline, point_id][EXPLICIT_ENABLE_FIELD] = True
                 elif point_id in remove or point_id in group.get("explicitly_disabled", ()):
                     desired[discipline, point_id][EXPLICIT_ENABLE_FIELD] = False
+            if include_operating_roles:
+                desired[discipline, point_id][OPERATING_ROLE_FIELD] = roles.get(point_id, "")
             status = group.get("status_rules", {}).get(point_id, {})
             metadata = status_fields(status, None)
             desired[discipline, point_id].update({field: metadata.get(field, "") for field in optional_fields})
@@ -113,6 +118,14 @@ def read_point_config_bitable(config, *, client=None):
                 continue
             if fields.get(EXPLICIT_ENABLE_FIELD) is True:
                 group.setdefault("explicitly_enabled", []).append(point_id)
+            if role_text := _text(fields.get(OPERATING_ROLE_FIELD)):
+                role, _, number = role_text.partition(":")
+                if role not in CONTROL_GROUPS or number not in "123456" or len(number) != 1:
+                    raise ValueError(f"{building} 冷机表联动控制字段无效")
+                roles = group.setdefault("operating_rules", {}).setdefault(role, {})
+                if number in roles:
+                    raise ValueError(f"{building} 冷机表联动控制重复")
+                roles[number] = point_id
             target = {key: _text(fields.get(field)) for key, field in
                       (("workbook", "目标巡检表"), ("sheet", "目标工作表"), ("cell", "目标单元格"))}
             rounds = {key: _text(fields.get(field)) for key, field in INSPECTION_ROUND_FIELDS.items()}
@@ -172,6 +185,12 @@ def sync_point_config_bitable(config, settings, *, buildings=None, initialize=Fa
             raise ValueError(f"{building} 飞书配置表缺少复选框字段{EXPLICIT_ENABLE_FIELD}，主动启用待同步")
         primary = next((f["field_name"] for f in definitions if f.get("is_primary") and f["type"] == 1), "")
         missing = {k: t for k, t in _FIELD_TYPES.items() if k not in existing}
+        has_operating = any(group.get("operating_rules") for group in settings.get(building, {}).values())
+        operating_type = existing.get(OPERATING_ROLE_FIELD)
+        if operating_type not in (None, 1):
+            raise ValueError(f"{building} 飞书配置表的{OPERATING_ROLE_FIELD}必须是文本")
+        if has_operating and operating_type is None:
+            missing[OPERATING_ROLE_FIELD] = 1
         has_corrections = any(group.get("correction_rules") for group in settings.get(building, {}).values())
         correction_type = existing.get(CORRECTION_RULE_FIELD)
         if correction_type not in (None, 1):
@@ -190,6 +209,7 @@ def sync_point_config_bitable(config, settings, *, buildings=None, initialize=Fa
         current, blank = _index(client.list_records(table, max_records=0))
         desired = _expected_rows(settings.get(building, {}), include_explicit_enable=explicit_type == 7,
                                  include_corrections=has_corrections or correction_type == 1,
+                                 include_operating_roles=has_operating or operating_type == 1,
                                  optional_fields=sorted(optional_fields))
         if not desired:
             raise ValueError(f"{building} 没有可保存的测点配置")

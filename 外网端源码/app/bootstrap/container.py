@@ -815,32 +815,37 @@ class AppContainer:
         watchdog = self.inspection_retrigger_watchdog
         if watchdog is not None and watchdog.is_stopped():
             return {"ok": False, "skipped": "补传巡检已停止（关闭中），不再派发"}
-        from app.modules.inspection_data.service.point_settings import peek_inspection_upload_retrigger
+        from app.modules.inspection_data.service.point_settings import (
+            read_inspection_upload_retrigger,
+            read_inspection_retrigger_dispatch_state,
+            record_inspection_retrigger_dispatch,
+        )
 
-        if not peek_inspection_upload_retrigger(self.runtime_config):
+        marker = read_inspection_upload_retrigger(self.runtime_config)
+        if not marker:
             return {"ok": False, "skipped": "无待补派标记"}
         if self._job_busy_for_feature_prefixes("inspection_data_upload")():
             return {"ok": False, "skipped": "巡检任务仍在运行，下一轮再检查"}
         if self.job_service.find_active_job_by_dedupe_key("inspection_data_upload:retrigger"):
             return {"ok": False, "skipped": "已有排队补派等待"}
-        from app.modules.inspection_data.service.point_settings import (
-            read_inspection_retrigger_dispatch_state,
-            record_inspection_retrigger_dispatch,
-        )
         feature_cfg = self.runtime_config.get("inspection_data_upload", {})
         try:
             min_gap = float(feature_cfg.get("retrigger_min_interval_sec", 60) or 60)
         except (TypeError, ValueError):
             min_gap = 60.0
-        last_dispatch = read_inspection_retrigger_dispatch_state(self.runtime_config).get("last_dispatch_at")
-        if isinstance(last_dispatch, (int, float)) and datetime.now().timestamp() - last_dispatch < min_gap:
+        dispatch = read_inspection_retrigger_dispatch_state(self.runtime_config)
+        last_dispatch = dispatch.get("last_dispatch_at")
+        force_id = marker.get("force_id")
+        new_confirmation = force_id and force_id != dispatch.get("force_id")
+        if (not new_confirmation and isinstance(last_dispatch, (int, float))
+                and datetime.now().timestamp() - last_dispatch < min_gap):
             return {"ok": False, "skipped": "补派重试冷却中，稍后再检查"}
         try:
             self._submit_inspection_retrigger()
         except Exception as exc:
             self.add_system_log(f"[巡检数据处理] 巡检补派提交失败：{exc}")
             return {"ok": False, "error": str(exc)}
-        record_inspection_retrigger_dispatch(self.runtime_config)
+        record_inspection_retrigger_dispatch(self.runtime_config, force_id=force_id)
         self.add_system_log("[巡检数据处理] 巡检发现未消费补派标记，已提交排队补派接班")
         return {"ok": True}
 

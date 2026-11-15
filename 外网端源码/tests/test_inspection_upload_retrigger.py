@@ -501,3 +501,64 @@ def test_watchdog_can_restart_after_role_exit_but_cannot_start_after_web_close()
     assert result["reason"] == "not_initialized"
     assert AppContainer.start_inspection_retrigger_watchdog(fake)["reason"] == "shutdown_started"
     assert fake.inspection_retrigger_watchdog is None
+
+
+def test_pressure_confirmation_dispatches_even_after_same_revision_or_recent_job(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    revision = _save(config, "saved")
+    point_settings.record_inspection_upload_revision(config, revision)
+    point_settings.record_inspection_retrigger_dispatch(config)
+    request_inspection_upload_retrigger(config, "D楼巡检压力审核确认", force=True)
+    force_id = read_inspection_upload_retrigger(config)["force_id"]
+    request_inspection_upload_retrigger(config, "同修订号的后续请求")
+    assert read_inspection_upload_retrigger(config)["force_id"] == force_id
+    assert not ack_inspection_upload_retrigger(config, revision)
+
+    submissions = []
+    fake = SimpleNamespace(
+        _configured_deployment_snapshot=lambda: {"role_mode": "external"},
+        runtime_config=config,
+        inspection_retrigger_watchdog=None,
+        _job_busy_for_feature_prefixes=lambda _feature: lambda: False,
+        job_service=SimpleNamespace(find_active_job_by_dedupe_key=lambda _key: None),
+        _submit_inspection_retrigger=lambda: submissions.append(force_id),
+        add_system_log=lambda _message: None,
+    )
+    assert AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
+    assert not AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
+    assert submissions == [force_id]
+
+    synthetic = _fake_service(monkeypatch, [{"status": "success", "settings_revision": revision,
+                                           "handover_pressure_read_failed": ["D楼"]}])
+    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True}, lambda _line: None)
+    assert synthetic == [1]
+    assert read_inspection_upload_retrigger(config)["force_id"] == force_id
+
+    calls = _fake_service(monkeypatch, [{"status": "success", "settings_revision": revision}])
+    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True}, lambda _line: None)
+    assert calls == [1]
+    assert read_inspection_upload_retrigger(config) is None
+
+
+def test_inflight_upload_leaves_newer_pressure_confirmation_pending(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    revision = _save(config, "saved")
+    request_inspection_upload_retrigger(config, "D楼巡检压力审核确认", force=True)
+    from app.modules.inspection_data.service import inspection_data_upload_service
+    requests = []
+
+    class FakeUpload:
+        def __init__(self, _config):
+            pass
+
+        def run(self, **kwargs):
+            marker = read_inspection_upload_retrigger(config)
+            requests.append(marker["force_id"])
+            if len(requests) == 1:
+                request_inspection_upload_retrigger(config, "E楼巡检压力审核确认", force=True)
+            return {"status": "success", "settings_revision": revision}
+
+    monkeypatch.setattr(inspection_data_upload_service, "InspectionDataUploadService", FakeUpload)
+    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True}, lambda _line: None)
+    assert len(set(requests)) == 2
+    assert read_inspection_upload_retrigger(config) is None

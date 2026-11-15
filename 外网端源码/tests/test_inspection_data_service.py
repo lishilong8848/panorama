@@ -554,6 +554,17 @@ def test_feishu_point_config_upsert_and_recovery():
     result = cfg.sync_point_config_bitable({}, groups, buildings=('D楼',), client=cloud)
     assert result['D楼']['created'] == result['D楼']['updated'] == 1
     assert cfg.read_point_config_bitable({}, client=cloud) == groups
+    d_hvac = groups["D楼"]["hvac_inspection_family"]
+    d_hvac["operating_rules"] = {"unit_modes": {"1": "7_0_1"}}
+    d_table = cfg.POINT_CONFIG_TABLES["D楼"]
+    cfg.sync_point_config_bitable({}, groups, buildings=("D楼",), client=cloud, initialize=True)
+    cloud._post_json.assert_called_once()
+    assert cfg.read_point_config_bitable({}, client=cloud)["D楼"]["hvac_inspection_family"] == d_hvac
+    assert not any(row["fields"].get(cfg.OPERATING_ROLE_FIELD) for row in tables[cfg.POINT_CONFIG_TABLES["E楼"]])
+    cloud.list_fields.return_value.append({"field_name": cfg.OPERATING_ROLE_FIELD, "type": 1})
+    del d_hvac["operating_rules"]
+    cfg.sync_point_config_bitable({}, groups, buildings=("D楼",), client=cloud)
+    assert not any(row["fields"].get(cfg.OPERATING_ROLE_FIELD) for row in tables[d_table])
     cloud.batch_delete_records.assert_not_called()
 
 
@@ -1444,3 +1455,49 @@ def test_explicit_own_building_label_is_accepted_and_other_building_rejected(tmp
     other = 'D楼' if building == 'E楼' else 'E楼'
     with pytest.raises(ValueError, match='其他楼栋'):
         InspectionDataUploadService.parse_workbook(path, building=other)
+
+
+def test_handover_mode_rows_are_committed_in_the_same_sealed_building_batch(tmp_path, monkeypatch):
+    from app.modules.inspection_data.service import handover_inspection_inputs as inputs
+
+    service, cloud, _ = prepared(tmp_path, monkeypatch)
+    sampled = datetime(2026, 10, 27, 9, 55, tzinfo=inputs.TZ)
+    d = inputs.mode_rows("D楼", {(1, sampled): {1}}, inputs.DEFAULT_VALUE_MAP, set())
+    e = inputs.mode_rows("E楼", {(1, sampled): {3}}, inputs.DEFAULT_VALUE_MAP, set())
+    monkeypatch.setattr(module, "handover_inspection_rows", lambda *args, **kwargs: {"D楼": d, "E楼": e})
+    result = service.run()
+    assert result["uploaded_count"] == 989
+    for building, expected in (("D楼", d), ("E楼", e)):
+        rows = cloud.rows[module.DEFAULT_CONFIG["tables"][building]]
+        additions = [row["fields"] for row in rows if row["fields"].get("测点来源") == inputs.MODE_SOURCE]
+        assert [{key: row[key] for key in expected[0]} for row in additions] == expected
+        assert module.validate_inspection_batch(rows, building=building, upload_time=additions[0]["上传日期"])
+
+
+def test_configured_operating_points_publish_with_own_building_batch(tmp_path, monkeypatch):
+    from app.modules.inspection_data.service.chiller_operating_points import HVAC_FAMILY, OPERATING_SOURCE
+    from app.modules.inspection_data.service.point_settings import _save_settings
+
+    service, cloud, _ = prepared(tmp_path, monkeypatch)
+    service.runtime_config.setdefault("paths", {})["runtime_state_root"] = str(tmp_path)
+    _save_settings(service.runtime_config, {"D楼": {HVAC_FAMILY: {
+        "points": {"7_0_2": "1号制冷单元模式", "7_0_3": "1号二次泵频率反馈"}, "remove": [],
+        "operating_rules": {"unit_modes": {"1": "7_0_2"}, "secondary_frequencies": {"1": "7_0_3"}},
+    }}})
+    doc = service.test_datasets["D楼"][HVAC_FAMILY]
+    doc["rows"] += [["D楼冷冻站", "控制器", "1号冷机模式", "4"], ["", "", "1号二次泵频率反馈", "10.01"]]
+    doc["point_ids"] = ["7_0_1", "7_0_2", "7_0_3"]
+    monkeypatch.setattr(module, "sync_point_settings", Mock())
+    result = service.run()
+    d_rows = cloud.rows[module.DEFAULT_CONFIG["tables"]["D楼"]]
+    e_rows = cloud.rows[module.DEFAULT_CONFIG["tables"]["E楼"]]
+    mark = {row["fields"]["目标单元格"]: row["fields"]["测点值"]
+            for row in d_rows if row["fields"].get("测点来源") == OPERATING_SOURCE
+            and "测点值" in row["fields"]}
+    assert mark["B4"] == "△" and mark["B24"] == "" and mark["K26"] == "√"
+    assert "K24" not in mark
+    assert not any(row["fields"].get("测点来源") == OPERATING_SOURCE for row in e_rows)
+    control = next(row["fields"] for row in d_rows if row["fields"].get("测点ID") == "7_0_2")
+    assert control["测点原始值"] == "4"
+    marker = module.validate_inspection_batch(d_rows, building="D楼", upload_time=control["上传日期"])
+    assert marker["point_count"] == result["results"]["D楼"]["point_count"]

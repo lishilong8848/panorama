@@ -3691,6 +3691,15 @@ export function mountHandoverReviewApp(Vue) {
       const pollTimer = ref(null);
       const heartbeatTimer = ref(null);
       const documentMutationVersion = ref(0);
+      const inspectionPressureEdits = new Map();
+
+      function trackInspectionPressure(row, field) {
+        const id = session.value?.session_id;
+        if (!id || !["D", "E"].includes(String(buildingCode).toUpperCase()) || !row.row_id) return;
+        const fields = inspectionPressureEdits.get(id) || new Map();
+        fields.set(row.row_id + "/" + field, { at: new Date().toISOString(), value: row[field] });
+        inspectionPressureEdits.set(id, fields);
+      }
       const documentRevision = ref(0);
       const pollIntervalMs = ref(DEFAULT_POLL_INTERVAL_MS);
       const reviewClientIdentity = ensureReviewClientIdentity();
@@ -5441,6 +5450,7 @@ export function mountHandoverReviewApp(Vue) {
         const nextValue = String(value ?? "");
         if (String(rows[rowIndex][key] ?? "") === nextValue) return;
         rows[rowIndex][key] = nextValue;
+        trackInspectionPressure(rows[rowIndex], key);
         markDocumentDirty({ region: "cooling_pump_pressures" });
       }
 
@@ -5451,6 +5461,7 @@ export function mountHandoverReviewApp(Vue) {
         const nextValue = String(value ?? "");
         if (String(rows[rowIndex][key] ?? "") === nextValue) return;
         rows[rowIndex][key] = nextValue;
+        trackInspectionPressure(rows[rowIndex], key);
         markDocumentDirty({ region: "cooling_pump_pressures" });
       }
 
@@ -5461,6 +5472,7 @@ export function mountHandoverReviewApp(Vue) {
         const nextValue = String(value ?? "");
         if (String(rows[rowIndex][key] ?? "") === nextValue) return;
         rows[rowIndex][key] = nextValue;
+        trackInspectionPressure(rows[rowIndex], key);
         markDocumentDirty({ region: "cooling_pump_pressures" });
       }
 
@@ -5607,14 +5619,23 @@ export function mountHandoverReviewApp(Vue) {
           let saveStatus = null;
           if (hasDocumentDirty) {
             compactDocumentSectionRows(documentRef.value);
+            const pressureSessionId = session.value.session_id;
+            const trackedPressures = inspectionPressureEdits.get(pressureSessionId);
+            const pressureEdits = Object.fromEntries(trackedPressures || []);
             const response = await saveHandoverReviewApi(buildingCode, {
-              session_id: session.value.session_id,
+              session_id: pressureSessionId,
               base_revision: currentDocumentRevision(),
               client_id: reviewClientId,
-              document: documentRef.value,
+              document: { ...documentRef.value, _inspection_pressure_touched: pressureEdits },
               dirty_regions: payloadDirtyRegions,
               shared_outdoor_temperature_dirty: outdoorTemperatureDirty.value,
             });
+            if (trackedPressures) {
+              for (const [field, edit] of Object.entries(pressureEdits)) {
+                if (trackedPressures.get(field) === edit) trackedPressures.delete(field);
+              }
+              if (!trackedPressures.size) inspectionPressureEdits.delete(pressureSessionId);
+            }
             applyPayloadMeta(response || {});
             applySavedDocumentPayload(response || {}, payloadVersion);
             broadcastHandoverReviewStatusChange(response || {});

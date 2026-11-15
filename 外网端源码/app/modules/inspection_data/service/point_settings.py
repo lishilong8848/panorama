@@ -5,12 +5,14 @@ import re
 import sqlite3
 import threading
 import time
+from uuid import uuid4
 from contextlib import contextmanager
 from os import fstat
 from pathlib import Path
 
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
+from app.modules.inspection_data.service.chiller_operating_points import normalize_operating_rules
 from app.modules.inspection_data.service.point_correction import normalize_correction_rules
 from app.modules.inspection_data.service.point_status import LOCAL_POINT_ID, normalize_status_rules
 from app.shared.utils.atomic_file import atomic_write_text
@@ -86,7 +88,7 @@ def load_or_restore_point_settings(config):
         if not settings:
             return None
         for building, groups in settings.items():
-            for group in groups.values():
+            for family, group in groups.items():
                 ids = set(group["baseline"]) | set(group["points"]) | set(group["remove"])
                 if any(not _valid_config_id(i) for i in ids):
                     raise ValueError("飞书巡检测点配置含无效 ID，未恢复配置")
@@ -100,6 +102,10 @@ def load_or_restore_point_settings(config):
                 if "correction_rules" in group:
                     group["correction_rules"] = normalize_correction_rules(
                         group["correction_rules"], (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
+                if "operating_rules" in group:
+                    group["operating_rules"] = normalize_operating_rules(
+                        building, family, group["operating_rules"],
+                        (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
                 _validate_local_points(group["points"], group.get("targets", {}), group.get("status_rules", {}),
                                        group.get("correction_rules", {}))
             _validate_target_collisions(groups)
@@ -310,19 +316,22 @@ def _retrigger_lock(config):
             connection.close()
 
 
-def request_inspection_upload_retrigger(config, reason: str = "") -> None:
+def request_inspection_upload_retrigger(config, reason: str = "", *, force: bool = False) -> None:
     """测点配置保存时登记“待传版本”；若已有上传任务在执行则由补派/巡检接手。
 
     标记携带保存时的配置修订号：任务只能确认覆盖到不高于该修订号的请求，
     更高的新保存不会被旧任务清掉。
     """
     with _retrigger_lock(config):
+        pending = read_inspection_upload_retrigger(config) or {}
+        force_id = uuid4().hex if force else pending.get("force_id")
         atomic_write_text(
             _retrigger_path(config),
             json.dumps({
                 "requested_at": time.time(),
                 "reason": str(reason or ""),
                 "revision": _settings_snapshot(config)[1],
+                **({"force_id": force_id} if force_id else {}),
             }, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -343,7 +352,7 @@ def read_inspection_upload_retrigger(config):
     return payload
 
 
-def ack_inspection_upload_retrigger(config, covered_revision) -> bool:
+def ack_inspection_upload_retrigger(config, covered_revision, *, covered_force_id=None) -> bool:
     """仅当标记请求的修订号已被本次实际上传覆盖（<= covered_revision）时清除标记。
 
     比较与删除在同一跨进程锁内完成并重新读取标记：旧确认在暂停期间被新保存
@@ -353,6 +362,8 @@ def ack_inspection_upload_retrigger(config, covered_revision) -> bool:
     with _retrigger_lock(config):
         payload = read_inspection_upload_retrigger(config)
         if payload is None:
+            return False
+        if payload.get("force_id") and payload["force_id"] != covered_force_id:
             return False
         requested_revision = payload.get("revision")
         if isinstance(requested_revision, int) and isinstance(covered_revision, int) \
@@ -426,9 +437,10 @@ def read_inspection_retrigger_dispatch_state(config):
     return payload if isinstance(payload, dict) else {}
 
 
-def record_inspection_retrigger_dispatch(config) -> None:
+def record_inspection_retrigger_dispatch(config, *, force_id=None) -> None:
     atomic_write_text(
-        _retrigger_state_path(config), json.dumps({"last_dispatch_at": time.time()}), encoding="utf-8")
+        _retrigger_state_path(config),
+        json.dumps({"last_dispatch_at": time.time(), "force_id": force_id}), encoding="utf-8")
 
 
 def peek_inspection_upload_retrigger(config) -> bool:
@@ -462,7 +474,7 @@ def retry_pending_point_config(config):
 
 
 def save_point_group(config, *, building, family, points, remove, expected_group=None, targets=None, status_rules=None,
-                     explicitly_enabled=None, explicitly_disabled=None, correction_rules=None):
+                     explicitly_enabled=None, explicitly_disabled=None, correction_rules=None, operating_rules=None):
     if not isinstance(building, str) or not isinstance(family, str) or building not in {"D楼", "E楼"} or family not in INSPECTION_SOURCE_CONTRACTS:
         raise ValueError("巡检测点只支持 D/E 楼的电气和暖通")
     if not isinstance(points, dict) or not isinstance(remove, list) or len(points) > 1000 or len(remove) > 1000:
@@ -484,6 +496,9 @@ def save_point_group(config, *, building, family, points, remove, expected_group
             targets = {i: target for i, target in groups.get(family, {}).get("targets", {}).items() if i in points}
         targets = _normalize_targets(building, points, targets)
         active_ids = (set(current.get("baseline", {})) | set(points)) - set(remove)
+        if operating_rules is None:
+            operating_rules = current.get("operating_rules", {})
+        operating_rules = normalize_operating_rules(building, family, operating_rules, active_ids)
         if explicitly_enabled is None:
             explicitly_enabled = [i for i in current.get("explicitly_enabled", []) if i in active_ids]
         if (not isinstance(explicitly_enabled, list) or len(explicitly_enabled) > 2000
@@ -511,6 +526,7 @@ def save_point_group(config, *, building, family, points, remove, expected_group
                               "remove": sorted(set(remove)), **({"targets": targets} if targets else {}),
                               **({"status_rules": status_rules} if status_rules else {}),
                               **({"correction_rules": correction_rules} if correction_rules else {}),
+                              **({"operating_rules": operating_rules} if operating_rules else {}),
                               **({"explicitly_enabled": sorted(set(explicitly_enabled))} if explicitly_enabled else {}),
                               **({"explicitly_disabled": sorted(set(explicitly_disabled))} if explicitly_disabled else {})}
             if "baseline" in current:
