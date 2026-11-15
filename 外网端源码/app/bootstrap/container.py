@@ -850,14 +850,45 @@ class AppContainer:
         return {"ok": True}
 
     def _build_inspection_retrigger_watchdog(self) -> InspectionRetriggerWatchdog:
+        from itertools import cycle
+        from time import monotonic
+
+        from app.modules.inspection_data.service.point_config_bitable import POINT_CONFIG_TABLES, point_config_client
+        from app.modules.inspection_data.service.point_settings import refresh_cloud_point_settings
+
         interval = self.runtime_config.get("inspection_data_upload", {}).get(
             "retrigger_watchdog_interval_sec", 10)
         try:
             interval = float(interval)
         except (TypeError, ValueError):
             interval = 10.0
+        next_check = 0.0
+        buildings = cycle(POINT_CONFIG_TABLES)
+        previous_errors = {}
+
+        def poll_and_dispatch():
+            nonlocal next_check
+            if (monotonic() >= next_check
+                    and self._configured_deployment_snapshot().get("role_mode") == "external"
+                    and self.runtime_config.get("inspection_data_upload", {}).get("enabled", True)):
+                building = next(buildings)
+                try:
+                    client = point_config_client(self.runtime_config)
+                    client.timeout = min(client.timeout, 3)
+                    client.request_retry_count = 0
+                    client.api_retry_attempt_limit = 1
+                    _, _, errors = refresh_cloud_point_settings(self.runtime_config, buildings=(building,), client=client)
+                    error = errors.get(building)
+                except Exception as exc:
+                    error = str(exc)
+                if error and previous_errors.get(building) != error:
+                    self.add_system_log(f"[巡检数据处理] {building}飞书测点配置待核验：{error}")
+                previous_errors[building] = error
+                next_check = monotonic() + 15
+            return self.dispatch_pending_inspection_retrigger()
+
         return InspectionRetriggerWatchdog(
-            dispatch=self.dispatch_pending_inspection_retrigger,
+            dispatch=poll_and_dispatch,
             interval_sec=interval,
             emit_log=self.add_system_log,
         )

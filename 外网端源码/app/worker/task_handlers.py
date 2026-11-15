@@ -829,7 +829,8 @@ def handle_inspection_data_upload(
         # 临时失败、取消、跨时段退出直接抛出：标记原样保留，
         # 由补派巡检在队列空闲后按最新待传版本接手。
         result = run_once()
-        if dry_run or retriggers >= max_retriggers or result.get("handover_pressure_read_failed"):
+        if (dry_run or retriggers >= max_retriggers or result.get("handover_pressure_read_failed")
+                or result.get("point_config_read_failed")):
             break
         if read_inspection_upload_retrigger(config) is None:
             break

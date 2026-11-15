@@ -26,8 +26,7 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.inspection_data.service.point_settings import (
-    load_or_restore_point_settings, load_point_settings, load_point_settings_with_revision, query_rules,
-    retry_pending_point_config, sync_point_settings,
+    load_point_settings, query_rules, refresh_cloud_point_settings, sync_point_settings,
 )
 from app.shared.utils.atomic_file import atomic_write_text
 
@@ -365,10 +364,10 @@ class InspectionDataUploadService:
             return None
         return marker
 
-    def ensure_schema(self, *, apply: bool = False) -> dict[str, Any]:
+    def ensure_schema(self, *, apply: bool = False, buildings=None) -> dict[str, Any]:
         client = self.make_bitable_client()
         report = {}
-        for building in self.cfg["buildings"]:
+        for building in self.cfg["buildings"] if buildings is None else buildings:
             table = self.cfg["tables"][building]
             existing = {item["field_name"]: item for item in client.list_fields(table)}
             conflicts = [d["field_name"] for d in field_definitions()
@@ -611,7 +610,7 @@ class InspectionDataUploadService:
             })
         return rows
 
-    def _sources(self, source_date: str, log, cancel, source_bucket_key: str = "", point_settings=None) -> dict:
+    def _sources(self, source_date: str, log, cancel, source_bucket_key: str = "", point_settings=None, *, buildings=None) -> dict:
         internal = self._internal or InternalBridgeHttpClient.from_runtime_config(self.runtime_config)
         if internal is None:
             raise ValueError("巡检数据处理需要配置内网HTTP桥接地址")
@@ -619,15 +618,17 @@ class InspectionDataUploadService:
         today = now.strftime("%Y-%m-%d")
         requested_bucket = source_bucket_key or (inspection_hour_bucket(now) if source_date == today else "")
         deadline = time.monotonic() + (max(0, float(self.cfg["wait_source_timeout_sec"])) if source_date == today else 0)
-        required = [(building, family) for building in self.cfg["buildings"] for family in SOURCE_FAMILIES]
+        buildings = self.cfg["buildings"] if buildings is None else buildings
+        required = [(building, family) for building in buildings for family in SOURCE_FAMILIES]
         retry_dispatch_at = {}
         last_diagnostic = ""
         last_error_log = -60.0
-        pending_sync = source_date == today and point_settings is not None
         rules = query_rules(point_settings)
+        pending_sync = source_date == today and bool(rules)
         while True:
             cancel()
-            if load_point_settings(self.runtime_config) != point_settings:
+            latest = load_point_settings(self.runtime_config) or {}
+            if any(latest.get(b, {}) != (point_settings or {}).get(b, {}) for b in buildings):
                 raise RuntimeError("巡检测点设置已变更，请重新运行；未清空多维表")
             try:
                 if pending_sync:
@@ -641,7 +642,7 @@ class InspectionDataUploadService:
                 if time.monotonic() - last_error_log >= 60:
                     log(f"[巡检数据处理] 内网暂不可用，保留原数据并等待: {exc}")
                     last_error_log = time.monotonic()
-            selected = {b: {} for b in self.cfg["buildings"]}
+            selected = {b: {} for b in buildings}
             bucket = payload.get("bucket_key", "")
             if payload.get("ok"):
                 if requested_bucket and bucket != requested_bucket:
@@ -652,6 +653,8 @@ class InspectionDataUploadService:
                 for doc in payload["datasets"]:
                     if not isinstance(doc, dict):
                         raise ValueError("巡检接口测点响应无效；未清空多维表")
+                    if doc.get("building") not in selected:
+                        continue
                     captured = self._validate_dataset(doc, source_date, bucket)
                     building, family = doc["building"], doc["source_family"]
                     if (building, family) in seen:
@@ -682,15 +685,15 @@ class InspectionDataUploadService:
                 raise RuntimeError(f"巡检时段已结束: {requested_bucket}；未清空多维表")
             for family in SOURCE_FAMILIES if not pending_sync else ():
                 tick = time.monotonic()
-                buildings = [b for b, f in missing if f == family and tick >= retry_dispatch_at.get((b, f), 0)]
-                if not buildings:
+                refresh_buildings = [b for b, f in missing if f == family and tick >= retry_dispatch_at.get((b, f), 0)]
+                if not refresh_buildings:
                     continue
                 cancel()
                 try:
-                    internal.refresh_latest_source_cache(source_family=family, buildings=buildings,
+                    internal.refresh_latest_source_cache(source_family=family, buildings=refresh_buildings,
                                                          target_bucket_key=requested_bucket)
                     # A queued acknowledgement does not prove that the download started.
-                    retry_dispatch_at.update({(b, family): time.monotonic() + 60 for b in buildings})
+                    retry_dispatch_at.update({(b, family): time.monotonic() + 60 for b in refresh_buildings})
                 except Exception as exc:
                     if not self._retryable_source_error(exc):
                         raise
@@ -730,21 +733,24 @@ class InspectionDataUploadService:
                 raise RuntimeError(f"巡检时段已结束或不匹配: {source_bucket_key}；未清空多维表")
 
         require_current_bucket()
-        # 配置与修订号同快照原子读取：记账只认本次实际加载并上传的版本，
-        # 加载之后并发保存的新版本不会被冒认为已覆盖。
-        point_settings, settings_revision = load_point_settings_with_revision(self.runtime_config)
-        if not dry_run:
-            try:
-                retry_pending_point_config(self.runtime_config)
-            except Exception as exc:
-                log(f"[巡检数据处理] 飞书测点配置待同步: {exc}")
-        sources = self._sources(date, log, cancel, source_bucket_key, point_settings)
+        point_settings, settings_revision, config_errors = refresh_cloud_point_settings(
+            self.runtime_config, client=self.make_bitable_client(), schedule=not dry_run)
+        if set(point_settings or {}) != set(self.cfg["buildings"]):
+            raise RuntimeError("D/E楼尚未完成飞书测点配置的首次核验；保留原巡检数据")
+        buildings = [building for building in self.cfg["buildings"] if building not in config_errors]
+        if not buildings:
+            raise RuntimeError("飞书巡检配置暂不可用；保留原巡检数据")
+        if config_errors:
+            settings_revision = None  # A partial run cannot acknowledge the shared upload revision.
+            for building, error in config_errors.items():
+                log(f"[巡检数据处理] {building}飞书测点配置待核验，本轮保留该楼原数据：{error}")
+        sources = self._sources(date, log, cancel, source_bucket_key, point_settings, buildings=buildings)
         hvac = {building: entries[HVAC_FAMILY] for building, entries in sources.items()}
         report_controls = report_operating_controls(self._internal, self.runtime_config, hvac, log)
         operating_buildings = set()
         parsed = {}
         catalog = load_catalog()
-        for building in self.cfg["buildings"]:
+        for building in buildings:
             combined = {"rows": [], "valid_points": 0, "matched_devices": 0,
                         "missing_devices": 0, "diagnostics": [], "sources": {}, "point_count": 0}
             for family, contract in SOURCE_FAMILIES.items():
@@ -803,6 +809,7 @@ class InspectionDataUploadService:
                 log(f"[巡检数据处理] {building} 交接班补充测点={len(extra_rows)}")
         source_metadata = {"source_families": copy.deepcopy(DEFAULT_CONFIG["source_families"]),
                            "source_file_count": sum(len(p["sources"]) for p in parsed.values()),
+                           **({"point_config_read_failed": config_errors} if config_errors else {}),
                            **({"handover_pressure_read_failed": pressure_failures} if pressure_failures else {})}
         if dry_run:
             return {"status": "success", "dry_run": True, "source_date": date,
@@ -813,12 +820,12 @@ class InspectionDataUploadService:
                     "results": {b: {k: v for k, v in p.items() if k != "rows"} for b, p in parsed.items()}}
         client = self.make_bitable_client()
         # Preflight both tables before the first destructive operation.
-        schema = self.ensure_schema()
+        schema = self.ensure_schema(buildings=buildings)
         missing = {field for item in schema.values() for field in item["missing_fields"]}
         if missing - POINT_DETAIL_TYPES.keys():
             raise ValueError("巡检目标表字段未创建完整，请先执行字段初始化；未清空多维表")
         if missing:
-            self.ensure_schema(apply=True)
+            self.ensure_schema(apply=True, buildings=buildings)
         numeric_fields = {item["field_name"] for item in field_definitions() if item["type"] == 2}
         replacements = {}
         occupied_times = set()
@@ -842,17 +849,18 @@ class InspectionDataUploadService:
         while upload_time in occupied_times:
             upload_time += 1
 
-        def require_unchanged():
+        def require_unchanged(buildings):
             cancel()
             require_current_bucket()
-            if load_point_settings(self.runtime_config) != point_settings:
+            latest = load_point_settings(self.runtime_config) or {}
+            if any(latest.get(b, {}) != (point_settings or {}).get(b, {}) for b in buildings):
                 raise RuntimeError("巡检测点设置已变更，请重新运行；未清空多维表")
 
         staged = {}
         attempted = []
         try:
             for building, parsed_building in parsed.items():
-                require_unchanged()
+                require_unchanged((building,))
                 table, ids, _, _ = replacements[building]
                 rows = [{**r, "上传日期": upload_time} for r in parsed_building["rows"]]
                 attempted.append(building)
@@ -879,7 +887,7 @@ class InspectionDataUploadService:
                     log(f"[巡检数据处理] {building} 上传回查字段差异: {diagnostic}（字段值已隐藏）")
                     raise RuntimeError(f"上传后回查设备、位置或上传批次不一致；{diagnostic}（字段值已隐藏）")
                 staged[building] = created_ids
-            require_unchanged()
+            require_unchanged(buildings)
         except Exception as exc:
             # A failed batch may have committed part of its rows before returning an error.
             for building in attempted:
@@ -904,7 +912,7 @@ class InspectionDataUploadService:
             marker_text = ""
             marker_write_attempted = False
             try:
-                require_unchanged()
+                require_unchanged((building,))
                 if ids and client.batch_delete_records(table, ids, batch_size=200) != len(ids):
                     raise RuntimeError("旧记录未全部清理")
                 actual = client.list_records(table, page_size=500, max_records=0)
@@ -935,7 +943,7 @@ class InspectionDataUploadService:
                           "device_count": counts["设备巡检"], "point_count": counts["测点明细"],
                           "record_ids_sha256": _record_ids_sha256(staged[building])}
                 marker_text = INSPECTION_BATCH_PREFIX + json.dumps(marker, ensure_ascii=False, separators=(",", ":"))
-                require_unchanged()
+                require_unchanged((building,))
                 current = client.list_records(table, page_size=500, max_records=0)
                 if {r.get("record_id") for r in current} != staged[building]:
                     raise RuntimeError("写入完成标记前记录已变化")
@@ -946,7 +954,7 @@ class InspectionDataUploadService:
                 client.update_record(table, carrier_id, {"备注": marker_text})
                 if self.read_completed_batch(building=building, upload_time=upload_time) != marker:
                     raise RuntimeError("完成标记回查不一致")
-                require_unchanged()
+                require_unchanged((building,))
                 snapshot["status"] = "completed"
                 atomic_write_text(backup, json.dumps(snapshot, ensure_ascii=False))
             except Exception as exc:
@@ -966,7 +974,8 @@ class InspectionDataUploadService:
                                 "unmatched_or_invalid_rows": len(parsed_building["diagnostics"]),
                                 "sources": parsed_building["sources"]}
             log(f"[巡检数据处理] {building} 上传完成: records={len(rows)}, deleted={len(ids)}")
-        return {"status": "success", "source_date": date, "buildings": list(result), "results": result,
+        return {"status": "partial" if config_errors else "success",
+                "source_date": date, "buildings": list(result), "results": result,
                 **source_metadata,
                 "settings_revision": settings_revision,
                 "uploaded_count": sum(v["uploaded_count"] for v in result.values())}

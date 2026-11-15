@@ -232,6 +232,17 @@ class Cloud:
         return {'data': {}}
 
 
+@pytest.fixture(autouse=True)
+def verified_upload_settings(monkeypatch):
+    from app.modules.inspection_data.service import point_settings
+
+    def read(config, **_):
+        saved, revision = point_settings.load_point_settings_with_revision(config)
+        return {building: (saved or {}).get(building, {}) for building in ("D楼", "E楼")}, revision, {}
+
+    monkeypatch.setattr(module, "refresh_cloud_point_settings", read)
+
+
 def inspection_datasets(tmp_path, invalid_source=None):
     datasets = {}
     catalog = load_catalog()
@@ -261,7 +272,7 @@ def prepared(tmp_path,monkeypatch,invalid_e=False,invalid_source=None):
     cloud=Cloud()
     service=InspectionDataUploadService({},bitable_client=cloud)
     service.test_datasets = files
-    monkeypatch.setattr(service,'_sources',lambda *_:files)
+    monkeypatch.setattr(service,'_sources',lambda *_, **__:files)
     monkeypatch.setattr(module, 'load_workbook', Mock(side_effect=AssertionError('upload must not open Excel')))
     monkeypatch.setattr(module,'BACKUP_ROOT',tmp_path/'backups')
     backups=[]
@@ -475,13 +486,12 @@ class SnapshotSources:
 
 def test_baseline_is_persistent_and_only_the_effective_ids_can_upload(tmp_path, monkeypatch):
     from app.modules.inspection_data.service import point_config_bitable, point_settings
+    from test_inspection_point_cloud_authority import FakeConfigBitable
 
     config = {"paths": {"runtime_state_root": str(tmp_path)}, "inspection_data_upload": {"wait_source_timeout_sec": 0}}
     internal = SnapshotSources(inspection_datasets(tmp_path))
     internal.put_inspection_point_rules = Mock(side_effect=lambda rules, revision: {"ok": True, "point_overrides": rules, "revision": revision})
     monkeypatch.setattr(point_settings.InternalBridgeHttpClient, "from_runtime_config", lambda _: internal)
-    cloud_config = Mock()
-    monkeypatch.setattr(point_config_bitable, 'sync_point_config_bitable', cloud_config)
     for doc in internal.entries.values():
         doc.update(point_ids=['7_0_1'], requested_point_ids=['7_0_1'])
 
@@ -495,6 +505,11 @@ def test_baseline_is_persistent_and_only_the_effective_ids_can_upload(tmp_path, 
     group = settings[b][f]
     assert list(group['baseline']) == ['7_0_1']
     assert group['baseline']['7_0_1']['sampleTime'] == docs[0]['value_time']
+    cloud_config = FakeConfigBitable()
+    point_config_bitable.sync_point_config_bitable(config, settings, client=cloud_config)
+    monkeypatch.setattr(point_config_bitable, "point_config_client", lambda _: cloud_config)
+    settings, _, _ = point_settings.refresh_cloud_point_settings(config)
+    group = settings[b][f]
     configured = {b: {f: {**group, 'points': {'7_0_1': '只修改备注'}}}}
     assert point_settings.query_rules(configured)[b][f] == {'add': [], 'remove': [], 'baseline': ['7_0_1']}
     with pytest.raises(ValueError, match='必须保留'):
@@ -502,7 +517,6 @@ def test_baseline_is_persistent_and_only_the_effective_ids_can_upload(tmp_path, 
     saved = point_settings.save_point_group(config, building=b, family=f, points={'7_0_2': '改点'},
                                             remove=['7_0_1'], expected_group=group)['settings']
     assert saved[b][f]['baseline'] == group['baseline']
-    cloud_config.assert_called_once_with(config, saved, buildings=(b,), initialize=True)
     rules = point_settings.query_rules(saved)
     for (building, family), doc in internal.entries.items():
         doc['point_overrides'] = rules[building][family]
@@ -514,13 +528,10 @@ def test_baseline_is_persistent_and_only_the_effective_ids_can_upload(tmp_path, 
         service.run(dry_run=True)
     doc.update(point_ids=['7_0_2'], requested_point_ids=['7_0_2'])
     assert service.run(dry_run=True)['status'] == 'success'
-    cloud_config.side_effect = RuntimeError('timeout')
-    failed = point_settings.save_point_group(config, building=b, family=f, points={'7_0_2': '新备注'}, remove=['7_0_1'])
-    assert failed['cloud_synced'] is False and failed['synced'] is True
-    assert point_settings._pending_buildings(config) == {b}
-    cloud_config.side_effect = None
-    point_settings.retry_pending_point_config(config)
-    assert not point_settings._pending_buildings(config)
+    cloud_config.fail_update = True
+    with pytest.raises(point_settings.PointConfigUnavailable, match='写入超时'):
+        point_settings.save_point_group(config, building=b, family=f, points={'7_0_2': '新备注'}, remove=['7_0_1'])
+    assert point_settings.load_point_settings(config) == saved
 
 
 def test_feishu_point_config_upsert_and_recovery():
@@ -569,14 +580,18 @@ def test_feishu_point_config_upsert_and_recovery():
 
 
 def test_custom_point_settings_sync_and_upload_point_remark(tmp_path, monkeypatch):
-    from app.modules.inspection_data.service import point_settings
+    from app.modules.inspection_data.service import point_settings, point_config_bitable
+    from test_inspection_point_cloud_authority import FakeConfigBitable, BASE_POINT
 
     config = {"paths": {"runtime_state_root": str(tmp_path)}, "inspection_data_upload": {"wait_source_timeout_sec": 0}}
     internal = SnapshotSources(inspection_datasets(tmp_path))
     internal.put_inspection_point_rules = Mock(side_effect=lambda rules, revision: {"ok": True, "point_overrides": rules, "revision": revision})
     monkeypatch.setattr(point_settings.InternalBridgeHttpClient, "from_runtime_config", lambda _: internal)
+    config_cloud = FakeConfigBitable()
+    monkeypatch.setattr(point_config_bitable, "point_config_client", lambda _: config_cloud)
+    point_settings.refresh_cloud_point_settings(config)
     family = 'electrical_inspection_family'
-    point_id, excluded = '7_0_387_1_606_0', '7_0_387_1_614_0'
+    point_id, excluded = '7_0_387_1_606_0', BASE_POINT
     book = next(name for name, sheets in point_settings.inspection_target_options('D楼').items() if '柴发巡检表' in sheets)
     target = {'workbook': book, 'sheet': '柴发巡检表', 'cell': 'b6'}
     saved = point_settings.save_point_group(config, building='D楼', family=family, points={point_id: '复测点'},
@@ -584,18 +599,18 @@ def test_custom_point_settings_sync_and_upload_point_remark(tmp_path, monkeypatc
     assert saved['synced'] is True
     assert point_settings.load_point_settings(config) == saved['settings']
 
-    assert internal.put_inspection_point_rules.call_args.args[0] == {
-        'D楼': {family: {'add': [point_id], 'remove': [excluded]}},
-    }
+    rules = internal.put_inspection_point_rules.call_args.args[0]
+    assert rules['D楼'][family] == {'add': [point_id], 'remove': [excluded], 'baseline': [excluded]}
     cloud = Cloud()
     service = InspectionDataUploadService(config, internal_client=internal, bitable_client=cloud)
     monkeypatch.setattr(module, 'BACKUP_ROOT', tmp_path/'backups')
     with pytest.raises(RuntimeError, match='未清空多维表'):
         service.run()
     assert not cloud.events
-
     entry = internal.entries['D楼', family]
-    entry.update(point_overrides={'add': [point_id], 'remove': [excluded]}, point_ids=[point_id], requested_point_ids=[point_id])
+    for (building, family_key), doc in internal.entries.items():
+        doc.update(point_overrides=rules[building][family_key], point_ids=[BASE_POINT], requested_point_ids=[BASE_POINT])
+    entry.update(point_ids=[point_id], requested_point_ids=[point_id])
     entry['rows'] = [['D楼 变电间', '新增设备', '待归类电流', '12.345']]
     assert service.run()['results']['D楼']['point_count'] == 2
     detail = next(row['fields'] for row in cloud.rows[module.DEFAULT_CONFIG['tables']['D楼']]
@@ -616,8 +631,25 @@ def test_custom_point_settings_sync_and_upload_point_remark(tmp_path, monkeypatc
     assert point_settings.load_point_settings(config) == saved['settings']
 
 
+def test_partial_config_failure_uploads_only_verified_building(tmp_path, monkeypatch):
+    service, cloud, _ = prepared(tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "refresh_cloud_point_settings",
+                        lambda *_, **__: ({"D楼": {}, "E楼": {}}, 92, {"D楼": "飞书读取超时"}))
+    monkeypatch.setattr(service, "_sources",
+                        lambda *_, buildings: {building: service.test_datasets[building] for building in buildings})
+    d_table, e_table = (module.DEFAULT_CONFIG["tables"][building] for building in ("D楼", "E楼"))
+    old_d = cloud.rows[d_table][:]
+    result = service.run()
+    assert result["status"] == "partial"
+    assert result["buildings"] == ["E楼"] and result["settings_revision"] is None
+    assert cloud.rows[d_table] == old_d
+    assert {table for _, table in cloud.events} == {e_table}
+
+
 def test_review_point_routes_are_building_scoped_and_reject_stale_edits(tmp_path, monkeypatch):
     from types import SimpleNamespace
+    from app.modules.inspection_data.service import point_config_bitable
+    from test_inspection_point_cloud_authority import FakeConfigBitable
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -631,16 +663,20 @@ def test_review_point_routes_are_building_scoped_and_reject_stale_edits(tmp_path
     internal.get_latest_inspection_points = Mock(return_value={'ok': True, 'datasets': [doc]})
     internal.put_inspection_point_rules = Mock(side_effect=lambda rules, revision: {'ok': True, 'point_overrides': rules, 'revision': revision})
     monkeypatch.setattr(module.InternalBridgeHttpClient, 'from_runtime_config', lambda _: internal)
+    config_cloud = FakeConfigBitable()
+    monkeypatch.setattr(point_config_bitable, "point_config_client", lambda _: config_cloud)
     app = FastAPI()
     app.include_router(router)
-    app.state.container = SimpleNamespace(runtime_config=config, _configured_deployment_snapshot=lambda: {'role_mode': 'external'})
+    app.state.container = SimpleNamespace(runtime_config=config, _configured_deployment_snapshot=lambda: {'role_mode': 'external'},
+                                          trigger_inspection_data_upload_now=lambda: {'ok': True})
     base = '/api/scheduler/inspection-data-upload/points'
     with TestClient(app) as client:
-        change = {'family': family, 'points': {'7_0_1': '复测'}, 'remove': [], 'expected_group': {'points': {}, 'remove': []}}
+        expected = client.get(f'{base}/d').json()['settings'][family]
+        change = {'family': family, 'points': {'7_0_1': '复测'}, 'remove': [], 'expected_group': expected}
         assert client.put(f'{base}/d', json=change).status_code == 200
         assert client.put(f'{base}/d', json=change).status_code == 409
         assert client.put(f'{base}/d', json={**change, 'building': 'E楼'}).status_code == 400
-        assert client.get(f'{base}/e').json()['settings'] == {}
+        assert client.get(f'{base}/e').json()['settings'][family]['points'] == {}
         assert client.get(f'{base}/a').status_code == 404
         latest = client.get(f'{base}/d/latest').json()['datasets'][family]
         assert latest['sample_time'] == doc['value_time']

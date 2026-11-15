@@ -7,7 +7,9 @@ from fastapi import APIRouter, HTTPException, Request
 from app.config.inspection_data_config import INSPECTION_DATA_UPLOAD_DEFAULTS, INSPECTION_SOURCE_CONTRACTS, normalize_inspection_scheduler
 from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
 from app.modules.inspection_data.service.point_correction import CORRECTED_VALUE_FIELD, corrected_samples
-from app.modules.inspection_data.service.point_settings import PointSettingsConflict, inspection_target_options, load_or_restore_point_settings, load_point_settings, save_point_group
+from app.modules.inspection_data.service.point_settings import (
+    PointConfigUnavailable, PointSettingsConflict, inspection_target_options, refresh_cloud_point_settings, save_point_group,
+)
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.scheduler.api._config_persistence import (
     persist_full_config,
@@ -30,9 +32,13 @@ def inspection_point_settings(request: Request):
     return {"ok": True, "settings": _read_point_settings(request.app.state.container.runtime_config)}
 
 
-def _read_point_settings(config):
+def _read_point_settings(config, *, building=None):
     try:
-        return load_or_restore_point_settings(config) or {}
+        buildings = (building,) if building else None
+        settings, _, errors = refresh_cloud_point_settings(config, buildings=buildings)
+        if errors:
+            raise PointConfigUnavailable("；".join(f"{b}：{message}" for b, message in errors.items()))
+        return settings
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"读取巡检测点配置失败：{exc}") from exc
 
@@ -51,15 +57,17 @@ def update_inspection_point_settings(payload: dict, request: Request):
         raise HTTPException(status_code=409, detail="请在外网端设置巡检测点")
     if not isinstance(payload.get("expected_group"), dict):
         raise HTTPException(status_code=409, detail="请重新加载测点配置后再保存")
-    _read_point_settings(container.runtime_config)
     try:
         result = save_point_group(container.runtime_config, building=payload.get("building"), family=payload.get("family"),
                                 points=payload.get("points", {}), remove=payload.get("remove", []),
-                                expected_group=payload["expected_group"], status_rules=payload.get("status_rules"),
+                                expected_group=payload["expected_group"], targets=payload.get("targets"),
+                                status_rules=payload.get("status_rules"),
                                 correction_rules=payload.get("correction_rules"), operating_rules=payload.get("operating_rules"),
                                 explicitly_enabled=payload.get("explicitly_enabled"), explicitly_disabled=payload.get("explicitly_disabled"))
     except PointSettingsConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PointConfigUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _trigger_upload_after_config_save(container, result)
@@ -75,7 +83,7 @@ def _point_building(building_code: str) -> str:
 def building_inspection_point_settings(building_code: str, request: Request):
     building = _point_building(building_code)
     config = request.app.state.container.runtime_config
-    return {"ok": True, "building": building, "settings": _read_point_settings(config).get(building, {}),
+    return {"ok": True, "building": building, "settings": _read_point_settings(config, building=building)[building],
             "target_options": inspection_target_options(building)}
 
 
@@ -87,7 +95,6 @@ def update_building_inspection_point_settings(building_code: str, payload: dict,
         raise HTTPException(status_code=409, detail="请在外网端设置巡检测点")
     if not isinstance(payload.get("expected_group"), dict) or set(payload) - {"family", "points", "remove", "expected_group", "targets", "status_rules", "explicitly_enabled", "explicitly_disabled", "correction_rules", "operating_rules"}:
         raise HTTPException(status_code=400, detail="巡检测点配置格式无效")
-    _read_point_settings(container.runtime_config)
     try:
         result = save_point_group(container.runtime_config, building=building, family=payload.get("family"),
                                   points=payload.get("points"), remove=payload.get("remove"), expected_group=payload["expected_group"],
@@ -96,6 +103,8 @@ def update_building_inspection_point_settings(building_code: str, payload: dict,
                                   explicitly_enabled=payload.get("explicitly_enabled"), explicitly_disabled=payload.get("explicitly_disabled"))
     except PointSettingsConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PointConfigUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     result = _trigger_upload_after_config_save(container, result)
@@ -110,7 +119,7 @@ def latest_building_inspection_points(building_code: str, request: Request):
     if bridge is None:
         raise HTTPException(status_code=503, detail="未配置内网桥接地址")
     datasets = {}
-    settings = (load_point_settings(config) or {}).get(building, {})
+    settings = _read_point_settings(config, building=building)[building]
     try:
         payload = bridge.get_latest_inspection_points(building=building)
         if not payload.get("ok") or not isinstance(payload.get("datasets"), list):

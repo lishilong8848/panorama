@@ -285,6 +285,7 @@ export function mountInspectionPointsPage(Vue) {
       const latestError = ref(""), settingsError = ref(""), message = ref("");
       const operatingDraft = ref(null);
       const controller = new AbortController();
+      let settingsPoll = null;
       const group = computed(() => settings.value[family.value] || { points: {}, remove: [] });
       const liveSampleTime = computed(() => datasets.value[family.value]?.sample_time || "");
       const sampleTime = computed(() => {
@@ -354,16 +355,22 @@ export function mountInspectionPointsPage(Vue) {
         return positions.every(valid) && new Set(positions).size === ROUND_FIELDS.length;
       }
 
-      async function loadSettings() {
+      async function loadSettings({ background = false } = {}) {
         if (settingsBusy.value || saving.value) return;
+        if (draft.value || operatingDraft.value) {
+          if (background || !window.confirm("重新读取飞书配置会放弃当前编辑，是否继续？")) return;
+        }
         settingsBusy.value = true;
-        settingsError.value = "";
+        if (!background) settingsError.value = "";
         try {
           const response = await getBuildingInspectionPointSettingsApi(code, { signal: controller.signal });
+          if (background && (draft.value || operatingDraft.value)) return;
+          draft.value = null;
           settings.value = response.settings;
           operatingDraft.value = null;
           targetOptions.value = response.target_options || {};
           settingsReady.value = true;
+          settingsError.value = "";
           page.value = Math.min(page.value, pageCount.value);
         } catch (error) {
           if (!controller.signal.aborted) settingsError.value = error.message;
@@ -604,8 +611,19 @@ export function mountInspectionPointsPage(Vue) {
           window.setTimeout(() => window.location.assign(returnUrl), 100);
         }
       }
-      onMounted(() => { void loadSettings(); void loadLatest(); window.addEventListener("keydown", onKeydown); });
-      onBeforeUnmount(() => { controller.abort(); window.removeEventListener("keydown", onKeydown); });
+      onMounted(() => {
+        void loadSettings();
+        void loadLatest();
+        settingsPoll = window.setInterval(() => {
+          if (!document.hidden) void loadSettings({ background: true });
+        }, 45000);
+        window.addEventListener("keydown", onKeydown);
+      });
+      onBeforeUnmount(() => {
+        window.clearInterval(settingsPoll);
+        controller.abort();
+        window.removeEventListener("keydown", onKeydown);
+      });
       return { building, families: FAMILIES, family, keyword, positionFilter, page, pageCount, pageButtons, pageRows, filteredRows, sampleTime,
         roundFields: ROUND_FIELDS, statusFields: STATUS_FIELDS, correctionFields: CORRECTION_FIELDS,
         correctionMaxRules: CORRECTION_MAX_RULES, correctionTextMaxlength: CORRECTION_TEXT_MAXLENGTH,

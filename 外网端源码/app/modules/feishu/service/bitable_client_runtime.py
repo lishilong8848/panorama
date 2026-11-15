@@ -73,6 +73,7 @@ class FeishuBitableClient:
         self.date_tz_offset_hours = date_tz_offset_hours
         self.timeout = int(auth.get("timeout", timeout) or timeout)
         self.request_retry_count = max(0, int(auth.get("request_retry_count", request_retry_count) or request_retry_count))
+        self.api_retry_attempt_limit: Optional[int] = None
         self.request_retry_interval_sec = max(0.0, float(auth.get("request_retry_interval_sec", request_retry_interval_sec) or request_retry_interval_sec))
         self._tenant_access_token: Optional[str] = None
         self._date_text_to_timestamp_ms_fn = date_text_to_timestamp_ms_fn
@@ -128,7 +129,7 @@ class FeishuBitableClient:
     def _api_retry_attempts(self) -> int:
         # Busy tables may return 1254607 (data not ready) or 1254291 (write
         # conflict); network retry limits are too short for both.
-        return max(self.request_retry_count + 1, 10)
+        return self.api_retry_attempt_limit or max(self.request_retry_count + 1, 10)
 
     @staticmethod
     def _api_retry_limit_for_body(body: Dict[str, Any], default_attempts: int) -> int:
@@ -473,6 +474,7 @@ class FeishuBitableClient:
         view_id: str = "",
         filter_formula: str = "",
         field_names: Optional[List[str]] = None,
+        require_complete: bool = False,
     ) -> List[Dict[str, Any]]:
         if page_size <= 0:
             raise ValueError("page_size 必须大于0")
@@ -483,6 +485,8 @@ class FeishuBitableClient:
         url = self.LIST_RECORD_URL.format(app_token=self.app_token, table_id=table_id)
         records: List[Dict[str, Any]] = []
         page_token = ""
+        seen_tokens: set[str] = set()
+        total = None
         while True:
             params: Dict[str, Any] = {"page_size": page_size}
             if page_token:
@@ -502,6 +506,16 @@ class FeishuBitableClient:
             data = self._get_json(url, params=params)
             payload = data.get("data") if isinstance(data, dict) else {}
             items = payload.get("items") if isinstance(payload, dict) else []
+            if require_complete:
+                if (not isinstance(payload, dict) or not isinstance(items, list)
+                        or any(not isinstance(item, dict) for item in items)
+                        or not isinstance(payload.get("has_more"), bool)):
+                    raise RuntimeError("飞书记录分页返回不完整")
+                observed_total = payload.get("total")
+                if isinstance(observed_total, int):
+                    if total is not None and observed_total != total:
+                        raise RuntimeError("飞书记录读取期间总数变更")
+                    total = observed_total
             if isinstance(items, list):
                 for item in items:
                     if isinstance(item, dict):
@@ -513,8 +527,13 @@ class FeishuBitableClient:
             if not has_more:
                 break
             page_token = str(payload.get("page_token", "")).strip() if isinstance(payload, dict) else ""
-            if not page_token:
+            if not page_token or page_token in seen_tokens:
+                if require_complete:
+                    raise RuntimeError("飞书记录分页令牌缺失或重复")
                 break
+            seen_tokens.add(page_token)
+        if require_complete and total is not None and total != len(records):
+            raise RuntimeError("飞书记录分页总数不一致")
         return records
 
     def list_record_ids(

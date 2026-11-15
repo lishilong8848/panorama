@@ -114,7 +114,7 @@ export async function getConfigApi() {
 }
 
 export function getInspectionPointSettingsApi() {
-  return apiJsonWithTimeout("/api/scheduler/inspection-data-upload/points", {}, 8000);
+  return apiJsonWithTimeout("/api/scheduler/inspection-data-upload/points", {}, 20000);
 }
 
 export function putInspectionPointSettingsApi(payload) {
@@ -124,7 +124,7 @@ export function putInspectionPointSettingsApi(payload) {
 }
 
 export function getBuildingInspectionPointSettingsApi(building, options = {}) {
-  return apiJsonWithTimeout(`/api/scheduler/inspection-data-upload/points/${encodeURIComponent(building)}`, { cache: "no-store", ...options }, 8000);
+  return apiJsonWithTimeout(`/api/scheduler/inspection-data-upload/points/${encodeURIComponent(building)}`, { cache: "no-store", ...options }, 15000);
 }
 
 export function getBuildingInspectionLatestPointsApi(building, options = {}) {

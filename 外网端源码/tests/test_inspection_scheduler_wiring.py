@@ -445,12 +445,16 @@ def test_dry_run_is_not_upload_slot_success():
 
 def test_split_manual_dry_run_keeps_default_scheduler_off(monkeypatch):
     from app.bootstrap.container import AppContainer
+    from app.modules.inspection_data.service import inspection_data_upload_service
     from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
 
     config = {"inspection_data_upload": copy.deepcopy(INSPECTION_DATA_UPLOAD_DEFAULTS)}
     before = copy.deepcopy(config)
     service = InspectionDataUploadService(config)
-    def unavailable(*args):
+    monkeypatch.setattr(service, 'make_bitable_client', lambda: object())
+    monkeypatch.setattr(inspection_data_upload_service, 'refresh_cloud_point_settings',
+                        lambda *args, **kwargs: ({"D楼": {}, "E楼": {}}, 0, {}))
+    def unavailable(*args, **kwargs):
         raise RuntimeError('mock source missing')
     monkeypatch.setattr(service, '_sources', unavailable)
     with pytest.raises(RuntimeError, match='mock source missing'):

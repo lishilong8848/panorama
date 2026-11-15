@@ -28,14 +28,18 @@ def _text(value):
 
 def _index(records):
     rows, blank_ids = {}, []
+    record_ids = set()
     for row in records:
         fields = row.get("fields", {})
         record_id = row.get("record_id")
         key = _text(fields.get("专业")), _text(fields.get("测点ID"))
-        if not any(fields.values()) and record_id:
+        if not record_id or record_id in record_ids:
+            raise ValueError("飞书巡检配置表记录 ID 缺失或重复")
+        record_ids.add(record_id)
+        if not any(fields.values()):
             blank_ids.append(record_id)
             continue
-        if not all(key) or not record_id or key in rows:
+        if not all(key) or key in rows:
             raise ValueError("飞书巡检配置表存在无标识或重复的记录，未写入")
         rows[key] = row
     return rows, blank_ids
@@ -92,14 +96,33 @@ def _different(observed, desired):
             if value != (observed.get(field) is True if isinstance(value, bool) else _text(observed.get(field)))}
 
 
-def read_point_config_bitable(config, *, client=None):
+def point_config_client(config):
     from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
 
-    client = client or InspectionDataUploadService(config).make_bitable_client()
+    return InspectionDataUploadService(config).make_bitable_client()
+
+
+def _record_snapshot(rows):
+    return json.dumps(sorted(rows, key=lambda row: row["record_id"]), ensure_ascii=False, sort_keys=True)
+
+
+def read_building_point_records(client, building):
+    return client.list_records(POINT_CONFIG_TABLES[building], max_records=0, require_complete=True)
+
+
+def read_point_config_bitable(config, *, client=None, buildings=None, snapshots=None):
+    client = client or point_config_client(config)
     families = {contract["discipline"]: family for family, contract in INSPECTION_SOURCE_CONTRACTS.items()}
     settings = {}
-    for building, table in POINT_CONFIG_TABLES.items():
-        current, _ = _index(client.list_records(table, max_records=0))
+    requested = tuple(POINT_CONFIG_TABLES if buildings is None else buildings)
+    for building in requested:
+        if snapshots is not None:
+            rows = snapshots[building]
+        elif buildings is None:
+            rows = client.list_records(POINT_CONFIG_TABLES[building], max_records=0)
+        else:
+            rows = read_building_point_records(client, building)
+        current, _ = _index(rows)
         groups = {}
         for (discipline, point_id), row in current.items():
             if discipline not in families:
@@ -160,17 +183,17 @@ def read_point_config_bitable(config, *, client=None):
                 group.setdefault("targets", {})[point_id] = target
         if groups:
             settings[building] = groups
-    if settings and (set(settings) != set(POINT_CONFIG_TABLES) or any(
+    if (settings or buildings is not None) and (set(settings) != set(requested) or any(
             set(groups) != set(INSPECTION_SOURCE_CONTRACTS) or any(not group["baseline"] for group in groups.values())
             for groups in settings.values())):
         raise ValueError("飞书巡检测点基线不完整，未恢复配置")
     return settings
 
 
-def sync_point_config_bitable(config, settings, *, buildings=None, initialize=False, client=None):
-    from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
-
-    client = client or InspectionDataUploadService(config).make_bitable_client()
+def sync_point_config_bitable(config, settings, *, buildings=None, initialize=False, client=None,
+                              prior_settings=None, snapshots=None):
+    client = client or point_config_client(config)
+    guarded = snapshots is not None
     requested = tuple(POINT_CONFIG_TABLES if buildings is None else buildings)
     plans = {}
     for building in requested:
@@ -206,40 +229,70 @@ def sync_point_config_bitable(config, settings, *, buildings=None, initialize=Fa
         if any(existing.get(field, 1) != 1 for field in optional_fields):
             raise ValueError(f"{building} 飞书巡检配置扩展字段必须是文本")
         missing.update({field: 1 for field in optional_fields if field not in existing})
-        current, blank = _index(client.list_records(table, max_records=0))
+        if guarded:
+            current, blank = _index(snapshots[building])
+        else:
+            current, blank = _index(client.list_records(table, max_records=0))
         desired = _expected_rows(settings.get(building, {}), include_explicit_enable=explicit_type == 7,
                                  include_corrections=has_corrections or correction_type == 1,
                                  include_operating_roles=has_operating or operating_type == 1,
                                  optional_fields=sorted(optional_fields))
         if not desired:
             raise ValueError(f"{building} 没有可保存的测点配置")
-        plans[building] = (table, primary, missing, current, blank, desired)
+        previous_rows = (_expected_rows(prior_settings[building], include_explicit_enable=explicit_type == 7,
+                                        include_corrections=has_corrections or correction_type == 1,
+                                        include_operating_roles=has_operating or operating_type == 1,
+                                        optional_fields=sorted(optional_fields)) if guarded else {})
+        plans[building] = (table, primary, missing, current, blank, desired, previous_rows)
 
     result = {}
-    for building, (table, primary, missing, current, blank, desired) in plans.items():
+    for building, (table, primary, missing, current, blank, desired, previous_rows) in plans.items():
+        if guarded and _record_snapshot(read_building_point_records(client, building)) != _record_snapshot(snapshots[building]):
+            from app.modules.inspection_data.service.point_settings import PointSettingsConflict
+
+            raise PointSettingsConflict(f"{building}飞书测点配置已变更，请重新加载后再保存")
         for field, field_type in missing.items():
             url = client.LIST_FIELD_URL.format(app_token=client.app_token, table_id=table)
             client._post_json(url, {"field_name": field, "type": field_type})
-        creates, updates = [], []
+        creates, updates, verify = [], [], {}
         for key, fields in desired.items():
             payload = {primary: f"{key[0]} / {key[1]}", **fields}
             previous = current.get(key)
             if previous:
-                changes = _different(previous["fields"], payload)
+                if guarded:
+                    before = previous_rows.get(key, {})
+                    # Clear a formerly managed value when the new configuration omits it.
+                    cleared = {field: False if isinstance(value, bool) else ""
+                               for field, value in before.items() if field not in fields}
+                    delta = {field: value for field, value in {**cleared, **fields}.items()
+                             if value != before.get(field, False if isinstance(value, bool) else "")}
+                    changes = _different(previous["fields"], delta)
+                else:
+                    changes = _different(previous["fields"], payload)
                 if changes:
                     updates.append({"record_id": previous["record_id"], "fields": changes})
-            elif blank:
+                    verify[key] = changes
+            elif blank and not guarded:
                 updates.append({"record_id": blank.pop(0), "fields": payload})
             else:
                 creates.append(payload)
-        for key in current.keys() - desired.keys():
+                verify[key] = fields
+        for key in (previous_rows.keys() if guarded else current.keys()) - desired.keys():
             previous = current[key]
             if previous["fields"].get("启用") is True:
                 updates.append({"record_id": previous["record_id"], "fields": {"启用": False}})
+                verify[key] = {"启用": False}
         if creates:
             client.batch_create_records(table, creates)
         if updates:
             client.batch_update_records(table, updates)
+        if guarded:
+            rows = read_building_point_records(client, building)
+            actual = _index(rows)[0]
+            if any(key not in actual or _different(actual[key]["fields"], row) for key, row in verify.items()):
+                raise RuntimeError(f"{building} 飞书巡检测点配置写入后回查不一致")
+            result[building] = rows
+            continue
         actual = _index(client.list_records(table, max_records=0))[0] if creates or updates else current
         if (any(key not in actual or _different(actual[key]["fields"], row) for key, row in desired.items())
                 or any(actual[key]["fields"].get("启用") is True for key in actual.keys() - desired.keys())):

@@ -20,10 +20,15 @@ from app.shared.utils.atomic_file import atomic_write_text
 
 _POINT_ID = re.compile(r"[0-9]+(?:_[0-9]+){1,15}")
 _LOCK = threading.Lock()
+_RETRIGGER_LOCK = threading.Lock()
 EMPTY_POINT_GROUP = {"points": {}, "remove": []}
 
 
 class PointSettingsConflict(ValueError):
+    pass
+
+
+class PointConfigUnavailable(RuntimeError):
     pass
 
 
@@ -48,9 +53,10 @@ def load_point_settings(config):
     return _settings_snapshot(config)[0]
 
 
-def _save_settings(config, settings):
+def _save_settings(config, settings, *, cloud_buildings=()):
     revision = max(time.time_ns(), _settings_snapshot(config)[1] + 1)
-    atomic_write_text(_path(config), json.dumps({"revision": revision, "settings": settings}, ensure_ascii=False), encoding="utf-8")
+    payload = {"revision": revision, "settings": settings, "cloud_buildings": sorted(cloud_buildings)}
+    atomic_write_text(_path(config), json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 @contextmanager
@@ -88,29 +94,92 @@ def load_or_restore_point_settings(config):
         if not settings:
             return None
         for building, groups in settings.items():
-            for family, group in groups.items():
-                ids = set(group["baseline"]) | set(group["points"]) | set(group["remove"])
-                if any(not _valid_config_id(i) for i in ids):
-                    raise ValueError("飞书巡检测点配置含无效 ID，未恢复配置")
-                group["remove"].sort()
-                _validate_effective_count(group["baseline"], group["points"], group["remove"])
-                if "targets" in group:
-                    group["targets"] = _normalize_targets(building, group["points"], group["targets"])
-                if "status_rules" in group:
-                    group["status_rules"] = normalize_status_rules(
-                        group["status_rules"], (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
-                if "correction_rules" in group:
-                    group["correction_rules"] = normalize_correction_rules(
-                        group["correction_rules"], (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
-                if "operating_rules" in group:
-                    group["operating_rules"] = normalize_operating_rules(
-                        building, family, group["operating_rules"],
-                        (set(group["baseline"]) | set(group["points"])) - set(group["remove"]))
-                _validate_local_points(group["points"], group.get("targets", {}), group.get("status_rules", {}),
-                                       group.get("correction_rules", {}))
-            _validate_target_collisions(groups)
+            _validate_cloud_groups(building, groups)
         _save_settings(config, settings)
         return settings
+
+
+def _validate_cloud_groups(building, groups):
+    for family, group in groups.items():
+        ids = set(group["baseline"]) | set(group["points"]) | set(group["remove"])
+        if any(not _valid_config_id(i) for i in ids):
+            raise ValueError(f"{building}飞书巡检测点配置含无效 ID")
+        group["remove"].sort()
+        group.get("explicitly_enabled", []).sort()
+        _validate_effective_count(group["baseline"], group["points"], group["remove"])
+        active = ids - set(group["remove"])
+        if "targets" in group:
+            group["targets"] = _normalize_targets(building, group["points"], group["targets"])
+        if "operating_rules" in group:
+            group["operating_rules"] = normalize_operating_rules(building, family, group["operating_rules"], active)
+        _validate_local_points(group["points"], group.get("targets", {}), group.get("status_rules", {}),
+                               group.get("correction_rules", {}))
+    _validate_target_collisions(groups)
+
+
+def _cloud_buildings(config):
+    try:
+        with _path(config).open(encoding="utf-8") as handle:
+            return set(json.load(handle).get("cloud_buildings", ()))
+    except FileNotFoundError:
+        return set()
+
+
+def _remember_cloud_settings(config, observed, *, schedule=True):
+    """Under the settings lock, retain only cloud-verified configurations for bridging."""
+    verified = _cloud_buildings(config)
+    cached, _ = _settings_snapshot(config)
+    settings = dict(cached or {})
+    changed = set()
+    for building, groups in observed.items():
+        previous = settings.get(building, {})
+        # Retain cached sample display metadata only for identical source points.
+        for family, group in groups.items():
+            baseline = previous.get(family, {}).get("baseline", {})
+            for point_id, point in group["baseline"].items():
+                old = baseline.get(point_id, {})
+                if all(point.get(key) == old.get(key) for key in ("name", "path")):
+                    point.update({key: old[key] for key in ("value", "sampleTime") if key in old})
+        if building not in verified or previous != groups:
+            changed.add(building)
+        settings[building] = groups
+    if changed:
+        _save_settings(config, settings, cloud_buildings=verified | observed.keys())
+    if schedule and changed:
+        request_inspection_upload_retrigger(config, reason="飞书巡检测点配置已变更")
+    return changed
+
+
+def refresh_cloud_point_settings(config, *, buildings=None, client=None, schedule=True):
+    """Read each requested table independently; a failed read never changes its last verified copy."""
+    from app.modules.inspection_data.service.point_config_bitable import POINT_CONFIG_TABLES, point_config_client, read_point_config_bitable
+
+    client = client or point_config_client(config)
+    errors = {}
+    requested = tuple(POINT_CONFIG_TABLES if buildings is None else buildings)
+    for building in requested:
+        try:
+            for _ in range(2):
+                before = (load_point_settings(config) or {}).get(building)
+                groups = read_point_config_bitable(config, client=client, buildings=(building,))[building]
+                _validate_cloud_groups(building, groups)
+                with _settings_write_lock(config):
+                    if (load_point_settings(config) or {}).get(building) != before:
+                        continue
+                    _remember_cloud_settings(config, {building: groups}, schedule=schedule)
+                    break
+            else:
+                raise PointSettingsConflict(f"{building}飞书测点正在同步，请稍后重试")
+        except Exception as exc:
+            errors[building] = str(exc)
+    with _settings_write_lock(config):
+        settings, revision = _settings_snapshot(config)
+        verified = _cloud_buildings(config)
+        if (schedule and verified == set(POINT_CONFIG_TABLES) and len(errors) < len(requested)
+                and revision > (last_inspection_upload_revision(config) or 0)
+                and not read_inspection_upload_retrigger(config)):
+            request_inspection_upload_retrigger(config, reason="飞书测点配置等待上传核验")
+    return {b: groups for b, groups in (settings or {}).items() if b in verified}, revision, errors
 
 
 def inspection_target_options(building):
@@ -276,23 +345,25 @@ def sync_point_settings(config, settings, *, bridge=None):
         raise PointSettingsConflict("巡检测点配置已变更，拒绝同步旧配置")
     rules = query_rules(saved)
     response = bridge.put_inspection_point_rules(rules, revision=revision)
-    if not response.get("ok") or response.get("point_overrides") != rules or response.get("revision") != revision:
+    remote_revision = response.get("revision")
+    if (not response.get("ok") or response.get("point_overrides") != rules
+            or not isinstance(remote_revision, int) or remote_revision < revision):
         raise RuntimeError("内网未确认巡检测点配置")
 
 
-def _pending_path(config):
-    return _path(config).with_name("inspection_point_config_pending.json")
-
-
 def _pending_buildings(config):
+    # The offline migration command still checks for a legacy pending file.
+    # The running service never reapplies its contents to Feishu.
+    path = _path(config).with_name("inspection_point_config_pending.json")
     try:
-        return set(json.loads(_pending_path(config).read_text(encoding="utf-8")))
+        return set(json.loads(path.read_text(encoding="utf-8")))
     except FileNotFoundError:
         return set()
 
 
 def _write_pending(config, buildings):
-    atomic_write_text(_pending_path(config), json.dumps(sorted(buildings), ensure_ascii=False), encoding="utf-8")
+    path = _path(config).with_name("inspection_point_config_pending.json")
+    atomic_write_text(path, json.dumps(sorted(buildings), ensure_ascii=False), encoding="utf-8")
 
 
 def _retrigger_path(config):
@@ -304,7 +375,7 @@ def _retrigger_lock(config):
     """补派标记的跨进程写锁：写标记与"比较+删除"必须互斥，避免旧确认删掉新请求。"""
     path = _path(config).with_name("inspection_retrigger.lock.db")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _LOCK:
+    with _RETRIGGER_LOCK:
         connection = sqlite3.connect(path, timeout=10)
         try:
             try:
@@ -456,23 +527,6 @@ def peek_inspection_upload_retrigger(config) -> bool:
     return isinstance(requested, (int, float)) and time.time() - requested <= 6 * 3600
 
 
-def _sync_cloud_config(config, settings, buildings):
-    from app.modules.inspection_data.service.point_config_bitable import sync_point_config_bitable
-
-    sync_point_config_bitable(config, settings, buildings=tuple(sorted(buildings)), initialize=True)
-    _write_pending(config, _pending_buildings(config) - set(buildings))
-
-
-def retry_pending_point_config(config):
-    if not _pending_buildings(config):
-        return
-    with _settings_write_lock(config):
-        buildings = _pending_buildings(config)
-        settings = load_point_settings(config)
-        if settings and buildings:
-            _sync_cloud_config(config, settings, buildings)
-
-
 def save_point_group(config, *, building, family, points, remove, expected_group=None, targets=None, status_rules=None,
                      explicitly_enabled=None, explicitly_disabled=None, correction_rules=None, operating_rules=None):
     if not isinstance(building, str) or not isinstance(family, str) or building not in {"D楼", "E楼"} or family not in INSPECTION_SOURCE_CONTRACTS:
@@ -485,9 +539,22 @@ def save_point_group(config, *, building, family, points, remove, expected_group
         raise ValueError("巡检测点备注必须为不超过500字的文本")
     if set(points) & set(remove):
         raise ValueError("同一测点不能同时纳入和排除")
-    load_or_restore_point_settings(config)
+    from app.modules.inspection_data.service.point_config_bitable import (
+        POINT_CONFIG_TABLES, point_config_client, read_building_point_records, read_point_config_bitable,
+        sync_point_config_bitable,
+    )
+
     with _settings_write_lock(config):
-        settings = load_point_settings(config) or {}
+        try:
+            client = point_config_client(config)
+            snapshots = {building: read_building_point_records(client, building)}
+            previous = read_point_config_bitable(config, client=client, buildings=(building,), snapshots=snapshots)
+            _validate_cloud_groups(building, previous[building])
+            _remember_cloud_settings(config, previous)
+            # The page also receives cached samples for display. Use the same group for conflict checks.
+            settings = {building: dict(previous[building])}
+        except Exception as exc:
+            raise PointConfigUnavailable(f"{building}飞书巡检测点配置读取失败：{exc}") from exc
         groups = settings.setdefault(building, {})
         current = groups.get(family, EMPTY_POINT_GROUP)
         if expected_group is not None and current != expected_group:
@@ -535,25 +602,24 @@ def save_point_group(config, *, building, family, points, remove, expected_group
             groups.pop(family, None)
             if not groups:
                 settings.pop(building)
-        has_baseline = any("baseline" in group for group in groups.values())
-        if has_baseline:
-            _write_pending(config, _pending_buildings(config) | {building})
-        _save_settings(config, settings)
-        pending = []
-        cloud_synced = None
-        if has_baseline:
-            try:
-                _sync_cloud_config(config, settings, (building,))
-                cloud_synced = True
-            except Exception as exc:
-                cloud_synced = False
-                pending.append(f"飞书配置表待同步：{exc}")
         try:
-            sync_point_settings(config, settings)
-        except (RuntimeError, OSError, ValueError) as exc:
-            inner_synced = False
-            pending.append(f"内网待同步：{exc}")
-        else:
-            inner_synced = True
-    return {"ok": True, "settings": settings, "synced": inner_synced, "cloud_synced": cloud_synced,
-            "message": "已保存，" + "；".join(pending) if pending else "测点设置已保存并同步"}
+            rows = sync_point_config_bitable(config, settings, buildings=(building,), initialize=True,
+                                            client=client, prior_settings=previous, snapshots=snapshots)
+            confirmed = read_point_config_bitable(config, client=client, buildings=(building,), snapshots=rows)
+            _validate_cloud_groups(building, confirmed[building])
+            _remember_cloud_settings(config, confirmed)
+        except PointSettingsConflict:
+            raise
+        except Exception as exc:
+            raise PointConfigUnavailable(f"{building}飞书配置尚未核验，请重新加载后查看：{exc}") from exc
+        settings = load_point_settings(config)
+        if _cloud_buildings(config) == set(POINT_CONFIG_TABLES):
+            try:
+                sync_point_settings(config, settings)
+            except (RuntimeError, OSError, ValueError):
+                pass
+            else:
+                return {"ok": True, "settings": settings, "synced": True, "cloud_synced": True,
+                        "message": "测点设置已保存并同步"}
+        return {"ok": True, "settings": settings, "synced": False, "cloud_synced": True,
+                "message": "飞书配置已核验，内网采集等待同步"}
