@@ -9,6 +9,7 @@ from app.modules.inspection_data.service.inspection_data_upload_service import I
 from app.modules.inspection_data.service.point_correction import CORRECTED_VALUE_FIELD, corrected_samples
 from app.modules.inspection_data.service.point_settings import (
     PointConfigUnavailable, PointSettingsConflict, inspection_target_options, refresh_cloud_point_settings, save_point_group,
+    verified_review_point_settings,
 )
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.scheduler.api._config_persistence import (
@@ -32,8 +33,12 @@ def inspection_point_settings(request: Request):
     return {"ok": True, "settings": _read_point_settings(request.app.state.container.runtime_config)}
 
 
-def _read_point_settings(config, *, building=None):
+def _read_point_settings(config, *, building=None, fresh=False):
     try:
+        if building and not fresh:
+            cached = verified_review_point_settings(config, building)
+            if cached:
+                return cached
         buildings = (building,) if building else None
         settings, _, errors = refresh_cloud_point_settings(config, buildings=buildings)
         if errors:
@@ -43,11 +48,11 @@ def _read_point_settings(config, *, building=None):
         raise HTTPException(status_code=503, detail=f"读取巡检测点配置失败：{exc}") from exc
 
 
-def _trigger_upload_after_config_save(container, result: dict) -> dict:
+def _trigger_upload_after_config_save(container, result: dict, building: str) -> dict:
     """配置已同步飞书后，立即重传当前时段数值，让灯塔日常巡检实时拿到最新数据。"""
     if not isinstance(result, dict) or not result.get("cloud_synced"):
         return result
-    return {**result, "upload_trigger": container.trigger_inspection_data_upload_now()}
+    return {**result, "upload_trigger": container.trigger_inspection_data_upload_now(building=building)}
 
 
 @router.put("/points")
@@ -70,7 +75,7 @@ def update_inspection_point_settings(payload: dict, request: Request):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _trigger_upload_after_config_save(container, result)
+    return _trigger_upload_after_config_save(container, result, payload["building"])
 
 
 def _point_building(building_code: str) -> str:
@@ -80,10 +85,10 @@ def _point_building(building_code: str) -> str:
 
 
 @router.get("/points/{building_code}")
-def building_inspection_point_settings(building_code: str, request: Request):
+def building_inspection_point_settings(building_code: str, request: Request, fresh: bool = False):
     building = _point_building(building_code)
     config = request.app.state.container.runtime_config
-    return {"ok": True, "building": building, "settings": _read_point_settings(config, building=building)[building],
+    return {"ok": True, "building": building, "settings": _read_point_settings(config, building=building, fresh=fresh)[building],
             "target_options": inspection_target_options(building)}
 
 
@@ -107,7 +112,7 @@ def update_building_inspection_point_settings(building_code: str, payload: dict,
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    result = _trigger_upload_after_config_save(container, result)
+    result = _trigger_upload_after_config_save(container, result, building)
     return {**result, "settings": result["settings"].get(building, {})}
 
 

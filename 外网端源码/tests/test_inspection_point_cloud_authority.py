@@ -107,7 +107,7 @@ def test_cloud_edit_wins_over_local_and_schedules_verified_full_rules(setup):
     assert result[D][ELECTRICAL]["points"] == {}
     assert result[E][ELECTRICAL]["targets"][EXTRA_POINT] == expected_target
     assert client.writes == []
-    assert settings.read_inspection_upload_retrigger(config)["revision"] == revision
+    assert settings.read_inspection_upload_retrigger(config, building=E)["revision"] == revision
 
     # A worker forwards the same cloud snapshot to the old full-replacement bridge.
     settings.sync_point_settings(config, result)
@@ -168,7 +168,7 @@ def test_one_building_failure_does_not_apply_legacy_cache_or_block_other_page(se
     app.include_router(router)
     app.state.container = SimpleNamespace(runtime_config=config,
                                           _configured_deployment_snapshot=lambda: {"role_mode": "external"},
-                                          trigger_inspection_data_upload_now=lambda: {"ok": True})
+                                          trigger_inspection_data_upload_now=lambda **_: {"ok": True})
     url = "/api/scheduler/inspection-data-upload/points"
     with TestClient(app) as api:
         assert api.get(f"{url}/d").status_code == 503
@@ -189,7 +189,8 @@ def test_background_polls_each_building_and_dispatches_fresh_revision(setup, mon
     config, client, _ = setup
     cached, revision, _ = settings.refresh_cloud_point_settings(config)
     settings.record_inspection_upload_revision(config, revision)
-    assert settings.ack_inspection_upload_retrigger(config, revision)
+    for building in (D, E):
+        assert settings.ack_inspection_upload_retrigger(config, revision, building=building)
     change_on_cloud(client, E, EXTRA_POINT, "B6")
     d_table = cloud.POINT_CONFIG_TABLES[D]
     client.fail_read.add(d_table)
@@ -197,7 +198,7 @@ def test_background_polls_each_building_and_dispatches_fresh_revision(setup, mon
     monkeypatch.setattr(cloud, "point_config_client", lambda _: client)
     monotonic = Mock(side_effect=[0.0, 0.0, 20.0, 20.0])
     monkeypatch.setattr("time.monotonic", monotonic)
-    dispatch = Mock(side_effect=lambda: settings.read_inspection_upload_retrigger(config) or {})
+    dispatch = Mock(side_effect=lambda: settings.read_inspection_upload_retrigger(config, building=E) or {})
     container = SimpleNamespace(runtime_config=config, add_system_log=Mock(),
                                 _configured_deployment_snapshot=lambda: {"role_mode": "external"},
                                 dispatch_pending_inspection_retrigger=dispatch)
@@ -208,4 +209,21 @@ def test_background_polls_each_building_and_dispatches_fresh_revision(setup, mon
     assert marker["revision"] > revision
     assert current[D] == cached[D]
     assert EXTRA_POINT in current[E][ELECTRICAL]["points"]
+    assert settings.read_inspection_upload_retrigger(config, building=D) is None
     assert not client.writes
+
+
+def test_verified_review_cache_does_not_repeat_slow_cloud_reads(setup):
+    config, client, _ = setup
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(runtime_config=config)
+    url = "/api/scheduler/inspection-data-upload/points/d"
+    with TestClient(app) as api:
+        assert api.get(url).status_code == 200
+        client.read.clear()
+        assert api.get(url).status_code == 200
+        assert not client.read
+        client.fields(D)["测点备注"] = "飞书修改后手工刷新"
+        assert api.get(url + "?fresh=true").json()["settings"][ELECTRICAL]["points"][BASE_POINT] == "飞书修改后手工刷新"
+        assert client.read == [cloud.POINT_CONFIG_TABLES[D]]

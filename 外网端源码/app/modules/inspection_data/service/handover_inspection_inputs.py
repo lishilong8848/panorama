@@ -314,7 +314,7 @@ def record_pressure_confirmation(config, session, document_revision, *, now=None
 
     request_inspection_upload_retrigger(
         {"paths": {"runtime_state_root": str(store.db_path.parent.parent)}},
-        reason=f"{building}巡检压力审核确认", force=True,
+        reason=f"{building}巡检压力审核确认", force=True, building=building,
     )
     return True
 

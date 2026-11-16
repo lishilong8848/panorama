@@ -20,6 +20,7 @@ from app.shared.utils.atomic_file import atomic_write_text
 
 _POINT_ID = re.compile(r"[0-9]+(?:_[0-9]+){1,15}")
 _LOCK = threading.Lock()
+_BUILDING_LOCKS = {building: threading.Lock() for building in ("D楼", "E楼")}
 _RETRIGGER_LOCK = threading.Lock()
 EMPTY_POINT_GROUP = {"points": {}, "remove": []}
 
@@ -53,18 +54,23 @@ def load_point_settings(config):
     return _settings_snapshot(config)[0]
 
 
-def _save_settings(config, settings, *, cloud_buildings=()):
-    revision = max(time.time_ns(), _settings_snapshot(config)[1] + 1)
-    payload = {"revision": revision, "settings": settings, "cloud_buildings": sorted(cloud_buildings)}
+def _save_settings(config, settings, *, cloud_buildings=(), changed_buildings=()):
+    old_revision = _settings_snapshot(config)[1]
+    revision = max(time.time_ns(), old_revision + 1)
+    previous = _cloud_point_metadata(config).get("cloud_revisions", {})
+    versions = {b: revision if b in changed_buildings else previous.get(b, old_revision) for b in cloud_buildings}
+    payload = {"revision": revision, "settings": settings, "cloud_buildings": sorted(cloud_buildings),
+               "cloud_revisions": versions}
     atomic_write_text(_path(config), json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 @contextmanager
-def _settings_write_lock(config):
-    path = _path(config).with_name("inspection_point_settings.lock.db")
+def _settings_write_lock(config, *, building=None):
+    suffix = f"_{building[0]}" if building else ""
+    path = _path(config).with_name(f"inspection_point_settings{suffix}.lock.db")
     path.parent.mkdir(parents=True, exist_ok=True)
     # The scheduler worker and the web process must serialize Feishu writes as well as local edits.
-    with _LOCK:
+    with (_BUILDING_LOCKS[building] if building else _LOCK):
         connection = sqlite3.connect(path, timeout=10)
         try:
             try:
@@ -117,12 +123,24 @@ def _validate_cloud_groups(building, groups):
     _validate_target_collisions(groups)
 
 
-def _cloud_buildings(config):
+def _cloud_point_metadata(config):
     try:
         with _path(config).open(encoding="utf-8") as handle:
-            return set(json.load(handle).get("cloud_buildings", ()))
+            return json.load(handle)
     except FileNotFoundError:
-        return set()
+        return {}
+
+
+def _cloud_buildings(config):
+    return set(_cloud_point_metadata(config).get("cloud_buildings", ()))
+
+
+def verified_review_point_settings(config, building=None):
+    saved = _cloud_point_metadata(config)
+    verified = set(saved.get("cloud_buildings", ()))
+    if building:
+        verified.intersection_update((building,))
+    return {b: saved["settings"][b] for b in verified}
 
 
 def _remember_cloud_settings(config, observed, *, schedule=True):
@@ -144,9 +162,10 @@ def _remember_cloud_settings(config, observed, *, schedule=True):
             changed.add(building)
         settings[building] = groups
     if changed:
-        _save_settings(config, settings, cloud_buildings=verified | observed.keys())
-    if schedule and changed:
-        request_inspection_upload_retrigger(config, reason="飞书巡检测点配置已变更")
+        _save_settings(config, settings, cloud_buildings=verified | observed.keys(), changed_buildings=changed)
+    if schedule:
+        for building in changed:
+            request_inspection_upload_retrigger(config, reason="飞书巡检测点配置已变更", building=building)
     return changed
 
 
@@ -163,7 +182,7 @@ def refresh_cloud_point_settings(config, *, buildings=None, client=None, schedul
                 before = (load_point_settings(config) or {}).get(building)
                 groups = read_point_config_bitable(config, client=client, buildings=(building,))[building]
                 _validate_cloud_groups(building, groups)
-                with _settings_write_lock(config):
+                with _settings_write_lock(config, building=building), _settings_write_lock(config):
                     if (load_point_settings(config) or {}).get(building) != before:
                         continue
                     _remember_cloud_settings(config, {building: groups}, schedule=schedule)
@@ -175,10 +194,13 @@ def refresh_cloud_point_settings(config, *, buildings=None, client=None, schedul
     with _settings_write_lock(config):
         settings, revision = _settings_snapshot(config)
         verified = _cloud_buildings(config)
-        if (schedule and verified == set(POINT_CONFIG_TABLES) and len(errors) < len(requested)
-                and revision > (last_inspection_upload_revision(config) or 0)
-                and not read_inspection_upload_retrigger(config)):
-            request_inspection_upload_retrigger(config, reason="飞书测点配置等待上传核验")
+        if schedule:
+            for building, changed_at in _cloud_point_metadata(config).get("cloud_revisions", {}).items():
+                if (building in requested and building not in errors
+                        and changed_at > (last_inspection_upload_revision(config, building=building)
+                                          or last_inspection_upload_revision(config) or 0)
+                        and not read_inspection_upload_retrigger(config, building=building)):
+                    request_inspection_upload_retrigger(config, reason="飞书测点配置等待上传核验", building=building)
     return {b: groups for b, groups in (settings or {}).items() if b in verified}, revision, errors
 
 
@@ -336,12 +358,16 @@ def _validate_local_points(points, targets, status_rules, corrections):
             raise ValueError("固定或手工巡检项必须有说明和目标格，且不能设置数值修正")
 
 
-def sync_point_settings(config, settings, *, bridge=None):
+def sync_point_settings(config, settings, *, bridge=None, building=None):
     bridge = bridge or InternalBridgeHttpClient.from_runtime_config(config)
     if bridge is None:
         raise RuntimeError("未配置内网桥接地址")
     saved, revision = _settings_snapshot(config)
-    if saved != settings or not revision:
+    if building:
+        if ((saved or {}).get(building) != (settings or {}).get(building)
+                or _cloud_buildings(config) != {"D楼", "E楼"}):
+            raise PointSettingsConflict("当前楼栋配置变化或另一楼尚无已核验配置，请重新同步")
+    elif saved != settings or not revision:
         raise PointSettingsConflict("巡检测点配置已变更，拒绝同步旧配置")
     rules = query_rules(saved)
     response = bridge.put_inspection_point_rules(rules, revision=revision)
@@ -366,8 +392,15 @@ def _write_pending(config, buildings):
     atomic_write_text(path, json.dumps(sorted(buildings), ensure_ascii=False), encoding="utf-8")
 
 
-def _retrigger_path(config):
-    return _path(config).with_name("inspection_upload_retrigger_pending.json")
+def _scoped_runtime_file(config, stem, building):
+    if building not in (None, "D楼", "E楼"):
+        raise ValueError("巡检补传仅支持D、E楼")
+    suffix = f"_{building[0]}" if building else ""
+    return _path(config).with_name(f"{stem}{suffix}.json")
+
+
+def _retrigger_path(config, building=None):
+    return _scoped_runtime_file(config, "inspection_upload_retrigger_pending", building)
 
 
 @contextmanager
@@ -387,17 +420,17 @@ def _retrigger_lock(config):
             connection.close()
 
 
-def request_inspection_upload_retrigger(config, reason: str = "", *, force: bool = False) -> None:
+def request_inspection_upload_retrigger(config, reason: str = "", *, force: bool = False, building=None) -> None:
     """测点配置保存时登记“待传版本”；若已有上传任务在执行则由补派/巡检接手。
 
     标记携带保存时的配置修订号：任务只能确认覆盖到不高于该修订号的请求，
     更高的新保存不会被旧任务清掉。
     """
     with _retrigger_lock(config):
-        pending = read_inspection_upload_retrigger(config) or {}
+        pending = read_inspection_upload_retrigger(config, building=building) or {}
         force_id = uuid4().hex if force else pending.get("force_id")
         atomic_write_text(
-            _retrigger_path(config),
+            _retrigger_path(config, building),
             json.dumps({
                 "requested_at": time.time(),
                 "reason": str(reason or ""),
@@ -408,9 +441,9 @@ def request_inspection_upload_retrigger(config, reason: str = "", *, force: bool
         )
 
 
-def read_inspection_upload_retrigger(config):
+def read_inspection_upload_retrigger(config, *, building=None):
     """只读取出补派标记（含修订号）；不存在或已过期返回 None，不删除。"""
-    path = _retrigger_path(config)
+    path = _retrigger_path(config, building)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError):
@@ -423,7 +456,7 @@ def read_inspection_upload_retrigger(config):
     return payload
 
 
-def ack_inspection_upload_retrigger(config, covered_revision, *, covered_force_id=None) -> bool:
+def ack_inspection_upload_retrigger(config, covered_revision, *, covered_force_id=None, building=None) -> bool:
     """仅当标记请求的修订号已被本次实际上传覆盖（<= covered_revision）时清除标记。
 
     比较与删除在同一跨进程锁内完成并重新读取标记：旧确认在暂停期间被新保存
@@ -431,7 +464,7 @@ def ack_inspection_upload_retrigger(config, covered_revision, *, covered_force_i
     请求因此持久保留。
     """
     with _retrigger_lock(config):
-        payload = read_inspection_upload_retrigger(config)
+        payload = read_inspection_upload_retrigger(config, building=building)
         if payload is None:
             return False
         if payload.get("force_id") and payload["force_id"] != covered_force_id:
@@ -441,7 +474,7 @@ def ack_inspection_upload_retrigger(config, covered_revision, *, covered_force_i
                 and requested_revision > covered_revision:
             return False
         try:
-            _retrigger_path(config).unlink()
+            _retrigger_path(config, building).unlink()
         except OSError:
             return False
         return True
@@ -459,18 +492,20 @@ def consume_inspection_upload_retrigger(config) -> bool:
     return True
 
 
-def _upload_revision_path(config):
-    return _path(config).with_name("inspection_upload_last_revision.json")
+def _upload_revision_path(config, building=None):
+    return _scoped_runtime_file(config, "inspection_upload_last_revision", building)
 
 
-def record_inspection_upload_revision(config, revision) -> None:
+def record_inspection_upload_revision(config, revision, *, building=None) -> None:
     """记录最近一次成功上传覆盖的配置修订号，供补派任务判断是否仍需重传。"""
-    atomic_write_text(_upload_revision_path(config), json.dumps({"revision": int(revision)}), encoding="utf-8")
+    with _retrigger_lock(config):
+        revision = max(int(revision), last_inspection_upload_revision(config, building=building) or 0)
+        atomic_write_text(_upload_revision_path(config, building), json.dumps({"revision": revision}), encoding="utf-8")
 
 
-def last_inspection_upload_revision(config):
+def last_inspection_upload_revision(config, *, building=None):
     try:
-        payload = json.loads(_upload_revision_path(config).read_text(encoding="utf-8"))
+        payload = json.loads(_upload_revision_path(config, building).read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError):
         return None
     revision = payload.get("revision") if isinstance(payload, dict) else None
@@ -495,22 +530,22 @@ def load_point_settings_with_revision(config):
     return settings, revision
 
 
-def _retrigger_state_path(config):
-    return _path(config).with_name("inspection_upload_retrigger_state.json")
+def _retrigger_state_path(config, building=None):
+    return _scoped_runtime_file(config, "inspection_upload_retrigger_state", building)
 
 
-def read_inspection_retrigger_dispatch_state(config):
+def read_inspection_retrigger_dispatch_state(config, *, building=None):
     """补派巡检的派发节流状态；用于限制失败后的重试频率。"""
     try:
-        payload = json.loads(_retrigger_state_path(config).read_text(encoding="utf-8"))
+        payload = json.loads(_retrigger_state_path(config, building).read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
 
-def record_inspection_retrigger_dispatch(config, *, force_id=None) -> None:
+def record_inspection_retrigger_dispatch(config, *, force_id=None, building=None) -> None:
     atomic_write_text(
-        _retrigger_state_path(config),
+        _retrigger_state_path(config, building),
         json.dumps({"last_dispatch_at": time.time(), "force_id": force_id}), encoding="utf-8")
 
 
@@ -544,13 +579,14 @@ def save_point_group(config, *, building, family, points, remove, expected_group
         sync_point_config_bitable,
     )
 
-    with _settings_write_lock(config):
+    with _settings_write_lock(config, building=building):
         try:
             client = point_config_client(config)
             snapshots = {building: read_building_point_records(client, building)}
             previous = read_point_config_bitable(config, client=client, buildings=(building,), snapshots=snapshots)
             _validate_cloud_groups(building, previous[building])
-            _remember_cloud_settings(config, previous)
+            with _settings_write_lock(config):
+                _remember_cloud_settings(config, previous)
             # The page also receives cached samples for display. Use the same group for conflict checks.
             settings = {building: dict(previous[building])}
         except Exception as exc:
@@ -607,19 +643,20 @@ def save_point_group(config, *, building, family, points, remove, expected_group
                                             client=client, prior_settings=previous, snapshots=snapshots)
             confirmed = read_point_config_bitable(config, client=client, buildings=(building,), snapshots=rows)
             _validate_cloud_groups(building, confirmed[building])
-            _remember_cloud_settings(config, confirmed)
+            with _settings_write_lock(config):
+                _remember_cloud_settings(config, confirmed)
         except PointSettingsConflict:
             raise
         except Exception as exc:
             raise PointConfigUnavailable(f"{building}飞书配置尚未核验，请重新加载后查看：{exc}") from exc
         settings = load_point_settings(config)
-        if _cloud_buildings(config) == set(POINT_CONFIG_TABLES):
-            try:
-                sync_point_settings(config, settings)
-            except (RuntimeError, OSError, ValueError):
-                pass
-            else:
-                return {"ok": True, "settings": settings, "synced": True, "cloud_synced": True,
-                        "message": "测点设置已保存并同步"}
-        return {"ok": True, "settings": settings, "synced": False, "cloud_synced": True,
-                "message": "飞书配置已核验，内网采集等待同步"}
+    if _cloud_buildings(config) == set(POINT_CONFIG_TABLES):
+        try:
+            sync_point_settings(config, settings, building=building)
+        except (RuntimeError, OSError, ValueError):
+            pass
+        else:
+            return {"ok": True, "settings": settings, "synced": True, "cloud_synced": True,
+                    "message": "测点设置已保存并同步"}
+    return {"ok": True, "settings": settings, "synced": False, "cloud_synced": True,
+            "message": "飞书配置已核验，内网采集等待同步"}

@@ -610,7 +610,8 @@ class InspectionDataUploadService:
             })
         return rows
 
-    def _sources(self, source_date: str, log, cancel, source_bucket_key: str = "", point_settings=None, *, buildings=None) -> dict:
+    def _sources(self, source_date: str, log, cancel, source_bucket_key: str = "", point_settings=None, *,
+                 buildings=None, scoped_building=None) -> dict:
         internal = self._internal or InternalBridgeHttpClient.from_runtime_config(self.runtime_config)
         if internal is None:
             raise ValueError("巡检数据处理需要配置内网HTTP桥接地址")
@@ -632,11 +633,22 @@ class InspectionDataUploadService:
                 raise RuntimeError("巡检测点设置已变更，请重新运行；未清空多维表")
             try:
                 if pending_sync:
-                    sync_point_settings(self.runtime_config, point_settings, bridge=internal)
+                    scope = {"building": scoped_building} if scoped_building else {}
+                    sync_point_settings(self.runtime_config, point_settings, bridge=internal, **scope)
                     pending_sync = False
-                payload = internal.get_inspection_snapshot(source_date=source_date, bucket_key=requested_bucket)
+                if scoped_building and source_date == today:
+                    payload = internal.get_latest_inspection_points(building=scoped_building)
+                    if payload.get("ok") and isinstance(payload.get("datasets"), list):
+                        # This read API may legitimately return the last usable
+                        # slot. Only the requested slot may feed a fresh batch.
+                        payload = {**payload, "bucket_key": requested_bucket, "datasets": [
+                            doc for doc in payload["datasets"]
+                            if not isinstance(doc, dict) or doc.get("bucket_key") == requested_bucket
+                        ]}
+                else:
+                    payload = internal.get_inspection_snapshot(source_date=source_date, bucket_key=requested_bucket)
             except Exception as exc:
-                if not self._retryable_source_error(exc):
+                if not self._retryable_source_error(exc) and not (scoped_building and "409" in str(exc)):
                     raise
                 payload = {}
                 if time.monotonic() - last_error_log >= 60:
@@ -713,7 +725,7 @@ class InspectionDataUploadService:
         )
 
     def run(self, *, log: Callable[[str], None] | None = None, check_cancel=None,
-            source_date=None, source_bucket_key: str = "", dry_run: bool = False) -> dict[str, Any]:
+            source_date=None, source_bucket_key: str = "", dry_run: bool = False, building=None) -> dict[str, Any]:
         log = log or (lambda _: None)
         cancel = check_cancel or (lambda: None)
         if not self.cfg["enabled"]:
@@ -722,6 +734,9 @@ class InspectionDataUploadService:
             raise ValueError("巡检数据处理仅支持D楼、E楼，必须同时预检")
         if len(set(self.cfg["tables"][b] for b in self.cfg["buildings"])) != 2:
             raise ValueError("D/E楼巡检目标表不能相同")
+        if building is not None and building not in self.cfg["buildings"]:
+            raise ValueError("巡检仅支持D、E楼")
+        requested = (building,) if building else tuple(self.cfg["buildings"])
         date = self.normalize_source_date(source_date)
         if not source_bucket_key and date == datetime.now().strftime("%Y-%m-%d"):
             source_bucket_key = inspection_hour_bucket(datetime.now())
@@ -734,17 +749,18 @@ class InspectionDataUploadService:
 
         require_current_bucket()
         point_settings, settings_revision, config_errors = refresh_cloud_point_settings(
-            self.runtime_config, client=self.make_bitable_client(), schedule=not dry_run)
+            self.runtime_config, buildings=requested, client=self.make_bitable_client(), schedule=not dry_run)
         if set(point_settings or {}) != set(self.cfg["buildings"]):
             raise RuntimeError("D/E楼尚未完成飞书测点配置的首次核验；保留原巡检数据")
-        buildings = [building for building in self.cfg["buildings"] if building not in config_errors]
+        buildings = [b for b in requested if b not in config_errors]
         if not buildings:
             raise RuntimeError("飞书巡检配置暂不可用；保留原巡检数据")
         if config_errors:
             settings_revision = None  # A partial run cannot acknowledge the shared upload revision.
-            for building, error in config_errors.items():
-                log(f"[巡检数据处理] {building}飞书测点配置待核验，本轮保留该楼原数据：{error}")
-        sources = self._sources(date, log, cancel, source_bucket_key, point_settings, buildings=buildings)
+            for failed_building, error in config_errors.items():
+                log(f"[巡检数据处理] {failed_building}飞书测点配置待核验，本轮保留该楼原数据：{error}")
+        scope = {"scoped_building": building} if building else {}
+        sources = self._sources(date, log, cancel, source_bucket_key, point_settings, buildings=buildings, **scope)
         hvac = {building: entries[HVAC_FAMILY] for building, entries in sources.items()}
         report_controls = report_operating_controls(self._internal, self.runtime_config, hvac, log)
         operating_buildings = set()

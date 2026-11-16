@@ -140,7 +140,8 @@ def _fake_container(config, double, watchdog=None):
     )
     fake._job_busy_for_feature_prefixes = lambda prefix: AppContainer._job_busy_for_feature_prefixes(fake, prefix)
     fake._submit_inspection_data_upload = lambda slot: AppContainer._submit_inspection_data_upload(fake, slot)
-    fake._submit_inspection_retrigger = lambda: AppContainer._submit_inspection_retrigger(fake)
+    fake._submit_inspection_retrigger = lambda **scope: AppContainer._submit_inspection_retrigger(fake, **scope)
+    fake._dispatch_inspection_retrigger = lambda building=None: AppContainer._dispatch_inspection_retrigger(fake, building)
     return fake
 
 
@@ -373,6 +374,24 @@ def test_trigger_queues_retrigger_when_busy(tmp_path):
     assert consume_inspection_upload_retrigger(_config(tmp_path)) is True
 
 
+def test_independent_building_jobs_and_receipts(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    double = _Double()
+    fake = _fake_container(config, double)
+    revision = _save(config, "checked")
+    assert AppContainer.trigger_inspection_data_upload_now(fake, building="D楼")["ok"]
+    double.jobs[0].status = "running"
+    assert AppContainer.trigger_inspection_data_upload_now(fake, building="E楼")["ok"]
+    assert [job.resource_keys for job in double.jobs] == [["inspection_data_upload:D"], ["inspection_data_upload:E"]]
+    assert [job.payload["building"] for job in double.jobs] == ["D楼", "E楼"]
+    _fake_service(monkeypatch, [{"status": "success", "settings_revision": revision, "buildings": ["D楼"]}])
+    task_handlers.handle_inspection_data_upload(config, double.jobs[0].payload, lambda _: None)
+    assert read_inspection_upload_retrigger(config, building="D楼") is None
+    assert read_inspection_upload_retrigger(config, building="E楼")["revision"] == revision
+    assert point_settings.last_inspection_upload_revision(config, building="D楼") == revision
+    assert point_settings.last_inspection_upload_revision(config, building="E楼") is None
+
+
 def test_trigger_busy_with_waiting_retrigger_does_not_stack(tmp_path):
     fake = SimpleNamespace(
         runtime_config=_config(tmp_path),
@@ -524,6 +543,7 @@ def test_pressure_confirmation_dispatches_even_after_same_revision_or_recent_job
         _submit_inspection_retrigger=lambda: submissions.append(force_id),
         add_system_log=lambda _message: None,
     )
+    fake._dispatch_inspection_retrigger = lambda building=None: AppContainer._dispatch_inspection_retrigger(fake, building)
     assert AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
     assert not AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
     assert submissions == [force_id]

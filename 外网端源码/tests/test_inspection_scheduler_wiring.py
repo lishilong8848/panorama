@@ -253,7 +253,7 @@ def test_worker_passes_contract_and_cancellation(fake_inspection_service):
     }
 
 
-def test_manual_and_scheduler_use_global_resource_and_dedupe(fake_inspection_service, monkeypatch):
+def test_manual_and_scheduler_reserve_both_buildings_and_dedupe(fake_inspection_service, monkeypatch):
     from app.bootstrap.container import AppContainer
     from app.modules.report_pipeline.api import routes
 
@@ -274,7 +274,7 @@ def test_manual_and_scheduler_use_global_resource_and_dedupe(fake_inspection_ser
     AppContainer._submit_inspection_data_upload(container, "2026-10-27 01:10:00")
     assert captured[-1]["worker_payload"]["source_bucket_key"] == "2026-10-27 00"
     for call in captured:
-        assert "inspection_data_upload:global" in call["resource_keys"]
+        assert {"inspection_data_upload:D", "inspection_data_upload:E"} <= set(call["resource_keys"])
         assert call["dedupe_key"] == "inspection_data_upload"
         assert call["worker_handler"] == "inspection_data_upload"
     with pytest.raises(HTTPException) as invalid:

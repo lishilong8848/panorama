@@ -646,6 +646,23 @@ def test_partial_config_failure_uploads_only_verified_building(tmp_path, monkeyp
     assert {table for _, table in cloud.events} == {e_table}
 
 
+def test_scoped_run_collects_and_writes_only_requested_building(tmp_path, monkeypatch):
+    internal = SnapshotSources(inspection_datasets(tmp_path))
+    internal.get_latest_inspection_points = Mock(side_effect=lambda building: {
+        "ok": True, "datasets": [doc for (owner, _), doc in internal.entries.items() if owner == building],
+    })
+    internal.get_inspection_snapshot = Mock(side_effect=AssertionError("single-building upload queried both buildings"))
+    cloud = Cloud()
+    config = {"paths": {"runtime_state_root": str(tmp_path)}}
+    service = InspectionDataUploadService(config, internal_client=internal, bitable_client=cloud)
+    monkeypatch.setattr(module, "BACKUP_ROOT", tmp_path / "backups")
+    expected_table = module.DEFAULT_CONFIG["tables"]["D楼"]
+    result = service.run(building="D楼")
+    assert result["buildings"] == ["D楼"] and result["status"] == "success"
+    internal.get_latest_inspection_points.assert_called_once_with(building="D楼")
+    assert {table for _, table in cloud.events} == {expected_table}
+
+
 def test_review_point_routes_are_building_scoped_and_reject_stale_edits(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from app.modules.inspection_data.service import point_config_bitable
@@ -668,7 +685,7 @@ def test_review_point_routes_are_building_scoped_and_reject_stale_edits(tmp_path
     app = FastAPI()
     app.include_router(router)
     app.state.container = SimpleNamespace(runtime_config=config, _configured_deployment_snapshot=lambda: {'role_mode': 'external'},
-                                          trigger_inspection_data_upload_now=lambda: {'ok': True})
+                                          trigger_inspection_data_upload_now=lambda **_: {'ok': True})
     base = '/api/scheduler/inspection-data-upload/points'
     with TestClient(app) as client:
         expected = client.get(f'{base}/d').json()['settings'][family]

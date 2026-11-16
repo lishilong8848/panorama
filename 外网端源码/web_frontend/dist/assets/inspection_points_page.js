@@ -124,7 +124,7 @@ const TEMPLATE = `
       </div>
       <div class="inspection-points-summary">
         <span>测点 {{ filteredRows.length }} 项</span><span>最近采样：{{ sampleTime || '暂无采样' }}</span>
-        <button v-if="settingsError" class="btn btn-secondary btn-mini" type="button" :disabled="settingsBusy || saving" @click="loadSettings">重新读取设置</button>
+        <button class="btn btn-secondary btn-mini" type="button" :disabled="settingsBusy || saving" @click="loadSettings({ fresh: true })">从飞书刷新设置</button>
       </div>
       <p v-if="settingsError || latestError" role="alert" class="review-status-line review-status-danger">{{ settingsError || latestError }}</p>
       <p v-if="message" role="status" class="review-status-line review-status-info">{{ message }}</p>
@@ -355,7 +355,7 @@ export function mountInspectionPointsPage(Vue) {
         return positions.every(valid) && new Set(positions).size === ROUND_FIELDS.length;
       }
 
-      async function loadSettings({ background = false } = {}) {
+      async function loadSettings({ background = false, fresh = false } = {}) {
         if (settingsBusy.value || saving.value) return;
         if (draft.value || operatingDraft.value) {
           if (background || !window.confirm("重新读取飞书配置会放弃当前编辑，是否继续？")) return;
@@ -363,7 +363,7 @@ export function mountInspectionPointsPage(Vue) {
         settingsBusy.value = true;
         if (!background) settingsError.value = "";
         try {
-          const response = await getBuildingInspectionPointSettingsApi(code, { signal: controller.signal });
+          const response = await getBuildingInspectionPointSettingsApi(code, { signal: controller.signal, fresh });
           if (background && (draft.value || operatingDraft.value)) return;
           draft.value = null;
           settings.value = response.settings;

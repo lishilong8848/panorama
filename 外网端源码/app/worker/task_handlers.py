@@ -771,17 +771,23 @@ def handle_inspection_data_upload(
         record_inspection_upload_revision,
     )
 
+    building = payload.get("building")
+    if building is not None and building not in ("D楼", "E楼"):
+        raise ValueError("巡检仅支持D、E楼")
+    scope = {"building": building} if building else {}
     if payload.get("retrigger"):
         # 补派任务启动不清标记：待传请求持久保留，只有成功上传并回查覆盖到
         # 其请求修订号后才由 ack 确认清除。标记请求已被既有回执覆盖时跳过，
         # 避免重复清表重传。
-        marker = read_inspection_upload_retrigger(config)
+        marker = read_inspection_upload_retrigger(config, **scope)
+        if building and marker is None:
+            return {"status": "skipped", "reason": "该楼无待补派版本"}
         current_revision = current_point_settings_revision(config)
-        last_revision = last_inspection_upload_revision(config)
+        last_revision = last_inspection_upload_revision(config, **scope)
         if (marker is not None and not marker.get("force_id")
                 and isinstance(marker.get("revision"), int) and isinstance(last_revision, int)
                 and marker["revision"] <= last_revision
-                and ack_inspection_upload_retrigger(config, last_revision)):
+                and ack_inspection_upload_retrigger(config, last_revision, **scope)):
             emit_log("[巡检数据处理] 补派标记的请求已由最近一次上传覆盖，本次补派跳过")
             return {"status": "skipped", "reason": "配置已由最近一次上传覆盖"}
         if marker is None and not dry_run and current_revision and last_revision == current_revision:
@@ -801,24 +807,36 @@ def handle_inspection_data_upload(
     inspection_log("[巡检数据处理] 正在核对测点配置和本时段内网数据")
 
     def run_once():
-        marker_at_start = read_inspection_upload_retrigger(config) or {}
+        marker_at_start = read_inspection_upload_retrigger(config, **scope) or {}
         force_id = marker_at_start.get("force_id")
+        building_markers = {b: read_inspection_upload_retrigger(config, building=b) or {}
+                            for b in ("D楼", "E楼")} if not building else {}
         result = InspectionDataUploadService(config).run(
             source_date=payload.get("source_date") or None,
             source_bucket_key=str(payload.get("source_bucket_key") or ""),
             log=inspection_log,
             check_cancel=check_cancel,
             dry_run=dry_run,
+            **scope,
         )
         if not dry_run and isinstance(result, dict) and result.get("status") == "success":
+            if building and result.get("buildings") != [building]:
+                raise RuntimeError("巡检补派回执楼栋与任务不一致")
             uploaded_revision = result.get("settings_revision", result.get("uploaded_fixture_revision"))
             if isinstance(uploaded_revision, int):
                 # 仅在上传成功且服务完成回查核验后记账并确认标记；
                 # skipped/失败/缺失权威快照版本一律不写回执、不动标记。
                 try:
-                    record_inspection_upload_revision(config, uploaded_revision)
+                    record_inspection_upload_revision(config, uploaded_revision, **scope)
                     if not (force_id and result.get("handover_pressure_read_failed")):
-                        ack_inspection_upload_retrigger(config, uploaded_revision, covered_force_id=force_id)
+                        ack_inspection_upload_retrigger(config, uploaded_revision, covered_force_id=force_id, **scope)
+                    if not building:
+                        for b in result.get("buildings", ()):
+                            requested_force = building_markers[b].get("force_id")
+                            record_inspection_upload_revision(config, uploaded_revision, building=b)
+                            if not (requested_force and result.get("handover_pressure_read_failed")):
+                                ack_inspection_upload_retrigger(
+                                    config, uploaded_revision, covered_force_id=requested_force, building=b)
                 except (OSError, ValueError):
                     emit_log("[巡检数据处理] 上传修订号记录失败，不影响本次上传结果")
         return result
@@ -832,7 +850,7 @@ def handle_inspection_data_upload(
         if (dry_run or retriggers >= max_retriggers or result.get("handover_pressure_read_failed")
                 or result.get("point_config_read_failed")):
             break
-        if read_inspection_upload_retrigger(config) is None:
+        if read_inspection_upload_retrigger(config, **scope) is None:
             break
         retriggers += 1
         inspection_log("[巡检数据处理] 存在更新的待传版本，继续立即补传一次")

@@ -123,8 +123,9 @@ export function putInspectionPointSettingsApi(payload) {
   }, 45000);
 }
 
-export function getBuildingInspectionPointSettingsApi(building, options = {}) {
-  return apiJsonWithTimeout(`/api/scheduler/inspection-data-upload/points/${encodeURIComponent(building)}`, { cache: "no-store", ...options }, 15000);
+export function getBuildingInspectionPointSettingsApi(building, { fresh = false, ...options } = {}) {
+  const suffix = fresh ? "?fresh=true" : "";
+  return apiJsonWithTimeout(`/api/scheduler/inspection-data-upload/points/${encodeURIComponent(building)}${suffix}`, { cache: "no-store", ...options }, fresh ? 30000 : 15000);
 }
 
 export function getBuildingInspectionLatestPointsApi(building, options = {}) {

@@ -5383,7 +5383,7 @@ def job_inspection_data_upload_run(
             run_func=None,
             worker_handler="inspection_data_upload",
             worker_payload={"source_date": source_date, "dry_run": dry_run},
-            resource_keys=_job_resource_keys("inspection_data_upload:global"),
+            resource_keys=_job_resource_keys("inspection_data_upload:D", "inspection_data_upload:E"),
             priority="manual",
             feature="inspection_data_upload",
             dedupe_key="inspection_data_upload",
