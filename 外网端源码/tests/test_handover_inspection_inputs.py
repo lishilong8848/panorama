@@ -92,7 +92,7 @@ def test_only_explicit_exact_same_round_pressure_after_confirm(tmp_path, monkeyp
     assert inputs.record_pressure_confirmation(config, session, revision, now=when("15 10:01"))
     from app.modules.inspection_data.service.point_settings import read_inspection_upload_retrigger
 
-    marker = read_inspection_upload_retrigger({"paths": {"runtime_state_root": str(tmp_path)}})
+    marker = read_inspection_upload_retrigger({"paths": {"runtime_state_root": str(tmp_path)}}, building=building)
     assert marker["force_id"] and "D楼" in marker["reason"]
     public = inputs.public_review_document(store.get_document(session["session_id"])["document"])
     assert public == {"cooling_pump_pressures": pressure_payload("0 MPa")}
@@ -238,3 +238,20 @@ def test_existing_capacity_reports_control_correct_pump_without_ids(tmp_path):
     assert marks["E21"] == "√" and "E17" not in marks
     assert marks["E26"] == "△" and marks["E24"] == "/"
     assert marks["K26"] == "√" and marks["N26"] == ""
+
+
+def test_mode_table_source_supplies_same_round_frequencies_and_rejects_state_conflicts(monkeypatch):
+    from app.modules.inspection_data.service import chiller_operating_points as operating
+
+    stamp = when("15 18:00")
+    sample = stamp.isoformat()
+    raw = [[], ["", "", "", "", sample], [],
+           ["", "D冷站", "D-150-BAS-101", "1#冷冻泵频率反馈", "26"],
+           ["", "", "", "1#冷却泵频率反馈", "25"],
+           ["", "", "", "1号冷机运行模式", 2]]
+    mode_source = operating._mode_report_observations(raw, start=stamp, end=stamp)
+    capacity = {(('D楼', '冷却泵', '1'), stamp): {'0'}}
+    monkeypatch.setattr(operating, '_source_observations', lambda *_args, **kwargs: {
+        'D楼': capacity if kwargs.get('family') == operating.CAPACITY_FAMILY else mode_source})
+    result = operating.report_operating_controls(None, {}, {'D楼':{'value_time':sample}}, lambda _: None)
+    assert result['D楼'] == {'modes': {'1':2}, 'pumps': {('冷冻一次泵','1'):'26'}}

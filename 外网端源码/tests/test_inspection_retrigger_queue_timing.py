@@ -17,6 +17,7 @@ from app.modules.inspection_data.service import point_settings
 from app.worker import task_handlers
 
 ACTIVE = {"submitted", "running"}
+DEDUPE_KEY = "inspection_data_upload:retrigger:D"
 
 
 class QueueDouble:
@@ -92,11 +93,12 @@ class Scenario:
                 self.cfg = cfg
 
             def run(inner, **kwargs):  # noqa: N805
+                assert kwargs["building"] == "D楼"
                 revision = point_settings.current_point_settings_revision(self.config)
                 self.actual.append(revision)
                 started.set()
                 assert inner_release(index)
-                return {"status": "success", "settings_revision": revision,
+                return {"status": "success", "settings_revision": revision, "buildings": ["D楼"],
                         "uploaded_fixture_revision": revision}
 
         def inner_release(run_index):
@@ -119,13 +121,12 @@ class Scenario:
             _configured_deployment_snapshot=lambda: {"role_mode": "external"},
             add_system_log=lambda message: None,
         )
-        fake._job_busy_for_feature_prefixes = lambda prefix: AppContainer._job_busy_for_feature_prefixes(fake, prefix)
-        fake._submit_inspection_data_upload = lambda slot: AppContainer._submit_inspection_data_upload(fake, slot)
-        fake._submit_inspection_retrigger = lambda: AppContainer._submit_inspection_retrigger(fake)
+        fake._submit_inspection_retrigger = lambda **scope: AppContainer._submit_inspection_retrigger(fake, **scope)
+        fake._dispatch_inspection_retrigger = lambda building: AppContainer._dispatch_inspection_retrigger(fake, building)
         return fake
 
     def trigger(self, fake):
-        return AppContainer.trigger_inspection_data_upload_now(fake)
+        return AppContainer.trigger_inspection_data_upload_now(fake, building="D楼")
 
     def begin_job(self, logs):
         job = self.double.pop_runnable()
@@ -158,10 +159,10 @@ class Scenario:
         self.runs[index]["release"].set()
 
     def receipt(self):
-        return point_settings.last_inspection_upload_revision(self.config)
+        return point_settings.last_inspection_upload_revision(self.config, building="D楼")
 
     def pending(self):
-        return point_settings.peek_inspection_upload_retrigger(self.config)
+        return point_settings.read_inspection_upload_retrigger(self.config, building="D楼") is not None
 
 
 def _versions(scenario):
@@ -179,8 +180,8 @@ def test_receipt_matches_actual_upload_and_queued_retrigger_covers_last_save(tmp
     job0, thread0, holder0 = scenario.begin_job(logs)
     scenario.await_run(0)
     revisions[2] = scenario.save(2)
-    assert scenario.trigger(fake)["ok"] is False          # 忙时：标记 + 排队补派
-    assert scenario.double.submissions[-1][0] == "inspection_data_upload:retrigger"
+    assert scenario.trigger(fake)["ok"] is False          # 在跑的同楼任务保留新标记
+    assert scenario.double.submissions[-1][0] == DEDUPE_KEY
     scenario.release(0)
     scenario.await_run(1)
     revisions[3] = scenario.save(3)
@@ -194,11 +195,12 @@ def test_receipt_matches_actual_upload_and_queued_retrigger_covers_last_save(tmp
     revisions[5] = scenario.save(5)                        # 第 4 次上传完成前保存 5
     scenario.trigger(fake)
     retrigger_submissions = [sid for key, sid in scenario.double.submissions
-                             if key == "inspection_data_upload:retrigger"]
+                             if key == DEDUPE_KEY]
     assert len(retrigger_submissions) == 1                 # 多次保存不叠加补派
     scenario.release(3)
     thread0.join(10)
     assert "error" not in holder0, holder0.get("error")
+    assert AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
     job_r, thread_r, holder_r = scenario.begin_job(logs)   # 排队补派接手版本 5
     scenario.await_run(4)
     scenario.release(4)
@@ -217,10 +219,6 @@ def test_watchdog_takes_over_after_retrigger_cap_exit(tmp_path, monkeypatch):
     revisions = {version: scenario.save(version) for version in (1,)}
     scenario.trigger(fake)
     job0, thread0, holder0 = scenario.begin_job(logs)
-    plan = [
-        (0, 2), (1, 3), (2, 4), (3, 5),    # 主任务：run1-4，期间保存 2-5（5 在 run4 期间）
-        (4, 6), (5, 7), (6, 8), (7, 9),    # 补派：run5-8，期间保存 6-9（9 在 run8 期间）
-    ]
     for index in range(4):
         scenario.await_run(index)
         revisions[index + 2] = scenario.save(index + 2)
@@ -228,6 +226,7 @@ def test_watchdog_takes_over_after_retrigger_cap_exit(tmp_path, monkeypatch):
         scenario.release(index)
     thread0.join(10)
     assert "error" not in holder0, holder0.get("error")
+    assert AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
     job_r, thread_r, holder_r = scenario.begin_job(logs)
     for index in range(4, 8):
         scenario.await_run(index)
@@ -250,11 +249,11 @@ def test_watchdog_takes_over_after_retrigger_cap_exit(tmp_path, monkeypatch):
         waiter = threading.Event()
         for _ in range(200):
             if len([sid for key, sid in scenario.double.submissions
-                    if key == "inspection_data_upload:retrigger"]) >= 2:
+                        if key == DEDUPE_KEY]) >= 3:
                 break
             waiter.wait(0.05)
         assert len([sid for key, sid in scenario.double.submissions
-                    if key == "inspection_data_upload:retrigger"]) >= 2, "巡检未提交接班补派"
+                    if key == DEDUPE_KEY]) >= 3, "巡检未提交接班补派"
         job_w, thread_w, holder_w = scenario.begin_job(logs)
         scenario.await_run(8)
         scenario.release(8)
@@ -268,23 +267,22 @@ def test_watchdog_takes_over_after_retrigger_cap_exit(tmp_path, monkeypatch):
     assert scenario.double.active_count() == 0
 
 
-def test_dispatch_pending_is_noop_while_queue_busy(tmp_path, monkeypatch):
+def test_waiting_building_job_shares_its_resource_with_scheduled_upload(tmp_path, monkeypatch):
     scenario = Scenario(tmp_path, monkeypatch)
     fake = scenario.fake_container()
-    point_settings.request_inspection_upload_retrigger(scenario.config, reason="测试")
+    point_settings.request_inspection_upload_retrigger(scenario.config, reason="测试", building="D楼")
     job = scenario.double.start_worker_job(
         name="占用", worker_handler="inspection_data_upload", worker_payload={},
-        resource_keys=["inspection_data_upload:global"], feature="inspection_data_upload",
+        resource_keys=["inspection_data_upload:D", "inspection_data_upload:E"], feature="inspection_data_upload",
         dedupe_key="inspection_data_upload")
     scenario.double.mark_running(job)
     result = AppContainer.dispatch_pending_inspection_retrigger(fake)
-    assert result["ok"] is False
-    assert scenario.pending() is True                      # 忙时不消费、不派发
-    scenario.double.mark_terminal(job)
-    result = AppContainer.dispatch_pending_inspection_retrigger(fake)
     assert result["ok"] is True
-    assert scenario.pending() is True                      # 标记留给接班任务启动时消费
-    assert scenario.double.find_active_job_by_dedupe_key("inspection_data_upload:retrigger")
+    assert scenario.pending() is True
+    assert scenario.double.pop_runnable() is None
+    assert not AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
+    scenario.double.mark_terminal(job)
+    assert scenario.double.pop_runnable().dedupe_key == DEDUPE_KEY
 
 
 def test_receipt_never_overstates_when_save_lands_before_booking(tmp_path, monkeypatch):

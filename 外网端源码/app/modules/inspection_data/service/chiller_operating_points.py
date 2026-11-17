@@ -4,7 +4,7 @@ import re
 from decimal import Decimal, InvalidOperation
 
 from app.modules.inspection_data.service.handover_inspection_inputs import (
-    MODE_ROWS, WORKBOOKS, _point_row, _source_observations, _stamp,
+    MODE_ROWS, WORKBOOKS, _point_row, _source_observations, _stamp, mode_observations,
 )
 from handover_log_module.core.chiller_mode_resolver import DEFAULT_VALUE_MAP, _normalize_mode_code
 
@@ -101,19 +101,34 @@ def pump_observations(rows, *, start, end):
     return output
 
 
+def _mode_report_observations(rows, *, start, end):
+    """Read frequencies from the same timestamped document that feeds the mode table."""
+    modes = mode_observations(rows, start=start, end=end)
+    pumps = pump_observations(rows, start=start, end=end)
+    return {('mode', *key): values for key, values in modes.items()} | {
+        ('pump', *key): values for key, values in pumps.items()}
+
+
 def report_operating_controls(bridge, config, hvac, log):
-    modes = _source_observations(bridge, config, hvac, log)
+    mode_report = _source_observations(bridge, config, hvac, log, extract=_mode_report_observations)
     pumps = _source_observations(bridge, config, hvac, log, family=CAPACITY_FAMILY, extract=pump_observations)
     controls = {}
     for building, doc in hvac.items():
         stamp = _stamp(doc["value_time"])
         control = {"modes": {}, "pumps": {}}
-        for (number, when), values in modes.get(building, {}).items():
-            if when == stamp and len(values) == 1:
-                control["modes"][str(number)] = next(iter(values))
-        for ((scope, pump, number), when), values in pumps.get(building, {}).items():
-            if scope == building and when == stamp and len(values) == 1:
-                control["pumps"][pump, number] = next(iter(values))
+        samples = {key: set(values) for key, values in pumps.get(building, {}).items()}
+        for (kind, identity, when), values in mode_report.get(building, {}).items():
+            if when != stamp:
+                continue
+            if kind == 'mode' and len(values) == 1:
+                control["modes"][str(identity)] = next(iter(values))
+            elif kind == 'pump':
+                samples.setdefault((identity, when), set()).update(values)
+        for ((scope, pump, number), when), values in samples.items():
+            # Numeric formatting of the same frequency can differ between reports.
+            readings = {value for value in (_frequency_running(raw) for raw in values) if value is not None}
+            if scope == building and when == stamp and len(readings) == 1:
+                control["pumps"][pump, number] = next(raw for raw in sorted(values) if _frequency_running(raw) is not None)
         if control["modes"] or control["pumps"]:
             controls[building] = control
     return controls

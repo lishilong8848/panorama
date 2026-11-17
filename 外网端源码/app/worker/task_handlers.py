@@ -765,7 +765,6 @@ def handle_inspection_data_upload(
 
     from app.modules.inspection_data.service.point_settings import (
         ack_inspection_upload_retrigger,
-        current_point_settings_revision,
         last_inspection_upload_revision,
         read_inspection_upload_retrigger,
         record_inspection_upload_revision,
@@ -776,22 +775,22 @@ def handle_inspection_data_upload(
         raise ValueError("巡检仅支持D、E楼")
     scope = {"building": building} if building else {}
     if payload.get("retrigger"):
+        # A queued task from an older version may have lost the triggering
+        # building. Leave its legacy marker for a regular scheduled upload.
+        if building is None:
+            return {"status": "skipped", "reason": "旧补传任务无楼栋，等待常规定时上传"}
         # 补派任务启动不清标记：待传请求持久保留，只有成功上传并回查覆盖到
         # 其请求修订号后才由 ack 确认清除。标记请求已被既有回执覆盖时跳过，
         # 避免重复清表重传。
         marker = read_inspection_upload_retrigger(config, **scope)
-        if building and marker is None:
+        if marker is None:
             return {"status": "skipped", "reason": "该楼无待补派版本"}
-        current_revision = current_point_settings_revision(config)
         last_revision = last_inspection_upload_revision(config, **scope)
-        if (marker is not None and not marker.get("force_id")
+        if (not marker.get("force_id")
                 and isinstance(marker.get("revision"), int) and isinstance(last_revision, int)
                 and marker["revision"] <= last_revision
                 and ack_inspection_upload_retrigger(config, last_revision, **scope)):
             emit_log("[巡检数据处理] 补派标记的请求已由最近一次上传覆盖，本次补派跳过")
-            return {"status": "skipped", "reason": "配置已由最近一次上传覆盖"}
-        if marker is None and not dry_run and current_revision and last_revision == current_revision:
-            emit_log("[巡检数据处理] 配置已由最近一次上传覆盖，本次补派跳过")
             return {"status": "skipped", "reason": "配置已由最近一次上传覆盖"}
 
     emit_event = getattr(runtime, "emit_event", None)
@@ -847,7 +846,7 @@ def handle_inspection_data_upload(
         # 临时失败、取消、跨时段退出直接抛出：标记原样保留，
         # 由补派巡检在队列空闲后按最新待传版本接手。
         result = run_once()
-        if (dry_run or retriggers >= max_retriggers or result.get("handover_pressure_read_failed")
+        if (not building or dry_run or retriggers >= max_retriggers or result.get("handover_pressure_read_failed")
                 or result.get("point_config_read_failed")):
             break
         if read_inspection_upload_retrigger(config, **scope) is None:

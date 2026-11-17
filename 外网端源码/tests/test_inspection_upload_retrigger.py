@@ -41,18 +41,18 @@ def test_worker_reads_web_settings_and_clears_web_marker_from_a_different_direct
 
     monkeypatch.chdir(worker_dir)
     old_revision = _save(config, "old")
-    point_settings.record_inspection_upload_revision(config, old_revision)
+    point_settings.record_inspection_upload_revision(config, old_revision, building="D楼")
 
     monkeypatch.chdir(web_dir)
     new_revision = _save(config, "new")
-    request_inspection_upload_retrigger(config, "配置保存")
+    request_inspection_upload_retrigger(config, "配置保存", building="D楼")
     service = JobService()
     service.configure_task_engine(runtime_config=config, app_dir=worker_dir,
                                   config_snapshot_getter=lambda: config)
     monkeypatch.setattr(service, "_launch_existing_worker_job", lambda *a, **kw: None)
     try:
         job = service.start_worker_job("巡检补传", worker_handler="inspection_data_upload",
-                                       worker_payload={"retrigger": True})
+                                       worker_payload={"retrigger": True, "building": "D楼"})
         other_job = service.start_worker_job("其他任务", worker_handler="other")
         jobs = worker_dir / ".runtime" / "task_engine" / "jobs"
         snapshot = json.loads((jobs / job.job_id / "config_snapshot.json").read_text(encoding="utf-8"))
@@ -61,15 +61,15 @@ def test_worker_reads_web_settings_and_clears_web_marker_from_a_different_direct
         monkeypatch.chdir(worker_dir)
         assert point_settings.load_point_settings_with_revision(snapshot)[1] == new_revision
         calls = _fake_service(monkeypatch, [{"status": "success", "settings_revision": new_revision}])
-        result = task_handlers.handle_inspection_data_upload(snapshot, {"retrigger": True}, lambda _: None)
+        result = task_handlers.handle_inspection_data_upload(snapshot, {"retrigger": True, "building": "D楼"}, lambda _: None)
         assert result["settings_revision"] == new_revision
         assert calls == [1]
-        assert point_settings.last_inspection_upload_revision(config) == old_revision
+        assert point_settings.last_inspection_upload_revision(config, building="D楼") == old_revision
         assert other_snapshot["paths"]["runtime_state_root"] == config["paths"]["runtime_state_root"] == ".runtime"
 
         monkeypatch.chdir(web_dir)
-        assert point_settings.last_inspection_upload_revision(config) == new_revision
-        assert read_inspection_upload_retrigger(config) is None
+        assert point_settings.last_inspection_upload_revision(config, building="D楼") == new_revision
+        assert read_inspection_upload_retrigger(config, building="D楼") is None
     finally:
         service.shutdown_task_engine()
 
@@ -88,6 +88,8 @@ def _fake_service(monkeypatch, results):
             item = results[min(len(calls) - 1, len(results) - 1)]
             if isinstance(item, Exception):
                 raise item
+            if kwargs.get("building") and item.get("status") == "success" and "buildings" not in item:
+                return {**item, "buildings": [kwargs["building"]]}
             return item
 
     monkeypatch.setattr(upload_module, "InspectionDataUploadService", FakeService)
@@ -122,7 +124,7 @@ class _Double:
     def find_active_job_by_dedupe_key(self, key):
         job = next((item for item in self.jobs
                     if item.dedupe_key == key and item.status in {"submitted", "running"}), None)
-        return {"job_id": job.job_id} if job else None
+        return {"job_id": job.job_id, "resource_keys": job.resource_keys} if job else None
 
     def has_active_jobs_for_feature_prefixes(self, prefixes):
         return any(job.status in {"submitted", "running"}
@@ -141,7 +143,7 @@ def _fake_container(config, double, watchdog=None):
     fake._job_busy_for_feature_prefixes = lambda prefix: AppContainer._job_busy_for_feature_prefixes(fake, prefix)
     fake._submit_inspection_data_upload = lambda slot: AppContainer._submit_inspection_data_upload(fake, slot)
     fake._submit_inspection_retrigger = lambda **scope: AppContainer._submit_inspection_retrigger(fake, **scope)
-    fake._dispatch_inspection_retrigger = lambda building=None: AppContainer._dispatch_inspection_retrigger(fake, building)
+    fake._dispatch_inspection_retrigger = lambda building: AppContainer._dispatch_inspection_retrigger(fake, building)
     return fake
 
 
@@ -205,36 +207,36 @@ def test_request_and_ack_serialized_by_cross_process_lock(tmp_path):
 def test_transient_failure_preserves_marker_and_receipt(tmp_path, monkeypatch):
     config = _config(tmp_path)
     rev1 = _save(config, "v1")
-    point_settings.record_inspection_upload_revision(config, rev1)
+    point_settings.record_inspection_upload_revision(config, rev1, building="D楼")
     rev2 = _save(config, "v2")
-    request_inspection_upload_retrigger(config, reason="保存2")
+    request_inspection_upload_retrigger(config, reason="保存2", building="D楼")
     _fake_service(monkeypatch, [RuntimeError("模拟源数据临时失败")])
     with pytest.raises(RuntimeError):
         HANDLER_REGISTRY["inspection_data_upload"](
             config, {"source_date": "2026-11-10", "source_bucket_key": "2026-11-10 10",
-                     "dry_run": False, "retrigger": True},
+                     "dry_run": False, "retrigger": True, "building": "D楼"},
             lambda line: None, None)
-    assert read_inspection_upload_retrigger(config)["revision"] == rev2
-    assert point_settings.last_inspection_upload_revision(config) == rev1
+    assert read_inspection_upload_retrigger(config, building="D楼")["revision"] == rev2
+    assert point_settings.last_inspection_upload_revision(config, building="D楼") == rev1
 
 
 def test_higher_save_not_cleared_by_older_covered_run(tmp_path, monkeypatch):
     config = _config(tmp_path)
     rev1 = _save(config, "v1")
     rev2 = _save(config, "v2")
-    request_inspection_upload_retrigger(config, reason="保存2")
+    request_inspection_upload_retrigger(config, reason="保存2", building="D楼")
     calls = _fake_service(monkeypatch, [
         {"status": "success", "settings_revision": rev1},
         {"status": "success", "settings_revision": rev2},
     ])
     result = HANDLER_REGISTRY["inspection_data_upload"](
         config, {"source_date": "2026-11-10", "source_bucket_key": "2026-11-10 10",
-                 "dry_run": False, "retrigger": True},
+                 "dry_run": False, "retrigger": True, "building": "D楼"},
         lambda line: None, None)
     assert result["status"] == "success"
     assert calls == [1, 2]
-    assert read_inspection_upload_retrigger(config) is None
-    assert point_settings.last_inspection_upload_revision(config) == rev2
+    assert read_inspection_upload_retrigger(config, building="D楼") is None
+    assert point_settings.last_inspection_upload_revision(config, building="D楼") == rev2
 
 
 def test_disabled_skipped_writes_no_receipt(tmp_path, monkeypatch):
@@ -251,41 +253,41 @@ def test_disabled_skipped_writes_no_receipt(tmp_path, monkeypatch):
 def test_missing_authoritative_revision_writes_no_receipt(tmp_path, monkeypatch):
     config = _config(tmp_path)
     rev1 = _save(config, "v1")
-    request_inspection_upload_retrigger(config, reason="保存1")
+    request_inspection_upload_retrigger(config, reason="保存1", building="D楼")
     calls = _fake_service(monkeypatch, [{"status": "success"}])          # 旧契约：无权威版本
     result = HANDLER_REGISTRY["inspection_data_upload"](
         config, {"source_date": "2026-11-10", "source_bucket_key": "2026-11-10 10",
-                 "dry_run": False, "retrigger": True},
+                 "dry_run": False, "retrigger": True, "building": "D楼"},
         lambda line: None, None)
     assert result["status"] == "success"
-    assert point_settings.last_inspection_upload_revision(config) is None
-    assert read_inspection_upload_retrigger(config)["revision"] == rev1  # 未确认不清标记
+    assert point_settings.last_inspection_upload_revision(config, building="D楼") is None
+    assert read_inspection_upload_retrigger(config, building="D楼")["revision"] == rev1  # 未确认不清标记
     assert len(calls) == 4                                               # 有界接续后留给巡检
 
 
 def test_retrigger_skips_when_marker_already_covered(tmp_path, monkeypatch):
     config = _config(tmp_path)
     rev1 = _save(config, "v1")
-    point_settings.record_inspection_upload_revision(config, rev1)
-    request_inspection_upload_retrigger(config, reason="旧请求")
+    point_settings.record_inspection_upload_revision(config, rev1, building="D楼")
+    request_inspection_upload_retrigger(config, reason="旧请求", building="D楼")
     calls = _fake_service(monkeypatch, [{"status": "success", "settings_revision": rev1}])
     result = HANDLER_REGISTRY["inspection_data_upload"](
         config, {"source_date": "2026-11-10", "source_bucket_key": "2026-11-10 10",
-                 "dry_run": False, "retrigger": True},
+                 "dry_run": False, "retrigger": True, "building": "D楼"},
         lambda line: None, None)
     assert result["status"] == "skipped"
     assert calls == []
-    assert read_inspection_upload_retrigger(config) is None
+    assert read_inspection_upload_retrigger(config, building="D楼") is None
 
 
 def test_retrigger_skips_without_marker_when_receipt_current(tmp_path, monkeypatch):
     config = _config(tmp_path)
     rev1 = _save(config, "v1")
-    point_settings.record_inspection_upload_revision(config, rev1)
+    point_settings.record_inspection_upload_revision(config, rev1, building="D楼")
     calls = _fake_service(monkeypatch, [{"status": "success", "settings_revision": rev1}])
     result = HANDLER_REGISTRY["inspection_data_upload"](
         config, {"source_date": "2026-11-10", "source_bucket_key": "2026-11-10 10",
-                 "dry_run": False, "retrigger": True},
+                 "dry_run": False, "retrigger": True, "building": "D楼"},
         lambda line: None, None)
     assert result["status"] == "skipped"
     assert calls == []
@@ -333,9 +335,9 @@ def test_trigger_idle_registers_marker_and_watchdog_takes_over_after_transient_f
     double = _Double()
     fake = _fake_container(config, double)
     rev31 = _save(config, "v31")
-    point_settings.record_inspection_upload_revision(config, rev31 - 1)
-    assert AppContainer.trigger_inspection_data_upload_now(fake)["ok"] is True
-    assert read_inspection_upload_retrigger(config)["revision"] == rev31   # 空闲也先持久登记
+    point_settings.record_inspection_upload_revision(config, rev31 - 1, building="D楼")
+    assert AppContainer.trigger_inspection_data_upload_now(fake, building="D楼")["ok"] is True
+    assert read_inspection_upload_retrigger(config, building="D楼")["revision"] == rev31   # 空闲也先持久登记
     calls = _fake_service(monkeypatch, [
         RuntimeError("模拟首次读源临时失败"),
         {"status": "success", "settings_revision": rev31},
@@ -344,34 +346,32 @@ def test_trigger_idle_registers_marker_and_watchdog_takes_over_after_transient_f
     with pytest.raises(RuntimeError):
         task_handlers.handle_inspection_data_upload(config, job.payload, lambda message: None, None)
     double.jobs[-1].status = "failed"
-    assert read_inspection_upload_retrigger(config)["revision"] == rev31   # 失败不丢待传
+    assert read_inspection_upload_retrigger(config, building="D楼")["revision"] == rev31   # 失败不丢待传
     assert AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"] is True
     job2 = double.jobs[-1]
     result = task_handlers.handle_inspection_data_upload(config, job2.payload, lambda message: None, None)
     assert result["status"] == "success"
     assert calls == [1, 2]
-    assert read_inspection_upload_retrigger(config) is None
-    assert point_settings.last_inspection_upload_revision(config) == rev31
+    assert read_inspection_upload_retrigger(config, building="D楼") is None
+    assert point_settings.last_inspection_upload_revision(config, building="D楼") == rev31
 
 
-def test_trigger_queues_retrigger_when_busy(tmp_path):
-    submitted = []
-    fake = SimpleNamespace(
-        runtime_config=_config(tmp_path),
-        inspection_retrigger_watchdog=None,
-        inspection_retrigger_shutdown=False,
-        _configured_deployment_snapshot=lambda: {"role_mode": "external"},
-        job_service=SimpleNamespace(
-            find_active_job_by_dedupe_key=lambda key: {"job_id": "busy"} if key == "inspection_data_upload" else None),
-        _job_busy_for_feature_prefixes=lambda prefix: (lambda: True),
-        add_system_log=lambda message: None,
-        _submit_inspection_data_upload=lambda slot: (_ for _ in ()).throw(AssertionError("忙时不应直接派发")),
-        _submit_inspection_retrigger=lambda: submitted.append("retrigger"),
-    )
-    result = AppContainer.trigger_inspection_data_upload_now(fake)
-    assert result["ok"] is False
-    assert submitted == ["retrigger"]
-    assert consume_inspection_upload_retrigger(_config(tmp_path)) is True
+def test_scheduled_upload_can_cover_queued_building_retrigger(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    double = _Double()
+    fake = _fake_container(config, double)
+    revision = _save(config, "v1")
+    scheduled = AppContainer._submit_inspection_data_upload(fake, time.strftime("%Y-%m-%d %H:%M:%S"))
+    scheduled.status = "running"
+    response = AppContainer.trigger_inspection_data_upload_now(fake, building="D楼")
+    queued = double.jobs[-1]
+    assert response == {"ok": True, "building": "D楼", "job_id": queued.job_id}
+    assert set(scheduled.resource_keys) & set(queued.resource_keys) == {"inspection_data_upload:D"}
+    calls = _fake_service(monkeypatch, [{"status": "success", "settings_revision": revision, "buildings": ["D楼", "E楼"]}])
+    task_handlers.handle_inspection_data_upload(config, scheduled.payload, lambda _: None)
+    assert task_handlers.handle_inspection_data_upload(config, queued.payload, lambda _: None)["status"] == "skipped"
+    assert calls == [1]
+    assert read_inspection_upload_retrigger(config, building="D楼") is None
 
 
 def test_independent_building_jobs_and_receipts(tmp_path, monkeypatch):
@@ -393,39 +393,64 @@ def test_independent_building_jobs_and_receipts(tmp_path, monkeypatch):
 
 
 def test_trigger_busy_with_waiting_retrigger_does_not_stack(tmp_path):
-    fake = SimpleNamespace(
-        runtime_config=_config(tmp_path),
-        inspection_retrigger_watchdog=None,
-        inspection_retrigger_shutdown=False,
-        _configured_deployment_snapshot=lambda: {"role_mode": "external"},
-        job_service=SimpleNamespace(find_active_job_by_dedupe_key=lambda key: {"job_id": "x"}),
-        _job_busy_for_feature_prefixes=lambda prefix: (lambda: True),
-        add_system_log=lambda message: None,
-        _submit_inspection_data_upload=lambda slot: (_ for _ in ()).throw(AssertionError("忙时不应直接派发")),
-        _submit_inspection_retrigger=lambda: (_ for _ in ()).throw(AssertionError("已有排队补派不应叠加")),
-    )
-    result = AppContainer.trigger_inspection_data_upload_now(fake)
-    assert result["ok"] is False
-    assert consume_inspection_upload_retrigger(_config(tmp_path)) is True
-
-
-def test_trigger_submits_when_idle(tmp_path):
-    submitted = []
     config = _config(tmp_path)
-    fake = SimpleNamespace(
-        runtime_config=config,
-        inspection_retrigger_watchdog=None,
-        inspection_retrigger_shutdown=False,
-        _configured_deployment_snapshot=lambda: {"role_mode": "external"},
-        job_service=SimpleNamespace(find_active_job_by_dedupe_key=lambda key: None),
-        _job_busy_for_feature_prefixes=lambda prefix: (lambda: False),
-        add_system_log=lambda message: None,
-        _submit_inspection_data_upload=submitted.append,
+    double = _Double()
+    fake = _fake_container(config, double)
+    assert AppContainer.trigger_inspection_data_upload_now(fake, building="D楼")["ok"]
+    assert not AppContainer.trigger_inspection_data_upload_now(fake, building="D楼")["ok"]
+    assert len(double.jobs) == 1
+    assert read_inspection_upload_retrigger(config, building="D楼") is not None
+    assert read_inspection_upload_retrigger(config) is None
+
+
+@pytest.mark.parametrize("building", ["D楼", "E楼"])
+def test_trigger_submits_only_selected_building_when_idle(tmp_path, building):
+    config = _config(tmp_path)
+    double = _Double()
+    fake = _fake_container(config, double)
+    response = AppContainer.trigger_inspection_data_upload_now(fake, building=building)
+    [job] = double.jobs
+    assert response == {"ok": True, "building": building, "job_id": job.job_id}
+    assert job.payload["building"] == building
+    assert job.resource_keys == [f"inspection_data_upload:{building[0]}"]
+    assert job.payload["source_date"] == time.strftime("%Y-%m-%d")
+    assert read_inspection_upload_retrigger(config) is None
+
+
+def test_legacy_marker_and_queued_job_wait_for_regular_schedule(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    double = _Double()
+    fake = _fake_container(config, double)
+    revision = _save(config, "legacy")
+    request_inspection_upload_retrigger(config, reason="旧版无楼栋补派")
+    calls = _fake_service(monkeypatch, [{"status": "success", "settings_revision": revision, "buildings": ["D楼", "E楼"]}])
+    assert not AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
+    assert not double.jobs
+    assert task_handlers.handle_inspection_data_upload(config, {"retrigger": True}, lambda _: None)["status"] == "skipped"
+    assert calls == []
+    assert read_inspection_upload_retrigger(config)["revision"] == revision
+    scheduled = AppContainer._submit_inspection_data_upload(fake, time.strftime("%Y-%m-%d %H:%M:%S"))
+    task_handlers.handle_inspection_data_upload(config, scheduled.payload, lambda _: None)
+    assert calls == [1]
+    assert read_inspection_upload_retrigger(config) is None
+
+
+def test_building_retrigger_waits_for_inflight_legacy_full_upload(tmp_path):
+    config = _config(tmp_path)
+    double = _Double()
+    fake = _fake_container(config, double)
+    old_job = double.start_worker_job(
+        name="旧版全楼上传", worker_handler="inspection_data_upload", worker_payload={},
+        dedupe_key="inspection_data_upload", resource_keys=["inspection_data_upload:global"],
     )
-    result = AppContainer.trigger_inspection_data_upload_now(fake)
-    assert result["ok"] is True
-    assert len(submitted) == 1
-    assert submitted[0][:10] == time.strftime("%Y-%m-%d")
+    old_job.status = "running"
+    assert not AppContainer.trigger_inspection_data_upload_now(fake, building="E楼")["ok"]
+    assert double.jobs == [old_job]
+    assert read_inspection_upload_retrigger(config, building="E楼") is not None
+    old_job.status = "success"
+    assert AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
+    assert double.jobs[-1].payload["building"] == "E楼"
+    assert double.jobs[-1].resource_keys == ["inspection_data_upload:E"]
 
 
 def test_dispatch_throttles_retry_after_failed_attempt(tmp_path):
@@ -433,12 +458,12 @@ def test_dispatch_throttles_retry_after_failed_attempt(tmp_path):
     double = _Double()
     fake = _fake_container(config, double)
     _save(config, "v1")
-    request_inspection_upload_retrigger(config, reason="测试")
-    assert AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"] is True
+    request_inspection_upload_retrigger(config, reason="测试", building="D楼")
+    assert AppContainer._dispatch_inspection_retrigger(fake, "D楼")["ok"] is True
     double.jobs[-1].status = "failed"
-    second = AppContainer.dispatch_pending_inspection_retrigger(fake)
+    second = AppContainer._dispatch_inspection_retrigger(fake, "D楼")
     assert second["ok"] is False and "冷却" in second["skipped"]
-    assert read_inspection_upload_retrigger(config) is not None          # 节流不清标记
+    assert read_inspection_upload_retrigger(config, building="D楼") is not None          # 节流不清标记
 
 
 def test_dispatch_survives_engine_shutdown(tmp_path):
@@ -447,10 +472,10 @@ def test_dispatch_survives_engine_shutdown(tmp_path):
     double.fail_submit = True
     fake = _fake_container(config, double)
     _save(config, "v1")
-    request_inspection_upload_retrigger(config, reason="测试")
-    result = AppContainer.dispatch_pending_inspection_retrigger(fake)
+    request_inspection_upload_retrigger(config, reason="测试", building="D楼")
+    result = AppContainer._dispatch_inspection_retrigger(fake, "D楼")
     assert result["ok"] is False and "error" in result
-    assert read_inspection_upload_retrigger(config) is not None          # 派发失败不丢待传
+    assert read_inspection_upload_retrigger(config, building="D楼") is not None          # 派发失败不丢待传
 
 
 def test_dispatch_stops_after_watchdog_shutdown(tmp_path):
@@ -462,8 +487,8 @@ def test_dispatch_stops_after_watchdog_shutdown(tmp_path):
     watchdog.stop()                                                      # 重复停止安全
     fake = _fake_container(config, double, watchdog=watchdog)
     _save(config, "v1")
-    request_inspection_upload_retrigger(config, reason="测试")
-    result = AppContainer.dispatch_pending_inspection_retrigger(fake)
+    request_inspection_upload_retrigger(config, reason="测试", building="D楼")
+    result = AppContainer._dispatch_inspection_retrigger(fake, "D楼")
     assert result["ok"] is False and "停止" in result["skipped"]
     assert double.submissions == []
 
@@ -525,45 +550,36 @@ def test_watchdog_can_restart_after_role_exit_but_cannot_start_after_web_close()
 def test_pressure_confirmation_dispatches_even_after_same_revision_or_recent_job(tmp_path, monkeypatch):
     config = _config(tmp_path)
     revision = _save(config, "saved")
-    point_settings.record_inspection_upload_revision(config, revision)
-    point_settings.record_inspection_retrigger_dispatch(config)
-    request_inspection_upload_retrigger(config, "D楼巡检压力审核确认", force=True)
-    force_id = read_inspection_upload_retrigger(config)["force_id"]
-    request_inspection_upload_retrigger(config, "同修订号的后续请求")
-    assert read_inspection_upload_retrigger(config)["force_id"] == force_id
-    assert not ack_inspection_upload_retrigger(config, revision)
+    point_settings.record_inspection_upload_revision(config, revision, building="D楼")
+    point_settings.record_inspection_retrigger_dispatch(config, building="D楼")
+    request_inspection_upload_retrigger(config, "D楼巡检压力审核确认", force=True, building="D楼")
+    force_id = read_inspection_upload_retrigger(config, building="D楼")["force_id"]
+    request_inspection_upload_retrigger(config, "同修订号的后续请求", building="D楼")
+    assert read_inspection_upload_retrigger(config, building="D楼")["force_id"] == force_id
+    assert not ack_inspection_upload_retrigger(config, revision, building="D楼")
 
-    submissions = []
-    fake = SimpleNamespace(
-        _configured_deployment_snapshot=lambda: {"role_mode": "external"},
-        runtime_config=config,
-        inspection_retrigger_watchdog=None,
-        _job_busy_for_feature_prefixes=lambda _feature: lambda: False,
-        job_service=SimpleNamespace(find_active_job_by_dedupe_key=lambda _key: None),
-        _submit_inspection_retrigger=lambda: submissions.append(force_id),
-        add_system_log=lambda _message: None,
-    )
-    fake._dispatch_inspection_retrigger = lambda building=None: AppContainer._dispatch_inspection_retrigger(fake, building)
+    double = _Double()
+    fake = _fake_container(config, double)
     assert AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
     assert not AppContainer.dispatch_pending_inspection_retrigger(fake)["ok"]
-    assert submissions == [force_id]
+    assert [job.payload["building"] for job in double.jobs] == ["D楼"]
 
     synthetic = _fake_service(monkeypatch, [{"status": "success", "settings_revision": revision,
                                            "handover_pressure_read_failed": ["D楼"]}])
-    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True}, lambda _line: None)
+    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True, "building": "D楼"}, lambda _line: None)
     assert synthetic == [1]
-    assert read_inspection_upload_retrigger(config)["force_id"] == force_id
+    assert read_inspection_upload_retrigger(config, building="D楼")["force_id"] == force_id
 
     calls = _fake_service(monkeypatch, [{"status": "success", "settings_revision": revision}])
-    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True}, lambda _line: None)
+    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True, "building": "D楼"}, lambda _line: None)
     assert calls == [1]
-    assert read_inspection_upload_retrigger(config) is None
+    assert read_inspection_upload_retrigger(config, building="D楼") is None
 
 
 def test_inflight_upload_leaves_newer_pressure_confirmation_pending(tmp_path, monkeypatch):
     config = _config(tmp_path)
     revision = _save(config, "saved")
-    request_inspection_upload_retrigger(config, "D楼巡检压力审核确认", force=True)
+    request_inspection_upload_retrigger(config, "D楼巡检压力审核确认", force=True, building="D楼")
     from app.modules.inspection_data.service import inspection_data_upload_service
     requests = []
 
@@ -572,13 +588,13 @@ def test_inflight_upload_leaves_newer_pressure_confirmation_pending(tmp_path, mo
             pass
 
         def run(self, **kwargs):
-            marker = read_inspection_upload_retrigger(config)
+            marker = read_inspection_upload_retrigger(config, building="D楼")
             requests.append(marker["force_id"])
             if len(requests) == 1:
-                request_inspection_upload_retrigger(config, "E楼巡检压力审核确认", force=True)
-            return {"status": "success", "settings_revision": revision}
+                request_inspection_upload_retrigger(config, "D楼再次巡检压力审核确认", force=True, building="D楼")
+            return {"status": "success", "settings_revision": revision, "buildings": ["D楼"]}
 
     monkeypatch.setattr(inspection_data_upload_service, "InspectionDataUploadService", FakeUpload)
-    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True}, lambda _line: None)
+    HANDLER_REGISTRY["inspection_data_upload"](config, {"retrigger": True, "building": "D楼"}, lambda _line: None)
     assert len(set(requests)) == 2
-    assert read_inspection_upload_retrigger(config) is None
+    assert read_inspection_upload_retrigger(config, building="D楼") is None

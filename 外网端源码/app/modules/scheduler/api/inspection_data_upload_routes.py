@@ -124,9 +124,12 @@ def latest_building_inspection_points(building_code: str, request: Request):
     if bridge is None:
         raise HTTPException(status_code=503, detail="未配置内网桥接地址")
     datasets = {}
-    settings = _read_point_settings(config, building=building)[building]
     try:
-        payload = bridge.get_latest_inspection_points(building=building)
+        # A sample refresh must not wait for Feishu or trigger a configuration sync.
+        settings = verified_review_point_settings(config, building).get(building)
+        if not settings:
+            raise PointConfigUnavailable(f"{building}测点配置尚未核验，请先刷新测点配置后重试")
+        payload = bridge.get_latest_inspection_points(building=building, interactive=True)
         if not payload.get("ok") or not isinstance(payload.get("datasets"), list):
             raise ValueError("内网巡检测点响应无效")
         for doc in payload["datasets"]:
@@ -148,7 +151,7 @@ def latest_building_inspection_points(building_code: str, request: Request):
                   "status": row.get("状态判定", "")}
                 for row in rows if row["测点ID"]
             ]}
-    except (RuntimeError, ValueError, TypeError) as exc:
+    except (RuntimeError, ValueError, TypeError, OSError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"ok": True, "building": building, "datasets": datasets}
 

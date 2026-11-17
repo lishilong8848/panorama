@@ -751,67 +751,42 @@ class AppContainer:
         )
         return self.job_service.get_job_state(job.job_id) or job
 
-    def trigger_inspection_data_upload_now(self, source: str = "测点配置变更", *, building=None) -> Dict[str, Any]:
-        """测点配置变更后立即重传当前时段巡检数据。
-
-        空闲时直接派发；已有同类任务执行时登记待传标记并提交一个排队补派
-        任务（资源键串行，等当前任务结束后自动启动），多次保存由补派任务的
-        dedupe 键合并，保证标记不会无人消费。
-        """
+    def trigger_inspection_data_upload_now(self, source: str = "测点配置变更", *, building: str) -> Dict[str, Any]:
+        """持久登记本楼的测点变更，并按本楼的任务资源派发补传。"""
+        if building not in ("D楼", "E楼"):
+            raise ValueError("巡检补传必须指定D楼或E楼")
         if self._configured_deployment_snapshot().get("role_mode") != "external":
             return {"ok": False, "skipped": "巡检数据处理仅允许在外网端执行"}
         if not self.runtime_config.get("inspection_data_upload", {}).get("enabled", True):
             return {"ok": False, "skipped": "巡检数据处理模块已关闭"}
         from app.modules.inspection_data.service.point_settings import request_inspection_upload_retrigger
 
-        if building:
-            request_inspection_upload_retrigger(self.runtime_config, reason=source, building=building)
-            return self._dispatch_inspection_retrigger(building)
-        busy = self._job_busy_for_feature_prefixes("inspection_data_upload")()
-        # 空闲与忙时都先持久登记待传版本：直接派发临时失败或派发失败时，
-        # 标记留在磁盘由补派巡检接手，不会丢待传请求。
-        request_inspection_upload_retrigger(self.runtime_config, reason=source)
-        if busy:
-            if not self.job_service.find_active_job_by_dedupe_key("inspection_data_upload:retrigger"):
-                try:
-                    self._submit_inspection_retrigger()
-                except Exception as exc:
-                    self.add_system_log(f"[巡检数据处理] {source}的排队补派提交失败，待传标记保留：{exc}")
-                    return {"ok": False, "skipped": "已有任务在执行，排队补派提交失败，待传标记保留", "error": str(exc)}
-            self.add_system_log(f"[巡检数据处理] {source}，已有任务在执行，已登记并排队补派")
-            return {"ok": False, "skipped": "已有巡检数据处理任务在执行，已登记并在任务结束后补派"}
-        try:
-            self._submit_inspection_data_upload(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        except Exception as exc:  # 配置已同步飞书；标记保留，由巡检按节流节奏接手
-            self.add_system_log(f"[巡检数据处理] {source}触发的立即重传未启动，待传标记保留：{exc}")
-            return {"ok": False, "error": str(exc)}
-        self.add_system_log(f"[巡检数据处理] {source}，已触发当前时段立即重传")
-        return {"ok": True}
+        request_inspection_upload_retrigger(self.runtime_config, reason=source, building=building)
+        return {**self._dispatch_inspection_retrigger(building), "building": building}
 
-    def _submit_inspection_retrigger(self, building=None):
+    def _submit_inspection_retrigger(self, *, building: str):
         from app.config.inspection_data_config import inspection_hour_bucket
 
         now = datetime.now()
         job = self.job_service.start_worker_job(
-            name=f"{building or ''}巡检数据处理补派 {now:%Y-%m-%d %H:%M:%S}", worker_handler="inspection_data_upload",
+            name=f"{building}巡检数据处理补派 {now:%Y-%m-%d %H:%M:%S}", worker_handler="inspection_data_upload",
             worker_payload={
                 "source_date": now.strftime("%Y-%m-%d"), "dry_run": False,
                 "source_bucket_key": inspection_hour_bucket(now), "retrigger": True,
-                **({"building": building} if building else {}),
+                "building": building,
             },
-            resource_keys=[f"inspection_data_upload:{building[0]}"] if building else
-                          ["inspection_data_upload:D", "inspection_data_upload:E"], priority="scheduler",
+            resource_keys=[f"inspection_data_upload:{building[0]}"], priority="scheduler",
             feature="inspection_data_upload",
-            dedupe_key=f"inspection_data_upload:retrigger:{building[0]}" if building else "inspection_data_upload:retrigger",
+            dedupe_key=f"inspection_data_upload:retrigger:{building[0]}",
             submitted_by="config-save",
         )
         return self.job_service.get_job_state(job.job_id) or job
 
     def dispatch_pending_inspection_retrigger(self) -> Dict[str, Any]:
         scoped = [self._dispatch_inspection_retrigger(building) for building in ("D楼", "E楼")]
-        return {"ok": True} if any(result.get("ok") for result in scoped) else self._dispatch_inspection_retrigger()
+        return {"ok": any(result.get("ok") for result in scoped)}
 
-    def _dispatch_inspection_retrigger(self, building=None) -> Dict[str, Any]:
+    def _dispatch_inspection_retrigger(self, building: str) -> Dict[str, Any]:
         """巡检未消费的补派标记：队列空闲时提交排队补派接班。
 
         覆盖“补派任务运行中再保存、任务内接续达到上限退出”等并发窗口：
@@ -831,21 +806,23 @@ class AppContainer:
             record_inspection_retrigger_dispatch,
         )
 
-        scope = {"building": building} if building else {}
-        marker = read_inspection_upload_retrigger(self.runtime_config, **scope)
+        marker = read_inspection_upload_retrigger(self.runtime_config, building=building)
         if not marker:
             return {"ok": False, "skipped": "无待补派标记"}
-        if not building and self._job_busy_for_feature_prefixes("inspection_data_upload")():
-            return {"ok": False, "skipped": "巡检任务仍在运行，下一轮再检查"}
-        dedupe_key = f"inspection_data_upload:retrigger:{building[0]}" if building else "inspection_data_upload:retrigger"
+        dedupe_key = f"inspection_data_upload:retrigger:{building[0]}"
         if self.job_service.find_active_job_by_dedupe_key(dedupe_key):
             return {"ok": False, "skipped": "已有排队补派等待"}
+        # Jobs persisted before per-building resources used a single shared key.
+        for legacy_key in ("inspection_data_upload", "inspection_data_upload:retrigger"):
+            active = self.job_service.find_active_job_by_dedupe_key(legacy_key) or {}
+            if "inspection_data_upload:global" in (active.get("resource_keys") or ()):
+                return {"ok": False, "skipped": "旧版全楼上传尚未结束，待补传标记保留"}
         feature_cfg = self.runtime_config.get("inspection_data_upload", {})
         try:
-            min_gap = float(feature_cfg.get("retrigger_min_interval_sec", 60) or 60)
+            min_gap = float(feature_cfg.get("retrigger_min_interval_sec", 60))
         except (TypeError, ValueError):
             min_gap = 60.0
-        dispatch = read_inspection_retrigger_dispatch_state(self.runtime_config, **scope)
+        dispatch = read_inspection_retrigger_dispatch_state(self.runtime_config, building=building)
         last_dispatch = dispatch.get("last_dispatch_at")
         force_id = marker.get("force_id")
         new_confirmation = force_id and force_id != dispatch.get("force_id")
@@ -853,13 +830,13 @@ class AppContainer:
                 and datetime.now().timestamp() - last_dispatch < min_gap):
             return {"ok": False, "skipped": "补派重试冷却中，稍后再检查"}
         try:
-            self._submit_inspection_retrigger(**scope)
+            job = self._submit_inspection_retrigger(building=building)
         except Exception as exc:
             self.add_system_log(f"[巡检数据处理] 巡检补派提交失败：{exc}")
             return {"ok": False, "error": str(exc)}
-        record_inspection_retrigger_dispatch(self.runtime_config, force_id=force_id, **scope)
-        self.add_system_log("[巡检数据处理] 巡检发现未消费补派标记，已提交排队补派接班")
-        return {"ok": True}
+        record_inspection_retrigger_dispatch(self.runtime_config, force_id=force_id, building=building)
+        self.add_system_log(f"[巡检数据处理] {building}待补传任务已提交")
+        return {"ok": True, "job_id": job.job_id}
 
     def _build_inspection_retrigger_watchdog(self) -> InspectionRetriggerWatchdog:
         from itertools import cycle

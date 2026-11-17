@@ -1,4 +1,4 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 import copy
 from datetime import datetime, timedelta
 import json
@@ -646,7 +646,8 @@ def test_partial_config_failure_uploads_only_verified_building(tmp_path, monkeyp
     assert {table for _, table in cloud.events} == {e_table}
 
 
-def test_scoped_run_collects_and_writes_only_requested_building(tmp_path, monkeypatch):
+@pytest.mark.parametrize("building", ["D楼", "E楼"])
+def test_scoped_run_collects_and_writes_only_requested_building(tmp_path, monkeypatch, building):
     internal = SnapshotSources(inspection_datasets(tmp_path))
     internal.get_latest_inspection_points = Mock(side_effect=lambda building: {
         "ok": True, "datasets": [doc for (owner, _), doc in internal.entries.items() if owner == building],
@@ -656,10 +657,10 @@ def test_scoped_run_collects_and_writes_only_requested_building(tmp_path, monkey
     config = {"paths": {"runtime_state_root": str(tmp_path)}}
     service = InspectionDataUploadService(config, internal_client=internal, bitable_client=cloud)
     monkeypatch.setattr(module, "BACKUP_ROOT", tmp_path / "backups")
-    expected_table = module.DEFAULT_CONFIG["tables"]["D楼"]
-    result = service.run(building="D楼")
-    assert result["buildings"] == ["D楼"] and result["status"] == "success"
-    internal.get_latest_inspection_points.assert_called_once_with(building="D楼")
+    expected_table = module.DEFAULT_CONFIG["tables"][building]
+    result = service.run(building=building)
+    assert result["buildings"] == [building] and result["status"] == "success"
+    internal.get_latest_inspection_points.assert_called_once_with(building=building)
     assert {table for _, table in cloud.events} == {expected_table}
 
 
@@ -684,20 +685,34 @@ def test_review_point_routes_are_building_scoped_and_reject_stale_edits(tmp_path
     monkeypatch.setattr(point_config_bitable, "point_config_client", lambda _: config_cloud)
     app = FastAPI()
     app.include_router(router)
+    trigger = Mock(side_effect=lambda *, building: {'ok': True, 'building': building})
     app.state.container = SimpleNamespace(runtime_config=config, _configured_deployment_snapshot=lambda: {'role_mode': 'external'},
-                                          trigger_inspection_data_upload_now=lambda **_: {'ok': True})
+                                          trigger_inspection_data_upload_now=trigger)
     base = '/api/scheduler/inspection-data-upload/points'
     with TestClient(app) as client:
+        pending = client.get(f'{base}/e/latest')
+        assert pending.status_code == 503
+        assert '尚未核验' in pending.json()['detail']
+        internal.get_latest_inspection_points.assert_not_called()
         expected = client.get(f'{base}/d').json()['settings'][family]
         change = {'family': family, 'points': {'7_0_1': '复测'}, 'remove': [], 'expected_group': expected}
-        assert client.put(f'{base}/d', json=change).status_code == 200
+        saved = client.put(f'{base}/d', json=change)
+        assert saved.status_code == 200
+        assert saved.json()['upload_trigger']['building'] == 'D楼'
         assert client.put(f'{base}/d', json=change).status_code == 409
         assert client.put(f'{base}/d', json={**change, 'building': 'E楼'}).status_code == 400
-        assert client.get(f'{base}/e').json()['settings'][family]['points'] == {}
+        e_group = client.get(f'{base}/e').json()['settings'][family]
+        assert e_group['points'] == {}
+        saved = client.put(base, json={**change, 'building': 'E楼', 'expected_group': e_group})
+        assert saved.status_code == 200
+        assert saved.json()['upload_trigger']['building'] == 'E楼'
+        assert trigger.call_args_list == [call(building='D楼'), call(building='E楼')]
         assert client.get(f'{base}/a').status_code == 404
+        monkeypatch.setattr(point_config_bitable, "point_config_client", Mock(side_effect=AssertionError("no Feishu read on latest")))
         latest = client.get(f'{base}/d/latest').json()['datasets'][family]
         assert latest['sample_time'] == doc['value_time']
         assert latest['points'][0]['id'] == '7_0_1'
+        internal.get_latest_inspection_points.assert_called_once_with(building='D楼', interactive=True)
         assert client.get(f'{base}/e/latest').status_code == 503
 
 

@@ -41,6 +41,26 @@ def test_internal_bridge_client_does_not_send_token(monkeypatch):
     assert "x-bridge-token" not in {key.lower() for key in captured_headers}
 
 
+def test_inspection_page_bridge_timeout_does_not_change_worker_retry_policy(monkeypatch):
+    timeouts = []
+
+    def fake_urlopen(req, timeout):
+        assert req.full_url.endswith("/inspection/latest-points?building=E")
+        timeouts.append(timeout)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.modules.internal_bridge_http.service.client.time.sleep", lambda _: None)
+    bridge = InternalBridgeHttpClient(base_url="http://127.0.0.1:18765", read_timeout_sec=18, max_attempts=2)
+    with pytest.raises(InternalBridgeHttpError, match="timed out"):
+        bridge.get_latest_inspection_points(building="E", interactive=True)
+    assert timeouts == [12]
+    timeouts.clear()
+    with pytest.raises(InternalBridgeHttpError, match="timed out"):
+        bridge.get_latest_inspection_points(building="E")
+    assert timeouts == [18, 18]
+
+
 def test_internal_bridge_client_treats_busy_source_index_as_retryable(monkeypatch):
     class Response:
         def __enter__(self):

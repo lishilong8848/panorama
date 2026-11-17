@@ -78,7 +78,7 @@ const TEMPLATE = `
       <div class="review-header-main">
         <div class="review-header-copy"><h1 class="review-title">{{ building }}巡检测点</h1></div>
         <div class="review-header-actions">
-          <button class="btn btn-secondary btn-mini" type="button" :disabled="latestBusy" @click="loadLatest">{{ latestBusy ? '刷新中…' : '刷新最新值' }}</button>
+          <button class="btn btn-secondary btn-mini" type="button" :disabled="latestBusy || !settingsReady" @click="loadLatest">{{ latestBusy ? '刷新中…' : '刷新最新值' }}</button>
           <a class="btn btn-secondary btn-mini" :href="returnUrl" @click="returnToReview">返回审核页</a>
         </div>
       </div>
@@ -369,9 +369,11 @@ export function mountInspectionPointsPage(Vue) {
           settings.value = response.settings;
           operatingDraft.value = null;
           targetOptions.value = response.target_options || {};
+          const firstLoad = !settingsReady.value;
           settingsReady.value = true;
           settingsError.value = "";
           page.value = Math.min(page.value, pageCount.value);
+          if (firstLoad || fresh) void loadLatest();
         } catch (error) {
           if (!controller.signal.aborted) settingsError.value = error.message;
         } finally {
@@ -613,7 +615,6 @@ export function mountInspectionPointsPage(Vue) {
       }
       onMounted(() => {
         void loadSettings();
-        void loadLatest();
         settingsPoll = window.setInterval(() => {
           if (!document.hidden) void loadSettings({ background: true });
         }, 45000);

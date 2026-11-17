@@ -113,6 +113,8 @@ class InternalBridgeHttpClient:
         *,
         payload: Dict[str, Any] | None = None,
         query: Dict[str, Any] | None = None,
+        timeout_sec: float | None = None,
+        max_attempts: int | None = None,
     ) -> Dict[str, Any]:
         if not self.base_url:
             raise InternalBridgeHttpError("内网端 HTTP 桥接 base_url 未配置")
@@ -135,9 +137,11 @@ class InternalBridgeHttpClient:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, method=str(method or "GET").upper(), headers=headers)
         last_exc: BaseException | None = None
-        for attempt in range(1, self.max_attempts + 1):
+        attempts = self.max_attempts if max_attempts is None else max_attempts
+        timeout = self.read_timeout_sec if timeout_sec is None else timeout_sec
+        for attempt in range(1, attempts + 1):
             try:
-                with urllib.request.urlopen(req, timeout=self.read_timeout_sec) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     raw = resp.read().decode("utf-8", errors="replace")
                     if not raw:
                         return {}
@@ -150,13 +154,13 @@ class InternalBridgeHttpClient:
                 except Exception:
                     body = ""
                 error = InternalBridgeHttpError(f"内网端 HTTP 返回 {exc.code}: {body or exc.reason}")
-                if attempt < self.max_attempts and self._is_retryable_error(error):
+                if attempt < attempts and self._is_retryable_error(error):
                     time.sleep(min(1.5, 0.5 * attempt))
                     continue
                 raise error from exc
             except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
                 last_exc = exc
-                if attempt >= self.max_attempts or not self._is_retryable_error(exc):
+                if attempt >= attempts or not self._is_retryable_error(exc):
                     break
                 time.sleep(min(1.5, 0.5 * attempt))
         raise InternalBridgeHttpError(f"内网端 HTTP 请求失败: {last_exc}") from last_exc
@@ -484,8 +488,10 @@ class InternalBridgeHttpClient:
         return self._request("PUT", "/api/internal-bridge/inspection/point-rules",
                              payload={"revision": revision, "point_overrides": rules})
 
-    def get_latest_inspection_points(self, *, building: str) -> Dict[str, Any]:
-        return self._request("GET", "/api/internal-bridge/inspection/latest-points", query={"building": building})
+    def get_latest_inspection_points(self, *, building: str, interactive: bool = False) -> Dict[str, Any]:
+        options = {"timeout_sec": min(12, self.read_timeout_sec), "max_attempts": 1} if interactive else {}
+        return self._request("GET", "/api/internal-bridge/inspection/latest-points",
+                             query={"building": building}, **options)
 
     def list_alarm_rule_export_files(self, *, period: str = "", building: str = "") -> Dict[str, Any]:
         return self._request(
