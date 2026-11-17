@@ -127,6 +127,30 @@ class HandoverDeliveryPrepareService:
             detail = str(job.get("error") or "").strip() if isinstance(job, dict) else ""
             raise HandoverDeliveryPrepareError(f"{label}未成功，不能准备交付成品" + (f": {detail}" if detail else ""))
 
+    def _wait_for_write(self, queue, *, building, job, label) -> None:
+        job_id = job.get("job_id")
+        if not job_id:
+            raise HandoverDeliveryPrepareError(f"{label}入队失败")
+        try:
+            self._require_success(queue.wait_for_job(building=building, job_id=str(job_id)), label)
+        except TimeoutError as exc:
+            raise HandoverDeliveryPrepareRetryableError(f"{label}等待超时: {building}, job_id={job_id}，请重试") from exc
+
+    def _log_is_current(self, session, state, sync) -> bool:
+        if (sync.get("status") != "synced" or sync.get("synced_revision") != state["revision"]
+                or sync.get("pending_revision")):
+            return False
+        try:
+            path = Path(session["output_file"])
+            stat = path.stat()
+            return (str(stat.st_mtime_ns) == state.get("source_excel_mtime")
+                    and stat.st_size == state.get("source_excel_size")
+                    and not self.document_state.writer.fixed_cells_need_sync_for_file(
+                        output_file=str(path), document=state["document"],
+                    ))
+        except Exception:
+            return False
+
     def _capture_sources(self, sources, paths, *, check_version, check_cancelled, emit_log):
         # Capture one stable pair before rendering. Later writes to the live Excel files
         # do not invalidate copies of the same saved review version.
@@ -190,40 +214,42 @@ class HandoverDeliveryPrepareService:
             document_state=self.document_state, emit_log=emit_log,
         )
         building = session["building"]
-        queued = queue.enqueue_review_excel_sync(
-            session, target_revision=document_revision, force_all_regions=True,
-        )
-        if queued.get("status") == "failed":
-            raise HandoverDeliveryPrepareError("日志Excel同步入队失败")
-        try:
-            # A successful barrier does not imply preceding jobs succeeded.
-            self._require_success(queue.wait_for_barrier(
-                building=building, session_id=session_id, reason="delivery_prepare_log",
-            ), "日志队列屏障")
+        store = self.document_state._store(building)
+        sync = store.get_sync_state(session_id)
+        reuse_log = self._log_is_current(session, state, sync)
+        if not reuse_log:
+            queued = queue.enqueue_review_excel_sync(
+                session, target_revision=document_revision, force_all_regions=True,
+            )
+            self._wait_for_write(queue, building=building, job=queued, label="日志Excel同步")
             check_cancelled()
             session = self._check_version(session_id, version)
-            sync = self.document_state._store(building).get_sync_state(session_id)
+            sync = store.get_sync_state(session_id)
             if (sync.get("status") != "synced"
                     or int(sync.get("synced_revision", 0) or 0) != document_revision
                     or int(sync.get("pending_revision", 0) or 0) != 0):
                 raise HandoverDeliveryPrepareError("日志Excel尚未同步到当前文档版本")
-            document, _ = self.document_state.load_document(session)
-            cells = HandoverCapacityReportService.extract_tracked_cells_from_review_document(document)
-            self._check_version(session_id, version)
+        document = state["document"]
+        cells = HandoverCapacityReportService.extract_tracked_cells_from_review_document(document)
+        session = self._check_version(session_id, version)
+        capacity_sync = session.get("capacity_sync") or {}
+        capacity_snapshot = capacity_sync.get("download_snapshot")
+        capacity_inputs = dict(
+            building=building, duty_date=session.get("duty_date", ""), duty_shift=session.get("duty_shift", ""),
+            handover_cells=cells, shared_110kv=shared,
+            cooling_pump_pressures=document.get("cooling_pump_pressures", {}), emit_log=emit_log,
+        )
+        reuse_capacity = bool(capacity_snapshot and capacity_sync.get("status") == "ready"
+                              and self.image_service.capacity_service.download_snapshot_matches(
+                                  capacity_snapshot, revision=document_revision,
+                                  output_file=session["capacity_output_file"], **capacity_inputs,
+                              ))
+        if not reuse_capacity:
             job = queue.enqueue_capacity_overlay_sync(
                 session, tracked_cells=cells, use_saved_shared_110kv=True,
                 expected_document_revision=document_revision,
             )
-            if not job.get("job_id"):
-                raise HandoverDeliveryPrepareError("容量Excel同步入队失败")
-            self._require_success(queue.wait_for_job(
-                building=building, job_id=str(job["job_id"]),
-            ), "容量Excel同步")
-            self._require_success(queue.wait_for_barrier(
-                building=building, session_id=session_id, reason="delivery_prepare_capacity",
-            ), "容量队列屏障")
-        except TimeoutError as exc:
-            raise HandoverDeliveryPrepareRetryableError("Excel同步等待超时，请重试") from exc
+            self._wait_for_write(queue, building=building, job=job, label="容量Excel同步")
         check_cancelled()
         session = self._check_version(session_id, version)
         capacity_sync = session.get("capacity_sync", {})
@@ -247,6 +273,19 @@ class HandoverDeliveryPrepareService:
                 sources, paths, check_version=lambda: self._check_version(session_id, version),
                 check_cancelled=check_cancelled, emit_log=emit_log,
             )
+            log_record = state if reuse_log else store.get_document(session_id)
+            if log_record and log_record.get("source_excel_mtime"):
+                size, mtime, _, digest = _fingerprint(sources["log"])
+                if (str(mtime) != log_record["source_excel_mtime"] or size != log_record.get("source_excel_size")
+                        or digest != source_hashes["log"]):
+                    raise HandoverDeliveryPrepareRetryableError("日志Excel已更新，请重新提交")
+            capacity_snapshot = capacity_sync.get("download_snapshot")
+            if capacity_snapshot and (source_hashes["capacity"] != _digest(sources["capacity"])
+                                      or not self.image_service.capacity_service.download_snapshot_matches(
+                                          capacity_snapshot, revision=document_revision, output_file=str(sources["capacity"]),
+                                          require_fresh=False, **capacity_inputs,
+                                      )):
+                raise HandoverDeliveryPrepareRetryableError("容量Excel或共享数据已更新，请重新提交")
             signature = self.image_service.capacity_service.build_capacity_overlay_signature(
                 building=building, duty_date=session.get("duty_date", ""),
                 duty_shift=session.get("duty_shift", ""), handover_cells=cells,

@@ -232,6 +232,17 @@ class HandoverXlsxWriteQueueService:
         self._start_worker(building_text)
         return job
 
+    def get_download_write_job(self, *, building: str, job_id: str, session_id: str,
+                               task_type: str, output_file: str, revision: int) -> Dict[str, Any] | None:
+        job = self._store(building).get_xlsx_write_job(job_id)
+        if not job or job.get("session_id") != session_id or job.get("task_type") != task_type:
+            return None
+        revision_key = "target_revision" if task_type == "review_excel_sync" else "expected_document_revision"
+        if job.get("target_key") != _output_key(output_file) or job.get("payload", {}).get(revision_key) != revision:
+            return None
+        self._start_worker(building)
+        return job
+
     def wait_for_job(self, *, building: str, job_id: str, timeout_sec: float = 120.0) -> Dict[str, Any]:
         building_text = _text(building)
         job_id_text = _text(job_id)
@@ -387,7 +398,7 @@ class HandoverXlsxWriteQueueService:
         )
         output_file = _text(session.get("capacity_output_file"))
         sync = session.get("capacity_sync", {})
-        if expected_revision is not None and not payload.get("use_saved_shared_110kv") and isinstance(sync, dict) and sync.get("status") == "ready":
+        if expected_revision is not None and isinstance(sync, dict) and sync.get("status") == "ready":
             if capacity_service.download_snapshot_matches(
                 sync.get("download_snapshot"), revision=expected_revision, output_file=output_file, **inputs,
             ):

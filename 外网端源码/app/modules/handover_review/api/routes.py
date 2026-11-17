@@ -1872,6 +1872,8 @@ def _should_sync_capacity_after_review_save(
     next_signature = HandoverCapacityReportService.capacity_input_signature(tracked_cells)
     if previous_signature != next_signature:
         return True
+    if dirty.get("cooling_pump_pressures") or dirty.get("capacity_room_inputs"):
+        return True
     status = str(previous_sync.get("status", "") or "").strip().lower()
     return status in {"pending_input", "missing_file", "failed"}
 
@@ -5709,8 +5711,24 @@ def handover_review_delivery_download(
     return FileResponse(manifest["paths"][artifact], filename=Path(target[filename_key]).name)
 
 
+def _xlsx_download_pending(job_id: str, revision: int) -> JSONResponse:
+    return JSONResponse({"job_id": job_id, "document_revision": revision}, status_code=202,
+                        headers={"Retry-After": "2", "Cache-Control": "no-store"})
+
+
+def _poll_xlsx_download_write(queue, *, building, job_id, session_id, task_type, output_file, revision):
+    job = queue.get_download_write_job(building=building, job_id=job_id, session_id=session_id,
+                                       task_type=task_type, output_file=output_file, revision=revision)
+    if job is None:
+        raise HTTPException(status_code=409, detail="审核版本或文件已更新，请重新下载")
+    return job
+
+
 @router.get("/api/handover/review/{building_code}/download")
-def handover_review_download(building_code: str, request: Request, session_id: str = "") -> FileResponse:
+def handover_review_download(
+    building_code: str, request: Request, session_id: str = "", async_download: bool = False,
+    xlsx_job_id: str = "", expected_document_revision: int | None = None,
+) -> FileResponse:
     container = request.app.state.container
     service, parser, writer, _ = _build_review_services(container)
     document_state = _build_review_document_state_service(container, parser=parser, writer=writer)
@@ -5733,6 +5751,8 @@ def handover_review_download(building_code: str, request: Request, session_id: s
     current_document_revision = int(
         (existing_document_state or {}).get("revision", session_revision) or 0
     )
+    if expected_document_revision is not None and expected_document_revision != current_document_revision:
+        raise HTTPException(status_code=409, detail="审核版本已更新，请重新下载")
     delivery_session = {
         **target,
         "revision": session_revision,
@@ -5795,19 +5815,22 @@ def handover_review_download(building_code: str, request: Request, session_id: s
                 review_service=service,
                 document_state=document_state,
             )
-            queued = queue_service.enqueue_review_excel_sync(
-                target,
-                target_revision=document_revision,
-                force_all_regions=True,
-                download_priority=True,
-            )
-            if not queued.get("job_id"):
-                raise ReviewDocumentStateError(str(queued.get("error") or "交接班文件写入任务未入队"))
-            completed = queue_service.wait_for_job(
-                building=building,
-                job_id=queued["job_id"],
-                timeout_sec=120,
-            )
+            if async_download and xlsx_job_id:
+                completed = _poll_xlsx_download_write(
+                    queue_service, building=building, job_id=xlsx_job_id, session_id=session_id_text,
+                    task_type="review_excel_sync", output_file=output_file_text, revision=document_revision,
+                )
+                if completed.get("status") in {"pending", "running"}:
+                    return _xlsx_download_pending(xlsx_job_id, document_revision)
+            else:
+                queued = queue_service.enqueue_review_excel_sync(
+                    target, target_revision=document_revision, force_all_regions=True, download_priority=True,
+                )
+                if not queued.get("job_id"):
+                    raise ReviewDocumentStateError(str(queued.get("error") or "交接班文件写入任务未入队"))
+                if async_download:
+                    return _xlsx_download_pending(queued["job_id"], document_revision)
+                completed = queue_service.wait_for_job(building=building, job_id=queued["job_id"], timeout_sec=120)
             if str(completed.get("status", "")).strip().lower() != "success":
                 raise ReviewDocumentStateError(str(completed.get("error") or "交接班文件写入队列失败"))
             latest_sync = document_state.attach_excel_sync(target).get("excel_sync", {})
@@ -5833,6 +5856,12 @@ def handover_review_download(building_code: str, request: Request, session_id: s
                     download_warning = "交接班文件固定单元格尚未同步到最新审核内容"
                 if not download_warning:
                     download_warning = f"交接班文件尚未同步到最新版本: synced={latest_synced_revision}, target={document_revision}"
+            if async_download and not download_warning:
+                existing_document_state = document_state.peek_document_state(target)
+                if not _log_file_matches(existing_document_state or {}):
+                    download_warning = "交接班文件在准备期间已更新，请重新下载"
+    except HTTPException:
+        raise
     except ReviewDocumentStateError as exc:
         download_warning = str(exc)
     except HandoverXlsxWriteQueueTimeoutError as exc:
@@ -5853,7 +5882,7 @@ def handover_review_download(building_code: str, request: Request, session_id: s
         expected_document_revision=current_document_revision,
         expected_source_path=str(target.get("output_file", "") or "").strip(),
         building=building, session_id_text=session_id_text, kind="成品", temp_kind="handover_log_download",
-        file_is_current=_log_file_matches if already_synced else None,
+        file_is_current=_log_file_matches if already_synced or async_download else None,
     )
     container.add_system_log(
         f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}, "
@@ -5873,6 +5902,9 @@ def handover_review_capacity_download(
     request: Request,
     session_id: str = "",
     client_id: str = "",
+    async_download: bool = False,
+    xlsx_job_id: str = "",
+    expected_document_revision: int | None = None,
 ) -> FileResponse:
     container = request.app.state.container
     service, parser, writer, _ = _build_review_services(container)
@@ -5906,6 +5938,8 @@ def handover_review_capacity_download(
         )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     current_document_revision = int(target.get("revision", 0) or 0)
+    if expected_document_revision is not None and expected_document_revision != current_document_revision:
+        raise HTTPException(status_code=409, detail="审核版本已更新，请重新下载")
     # 仅当成品对当前审核版本仍就绪（for_session 已做 stale 校验）才优先下载成品；过期/失败/缺失则走补写下载。
     delivery_session = {
         **target,
@@ -5960,18 +5994,24 @@ def handover_review_capacity_download(
             review_service=service,
             document_state=document_state,
         )
-        overlay_job = queue_service.enqueue_capacity_overlay_sync(
-            target,
-            tracked_cells=tracked_cells,
-            client_id=str(client_id or "").strip(),
-            expected_document_revision=current_document_revision,
-            download_priority=True,
-        )
-        completed_job = queue_service.wait_for_job(
-            building=building,
-            job_id=str(overlay_job.get("job_id", "") or "").strip(),
-            timeout_sec=240,
-        )
+        if async_download and xlsx_job_id:
+            completed_job = _poll_xlsx_download_write(
+                queue_service, building=building, job_id=xlsx_job_id, session_id=session_id_text,
+                task_type="capacity_overlay_sync", output_file=output_file_text, revision=current_document_revision,
+            )
+            if completed_job.get("status") in {"pending", "running"}:
+                return _xlsx_download_pending(xlsx_job_id, current_document_revision)
+        else:
+            overlay_job = queue_service.enqueue_capacity_overlay_sync(
+                target, tracked_cells=tracked_cells, client_id=str(client_id or "").strip(),
+                expected_document_revision=current_document_revision, download_priority=True,
+            )
+            overlay_id = str(overlay_job.get("job_id") or "").strip()
+            if not overlay_id:
+                raise HTTPException(status_code=409, detail="容量报表写入任务未入队")
+            if async_download:
+                return _xlsx_download_pending(overlay_id, current_document_revision)
+            completed_job = queue_service.wait_for_job(building=building, job_id=overlay_id, timeout_sec=240)
         if str(completed_job.get("status", "")).strip().lower() != "success":
             detail = str(completed_job.get("error", "") or "").strip() or "容量报表写入队列失败"
             container.add_system_log(
@@ -6016,7 +6056,7 @@ def handover_review_capacity_download(
     refreshed_output_file_text = str(target.get("capacity_output_file", "") or output_file_text).strip()
     if refreshed_output_file_text != output_file_text:
         raise HTTPException(status_code=409, detail="容量报表文件已重新生成，请重新下载")
-    if snapshot and not _capacity_file_matches(None, require_fresh=False):
+    if (snapshot or async_download) and not _capacity_file_matches(None, require_fresh=False):
         raise HTTPException(status_code=409, detail="容量报表的审核或共享数据已更新，请重新下载")
     output_file = Path(refreshed_output_file_text)
     if not refreshed_output_file_text or not output_file.exists() or not output_file.is_file():

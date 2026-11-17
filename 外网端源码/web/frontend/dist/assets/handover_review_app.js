@@ -236,11 +236,11 @@ async function readDownloadError(response) {
   }
 }
 
-async function triggerBrowserDownload(url, fallbackName = "") {
+async function triggerBrowserDownload(url, fallbackName = "", onPreparing) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 270000);
   try {
-    return await fetchBrowserDownload(url, fallbackName, controller.signal);
+    return await fetchBrowserDownload(url, fallbackName, controller.signal, onPreparing);
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error("下载等待超时。文件可能仍在后台同步，请稍后重试。");
@@ -251,12 +251,23 @@ async function triggerBrowserDownload(url, fallbackName = "") {
   }
 }
 
-async function fetchBrowserDownload(url, fallbackName, signal) {
-  const response = await window.fetch(String(url || ""), {
-    method: "GET",
-    cache: "no-store",
-    signal,
-  });
+async function fetchBrowserDownload(url, fallbackName, signal, onPreparing) {
+  let requestUrl = String(url || "");
+  const fetchFile = () => window.fetch(requestUrl, { method: "GET", cache: "no-store", signal });
+  let response = await fetchFile();
+  while (response.status === 202) {
+    const pending = await response.json();
+    if (!pending.job_id || !Number.isInteger(pending.document_revision)) {
+      throw new Error("文件准备状态无效，请重新下载。");
+    }
+    onPreparing?.();
+    const pollUrl = new URL(requestUrl, window.location.href);
+    pollUrl.searchParams.set("xlsx_job_id", pending.job_id);
+    pollUrl.searchParams.set("expected_document_revision", String(pending.document_revision));
+    requestUrl = pollUrl.toString();
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    response = await fetchFile();
+  }
   if (!response.ok) {
     const detail = await readDownloadError(response);
     const error = new Error(detail);

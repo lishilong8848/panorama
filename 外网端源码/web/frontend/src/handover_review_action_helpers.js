@@ -547,9 +547,12 @@ export function createHandoverReviewActionHelpers(options = {}) {
     try {
       const url = buildHandoverReviewDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,
+        async_download: true,
         ts: Date.now(),
       });
-      const result = await triggerBrowserDownload(url, session.value?.output_file || "班次附件.xlsx");
+      const result = await triggerBrowserDownload(url, session.value?.output_file || "班次附件.xlsx", () => {
+        statusText.value = "正在准备最新版交接班日志，就绪后自动下载。";
+      });
       statusText.value = result?.warning
         ? `成品已下载，但部分填充失败：${result.warning}`
         : "本楼班次附件成品已下载";
@@ -599,9 +602,12 @@ export function createHandoverReviewActionHelpers(options = {}) {
     try {
       const url = buildHandoverReviewCapacityDownloadUrl(buildingCode, sessionId, {
         client_id: reviewClientId,
+        async_download: true,
         ts: Date.now(),
       });
-      const result = await triggerBrowserDownload(url, capacityOutputFile || "交接班容量报表.xlsx");
+      const result = await triggerBrowserDownload(url, capacityOutputFile || "交接班容量报表.xlsx", () => {
+        statusText.value = "正在准备最新版容量报表，就绪后自动下载。";
+      });
       statusText.value = result?.warning
         ? `成品已下载，但部分填充失败：${result.warning}`
         : "本楼容量表成品已下载";

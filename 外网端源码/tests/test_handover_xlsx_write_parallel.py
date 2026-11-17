@@ -22,6 +22,22 @@ def _finish(store, job):
     store.finish_xlsx_write_job(job_id=job["job_id"], success=True)
 
 
+def test_download_poll_job_is_bound_to_file_shift_kind_and_revision(tmp_path):
+    store = _store(tmp_path)
+    output = str(tmp_path / "log.xlsx")
+    job = _enqueue(store, "review_excel_sync", _output_key(output), payload={"target_revision": 7})
+    queue = HandoverXlsxWriteQueueService.__new__(HandoverXlsxWriteQueueService)
+    queue._store = lambda _: store
+    queue._start_worker = Mock()
+    lookup = dict(building="A楼", job_id=job["job_id"], output_file=output,
+                  session_id="day", task_type="review_excel_sync", revision=7)
+    for key, wrong in (("session_id", "night"), ("output_file", output + ".new"),
+                       ("task_type", "capacity_overlay_sync"), ("revision", 6)):
+        assert queue.get_download_write_job(**{**lookup, key: wrong}) is None
+    queue._start_worker.assert_not_called()
+    assert queue.get_download_write_job(**lookup)["status"] == "pending"
+
+
 def test_independent_files_run_in_parallel_but_same_path_and_barrier_wait(tmp_path):
     store = _store(tmp_path)
     capacity = _enqueue(store, "capacity_overlay_sync", "capacity.xlsx")
