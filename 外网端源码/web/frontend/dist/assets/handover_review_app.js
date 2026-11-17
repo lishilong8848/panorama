@@ -3375,10 +3375,14 @@ function mountHandoverStationHApp(Vue) {
         dutyFocusPrintFrame = null;
       }
 
-      function printDutyFocusImage(imageUrl, title = "值班关注点") {
+      function printDutyFocusImage(imageUrl, title = "值班关注点", { landscape = false } = {}) {
         const normalizedUrl = String(imageUrl || "").trim();
         const docTitle = String(title || "值班关注点").trim();
         if (!normalizedUrl) return Promise.reject(new Error(`${docTitle}成品图片尚未生成`));
+        const orientation = landscape ? "landscape" : "portrait";
+        const [width, height, imageWidth, imageHeight, padding] = landscape
+          ? [296, 209, 296, 209, 0]
+          : [210, 297, 194, 281, 8];
         cleanupDutyFocusPrintFrame();
         return new Promise((resolve, reject) => {
           const frame = document.createElement("iframe");
@@ -3387,8 +3391,8 @@ function mountHandoverStationHApp(Vue) {
           frame.style.position = "fixed";
           frame.style.left = "-10000px";
           frame.style.top = "0";
-          frame.style.width = "210mm";
-          frame.style.height = "297mm";
+          frame.style.width = `${width}mm`;
+          frame.style.height = `${height}mm`;
           frame.style.border = "0";
           frame.style.opacity = "0";
           frame.style.pointerEvents = "none";
@@ -3409,11 +3413,11 @@ function mountHandoverStationHApp(Vue) {
     <meta charset="utf-8" />
     <title>${docTitle}</title>
     <style>
-      @page { size: A4 portrait; margin: 0; }
+      @page { size: A4 ${orientation}; margin: 0; }
       * { box-sizing: border-box; }
-      html, body { width: 210mm; min-height: 297mm; margin: 0; padding: 0; background: #fff; }
-      body { display: flex; align-items: center; justify-content: center; padding: 8mm; }
-      img { display: block; width: 194mm; height: 281mm; object-fit: contain; }
+      html, body { width: ${width}mm; min-height: ${height}mm; margin: 0; padding: 0; background: #fff; }
+      body { display: flex; align-items: center; justify-content: center; padding: ${padding}mm; }
+      img { display: block; width: ${imageWidth}mm; height: ${imageHeight}mm; object-fit: contain; }
     </style>
   </head>
   <body><img id="duty-focus-print-image" alt="${docTitle}" /></body>
@@ -3513,7 +3517,7 @@ function mountHandoverStationHApp(Vue) {
             _t: Date.now(),
           });
           objectUrl = URL.createObjectURL(blob);
-          await printDutyFocusImage(objectUrl, "交接班日志");
+          await printDutyFocusImage(objectUrl, "交接班日志", { landscape: true });
           statusText.value = "已调用浏览器打印，可在系统打印窗口中确认。";
         } catch (error) {
           cleanupDutyFocusPrintFrame();

@@ -43,12 +43,12 @@ STATION_H_DUTY_FOCUS_IMAGE_CELL = "J2"
 STATION_H_DUTY_FOCUS_IMAGE_MAX_WIDTH_PX = 900
 _IMAGE_CELL_PADDING_PX = 2
 
-# H楼交接班日志打印预设：纵向 A4、缩放成单页。打印区域按最终行数动态锁定日志正文，
+# H楼交接班日志打印预设：横向 A4、缩放成单页。打印区域按最终行数动态锁定日志正文，
 # 分类插行后仍覆盖到页脚。模板本身没有任何打印设置，导致每次打印都要手工重设；
 # 这里在生成时烘焙进去，下载/上传/打印的 H_handover.xlsx 都自带正确打印配置。
 STATION_H_PRINT_LAST_COLUMN = "H"
 STATION_H_PRINT_DEFAULT_LAST_ROW = 50
-STATION_H_PRINT_ORIENTATION = "portrait"
+STATION_H_PRINT_ORIENTATION = "landscape"
 STATION_H_PRINT_PAPER_SIZE = 9  # openpyxl Worksheet.PAPERSIZE_A4
 
 
@@ -56,6 +56,7 @@ def _apply_station_h_print_setup(worksheet: Any, *, last_row: int = STATION_H_PR
     """给 H楼日志正文工作表烘焙固定打印配置（不改动列宽/合并区域；行高由 wrap 逻辑负责）。"""
     final_row = max(1, int(last_row or STATION_H_PRINT_DEFAULT_LAST_ROW))
     worksheet.print_area = f"A1:{STATION_H_PRINT_LAST_COLUMN}{final_row}"
+    worksheet.print_options.horizontalCentered = True
     worksheet.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
     worksheet.page_setup.orientation = STATION_H_PRINT_ORIENTATION
     worksheet.page_setup.paperSize = STATION_H_PRINT_PAPER_SIZE

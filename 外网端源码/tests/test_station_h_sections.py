@@ -326,7 +326,9 @@ def test_build_station_h_handover_log_workbook_renders_sections(tmp_path, monkey
         # 页脚「清点确认人（接班）」顺延 +1 到行 46，仍为接班甲
         assert ws["H46"].value == "接班甲"
         # 打印预设烘焙进工作簿，打印区随插行覆盖到页脚
-        assert ws.page_setup.orientation == "portrait"
+        assert ws.page_setup.orientation == "landscape"
+        assert ws.page_setup.paperSize == int(ws.PAPERSIZE_A4)
+        assert ws.print_options.horizontalCentered is True
         assert ws.sheet_properties.pageSetUpPr.fitToPage is True
         assert ws.page_setup.fitToWidth == 1 and ws.page_setup.fitToHeight == 1
         assert str(ws.print_area).endswith("$H$51")
