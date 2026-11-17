@@ -213,6 +213,52 @@ def test_background_polls_each_building_and_dispatches_fresh_revision(setup, mon
     assert not client.writes
 
 
+def test_background_backs_off_only_failed_building_and_resets_on_recovery(setup, monkeypatch):
+    from app.bootstrap.container import AppContainer
+
+    config, client, _ = setup
+    cached, _, _ = settings.refresh_cloud_point_settings(config)
+    e_table = cloud.POINT_CONFIG_TABLES[E]
+    d_table = cloud.POINT_CONFIG_TABLES[D]
+    change_on_cloud(client, E, EXTRA_POINT, "B6")
+    client.fail_read.add(e_table)
+    client.timeout = 30
+    client.read.clear()
+    now = 0
+    monkeypatch.setattr("time.monotonic", lambda: now)
+    dispatch = Mock(return_value={"ok": True})
+    container = SimpleNamespace(runtime_config=config, add_system_log=Mock(),
+                                _configured_deployment_snapshot=lambda: {"role_mode": "external"},
+                                dispatch_pending_inspection_retrigger=dispatch)
+    watchdog = AppContainer._build_inspection_retrigger_watchdog(container)
+    e_checks = []
+    d_checks = []
+    for now in range(0, 1126, 15):
+        if now in (1065, 1125):
+            client.fail_read.remove(e_table)
+        elif now == 1095:
+            client.fail_read.add(e_table)
+        client.read.clear()
+        assert watchdog._dispatch() == {"ok": True}
+        assert len(client.read) <= 1
+        if client.read == [e_table]:
+            e_checks.append(now)
+        if client.read == [d_table]:
+            d_checks.append(now)
+        if now < 1065:
+            assert settings.load_point_settings(config)[E] == cached[E]
+
+    assert e_checks == [15, 45, 105, 225, 465, 765, 1065, 1095, 1125]
+    assert d_checks == list(range(0, 1126, 30))
+    assert dispatch.call_count == len(range(0, 1126, 15))
+    assert container.add_system_log.call_count == 2
+    assert client.timeout == 8
+    assert client.request_retry_count == 0
+    assert client.api_retry_attempt_limit == 1
+    assert EXTRA_POINT in settings.load_point_settings(config)[E][ELECTRICAL]["points"]
+    assert not client.writes
+
+
 def test_verified_review_cache_does_not_repeat_slow_cloud_reads(setup):
     config, client, _ = setup
     app = FastAPI()

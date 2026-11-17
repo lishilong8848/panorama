@@ -853,17 +853,26 @@ class AppContainer:
             interval = 10.0
         next_check = 0.0
         buildings = cycle(POINT_CONFIG_TABLES)
+        building_due = {}
+        retry_delay = {}
         previous_errors = {}
 
         def poll_and_dispatch():
             nonlocal next_check
-            if (monotonic() >= next_check
+            now = monotonic()
+            if (now >= next_check
                     and self._configured_deployment_snapshot().get("role_mode") == "external"
                     and self.runtime_config.get("inspection_data_upload", {}).get("enabled", True)):
-                building = next(buildings)
+                # Check at most one building per tick; skip buildings cooling down.
+                for _ in POINT_CONFIG_TABLES:
+                    building = next(buildings)
+                    if now >= building_due.get(building, 0.0):
+                        break
+                else:
+                    return self.dispatch_pending_inspection_retrigger()
                 try:
                     client = point_config_client(self.runtime_config)
-                    client.timeout = min(client.timeout, 3)
+                    client.timeout = min(client.timeout, 8)
                     client.request_retry_count = 0
                     client.api_retry_attempt_limit = 1
                     _, _, errors = refresh_cloud_point_settings(self.runtime_config, buildings=(building,), client=client)
@@ -873,7 +882,15 @@ class AppContainer:
                 if error and previous_errors.get(building) != error:
                     self.add_system_log(f"[巡检数据处理] {building}飞书测点配置待核验：{error}")
                 previous_errors[building] = error
-                next_check = monotonic() + 15
+                finished_at = monotonic()
+                if error:
+                    delay = min(retry_delay.get(building, 15) * 2, 300)
+                    retry_delay[building] = delay
+                else:
+                    retry_delay.pop(building, None)
+                    delay = 30
+                building_due[building] = finished_at + delay
+                next_check = finished_at + 15
             return self.dispatch_pending_inspection_retrigger()
 
         return InspectionRetriggerWatchdog(
