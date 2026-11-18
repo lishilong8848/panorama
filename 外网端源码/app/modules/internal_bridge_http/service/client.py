@@ -59,13 +59,14 @@ class InternalBridgeHttpClient:
         if not base_url:
             return None
         configured_read_timeout = int(cfg.get("read_timeout_sec", cfg.get("request_timeout_sec", 15)) or 15)
-        return cls(
+        client = cls(
             base_url=base_url,
             auth_token="",
             connect_timeout_sec=int(cfg.get("connect_timeout_sec", 3) or 3),
             read_timeout_sec=configured_read_timeout,
             max_attempts=int(cfg.get("max_attempts", 2) or 2),
         )
+        return client
 
     @staticmethod
     def _is_retryable_error(exc: BaseException) -> bool:

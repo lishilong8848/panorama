@@ -1211,6 +1211,7 @@ class InternalBridgeHttpTaskRunner:
         buildings: List[str],
         target_bucket_key: str = "",
         force_refresh: bool = False,
+        inspection_force_authorized: bool = False,
     ) -> Dict[str, Any]:
         family = str(source_family or "").strip()
         target_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
@@ -1220,8 +1221,12 @@ class InternalBridgeHttpTaskRunner:
         if force_refresh:
             from app.config.energy_report_download_config import ENERGY_REPORT_LABELS
 
-            if family not in ENERGY_REPORT_LABELS:
-                raise ValueError("强制补采仅支持月度能耗报表")
+            if family in INSPECTION_REPORT_TEMPLATES:
+                # 巡检强制补采只能来自已完成令牌校验的入口；这里做最后一道防线。
+                if not inspection_force_authorized:
+                    raise PermissionError("巡检强制补采未授权")
+            elif family not in ENERGY_REPORT_LABELS:
+                raise ValueError("强制补采仅支持月度能耗报表和巡检源文件")
         if family.lower() == "inspection_data_family":
             raise ValueError("inspection_data_family 已停用，请分别使用电气、暖通巡检源文件")
         if not target_buildings:

@@ -30,6 +30,7 @@ export const DASHBOARD_INSPECTION_DATA_UPLOAD_SECTION = `        <section class=
                   </button>
                   <button class="btn btn-ghost" :disabled="inspectionPointEditor.busy" @click="toggleInspectionPointEditor">测点配置</button>
                 </div>
+                <inspection-live-settings></inspection-live-settings>
                 <div v-if="inspectionPointEditor.open" class="form-row">
                   <div class="config-form-grid config-form-grid-compact">
                     <label><span>楼栋</span><select v-model="inspectionPointEditor.building" :disabled="inspectionPointEditor.busy" @change="showInspectionPointGroup">

@@ -34,6 +34,7 @@ INSPECTION_DATA_UPLOAD_DEFAULTS = {
     "wait_source_timeout_sec": 600,
     "wait_source_poll_sec": 5,
     "max_source_age_minutes": 120,
+    "lighthouse_bridge": {"enabled": False},
     "scheduler": {
         "enabled": False,
         "auto_start_in_gui": False,
@@ -44,6 +45,15 @@ INSPECTION_DATA_UPLOAD_DEFAULTS = {
         "state_file": "inspection_data_upload_scheduler_state.json",
     },
 }
+
+
+def normalize_lighthouse_bridge(value: Any) -> dict:
+    if not isinstance(value, dict) or set(value) - {"enabled", "token"}:
+        raise ValueError("巡检联动配置格式无效")
+    enabled = value.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("巡检联动启用状态无效")
+    return {"enabled": enabled}
 
 
 def normalize_inspection_scheduler(value: Any) -> dict:

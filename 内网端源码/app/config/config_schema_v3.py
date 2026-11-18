@@ -195,6 +195,7 @@ DEFAULT_CONFIG_V3: Dict[str, Any] = {
             },
         },
         "sheet_import": {},
+        "inspection_data_upload": {"lighthouse_bridge": {"enabled": False, "token": ""}},
         "inspection_data": {
             "enabled": False,
             "download": {

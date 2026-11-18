@@ -748,6 +748,12 @@ def handle_system_screenshot_upload(
         raise
 
 
+def handle_inspection_data_live_upload(config, payload, emit_log, runtime=None):
+    from app.modules.inspection_data.service.live_requests import run_live_upload
+
+    return run_live_upload(config, payload, emit_log, runtime)
+
+
 def handle_inspection_data_upload(
     config: Dict[str, Any],
     payload: Dict[str, Any],
@@ -1576,6 +1582,7 @@ HANDLER_REGISTRY: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], Callable[[
     "system_screenshot_upload": handle_system_screenshot_upload,
     "temperature_humidity_upload": handle_temperature_humidity_upload,
     "inspection_data_upload": handle_inspection_data_upload,
+    "inspection_data_live_upload": handle_inspection_data_live_upload,
     "system_screenshot_demand_upload": handle_system_screenshot_demand_upload,
     "resume_upload": handle_resume_upload,
     "manual_upload": handle_manual_upload,

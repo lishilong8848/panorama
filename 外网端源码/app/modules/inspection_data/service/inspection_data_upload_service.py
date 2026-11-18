@@ -18,10 +18,10 @@ from app.config.inspection_data_config import INSPECTION_DATA_UPLOAD_DEFAULTS as
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS
 from app.config.inspection_data_config import INSPECTION_SOURCE_CONTRACTS as SOURCE_FAMILIES
 from app.config.inspection_data_config import inspection_hour_bucket
-from app.modules.inspection_data.service.chiller_operating_points import HVAC_FAMILY, operation_rows, report_operating_controls
-from app.modules.inspection_data.service.handover_inspection_inputs import handover_inspection_rows
+from app.modules.inspection_data.service.chiller_operating_points import HVAC_FAMILY, OPERATING_SOURCE, operation_rows, report_operating_controls
+from app.modules.inspection_data.service.handover_inspection_inputs import MODE_SOURCE, PRESSURE_SOURCE, handover_inspection_rows
 from app.modules.inspection_data.service.point_correction import CORRECTED_VALUE_FIELD, corrected_samples
-from app.modules.inspection_data.service.point_status import FIXED_VALUE_FIELD, INTERVAL_FIELD, LOCAL_POINT_ID, SOURCE_FIELD, status_fields
+from app.modules.inspection_data.service.point_status import FIXED_VALUE_FIELD, INTERVAL_FIELD, LOCAL_POINT_ID, LOCAL_SOURCES, SOURCE_FIELD, status_fields
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
@@ -611,7 +611,7 @@ class InspectionDataUploadService:
         return rows
 
     def _sources(self, source_date: str, log, cancel, source_bucket_key: str = "", point_settings=None, *,
-                 buildings=None, scoped_building=None) -> dict:
+                 buildings=None, scoped_building=None, not_before=None, force_refresh=False) -> dict:
         internal = self._internal or InternalBridgeHttpClient.from_runtime_config(self.runtime_config)
         if internal is None:
             raise ValueError("巡检数据处理需要配置内网HTTP桥接地址")
@@ -622,6 +622,8 @@ class InspectionDataUploadService:
         buildings = self.cfg["buildings"] if buildings is None else buildings
         required = [(building, family) for building in buildings for family in SOURCE_FAMILIES]
         retry_dispatch_at = {}
+        collection_floor = int(time.time() * 1000) if force_refresh else None
+        forced = set()
         last_diagnostic = ""
         last_error_log = -60.0
         rules = query_rules(point_settings)
@@ -636,6 +638,13 @@ class InspectionDataUploadService:
                     scope = {"building": scoped_building} if scoped_building else {}
                     sync_point_settings(self.runtime_config, point_settings, bridge=internal, **scope)
                     pending_sync = False
+                if force_refresh and not pending_sync:
+                    for family in SOURCE_FAMILIES:
+                        if family not in forced:
+                            internal.refresh_latest_source_cache(source_family=family, buildings=list(buildings),
+                                                                 target_bucket_key=requested_bucket, force_refresh=True)
+                            forced.add(family)
+                            retry_dispatch_at.update({(b, family): time.monotonic() + 15 for b in buildings})
                 if scoped_building and source_date == today:
                     payload = internal.get_latest_inspection_points(building=scoped_building)
                     if payload.get("ok") and isinstance(payload.get("datasets"), list):
@@ -683,6 +692,12 @@ class InspectionDataUploadService:
                             if (not doc.get("requested_point_ids") or not added <= ids or ids & removed
                                     or (baseline is not None and ids != (set(baseline) | added) - removed)):
                                 raise ValueError("巡检接口返回的测点与已保存清单不符；未清空多维表")
+                    sampled_ms = int(datetime.strptime(doc["value_time"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
+                    if not_before is not None and sampled_ms < not_before:
+                        continue
+                    if force_refresh and (type(doc.get("collection_started_at")) is not int
+                                          or doc["collection_started_at"] < collection_floor):
+                        continue
                     age = (datetime.now() - captured).total_seconds()
                     if source_date == today and (age < -300 or age > max(1, int(self.cfg["max_source_age_minutes"])) * 60):
                         continue
@@ -703,9 +718,10 @@ class InspectionDataUploadService:
                 cancel()
                 try:
                     internal.refresh_latest_source_cache(source_family=family, buildings=refresh_buildings,
-                                                         target_bucket_key=requested_bucket)
+                                                         target_bucket_key=requested_bucket,
+                                                         **({"force_refresh": True} if force_refresh else {}))
                     # A queued acknowledgement does not prove that the download started.
-                    retry_dispatch_at.update({(b, family): time.monotonic() + 60 for b in refresh_buildings})
+                    retry_dispatch_at.update({(b, family): time.monotonic() + (15 if force_refresh else 60) for b in refresh_buildings})
                 except Exception as exc:
                     if not self._retryable_source_error(exc):
                         raise
@@ -724,10 +740,36 @@ class InspectionDataUploadService:
             reason in str(exc) for reason in ("WinError 10054", "HTTP 返回 502", "HTTP 返回 503", "HTTP 返回 504")
         )
 
+    @staticmethod
+    def _minimum_live_source_time(sources, parsed, not_before):
+        times = [int(datetime.strptime(doc["value_time"], "%Y-%m-%d %H:%M:%S")
+                     .replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
+                 for entries in sources.values() for doc in entries.values()]
+        # Match Lighthouse sampled_source_times: fixed/manual rows and auxiliary
+        # mode/pressure/derived controls do not certify the live measurement batch.
+        excluded = LOCAL_SOURCES | {MODE_SOURCE, PRESSURE_SOURCE, OPERATING_SOURCE,
+                                    "derived_operating", "HANDOVER_MODE", "HANDOVER_PRESSURE"}
+        for item in parsed.values():
+            for row in item["rows"]:
+                if (row.get("记录类型") not in {"设备巡检", "测点明细"}
+                        or row.get(SOURCE_FIELD) in excluded):
+                    continue
+                stamp = row.get("源文件时间")
+                if type(stamp) is not int or stamp <= 0:
+                    raise ValueError("真实巡检数据缺少有效源文件时间")
+                times.append(stamp)
+        now = int(time.time() * 1000)
+        if not times or min(times) < not_before or max(times) > now:
+            raise ValueError("真实巡检数据采样时间未达到本次要求；未清空多维表")
+        return min(times)
+
     def run(self, *, log: Callable[[str], None] | None = None, check_cancel=None,
-            source_date=None, source_bucket_key: str = "", dry_run: bool = False, building=None) -> dict[str, Any]:
+            source_date=None, source_bucket_key: str = "", dry_run: bool = False, building=None,
+            not_before=None, force_refresh=False, receipt_callback=None) -> dict[str, Any]:
         log = log or (lambda _: None)
         cancel = check_cancel or (lambda: None)
+        if force_refresh and (type(not_before) is not int or building not in {"D楼", "E楼"}):
+            raise ValueError("按需巡检必须指定单楼和最早采样时刻")
         if not self.cfg["enabled"]:
             return {"status": "skipped", "reason": "disabled"}
         if set(self.cfg["buildings"]) != {"D楼", "E楼"} or len(self.cfg["buildings"]) != 2:
@@ -760,6 +802,8 @@ class InspectionDataUploadService:
             for failed_building, error in config_errors.items():
                 log(f"[巡检数据处理] {failed_building}飞书测点配置待核验，本轮保留该楼原数据：{error}")
         scope = {"scoped_building": building} if building else {}
+        if force_refresh or not_before is not None:
+            scope.update(not_before=not_before, force_refresh=force_refresh)
         sources = self._sources(date, log, cancel, source_bucket_key, point_settings, buildings=buildings, **scope)
         hvac = {building: entries[HVAC_FAMILY] for building, entries in sources.items()}
         report_controls = report_operating_controls(self._internal, self.runtime_config, hvac, log)
@@ -783,7 +827,7 @@ class InspectionDataUploadService:
                     allow_unmapped=bool(entry.get("requested_point_ids")
                                         and any(r["测点ID"] in added_ids and r["测点值"] for r in point_rows)),
                 )
-                source_time = int(datetime.strptime(entry["query_end"], "%Y-%m-%d %H:%M:%S")
+                source_time = int(datetime.strptime(entry["value_time"] if force_refresh else entry["query_end"], "%Y-%m-%d %H:%M:%S")
                                   .replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
                 source_name = f"巡检接口/{entry['report_name']}"
                 local_rows = self._local_point_rows(building, contract["discipline"], group)
@@ -801,7 +845,8 @@ class InspectionDataUploadService:
                 combined["diagnostics"].extend(f"{contract['label']}: {item}" for item in p["diagnostics"])
                 combined["sources"][family] = {
                     **contract, "source_family": family, "source_file": source_name,
-                    "source_time": entry["query_end"], "bucket_kind": "latest", "bucket_key": entry["bucket_key"],
+                    "source_time": entry["value_time"] if force_refresh else entry["query_end"],
+                    "bucket_kind": "latest", "bucket_key": entry["bucket_key"],
                     **{key: value for key, value in p.items() if key != "rows"},
                 }
                 log(f"[巡检数据处理] {building}/{contract['report_name']} 设备={len(p['rows'])}, 有效测点={p['valid_points']}, "
@@ -823,6 +868,9 @@ class InspectionDataUploadService:
             parsed[building]["point_count"] += len(extra_rows)
             if extra_rows:
                 log(f"[巡检数据处理] {building} 交接班补充测点={len(extra_rows)}")
+        minimum_source_time = None
+        if force_refresh:
+            minimum_source_time = self._minimum_live_source_time(sources, parsed, not_before)
         source_metadata = {"source_families": copy.deepcopy(DEFAULT_CONFIG["source_families"]),
                            "source_file_count": sum(len(p["sources"]) for p in parsed.values()),
                            **({"point_config_read_failed": config_errors} if config_errors else {}),
@@ -927,6 +975,7 @@ class InspectionDataUploadService:
             carrier_id = ""
             marker_text = ""
             marker_write_attempted = False
+            receipt_recorded = False
             try:
                 require_unchanged((building,))
                 if ids and client.batch_delete_records(table, ids, batch_size=200) != len(ids):
@@ -971,10 +1020,16 @@ class InspectionDataUploadService:
                 if self.read_completed_batch(building=building, upload_time=upload_time) != marker:
                     raise RuntimeError("完成标记回查不一致")
                 require_unchanged((building,))
+                if receipt_callback is not None:
+                    receipt_callback({"status": "success", "buildings": [building],
+                                      "source_time": minimum_source_time, "uploaded_at": int(time.time() * 1000),
+                                      "results": {building: {"upload_time": upload_time, "uploaded_count": len(rows),
+                                                             "batch_completion": marker}}})
+                    receipt_recorded = True
                 snapshot["status"] = "completed"
                 atomic_write_text(backup, json.dumps(snapshot, ensure_ascii=False))
             except Exception as exc:
-                if marker_write_attempted and carrier_id and marker_text:
+                if marker_write_attempted and carrier_id and marker_text and not receipt_recorded:
                     try:
                         current = client.list_records(table, page_size=500, max_records=0)
                         carrier = next((r for r in current if r.get("record_id") == carrier_id), None)
@@ -991,6 +1046,7 @@ class InspectionDataUploadService:
                                 "sources": parsed_building["sources"]}
             log(f"[巡检数据处理] {building} 上传完成: records={len(rows)}, deleted={len(ids)}")
         return {"status": "partial" if config_errors else "success",
+                **({"source_time": minimum_source_time, "uploaded_at": int(time.time() * 1000)} if force_refresh else {}),
                 "source_date": date, "buildings": list(result), "results": result,
                 **source_metadata,
                 "settings_revision": settings_revision,

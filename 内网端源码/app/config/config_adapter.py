@@ -391,6 +391,8 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     features["inspection_data"] = normalize_inspection_data_config(
         deep_merge_defaults(_dict(legacy_cfg.get("inspection_data")), _dict(features.get("inspection_data")))
     )
+    features["inspection_data_upload"] = normalize_inspection_lighthouse_bridge_config(
+        deep_merge_defaults(_dict(legacy_cfg.get("inspection_data_upload")), _dict(features.get("inspection_data_upload"))))
     features["manual_upload_gui"] = deep_merge_defaults(_dict(legacy_cfg.get("manual_upload_gui")), _dict(features.get("manual_upload_gui")))
     features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
     features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
@@ -418,6 +420,21 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+def normalize_inspection_lighthouse_bridge_config(value: Any) -> Dict[str, Any]:
+    upload = copy.deepcopy(value) if isinstance(value, dict) else {}
+    bridge = upload.get("lighthouse_bridge", {})
+    if not isinstance(bridge, dict) or set(bridge) - {"enabled", "token"}:
+        raise ValueError("巡检联动配置格式无效")
+    enabled, token = bridge.get("enabled", False), bridge.get("token", "")
+    if (type(enabled) is not bool or not isinstance(token, str)
+            or any(ord(c) < 32 or ord(c) == 127 for c in token)):
+        raise ValueError("巡检联动启用状态或密钥格式无效")
+    if enabled and not token.strip():
+        raise ValueError("启用巡检联动前必须设置密钥")
+    upload["lighthouse_bridge"] = {"enabled": enabled, "token": token}
+    return upload
+
+
 def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
     raw = copy.deepcopy(raw_cfg) if isinstance(raw_cfg, dict) else {}
     if is_v3_config(raw):
@@ -432,6 +449,7 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
         common["shared_bridge"] = _resolve_shared_bridge_paths(common, deployment)
         common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
         features["inspection_data"] = normalize_inspection_data_config(features.get("inspection_data"))
+        features["inspection_data_upload"] = normalize_inspection_lighthouse_bridge_config(features.get("inspection_data_upload"))
         features["day_metric_upload"] = sanitize_day_metric_upload_config(_dict(features.get("day_metric_upload")))
         features["alarm_export"] = sanitize_alarm_export_config(_dict(features.get("alarm_export")))
         features["wet_bulb_collection"] = sanitize_wet_bulb_collection_config(
@@ -692,6 +710,7 @@ def adapt_runtime_config(v3_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "feishu_sheet_import": copy.deepcopy(sheet_import),
         "handover_log": runtime_handover_log,
         "inspection_data": copy.deepcopy(_dict(features.get("inspection_data"))),
+        "inspection_data_upload": copy.deepcopy(features.get("inspection_data_upload", {})),
         "day_metric_upload": copy.deepcopy(day_metric_upload),
         "alarm_export": copy.deepcopy(alarm_export),
         "alarm_rule_export": copy.deepcopy(_dict(features.get("alarm_rule_export"))),
@@ -804,6 +823,8 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
         _dict(runtime.get("alarm_rule_export")),
         _dict(features.get("alarm_rule_export")),
     )
+    features["inspection_data_upload"] = normalize_inspection_lighthouse_bridge_config(
+        deep_merge_defaults(_dict(runtime.get("inspection_data_upload")), _dict(features.get("inspection_data_upload"))))
     features["system_screenshot_capture"] = deep_merge_defaults(
         _dict(runtime.get("system_screenshot_capture")),
         _dict(features.get("system_screenshot_capture")),

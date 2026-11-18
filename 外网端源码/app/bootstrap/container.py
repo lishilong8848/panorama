@@ -39,6 +39,7 @@ from app.modules.scheduler.service.apscheduler_orchestrator import (
 from app.modules.updater.service.updater_service import UpdaterService
 from app.modules.scheduler.service.inspection_data_scheduler import InspectionDataScheduler
 from app.config.inspection_data_config import normalize_inspection_scheduler
+from app.modules.inspection_data.service.live_requests import linked_mode
 from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
 from app.shared.utils.file_utils import (
     canonicalize_windows_path_for_compare,
@@ -179,6 +180,7 @@ class AppContainer:
     inspection_retrigger_watchdog: InspectionRetriggerWatchdog | None = None
     inspection_retrigger_shutdown: bool = False
     _inspection_retrigger_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _inspection_live_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     energy_report_upload_scheduler: ApschedulerSchedulerFacade | None = None
     temperature_humidity_upload_scheduler_callback: Callable[[str], tuple[bool, str]] | None = None
     top5_power_report_scheduler: ApschedulerSchedulerFacade | None = None
@@ -720,7 +722,8 @@ class AppContainer:
     def _build_inspection_data_upload_scheduler(self) -> InspectionDataScheduler:
         return InspectionDataScheduler(
             scheduler_key="inspection_data_upload", feature="inspection_data_upload",
-            scheduler_cfg=self.runtime_config.get("inspection_data_upload", {}).get("scheduler", {}),
+            scheduler_cfg={**self.runtime_config.get("inspection_data_upload", {}).get("scheduler", {}),
+                           **({"enabled": False} if linked_mode(self.runtime_config) else {})},
             runtime_state_root=self._runtime_state_root_text(), emit_log=self.add_system_log,
             run_callback=self._submit_inspection_data_upload,
             lookup_job=self._lookup_inspection_data_job,
@@ -731,6 +734,8 @@ class AppContainer:
         )
 
     def _submit_inspection_data_upload(self, slot: str):
+        if linked_mode(self.runtime_config):
+            raise ValueError("巡检联动已启用，固定时点上传已停用")
         from app.config.inspection_data_config import inspection_hour_bucket
 
         if slot[:10] != datetime.now().strftime("%Y-%m-%d"):
@@ -781,6 +786,14 @@ class AppContainer:
             submitted_by="config-save",
         )
         return self.job_service.get_job_state(job.job_id) or job
+
+    def dispatch_inspection_live_requests(self):
+        from app.modules.inspection_data.service.live_requests import dispatch_live_requests
+
+        if self.inspection_retrigger_shutdown:
+            return
+        with self._inspection_live_lock:
+            dispatch_live_requests(self)
 
     def dispatch_pending_inspection_retrigger(self) -> Dict[str, Any]:
         scoped = [self._dispatch_inspection_retrigger(building) for building in ("D楼", "E楼")]
@@ -859,6 +872,11 @@ class AppContainer:
 
         def poll_and_dispatch():
             nonlocal next_check
+            if linked_mode(self.runtime_config):
+                try:
+                    self.dispatch_inspection_live_requests()
+                except Exception:
+                    self.add_system_log("[巡检数据处理] 按需请求等待恢复，不影响测点配置补传")
             now = monotonic()
             if (now >= next_check
                     and self._configured_deployment_snapshot().get("role_mode") == "external"
@@ -947,6 +965,8 @@ class AppContainer:
         return None
 
     def start_inspection_data_upload_scheduler(self, source: str = "手动") -> Dict[str, Any]:
+        if linked_mode(self.runtime_config):
+            raise ValueError("巡检联动已启用，固定时点上传已停用")
         if self._configured_deployment_snapshot().get("role_mode") != "external":
             raise ValueError("巡检数据处理调度仅允许在外网端启动")
         if not self.runtime_config.get("inspection_data_upload", {}).get("enabled", True):
@@ -966,7 +986,8 @@ class AppContainer:
 
     def rebuild_inspection_data_upload_scheduler(self, source: str = "配置热重载") -> Dict[str, Any]:
         feature_cfg = self.runtime_config.get("inspection_data_upload", {})
-        cfg = normalize_inspection_scheduler(feature_cfg.get("scheduler", {}))
+        cfg = normalize_inspection_scheduler({**feature_cfg.get("scheduler", {}),
+                                             **({"enabled": False} if linked_mode(self.runtime_config) else {})})
         scheduler = self.inspection_data_upload_scheduler
         was_running = bool(scheduler and scheduler.is_running())
         if scheduler:
@@ -982,7 +1003,8 @@ class AppContainer:
 
     def inspection_data_upload_scheduler_status(self) -> Dict[str, Any]:
         scheduler = self.inspection_data_upload_scheduler
-        cfg = normalize_inspection_scheduler(self.runtime_config.get("inspection_data_upload", {}).get("scheduler", {}))
+        cfg = normalize_inspection_scheduler({**self.runtime_config.get("inspection_data_upload", {}).get("scheduler", {}),
+                                             **({"enabled": False} if linked_mode(self.runtime_config) else {})})
         payload = scheduler.get_runtime_snapshot() if scheduler else {
             "enabled": cfg["enabled"], "running": False, "status": "未初始化",
             "run_times": cfg["run_times"], "next_run_time": "", "last_trigger_at": "",

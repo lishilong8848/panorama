@@ -33,7 +33,8 @@ def is_sensitive_key(key: str) -> bool:
 def mask_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     def _mask(value: Any, key: str | None = None) -> Any:
         if isinstance(value, dict):
-            return {k: _mask(v, k) for k, v in value.items()}
+            return {k: ("********" if k == "token" and key == "lighthouse_bridge" and v else _mask(v, k))
+                    for k, v in value.items()}
         if isinstance(value, list):
             return [_mask(item, key) for item in value]
         if isinstance(value, str) and key and is_sensitive_key(key):
@@ -55,7 +56,10 @@ def merge_masked_values(new_cfg: Dict[str, Any], old_cfg: Dict[str, Any]) -> Dic
             merged: Dict[str, Any] = {}
             all_keys = set(old_value.keys()) | set(new_value.keys())
             for child_key in all_keys:
-                merged[child_key] = _merge(new_value.get(child_key), old_value.get(child_key), child_key)
+                if key == "lighthouse_bridge" and child_key == "token" and new_value.get(child_key) == "********":
+                    merged[child_key] = old_value.get(child_key)
+                else:
+                    merged[child_key] = _merge(new_value.get(child_key), old_value.get(child_key), child_key)
             return merged
         if isinstance(new_value, list):
             if not isinstance(old_value, list):

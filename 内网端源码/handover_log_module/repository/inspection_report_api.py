@@ -12,7 +12,35 @@ from app.modules.shared_bridge.service.report_api_session import BmsReportApiSes
 from app.modules.shared_bridge.service.report_grid_parser import parse_report_grid
 
 
-def _first_sample(grid: list, start: datetime, end: datetime, *, ids=None, sample_ids=None) -> tuple[str, list]:
+def _first_sample(grid: list, start: datetime, end: datetime, *, ids=None, sample_ids=None, latest=False) -> tuple[str, list]:
+    if latest:
+        candidates = []
+        for header_index, row in enumerate(grid[:40]):
+            for column, value in enumerate(row[4:], 4):
+                try:
+                    stamp = datetime.strptime(value or "", "%Y-%m-%d %H:%M:%S")
+                except (TypeError, ValueError):
+                    continue
+                if start <= stamp <= end:
+                    candidates.append((stamp, header_index, column))
+            if candidates:
+                break
+        if not candidates:
+            raise ValueError("巡检接口缺少窗口内真实采样时间")
+        stamp, header_index, column = max(candidates)
+        rows, selected_ids = [], []
+        for i, line in enumerate(grid[header_index + 1:], header_index + 1):
+            if len(line) <= 3 or not line[3]:
+                continue
+            if len(line) <= column:
+                raise ValueError("巡检接口测点行缺少最新时刻数据列")
+            rows.append([*line[1:4], line[column]])
+            selected_ids.append((ids or {}).get(i, (ids or {}).get(str(i), "")))
+        if not rows or not any(row[3] not in (None, "") for row in rows):
+            raise ValueError("巡检接口未返回有效最新测点")
+        if sample_ids is not None:
+            sample_ids.extend(selected_ids)
+        return stamp.strftime("%Y-%m-%d %H:%M:%S"), rows
     for header_index, row in enumerate(grid[:40]):
         for column, value in enumerate(row[4:], 4):
             try:
@@ -53,7 +81,7 @@ def _select_points(current: list[str], rules: dict) -> list[str]:
     return selected
 
 
-def _query_once(client, *, building: str, source_family: str, rules: dict, start: datetime, end: datetime) -> dict:
+def _query_once(client, *, building: str, source_family: str, rules: dict, start: datetime, end: datetime, latest_sample=False) -> dict:
     template = INSPECTION_REPORT_TEMPLATES[source_family]
     start_text, end_text = (stamp.strftime("%Y-%m-%d %H:%M:%S") for stamp in (start, end))
     report = client.find_report(template)
@@ -84,7 +112,7 @@ def _query_once(client, *, building: str, source_family: str, rules: dict, start
     finally:
         response.close()
     sample_ids: list[str] = []
-    value_time, rows = _first_sample(parsed["grid"], start, end, ids=parsed["row_ids"], sample_ids=sample_ids)
+    value_time, rows = _first_sample(parsed["grid"], start, end, ids=parsed["row_ids"], sample_ids=sample_ids, latest=latest_sample)
     if set(sample_ids) != set(selected_ids) or "" in sample_ids or len(sample_ids) != len(set(sample_ids)):
         missing = sorted(set(selected_ids) - set(sample_ids))
         extra = sorted(set(sample_ids) - set(selected_ids))
@@ -108,7 +136,8 @@ def query_inspection_report(site: dict, *, building: str, source_family: str, co
             try:
                 with BmsReportApiSession(site) as client:
                     client.login()
-                    return _query_once(client, building=building, source_family=source_family, rules=rules, start=start, end=end)
+                    return _query_once(client, building=building, source_family=source_family, rules=rules, start=start, end=end,
+                                       **({"latest_sample": True} if config.get("inspection_data", {}).get("live_latest_sample") is True else {}))
             except ReportApiUnauthorized:
                 if attempt:
                     raise

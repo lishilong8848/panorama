@@ -10,7 +10,7 @@ from app.config.config_compat_cleanup import (
     sanitize_wet_bulb_collection_config,
 )
 from app.config.config_schema_v3 import DEFAULT_CONFIG_V3, deep_merge_defaults
-from app.config.inspection_data_config import normalize_inspection_scheduler
+from app.config.inspection_data_config import normalize_inspection_scheduler, normalize_lighthouse_bridge
 from app.shared.utils.file_utils import fallback_missing_windows_drive_path
 from handover_log_module.core.cell_rule_compiler import migrate_legacy_rule_structures, normalize_cell_rules
 from pipeline_utils import get_app_dir
@@ -431,6 +431,8 @@ def _legacy_to_v3(legacy_cfg: Dict[str, Any]) -> Dict[str, Any]:
     features["inspection_data_upload"] = deep_merge_defaults(
         _dict(legacy_cfg.get("inspection_data_upload")), features["inspection_data_upload"]
     )
+    features["inspection_data_upload"]["lighthouse_bridge"] = normalize_lighthouse_bridge(
+        features["inspection_data_upload"].get("lighthouse_bridge", {}))
     features["inspection_data_upload"]["scheduler"] = normalize_inspection_scheduler(
         features["inspection_data_upload"]["scheduler"]
     )
@@ -482,6 +484,8 @@ def ensure_v3_config(raw_cfg: Dict[str, Any] | None) -> Dict[str, Any]:
             _strip_external_source_site_config(common, features)
         else:
             common["internal_source_sites"] = _resolve_internal_source_sites(common, features)
+        features["inspection_data_upload"]["lighthouse_bridge"] = normalize_lighthouse_bridge(
+            features["inspection_data_upload"].get("lighthouse_bridge", {}))
         features["inspection_data_upload"]["scheduler"] = normalize_inspection_scheduler(
             features["inspection_data_upload"]["scheduler"]
         )
@@ -906,6 +910,8 @@ def sync_runtime_back_to_v3(v3_cfg: Dict[str, Any], runtime_cfg: Dict[str, Any])
     features["inspection_data_upload"] = deep_merge_defaults(
         _dict(runtime.get("inspection_data_upload")), features["inspection_data_upload"]
     )
+    features["inspection_data_upload"]["lighthouse_bridge"] = normalize_lighthouse_bridge(
+        features["inspection_data_upload"].get("lighthouse_bridge", {}))
     features["inspection_data_upload"]["scheduler"] = normalize_inspection_scheduler(
         features["inspection_data_upload"]["scheduler"]
     )

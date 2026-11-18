@@ -56,6 +56,7 @@ from app.modules.scheduler.api.monthly_event_report_routes import router as mont
 from app.modules.scheduler.api.routes import router as scheduler_router
 from app.modules.scheduler.api.system_screenshot_upload_routes import router as system_screenshot_upload_scheduler_router
 from app.modules.scheduler.api.inspection_data_upload_routes import router as inspection_data_upload_scheduler_router
+from app.modules.scheduler.api.inspection_live_routes import router as inspection_live_router
 from app.modules.scheduler.api.temperature_humidity_upload_routes import (
     router as temperature_humidity_upload_scheduler_router,
 )
@@ -300,6 +301,7 @@ def _register_external_role_routes(app: FastAPI) -> None:
     app.include_router(system_screenshot_upload_scheduler_router)
     app.include_router(temperature_humidity_upload_scheduler_router)
     app.include_router(inspection_data_upload_scheduler_router)
+    app.include_router(inspection_live_router)
     app.include_router(wet_bulb_collection_scheduler_router)
     app.include_router(top5_power_report_scheduler_router)
     app.include_router(monthly_change_report_scheduler_router)

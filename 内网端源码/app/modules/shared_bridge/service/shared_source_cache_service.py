@@ -116,6 +116,11 @@ DAILY_AUTO_SOURCE_FAMILIES = (
     FAMILY_BRANCH_SWITCH,
     FAMILY_BUILDING_FULL_CABINET_POWER,
 )
+# 巡检实时采集强制补采：仅巡检族可用。
+# INSPECTION_FORCE_REFRESH_KWARGS 传给对外 fill_electrical/hvac_inspection_latest 包装函数（参数名 force_refresh）；
+# INSPECTION_FORCE_FILL_KWARGS 传给 _fill_inspection_latest 本体（跳过对象级已有缓存短路）。
+INSPECTION_FORCE_REFRESH_KWARGS: Dict[str, bool] = {"force_refresh": True}
+INSPECTION_FORCE_FILL_KWARGS: Dict[str, bool] = {"force_refresh_existing": True}
 
 ALARM_EVENT_BITABLE_TARGET_FIELDS = {
     "level": "等级",
@@ -1708,6 +1713,16 @@ class SharedSourceCacheService:
         if text in {FAMILY_CHILLER_MODE_SWITCH, "chiller_mode_switch"}:
             return FAMILY_CHILLER_MODE_SWITCH
         return text
+
+    def _inspection_live_bridge_active(self) -> bool:
+        """内网联机模式：仅当本机配置 inspection_data_upload.lighthouse_bridge 已启用且令牌非空时成立。"""
+        bridge = self.runtime_config.get("inspection_data_upload")
+        if not isinstance(bridge, dict):
+            return False
+        bridge = bridge.get("lighthouse_bridge")
+        if not isinstance(bridge, dict):
+            return False
+        return bridge.get("enabled") is True and bool(str(bridge.get("token", "") or "").strip())
 
     def _uses_browser_pool(self, source_family: str) -> bool:
         family = self._normalize_source_family(source_family)
@@ -4574,14 +4589,20 @@ class SharedSourceCacheService:
             metadata=entry_metadata,
         )
 
-    def fill_electrical_inspection_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+    def fill_electrical_inspection_latest(
+        self, *, building: str, bucket_key: str, emit_log: Callable[[str], None], force_refresh: bool = False,
+    ) -> Dict[str, Any]:
         return self._fill_inspection_latest(
             source_family=FAMILY_ELECTRICAL_INSPECTION, building=building, bucket_key=bucket_key, emit_log=emit_log,
+            **(INSPECTION_FORCE_FILL_KWARGS if force_refresh else {}),
         )
 
-    def fill_hvac_inspection_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+    def fill_hvac_inspection_latest(
+        self, *, building: str, bucket_key: str, emit_log: Callable[[str], None], force_refresh: bool = False,
+    ) -> Dict[str, Any]:
         return self._fill_inspection_latest(
             source_family=FAMILY_HVAC_INSPECTION, building=building, bucket_key=bucket_key, emit_log=emit_log,
+            **(INSPECTION_FORCE_FILL_KWARGS if force_refresh else {}),
         )
 
     def _inspection_point_rule_snapshot(self) -> tuple[dict, int]:
@@ -4633,6 +4654,7 @@ class SharedSourceCacheService:
 
     def _fill_inspection_latest(
         self, *, source_family: str, building: str, bucket_key: str, emit_log: Callable[[str], None],
+        force_refresh_existing: bool = False,
     ) -> Dict[str, Any]:
         self._ensure_internal_source_writer("巡检最新源文件补采")
         if source_family not in INSPECTION_REPORT_TEMPLATES:
@@ -4644,7 +4666,8 @@ class SharedSourceCacheService:
             raise ValueError("巡检数据源文件未启用或楼栋不支持")
         if self._stop_event.is_set():
             raise RuntimeError("巡检数据源文件下载已取消")
-        existing = self._existing_latest_refresh_result(
+        # 强制补采（巡检实时采集）必须真正回源：跳过对象级已有缓存短路。
+        existing = None if force_refresh_existing else self._existing_latest_refresh_result(
             source_family=source_family, building=building, bucket_key=bucket_key,
         )
         if existing is not None:
@@ -4652,6 +4675,8 @@ class SharedSourceCacheService:
         cfg = load_handover_config(self.runtime_config)
         cfg["inspection_data"] = copy.deepcopy(self.runtime_config.get("inspection_data", {}))
         cfg["inspection_data"]["point_overrides"] = self._inspection_point_rules()
+        if force_refresh_existing:
+            cfg["inspection_data"]["live_latest_sample"] = True
         if self._tmp_root is None:
             raise RuntimeError("共享缓存根目录未配置")
         service = HandoverDownloadService(
@@ -4659,7 +4684,10 @@ class SharedSourceCacheService:
             download_browser_pool=self.download_browser_pool,
             business_root_override=self._tmp_root / self._family_dir_name(source_family) / self._bucket_path_segment(bucket_key) / building,
         )
+        collection_started_at = int(time.time() * 1000)
         result = service.run_inspection_data_only(building=building, source_family=source_family, emit_log=emit_log)
+        if force_refresh_existing:
+            result = {**result, "collection_started_at": collection_started_at}
         if inspection_hour_bucket(datetime.strptime(result["query_end"], "%Y-%m-%d %H:%M:%S")) != bucket_key:
             raise RuntimeError("巡检接口查询时间已跨时段，不登记到旧时段")
         if self._stop_event.is_set():
@@ -6939,11 +6967,15 @@ class SharedSourceCacheService:
                                 "next_probe_at": "",
                             },
                         )
+                    # 强制补采仅对巡检族透传：让采集函数跳过同桶 ready 的对象级缓存短路。
+                    force_inspection_fill = force_refresh_existing and normalized_family in INSPECTION_REPORT_TEMPLATES
+                    force_kwargs = {"force_refresh": True} if force_inspection_fill else {}
                     future = executor.submit(
                         fill_func,
                         building=building,
                         bucket_key=bucket_key,
                         emit_log=self._emit,
+                        **force_kwargs,
                     )
                     future_map[future] = (building, active_key)
                 for future in concurrent.futures.as_completed(future_map):
@@ -7193,14 +7225,25 @@ class SharedSourceCacheService:
         with self._lock:
             if not self._older_hourly_bucket(current_bucket, self._current_hour_bucket):
                 self._current_hour_bucket = current_bucket
+        steps = self._current_hour_source_steps(
+            bucket_key=current_bucket,
+            branch_bucket_key="",
+        )
+        skipped_auto_inspection = []
+        if self._inspection_live_bridge_active():
+            # 联机模式：自动小时轮次不再采集电气/暖通巡检，改由外网端携带令牌触发实时强制采集。
+            skipped_auto_inspection = [family for family, _bucket, _fill in steps if family in INSPECTION_REPORT_TEMPLATES]
+            steps = [step for step in steps if step[0] not in INSPECTION_REPORT_TEMPLATES]
         self._run_latest_source_steps_by_building(
-            steps=self._current_hour_source_steps(
-                bucket_key=current_bucket,
-                branch_bucket_key="",
-            ),
+            steps=steps,
             force_retry_failed=False,
             force_refresh_existing=False,
         )
+        if skipped_auto_inspection:
+            self._emit(
+                "[共享缓存] 巡检联机采集模式：自动小时预下载跳过巡检 family="
+                f"{','.join(skipped_auto_inspection)}，等待内网实时强制采集"
+            )
         with self._lock:
             self._last_run_at = _now_text()
             handover_failed = list(self._family_status.get(FAMILY_HANDOVER_LOG, {}).get("failed_buildings", []) or [])
@@ -7218,6 +7261,9 @@ class SharedSourceCacheService:
 
     def _retry_inspection_data_if_needed(self) -> None:
         if self._stop_event.is_set():
+            return
+        if self._inspection_live_bridge_active():
+            # 联机模式：巡检失败/等待重试的自动补采交由外网端实时强制采集，避免与联机采集互相覆盖。
             return
         retries = []
         for family, fill in (
@@ -8531,8 +8577,8 @@ class SharedSourceCacheService:
             target_bucket_key=target_bucket_key,
         )
         normalized_family = str(target.get("source_family", "") or "").strip()
-        if force_refresh and normalized_family not in ENERGY_REPORT_LABELS:
-            raise ValueError("强制补采仅支持月度能耗报表")
+        if force_refresh and normalized_family not in ENERGY_REPORT_LABELS and normalized_family not in INSPECTION_REPORT_TEMPLATES:
+            raise ValueError("强制补采仅支持月度能耗报表和巡检源文件")
         bucket_key = str(target.get("bucket_key", "") or "").strip()
         fill_func = target.get("fill_func")
         if not fill_func:

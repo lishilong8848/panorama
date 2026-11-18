@@ -1,6 +1,7 @@
 import { createLogStreamController } from "./log_stream.js";
 import { createDashboardActions } from "./dashboard_actions.js";
 import { createInspectionPointSettingsUi } from "./inspection_point_settings_ui.js";
+import { inspectionLiveSettings } from "./inspection_live_settings.js";
 import { createDateHandoverActions } from "./date_handover_actions.js";
 import { createRuntimeActions } from "./runtime_actions.js";
 import { createUiLocalActions } from "./ui_local_actions.js";
@@ -77,6 +78,7 @@ if (isInspectionPointsPage(window.location.pathname)) {
   finishAppBoot();
 } else {
 createApp({
+  components: { InspectionLiveSettings: inspectionLiveSettings },
   setup() {
     const inspectionPointSettingsUi = createInspectionPointSettingsUi(ref);
     const state = createAppState(Vue);

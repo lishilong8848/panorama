@@ -3069,7 +3069,7 @@ class JobService:
             )
             config_snapshot = self._capture_config_snapshot()
             if isinstance(config_snapshot, dict):
-                if normalized_handler == "inspection_data_upload":
+                if normalized_handler in {"inspection_data_upload", "inspection_data_live_upload"}:
                     # 巡检测点和补传标记由 Web 进程保存。Worker 从源码目录启动时，
                     # 要继续读取 Web 所用的状态目录，避免把旧版本误判为已覆盖。
                     paths = config_snapshot.setdefault("paths", {})

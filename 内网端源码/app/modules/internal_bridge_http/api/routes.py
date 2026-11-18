@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from ipaddress import ip_address
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -8,7 +9,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
-from app.config.inspection_data_config import InspectionPointRevisionConflict
+from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES, InspectionPointRevisionConflict
 
 from app.modules.alarm_rule_export.service.alarm_rule_export_service import (
     list_alarm_rule_export_files,
@@ -34,6 +35,9 @@ _SOURCE_INDEX_EXECUTOR = ThreadPoolExecutor(
 )
 _SOURCE_INDEX_BUSY_RETRY_AFTER_SEC = 15
 _RUNNER_INIT_LOCK = threading.Lock()
+# 仅在“巡检强制补采且令牌校验通过”时透传的参数，避免其它族/其它调用路径被意外强制。
+INSPECTION_FORCE_REFRESH_KWARGS: Dict[str, bool] = {"force_refresh": True}
+INSPECTION_FORCE_AUTHORIZED_KWARGS: Dict[str, bool] = {"inspection_force_authorized": True}
 
 
 async def _run_source_index_query(scope: str, callback):
@@ -93,6 +97,18 @@ def _require_enabled_and_authorized(request: Request) -> Dict[str, Any]:
     if normalized_ips and host not in normalized_ips:
         raise HTTPException(status_code=403, detail="当前客户端 IP 不允许调用内网桥接接口")
     return cfg
+
+
+def _inspection_force_peer_allowed(request: Request, bridge: Dict[str, Any]) -> bool:
+    # The existing bridge authorization already checked an explicit allowlist.
+    allowed = bridge.get("allowed_client_ips", [])
+    if isinstance(allowed, list) and any(str(item or "").strip() for item in allowed):
+        return True
+    try:
+        peer = ip_address(_client_host(request))
+    except ValueError:
+        return False
+    return peer.is_private and not (peer.is_unspecified or peer.is_reserved)
 
 
 def _runner(request: Request) -> InternalBridgeHttpTaskRunner:
@@ -474,7 +490,7 @@ def refresh_internal_latest_source_cache(
     request: Request,
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
-    _require_enabled_and_authorized(request)
+    bridge = _require_enabled_and_authorized(request)
     source_family = str(payload.get("source_family", "") or "") if isinstance(payload, dict) else ""
     buildings = payload.get("buildings", []) if isinstance(payload, dict) else []
     target_bucket_key = str(payload.get("target_bucket_key", "") or "") if isinstance(payload, dict) else ""
@@ -482,11 +498,17 @@ def refresh_internal_latest_source_cache(
     try:
         if not isinstance(force_refresh, bool):
             raise ValueError("force_refresh 必须为布尔值")
+        inspection_force_authorized = False
+        if force_refresh and source_family.strip().lower() in INSPECTION_REPORT_TEMPLATES:
+            if not _inspection_force_peer_allowed(request, bridge):
+                raise HTTPException(status_code=403, detail="仅允许内网桥接客户端请求巡检强制补采")
+            inspection_force_authorized = True
         return _runner(request).refresh_latest_source_cache(
             source_family=source_family,
             buildings=buildings if isinstance(buildings, list) else [],
             target_bucket_key=target_bucket_key,
-            **({"force_refresh": True} if force_refresh else {}),
+            **(INSPECTION_FORCE_REFRESH_KWARGS if force_refresh else {}),
+            **(INSPECTION_FORCE_AUTHORIZED_KWARGS if inspection_force_authorized else {}),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
