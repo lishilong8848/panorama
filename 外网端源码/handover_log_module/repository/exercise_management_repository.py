@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -9,6 +9,9 @@ from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClien
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
 from app.modules.report_pipeline.core.metrics_math import date_text_to_timestamp_ms
 from handover_log_module.core.shift_window import build_duty_window
+
+
+_DUTY_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,12 +82,12 @@ def _parse_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value
+        return value.astimezone(_DUTY_TIMEZONE).replace(tzinfo=None) if value.tzinfo else value
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         number = int(float(value))
         if abs(number) >= 10**12:
-            return datetime.fromtimestamp(number / 1000)
-        return datetime.fromtimestamp(number)
+            return datetime.fromtimestamp(number / 1000, _DUTY_TIMEZONE).replace(tzinfo=None)
+        return datetime.fromtimestamp(number, _DUTY_TIMEZONE).replace(tzinfo=None)
     if isinstance(value, list):
         for item in value:
             parsed = _parse_datetime(item)
@@ -105,8 +108,8 @@ def _parse_datetime(value: Any) -> datetime | None:
     if text.isdigit():
         number = int(text)
         if len(text) >= 13 or abs(number) >= 10**12:
-            return datetime.fromtimestamp(number / 1000)
-        return datetime.fromtimestamp(number)
+            return datetime.fromtimestamp(number / 1000, _DUTY_TIMEZONE).replace(tzinfo=None)
+        return datetime.fromtimestamp(number, _DUTY_TIMEZONE).replace(tzinfo=None)
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M:%S",
@@ -156,6 +159,7 @@ class ExerciseManagementRow:
     start_time: datetime
     project_text: str
     raw_fields: Dict[str, Any]
+    team_text: str = ""
 
 
 ExerciseRowsByBuilding = Dict[str, List[ExerciseManagementRow]]
@@ -172,14 +176,16 @@ class ExerciseManagementRepository:
             "enabled": True,
             "source": {
                 "app_token": "D01TwFPyXiJBY6kCBDZcMCGLnSe",
-                "table_id": "tblBrALE11XCicNN",
+                "table_id": "tblo1UuKuBfWQNEm",
+                "view_id": "vewqNLAo7q",
                 "page_size": 500,
                 "max_records": 5000,
             },
             "fields": {
-                "building": "机楼",
-                "start_time": "演练开始时间",
-                "project": "告警描述",
+                "building": "楼栋",
+                "team": "班组",
+                "start_time": "发生时间",
+                "project": "演练场景",
             },
             "sections": {
                 "exercise_management": "演练管理",
@@ -207,8 +213,11 @@ class ExerciseManagementRepository:
 
     def _normalize_cfg(self) -> Dict[str, Any]:
         raw = self.handover_cfg.get("exercise_management_section", {})
-        cfg = _deep_merge(self._defaults(), raw if isinstance(raw, dict) else {})
+        defaults = self._defaults()
+        cfg = _deep_merge(defaults, raw if isinstance(raw, dict) else {})
         source = cfg.get("source", {})
+        if source.get("table_id") != defaults["source"]["table_id"] and source.get("view_id") == defaults["source"]["view_id"]:
+            source["view_id"] = ""
         source["app_token"] = str(source.get("app_token", "")).strip()
         source["table_id"] = str(source.get("table_id", "")).strip()
         source["page_size"] = max(1, int(source.get("page_size", 500) or 500))
@@ -324,9 +333,10 @@ class ExerciseManagementRepository:
         source = cfg.get("source", {})
         fields_cfg = cfg.get("fields", {}) if isinstance(cfg.get("fields", {}), dict) else {}
         table_id = str(source.get("table_id", "")).strip()
-        building_field = str(fields_cfg.get("building", "机楼")).strip() or "机楼"
-        start_time_field = str(fields_cfg.get("start_time", "演练开始时间")).strip() or "演练开始时间"
-        project_field = str(fields_cfg.get("project", "告警描述")).strip() or "告警描述"
+        building_field = str(fields_cfg.get("building", "楼栋")).strip() or "楼栋"
+        team_field = str(fields_cfg.get("team", "班组")).strip() or "班组"
+        start_time_field = str(fields_cfg.get("start_time", "发生时间")).strip() or "发生时间"
+        project_field = str(fields_cfg.get("project", "演练场景")).strip() or "演练场景"
 
         download_cfg = self.handover_cfg.get("download", {})
         shift_windows = download_cfg.get("shift_windows", {}) if isinstance(download_cfg, dict) else {}
@@ -349,7 +359,7 @@ class ExerciseManagementRepository:
         option_maps = self._load_field_option_maps(
             client=client,
             table_id=table_id,
-            target_fields=[building_field],
+            target_fields=[building_field, team_field],
             emit_log=emit_log,
         )
         building_option_map = option_maps.get(building_field, {})
@@ -358,6 +368,8 @@ class ExerciseManagementRepository:
             table_id=table_id,
             page_size=int(source.get("page_size", 500) or 500),
             max_records=int(source.get("max_records", 5000) or 5000),
+            view_id=str(source.get("view_id") or "").strip(),
+            field_names=[building_field, team_field, start_time_field, project_field],
         )
         rows: List[ExerciseManagementRow] = []
         total = 0
@@ -375,11 +387,14 @@ class ExerciseManagementRepository:
                 raw_fields = {}
 
             building_values = _field_texts_with_option_map(raw_fields.get(building_field), building_option_map)
-            start_time = _parse_datetime(raw_fields.get(start_time_field))
+            try:
+                start_time = _parse_datetime(raw_fields.get(start_time_field))
+            except (ValueError, OverflowError, OSError):
+                start_time = None
             if start_time is None:
                 parse_fail += 1
                 continue
-            if start_time < start_dt or start_time > end_dt:
+            if not start_dt <= start_time < end_dt:
                 continue
 
             project_text = _field_text(raw_fields.get(project_field))
@@ -395,6 +410,7 @@ class ExerciseManagementRepository:
                     start_time=start_time,
                     project_text=project_text,
                     raw_fields=raw_fields,
+                    team_text=_field_text_with_option_map(raw_fields.get(team_field), option_maps.get(team_field, {})),
                 )
             )
 

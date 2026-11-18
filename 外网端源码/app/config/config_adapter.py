@@ -292,6 +292,14 @@ def _extract_buildings_for_handover(features: Dict[str, Any]) -> list[str]:
 def _normalize_handover_rules(features: Dict[str, Any]) -> None:
     handover = _dict(features.get("handover_log"))
     handover = migrate_legacy_rule_structures(handover)
+    exercise = _dict(handover.get("exercise_management_section"))
+    source = _dict(exercise.get("source"))
+    defaults = DEFAULT_CONFIG_V3["features"]["handover_log"]["exercise_management_section"]
+    if source.get("table_id") == "tblBrALE11XCicNN":
+        source.update({key: defaults["source"][key] for key in ("app_token", "table_id", "view_id")})
+        exercise["fields"] = copy.deepcopy(defaults["fields"])
+    elif source.get("table_id") != defaults["source"]["table_id"] and source.get("view_id") == defaults["source"]["view_id"]:
+        source["view_id"] = ""
     buildings = _extract_buildings_for_handover(features)
     normalized_rules = normalize_cell_rules(handover, buildings)
     default_rows = _list(normalized_rules.get("default_rows"))

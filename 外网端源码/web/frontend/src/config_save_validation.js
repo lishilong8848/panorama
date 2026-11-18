@@ -697,10 +697,12 @@ function validateAndNormalizeHandoverExerciseManagementSection(payload) {
 
   sectionCfg.source.app_token = String(sectionCfg.source.app_token || "").trim();
   sectionCfg.source.table_id = String(sectionCfg.source.table_id || "").trim();
+  sectionCfg.source.view_id = String(sectionCfg.source.view_id || "").trim();
   sectionCfg.source.page_size = Number.parseInt(sectionCfg.source.page_size ?? 500, 10);
   sectionCfg.source.max_records = Number.parseInt(sectionCfg.source.max_records ?? 5000, 10);
 
   sectionCfg.fields.building = String(sectionCfg.fields.building || "").trim();
+  sectionCfg.fields.team = String(sectionCfg.fields.team || "").trim();
   sectionCfg.fields.start_time = String(sectionCfg.fields.start_time || "").trim();
   sectionCfg.fields.project = String(sectionCfg.fields.project || "").trim();
 
@@ -737,8 +739,8 @@ function validateAndNormalizeHandoverExerciseManagementSection(payload) {
   if (!Number.isInteger(sectionCfg.source.max_records) || sectionCfg.source.max_records <= 0) {
     return { ok: false, error: "演练管理 max_records 必须大于0" };
   }
-  if (!sectionCfg.fields.building || !sectionCfg.fields.start_time || !sectionCfg.fields.project) {
-    return { ok: false, error: "演练管理字段映射（机楼/演练开始时间/告警描述）不能为空" };
+  if (!sectionCfg.fields.building || !sectionCfg.fields.team || !sectionCfg.fields.start_time || !sectionCfg.fields.project) {
+    return { ok: false, error: "演练管理字段映射（楼栋/班组/发生时间/演练场景）不能为空" };
   }
   if (!sectionCfg.sections.exercise_management) {
     return { ok: false, error: "演练管理分类名不能为空" };

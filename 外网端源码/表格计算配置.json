@@ -733,14 +733,16 @@
         "enabled": true,
         "source": {
           "app_token": "D01TwFPyXiJBY6kCBDZcMCGLnSe",
-          "table_id": "tblBrALE11XCicNN",
+          "table_id": "tblo1UuKuBfWQNEm",
+          "view_id": "vewqNLAo7q",
           "page_size": 500,
           "max_records": 5000
         },
         "fields": {
-          "building": "机楼",
-          "start_time": "演练开始时间",
-          "project": "告警描述"
+          "building": "楼栋",
+          "team": "班组",
+          "start_time": "发生时间",
+          "project": "演练场景"
         },
         "sections": {
           "exercise_management": "演练管理"

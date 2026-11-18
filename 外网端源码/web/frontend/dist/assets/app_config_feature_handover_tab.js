@@ -193,11 +193,13 @@ export const CONFIG_FEATURE_HANDOVER_TAB_TEMPLATE = `
           <div class="form-row"><label><input type="checkbox" v-model="config.handover_log.exercise_management_section.enabled" /> 启用演练管理写入</label></div>
           <div class="form-row"><label class="label">多维 App Token</label><input type="text" v-model="config.handover_log.exercise_management_section.source.app_token" /></div>
           <div class="form-row"><label class="label">多维 Table ID</label><input type="text" v-model="config.handover_log.exercise_management_section.source.table_id" /></div>
+          <div class="form-row"><label class="label">多维视图 ID</label><input type="text" v-model="config.handover_log.exercise_management_section.source.view_id" /></div>
           <div class="form-row"><label class="label">分页大小</label><input type="number" v-model.number="config.handover_log.exercise_management_section.source.page_size" /></div>
           <div class="form-row"><label class="label">最多读取记录数</label><input type="number" v-model.number="config.handover_log.exercise_management_section.source.max_records" /></div>
-          <div class="form-row"><label class="label">字段：机楼</label><input type="text" v-model="config.handover_log.exercise_management_section.fields.building" /></div>
-          <div class="form-row"><label class="label">字段：演练开始时间</label><input type="text" v-model="config.handover_log.exercise_management_section.fields.start_time" /></div>
-          <div class="form-row"><label class="label">字段：告警描述</label><input type="text" v-model="config.handover_log.exercise_management_section.fields.project" /></div>
+          <div class="form-row"><label class="label">字段：楼栋</label><input type="text" v-model="config.handover_log.exercise_management_section.fields.building" /></div>
+          <div class="form-row"><label class="label">字段：班组</label><input type="text" v-model="config.handover_log.exercise_management_section.fields.team" /></div>
+          <div class="form-row"><label class="label">字段：发生时间</label><input type="text" v-model="config.handover_log.exercise_management_section.fields.start_time" /></div>
+          <div class="form-row"><label class="label">字段：演练场景</label><input type="text" v-model="config.handover_log.exercise_management_section.fields.project" /></div>
           <div class="form-row"><label class="label">分类名：演练管理</label><input type="text" v-model="config.handover_log.exercise_management_section.sections.exercise_management" /></div>
           <div class="form-row"><label class="label">固定文案：演练类型</label><input type="text" v-model="config.handover_log.exercise_management_section.fixed_values.exercise_type" /></div>
           <div class="form-row"><label class="label">固定文案：演练完成情况</label><input type="text" v-model="config.handover_log.exercise_management_section.fixed_values.completion" /></div>

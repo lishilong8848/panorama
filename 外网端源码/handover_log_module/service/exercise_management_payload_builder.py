@@ -20,7 +20,7 @@ def _norm_header(value: Any) -> str:
     return str(value or "").replace(" ", "").strip().casefold()
 
 
-def _dedupe_text(value: Any) -> str:
+def _normalize_team(value: Any) -> str:
     return "".join(str(value or "").split()).casefold()
 
 
@@ -141,11 +141,16 @@ class ExerciseManagementPayloadBuilder:
         duty_date: str,
         duty_shift: str,
         executor_text: str,
+        current_team: str,
         preloaded_rows_by_building: ExerciseRowsByBuilding | None = None,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         cfg = self.repo.get_config()
         if not bool(cfg.get("enabled", True)):
+            return {}
+        team = _normalize_team(current_team)
+        if not team:
+            emit_log(f"[交接班][演练管理] building={building} 未识别本班班组，跳过自动填充")
             return {}
 
         if preloaded_rows_by_building is None:
@@ -171,17 +176,18 @@ class ExerciseManagementPayloadBuilder:
 
         payload_rows = []
         deduped_count = 0
-        seen_projects: set[str] = set()
+        seen_record_ids: set[str] = set()
         for row in rows:
+            if _normalize_team(row.team_text) != team:
+                continue
             project_text = str(row.project_text or "").strip()
             if not project_text:
                 continue
-            dedupe_key = _dedupe_text(project_text)
-            if dedupe_key and dedupe_key in seen_projects:
+            if row.record_id and row.record_id in seen_record_ids:
                 deduped_count += 1
                 continue
-            if dedupe_key:
-                seen_projects.add(dedupe_key)
+            if row.record_id:
+                seen_record_ids.add(row.record_id)
             payload_rows.append(
                 {
                     "cells": self._to_cells(

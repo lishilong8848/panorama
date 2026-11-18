@@ -1084,7 +1084,7 @@ def _validate_handover_exercise_management_section(cfg: Dict[str, Any]) -> None:
         if int(source.get("max_records", 0)) <= 0:
             raise ValueError("配置错误: features.handover_log.exercise_management_section.source.max_records 必须大于0")
 
-        for key in ("building", "start_time", "project"):
+        for key in ("building", "team", "start_time", "project"):
             if not str(fields.get(key, "")).strip():
                 raise ValueError(
                     f"配置错误: features.handover_log.exercise_management_section.fields.{key} 不能为空"

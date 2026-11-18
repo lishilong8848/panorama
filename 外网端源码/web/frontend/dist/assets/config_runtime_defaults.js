@@ -716,12 +716,16 @@ function applyHandoverDefaults(cfg) {
 
   setBooleanDefault(exerciseManagement, "enabled", true);
   setStringDefault(exerciseManagement.source, "app_token", "D01TwFPyXiJBY6kCBDZcMCGLnSe");
-  setStringDefault(exerciseManagement.source, "table_id", "tblBrALE11XCicNN");
+  setStringDefault(exerciseManagement.source, "table_id", "tblo1UuKuBfWQNEm");
+  if (typeof exerciseManagement.source.view_id !== "string") {
+    exerciseManagement.source.view_id = exerciseManagement.source.table_id === "tblo1UuKuBfWQNEm" ? "vewqNLAo7q" : "";
+  }
   setNumberDefault(exerciseManagement.source, "page_size", 500);
   setNumberDefault(exerciseManagement.source, "max_records", 5000);
-  setStringDefault(exerciseManagement.fields, "building", "机楼");
-  setStringDefault(exerciseManagement.fields, "start_time", "演练开始时间");
-  setStringDefault(exerciseManagement.fields, "project", "告警描述");
+  setStringDefault(exerciseManagement.fields, "building", "楼栋");
+  setStringDefault(exerciseManagement.fields, "team", "班组");
+  setStringDefault(exerciseManagement.fields, "start_time", "发生时间");
+  setStringDefault(exerciseManagement.fields, "project", "演练场景");
   setStringDefault(exerciseManagement.sections, "exercise_management", "演练管理");
   setStringDefault(exerciseManagement.fixed_values, "exercise_type", "计划性演练");
   setStringDefault(exerciseManagement.fixed_values, "completion", "已完成");

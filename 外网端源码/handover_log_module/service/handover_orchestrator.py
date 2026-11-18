@@ -1215,11 +1215,17 @@ class HandoverOrchestrator:
             except Exception as exc:  # noqa: BLE001
                 emit_log(f"[交接班][变更管理] 构建失败，按空分类继续: {exc}")
             try:
+                exercise_assignment = roster_assignment
+                if exercise_assignment is None and self._exercise_management_builder.repo.get_config().get("enabled"):
+                    exercise_assignment = self._shift_roster_repo.query_assignment(
+                        building=building, duty_date=duty_date_text, duty_shift=duty_shift_text, emit_log=emit_log,
+                    )
                 exercise_payloads = self._exercise_management_builder.build(
                     building=building,
                     duty_date=duty_date_text,
                     duty_shift=duty_shift_text,
                     executor_text=current_people_text,
+                    current_team=exercise_assignment.current_team if exercise_assignment else "",
                     preloaded_rows_by_building=exercise_rows_by_building,
                     emit_log=emit_log,
                 )
