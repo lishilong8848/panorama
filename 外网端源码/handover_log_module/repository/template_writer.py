@@ -21,6 +21,7 @@ from handover_log_module.core.footer_snapshot import (
     restore_footer_block_snapshot,
 )
 from handover_log_module.core.section_layout import capture_section_snapshots, parse_category_sections
+from handover_log_module.core.handover_log_print import apply_handover_log_print_profile
 from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
 from handover_log_module.repository.section_writer import (
     resolve_section_target_row_count,
@@ -174,6 +175,7 @@ def _write_workbook(
                 )
 
             wrap_and_fit_rows(ws)
+            apply_handover_log_print_profile(ws)
             wb.save(temp_path)
         finally:
             wb.close()

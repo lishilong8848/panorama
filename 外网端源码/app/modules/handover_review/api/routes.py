@@ -22,7 +22,9 @@ from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException,
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 from pipeline_utils import get_app_dir
-from app.shared.utils.atomic_file import atomic_copy_file, atomic_write_bytes, validate_excel_workbook_file
+from app.shared.utils.atomic_file import atomic_copy_file, atomic_save_workbook, atomic_write_bytes, validate_excel_workbook_file
+from handover_log_module.core.handover_log_print import HANDOVER_LOG_SHEET, apply_handover_log_print_profile
+from handover_log_module.repository.excel_reader import load_workbook_quietly
 from app.shared.utils.report_source_json import validate_report_source_json
 from app.shared.utils.runtime_temp_workspace import cleanup_runtime_temp_dir, create_runtime_temp_dir
 
@@ -3815,6 +3817,45 @@ def _require_review_delivery(service, session):
     raise HTTPException(status_code=409, detail="当前审核版本的交接班成品尚未就绪，请先生成成品")
 
 
+def _normalize_log_download_workbook(source: Path, *, sheet_name: str, save_to) -> Path:
+    workbook = load_workbook_quietly(source)
+    try:
+        if sheet_name not in workbook.sheetnames or not apply_handover_log_print_profile(
+            workbook[sheet_name], fill_width=True,
+        ):
+            return source
+        destination = save_to()
+        atomic_save_workbook(workbook, destination, temp_suffix=".tmp")
+        return destination
+    finally:
+        workbook.close()
+
+
+def _ready_log_download(source, filename, *, service, recheck) -> FileResponse:
+    source = Path(source)
+    snapshot_dir = None
+
+    def new_target():
+        nonlocal snapshot_dir
+        snapshot_dir = create_runtime_temp_dir(kind="handover_log_download")
+        return snapshot_dir / source.name
+
+    try:
+        sheet_name = service.config.get("template", {}).get("sheet_name") or HANDOVER_LOG_SHEET
+        path = _normalize_log_download_workbook(source, sheet_name=sheet_name, save_to=new_target)
+        recheck()
+    except HTTPException:
+        if snapshot_dir is not None:
+            cleanup_runtime_temp_dir(snapshot_dir)
+        raise
+    except Exception as exc:
+        if snapshot_dir is not None:
+            cleanup_runtime_temp_dir(snapshot_dir)
+        raise HTTPException(status_code=409, detail="交接班日志打印设置准备失败，请重试") from exc
+    return FileResponse(path, filename=filename,
+                        background=BackgroundTask(cleanup_runtime_temp_dir, snapshot_dir) if snapshot_dir else None)
+
+
 def _stable_review_download_snapshot(
     *,
     container,
@@ -3828,6 +3869,7 @@ def _stable_review_download_snapshot(
     kind: str,
     temp_kind: str,
     file_is_current=None,
+    log_sheet_name: str = "",
 ) -> tuple[Path, Path]:
     """返回前只读重查审核版本与源文件路径，一致才把文件拷成稳定副本返回（TOCTOU 防护）。
 
@@ -3863,6 +3905,8 @@ def _stable_review_download_snapshot(
     snapshot_path = snapshot_dir / output_file.name
     try:
         atomic_copy_file(output_file, snapshot_path, validator=validate_excel_workbook_file)
+        if log_sheet_name:
+            _normalize_log_download_workbook(snapshot_path, sheet_name=log_sheet_name, save_to=lambda: snapshot_path)
     except Exception as exc:  # noqa: BLE001
         cleanup_runtime_temp_dir(snapshot_dir)
         container.add_system_log(
@@ -5708,6 +5752,11 @@ def handover_review_delivery_download(
         raise HTTPException(status_code=409, detail="交接班成品版本已更新，请刷新后下载")
     filename_key = "output_file" if artifact == "log" else "capacity_output_file"
     _ensure_review_not_regenerating(target, container)
+    if artifact == "log":
+        return _ready_log_download(
+            manifest["paths"][artifact], Path(target[filename_key]).name, service=service,
+            recheck=lambda: _ensure_review_not_regenerating(target, container),
+        )
     return FileResponse(manifest["paths"][artifact], filename=Path(target[filename_key]).name)
 
 
@@ -5765,7 +5814,10 @@ def handover_review_download(
     )
     if prepared.get("artifacts_ready") and HandoverDeliveryStateService.artifacts_exist(prepared):
         _ensure_review_not_regenerating(target, container)
-        return FileResponse(prepared["paths"]["log"], filename=Path(target["output_file"]).name)
+        return _ready_log_download(
+            prepared["paths"]["log"], Path(target["output_file"]).name, service=service,
+            recheck=lambda: _ensure_review_not_regenerating(target, container),
+        )
 
     output_file_text = str(target.get("output_file", "")).strip()
     if not output_file_text:
@@ -5883,6 +5935,7 @@ def handover_review_download(
         expected_source_path=str(target.get("output_file", "") or "").strip(),
         building=building, session_id_text=session_id_text, kind="成品", temp_kind="handover_log_download",
         file_is_current=_log_file_matches if already_synced or async_download else None,
+        log_sheet_name=service.config.get("template", {}).get("sheet_name") or HANDOVER_LOG_SHEET,
     )
     container.add_system_log(
         f"[交接班][下载成品] building={building}, session_id={session_id_text}, file={output_file}, "

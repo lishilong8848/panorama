@@ -1,7 +1,7 @@
 """H楼交接班日志附件工作簿构建器。
 
 复制 ``H楼交接班日志空模板.xlsx``，把 ``cell_values`` 的值写入对应单元格，并按需
-把独立值班关注点图片放在 ``J2``；模板的合并区域、样式、行列尺寸与打印设置保留。
+把独立值班关注点图片放在 ``J2``；保留模板合并区域和样式，并按统一的打印预设调整正文。
 
 * 写入合并区域内坐标时落到该区域左上角，同一锚点出现不同值
   直接报错，不静默覆盖。
@@ -31,9 +31,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from openpyxl.utils.exceptions import CellCoordinatesException
 from openpyxl.utils.units import pixels_to_EMU
-from openpyxl.worksheet.properties import PageSetupProperties
 from PIL import Image as PILImage
 
+from handover_log_module.core.handover_log_print import apply_handover_log_print_profile
 from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
 from handover_log_module.core.station_h_operating_cells import STATION_H_CARRY_READING_CELLS
 
@@ -53,15 +53,12 @@ STATION_H_PRINT_PAPER_SIZE = 9  # openpyxl Worksheet.PAPERSIZE_A4
 
 
 def _apply_station_h_print_setup(worksheet: Any, *, last_row: int = STATION_H_PRINT_DEFAULT_LAST_ROW) -> None:
-    """给 H楼日志正文工作表烘焙固定打印配置（不改动列宽/合并区域；行高由 wrap 逻辑负责）。"""
+    """给 H楼日志正文成品统一打印配置，保留列宽比例和合并区域。"""
     final_row = max(1, int(last_row or STATION_H_PRINT_DEFAULT_LAST_ROW))
-    worksheet.print_area = f"A1:{STATION_H_PRINT_LAST_COLUMN}{final_row}"
-    worksheet.print_options.horizontalCentered = True
-    worksheet.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    worksheet.page_setup.orientation = STATION_H_PRINT_ORIENTATION
-    worksheet.page_setup.paperSize = STATION_H_PRINT_PAPER_SIZE
-    worksheet.page_setup.fitToWidth = 1
-    worksheet.page_setup.fitToHeight = 1
+    apply_handover_log_print_profile(
+        worksheet, last_row=final_row, last_column=column_index_from_string(STATION_H_PRINT_LAST_COLUMN), fill_width=True,
+        character_width_pt=5.625,  # H楼模板正文字体为宋体 11，A–E楼为等线 11。
+    )
 
 # 与 HandoverCloudSheetSyncService.STATION_H_ALLOWED_CELLS 保持一致；另允许培训行 B31:G31。
 STATION_H_CELL_KEYS = frozenset(

@@ -9,6 +9,7 @@ from app.shared.utils.atomic_file import atomic_save_workbook
 from handover_log_module.core.fixed_cell_overrides import apply_forced_fixed_cell_values
 from handover_log_module.core.footer_layout import FOOTER_DYNAMIC_FIXED_CELLS
 from handover_log_module.core.section_layout import capture_section_snapshots, parse_category_sections
+from handover_log_module.core.handover_log_print import apply_handover_log_print_profile
 from handover_log_module.core.worksheet_layout import wrap_and_fit_rows
 from handover_log_module.repository.excel_reader import load_workbook_quietly
 from handover_log_module.repository.footer_inventory_writer import write_footer_inventory_table
@@ -225,6 +226,7 @@ class ReviewDocumentWriter:
                     inventory_block=self._inventory_footer_block(document),
                 )
             wrap_and_fit_rows(ws)
+            apply_handover_log_print_profile(ws)
             atomic_save_workbook(workbook, output_file, temp_suffix=".tmp")
         finally:
             workbook.close()

@@ -68,7 +68,7 @@ def _snapshot(path: Path) -> dict:
                 for c in ("A1", "B2", "F2", "B4", "B12", "H12")
             },
             "row_heights": {r: worksheet.row_dimensions[r].height for r in (1, 2)},
-            "column_widths": {c: worksheet.column_dimensions[c].width for c in ("B", "J")},
+            "column_widths": {c: worksheet.column_dimensions[c].width for c in ("A", "B", "J")},
             "print_area": str(worksheet.print_area),
         }
     finally:
@@ -107,9 +107,11 @@ def test_values_written_and_style_sheet_preserved(template: Path, tmp_path: Path
 
     assert result == Path(str(output.resolve())) and output.is_file()
     after = _snapshot(output)
-    assert {k: after[k] for k in ("merges", "styles", "column_widths", "print_area")} == {
-        k: before[k] for k in ("merges", "styles", "column_widths", "print_area")
+    assert {k: after[k] for k in ("merges", "styles", "print_area")} == {
+        k: before[k] for k in ("merges", "styles", "print_area")
     }
+    assert after["column_widths"]["J"] == before["column_widths"]["J"]
+    assert after["column_widths"]["B"] / after["column_widths"]["A"] == pytest.approx(17.45 / 8.43)
     workbook = openpyxl.load_workbook(output)
     try:
         sheet = workbook[SHEET_TITLE]

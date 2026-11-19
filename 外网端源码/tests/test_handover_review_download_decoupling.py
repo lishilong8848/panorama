@@ -316,6 +316,7 @@ def test_log_download_prefers_current_delivery_artifact(monkeypatch, tmp_path):
     session = _base_session(tmp_path, revision=1, confirmed=True)
     state = HandoverDeliveryStateService(config)
     ready_artifacts = _artifacts(tmp_path, prefix="ready")
+    ready_artifacts["log"] = str(_make_xlsx(tmp_path / "ready_log.xlsx"))
     state.begin({**session, "revision": 1, "document_revision": 1}, "g1")
     state.update(
         SESSION_ID, "g1", status="ready", artifacts_ready=True,
