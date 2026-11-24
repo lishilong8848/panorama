@@ -85,6 +85,30 @@ def test_validation_errors_are_not_retried(client, monkeypatch):
     module.time.sleep.assert_not_called()
 
 
+@pytest.mark.parametrize("status", [200, 400])
+def test_media_server_error_retries_same_bytes(client, monkeypatch, status):
+    success = _response(0)
+    success._content = b'{"code":0,"data":{"file_token":"uploaded"}}'
+    request = Mock(side_effect=[_response(1061001, status=status), success])
+    monkeypatch.setattr(module.requests, "request", request)
+    assert client.upload_attachment_bytes("handover.xlsx", b"workbook") == "uploaded"
+    assert request.call_count == 2
+    assert request.call_args_list[0] == request.call_args_list[1]
+    module.time.sleep.assert_called_once_with(2)
+
+
+def test_media_server_error_is_bounded_and_does_not_retry_record_write(client, monkeypatch):
+    request = Mock(return_value=_response(1061001))
+    monkeypatch.setattr(module.requests, "request", request)
+    with pytest.raises(RuntimeError, match="1061001"):
+        client.upload_attachment_bytes("handover.xlsx", b"workbook")
+    assert request.call_count == 3
+    request.reset_mock()
+    with pytest.raises(RuntimeError, match="1061001"):
+        client.update_record("attachment", "record-id", {"楼栋": "E楼"})
+    request.assert_called_once()
+
+
 @pytest.mark.parametrize("code,status", [(1254290, 429), (99991400, 200)])
 def test_rate_limit_uses_server_delay_and_keeps_create_key(client, monkeypatch, code, status):
     limited = _response(code, status=status)

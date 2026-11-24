@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import io
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,6 +10,19 @@ from app.modules.report_pipeline.service import energy_report_upload_service as 
 from app.modules.report_pipeline.service import job_service as jobs_module
 from app.modules.report_pipeline.service.job_service import JobService, JobState
 from app.worker.task_handlers import HANDLER_REGISTRY
+
+
+def test_energy_completion_marker_is_shared_across_working_directories(monkeypatch, tmp_path):
+    worker = tmp_path / "worker"
+    worker.mkdir()
+    config = {"paths": {"runtime_state_root": "state"}}
+    monkeypatch.setattr("app.shared.utils.runtime_temp_workspace.get_app_dir", lambda: worker)
+    monkeypatch.chdir(worker)
+    marker = module._completion_path(config, "2026-10")
+    module.save_cached_json(marker, {"period": "2026-10", "table_id": module.TABLE_ID})
+    monkeypatch.chdir(tmp_path)
+    assert module._completion_path(config, "2026-10") == marker
+    assert module.pending_periods(config, datetime(2026, 11, 23, 9, 5)) == ()
 
 
 def test_energy_scheduler_starts_and_allows_source_wait_to_retry(tmp_path):
@@ -124,10 +138,15 @@ def test_monthly_source_wait_survives_restart_then_resumes_same_worker_job(monke
     result = {"status": "waiting_resource", "wait_reason": module.SOURCE_WAIT_REASON, "summary": "等待内网源文件"}
     responses = iter((result, {"status": "success"}))
 
-    def spawn(*args, **kwargs):
+    def spawn(command, **kwargs):
         payload = next(responses)
+        receipt = Path(command[command.index("--result-file") + 1])
+        assert not receipt.exists()
+        receipt.write_text(json.dumps({
+            "type": "result", "stage_id": "main", "handler": module.FEATURE, "ok": True, "payload": payload,
+        }), encoding="utf-8")
         process = Mock(pid=123, returncode=0)
-        process.stdout = io.StringIO(json.dumps({"type": "result", "ok": True, "payload": payload}) + "\n")
+        process.stdout = io.StringIO("")
         process.stderr = io.StringIO("")
         process.wait.return_value = 0
         process.poll.return_value = 0

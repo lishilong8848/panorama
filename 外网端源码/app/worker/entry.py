@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict
 from app.worker.task_handlers import HANDLER_REGISTRY
 from app.config.settings_loader import load_pipeline_config
 from app.modules.feishu.service.feishu_auth_resolver import configure_feishu_auth_source
+from app.shared.utils.cached_json_file import save_cached_json
 
 
 class WorkerCancelledError(RuntimeError):
@@ -210,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stage-id", required=True)
     parser.add_argument("--handler", required=True)
     parser.add_argument("--payload-file", required=True)
+    parser.add_argument("--result-file", type=Path)
     parser.add_argument("--control-port", type=int, default=0)
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
     args = parser.parse_args(argv)
@@ -223,10 +225,19 @@ def main(argv: list[str] | None = None) -> int:
     payload = _load_json(payload_file)
 
     handler_name = str(args.handler or "").strip()
+
+    def emit_result(event: Dict[str, Any]) -> None:
+        if args.result_file is not None:
+            try:
+                save_cached_json(args.result_file, event, indent=None)
+            except OSError as exc:
+                _emit_log(stage_id, f"[worker] could not persist result: {exc}", level="warning")
+        _emit_event(event)
+
     handler = HANDLER_REGISTRY.get(handler_name)
     if handler is None:
         _emit_log(stage_id, f"[worker] unknown handler: {handler_name}", level="error")
-        _emit_event(
+        emit_result(
             {
                 "type": "result",
                 "stage_id": stage_id,
@@ -274,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime.raise_if_cancelled()
         result = _invoke_handler(handler, config_snapshot, payload, emit_log, runtime)
         runtime.raise_if_cancelled()
-        _emit_event(
+        emit_result(
             {
                 "type": "result",
                 "stage_id": stage_id,
@@ -298,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ts": _now_text(),
             }
         )
-        _emit_event(
+        emit_result(
             {
                 "type": "result",
                 "stage_id": stage_id,
@@ -317,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         _emit_log(stage_id, f"[worker] failed: {detail}", level="error")
         if traceback_text:
             _emit_log(stage_id, f"[worker] traceback:\n{traceback_text}", level="error")
-        _emit_event(
+        emit_result(
             {
                 "type": "result",
                 "stage_id": stage_id,

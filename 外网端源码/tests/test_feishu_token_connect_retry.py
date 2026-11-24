@@ -7,12 +7,15 @@ import requests
 from app.modules.feishu.service import feishu_token_manager as module
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.report_pipeline.service import energy_report_upload_service as energy
+from app.modules.report_pipeline.service.job_panel_presenter import _format_job_wait_reason
+from app.worker.task_handlers import handle_energy_report_upload
 
 
-def test_token_retries_connection_timeout_once_and_caches_success(monkeypatch):
+@pytest.mark.parametrize("timeout_type", [requests.ConnectTimeout, requests.ReadTimeout])
+def test_token_retries_timeout_once_and_caches_success(monkeypatch, timeout_type):
     response = Mock()
     response.json.return_value = {"code": 0, "tenant_access_token": "fake-token"}
-    post = Mock(side_effect=[requests.ConnectTimeout("test timeout"), response])
+    post = Mock(side_effect=[timeout_type("test timeout"), response])
     sleep = Mock()
     monkeypatch.setattr(module.requests, "post", post)
     monkeypatch.setattr(module.time, "sleep", sleep)
@@ -49,8 +52,9 @@ def test_only_opted_in_target_probe_propagates_token_timeout(propagate):
     client._request_with_retry.assert_not_called()
 
 
-def test_energy_report_auth_timeout_leaves_month_pending_without_writes(monkeypatch, tmp_path):
-    post = Mock(side_effect=requests.ConnectTimeout("test timeout"))
+@pytest.mark.parametrize("timeout_type", [requests.ConnectTimeout, requests.ReadTimeout])
+def test_energy_report_auth_timeout_leaves_month_pending_without_writes(monkeypatch, tmp_path, timeout_type):
+    post = Mock(side_effect=timeout_type("test timeout"))
     monkeypatch.setattr(module.requests, "post", post)
     monkeypatch.setattr(module.time, "sleep", lambda _: None)
     bitable = Mock()
@@ -62,8 +66,13 @@ def test_energy_report_auth_timeout_leaves_month_pending_without_writes(monkeypa
     monkeypatch.setattr(service, "source_paths", lambda _, **__: {})
     now = datetime(2026, 11, 9, 7, 5)
     assert energy.pending_periods(config, now) == ("2026-10",)
-    with pytest.raises(module.FeishuTokenConnectTimeout, match="test timeout"):
-        service.run("2026-10", log=lambda _: None)
+    monkeypatch.setattr(energy, "EnergyReportUploadService", lambda _: service)
+    result = handle_energy_report_upload(config, {"period": "2026-10"}, lambda _: None)
+    assert result["status"] == "waiting_resource" and result["wait_reason"] == energy.SOURCE_WAIT_REASON
+    assert "飞书鉴权连接恢复" in result["summary"]
+    assert _format_job_wait_reason(result) == result["summary"]
+    assert "test timeout" in result["detail"] and not result["alert"]
+    assert not energy.source_retry_due(config, "2026-10", datetime.now())
     assert post.call_count == 2
     assert energy.pending_periods(config, now) == ("2026-10",)
     bitable._post_json.assert_not_called()

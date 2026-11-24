@@ -1,3 +1,4 @@
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import uuid
@@ -113,6 +114,7 @@ class HandoverDeliveryWorkflowService:
             # 每楼各自的多维记录 token/url 存在 session 级 cloud_sheet_sync 与 details 里。
             token = f"bitable:{batch_key}"
             changed, failed = [], []
+            verified = {}
             details: dict[str, dict[str, str]] = {}
             representative_url = ""
 
@@ -121,30 +123,27 @@ class HandoverDeliveryWorkflowService:
 
             for name in candidates:
                 row = manifests[name]
+                phase = "记录准备"
                 try:
-                    # 每楼各自记录：ensure_record(date,shift,楼栋) 找/建本楼记录并写本楼日报链接。
-                    record = store.ensure_record(date, shift, name)
-                except Exception as exc:
-                    failed.append({"building": name, "error": str(exc)})
-                    emit_log(f"[交接班][班次附件] {name} 记录准备失败: {exc}")
-                    if isinstance(exc, FeishuBitableRateLimited):
-                        break
-                    continue
-                url = record["record_url"]
-                building_token = f"bitable:{record['record_id']}"
-                details[name] = {"record_id": record["record_id"], "record_url": url,
-                                 "spreadsheet_token": building_token, "spreadsheet_url": url}
-                existing_names = set(record.get("attachment_names", []))
-                if (row.get("status") == "uploaded" and row.get("record_url") == url
-                        and set(filenames(name)) <= existing_names):
-                    representative_url = representative_url or url
-                    continue
+                    record = store.ensure_record(date, shift, name, preferred_record_url=row.get("record_url", ""))
+                    url = record["record_url"]
+                    building_token = f"bitable:{record['record_id']}"
+                    details[name] = {"record_id": record["record_id"], "record_url": url,
+                                     "spreadsheet_token": building_token, "spreadsheet_url": url}
+                    existing_names = set(record.get("attachment_names", []))
+                    if (row.get("status") == "uploaded" and row.get("record_url") == url
+                            and set(filenames(name)) <= existing_names):
+                        representative_url = representative_url or url
+                        verified[name] = row["generation_id"]
+                        continue
+                    if row.get("record_url") and row["record_url"] != url:
+                        emit_log(f"[交接班][班次附件] {batch_key} {name} 原记录与当前班次不匹配，改用正确记录补传")
 
-                def is_current():
-                    current = self._current_batch(batch_key).get(name, {})
-                    return current.get("generation_id") == row["generation_id"]
+                    def is_current():
+                        current = self._current_batch(batch_key).get(name, {})
+                        return current.get("generation_id") == row["generation_id"]
 
-                try:
+                    phase = "上传"
                     if not self.state.artifacts_exist(row):
                         raise RuntimeError(f"{name} 已准备成品缺失，请重新生成")
                     pair = dict(zip(filenames(name), (row["paths"]["log"], row["paths"]["capacity"])))
@@ -163,26 +162,30 @@ class HandoverDeliveryWorkflowService:
                     self.state.update(row["session_id"], row["generation_id"], status="uploaded",
                                       artifacts_ready=True, record_url=url, upload_error="")
                     representative_url = representative_url or url
+                    verified[name] = row["generation_id"]
                     changed.append(name)
                 except Exception as exc:
                     failed.append({"building": name, "error": str(exc)})
-                    emit_log(f"[交接班][班次附件] {name} 上传未完成: {exc}")
+                    emit_log(f"[交接班][班次附件] {batch_key} {name} {phase}未完成: {exc}")
                     try:
                         self.state.update(row["session_id"], row["generation_id"], status="ready",
-                                          record_url="", upload_error=str(exc))
+                                          upload_error=str(exc))
                     except RuntimeError:
                         pass
                     if isinstance(exc, FeishuBitableRateLimited):
                         break
             current = self._current_batch(batch_key)
 
-            def is_completed(name, row):
-                return row.get("status") == "uploaded" and bool(row.get("record_url"))
-
-            completed = [name for name in self.BUILDINGS if is_completed(name, current.get(name, {}))]
+            completed_urls = {
+                name: row["record_url"] for name, row in current.items()
+                if row.get("status") == "uploaded" and row.get("record_url")
+                and (name not in requested or verified.get(name) == row["generation_id"])
+            }
+            url_counts = Counter(completed_urls.values())
+            completed = [name for name in self.BUILDINGS if url_counts[completed_urls.get(name)] == 1]
             missing = [name for name in self.BUILDINGS if name not in completed]
             status = "partial_failed" if failed and completed else "failed" if failed else (
-                "pending" if not building and missing else "ok"
+                "pending" if any(name in missing for name in requested) else "ok"
             )
             previous = self.review.get_cloud_batch_fast(batch_key) or {}
             if previous.get("spreadsheet_token") != token:

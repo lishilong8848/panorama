@@ -3449,12 +3449,18 @@ def _build_review_display_state(
         retry_disabled_reason = "当前楼栋尚未确认，不能重试附件上传"
     elif str(cloud_sheet_state["status"]) not in {"failed", "prepare_failed"}:
         retry_disabled_reason = "当前附件状态无需重试"
-    update_history_allowed = bool(session_payload) and is_history_mode and not remote_editor_active
+    update_history_allowed = (
+        is_history_mode and confirmed and has_output_file and has_capacity_file and not remote_editor_active
+    )
     update_history_disabled_reason = ""
     if not session_payload:
         update_history_disabled_reason = "暂无可更新的历史交接班记录"
     elif not is_history_mode:
         update_history_disabled_reason = "仅历史模式支持更新班次附件"
+    elif not confirmed:
+        update_history_disabled_reason = "该班次尚未确认，不能补传附件"
+    elif not (has_output_file and has_capacity_file):
+        update_history_disabled_reason = "该班次的交接班日志或容量报表缺失，不能补传"
     elif remote_editor_active:
         update_history_disabled_reason = "当前审核页正在其他终端编辑，请等待或刷新后重试"
     return_to_latest_allowed = bool(session_payload) and is_history_mode and bool(latest_session_id_text)
@@ -3728,9 +3734,9 @@ def _build_review_display_state(
                 variant="warning",
             ),
             "update_history_cloud_sync": _review_action(
-                allowed=False,
-                visible=False,
-                label="更新班次附件",
+                allowed=update_history_allowed,
+                visible=is_history_mode and building in HandoverDeliveryWorkflowService.BUILDINGS,
+                label="更新历史班次附件",
                 disabled_reason=update_history_disabled_reason,
                 tone="warning",
                 variant="warning",

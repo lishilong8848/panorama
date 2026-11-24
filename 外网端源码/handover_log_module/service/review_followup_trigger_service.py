@@ -689,6 +689,13 @@ class ReviewFollowupTriggerService:
     ) -> Dict[str, Any]:
         target_batch = str(batch_key or "").strip()
         sessions = self._review_service.list_batch_sessions(target_batch)
+        if target_batch and isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
+            workflow = HandoverDeliveryWorkflowService(self.config)
+            failures = workflow.prepare_sessions(sessions, emit_log, confirm_unconfirmed=True)
+            result = self.publish_attachment_delivery(batch_key=target_batch, emit_log=emit_log)
+            if failures:
+                result.update(status="partial_failed", failed_buildings=[*result.get("failed_buildings", []), *failures])
+            return {**result, "batch_key": target_batch, "cloud_sheet_sync": result}
         if not target_batch or not sessions:
             cloud_result = {
                 "status": "skipped",
@@ -708,14 +715,6 @@ class ReviewFollowupTriggerService:
                 cabinet_shift_record_export=self._existing_cabinet_shift_record_export(sessions),
                 sessions=sessions,
             )
-
-        if isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
-            workflow = HandoverDeliveryWorkflowService(self.config)
-            failures = workflow.prepare_sessions(sessions, emit_log, confirm_unconfirmed=True)
-            result = self.publish_attachment_delivery(batch_key=target_batch, emit_log=emit_log)
-            if failures:
-                result.update(status="partial_failed", failed_buildings=[*result.get("failed_buildings", []), *failures])
-            return {**result, "batch_key": target_batch, "cloud_sheet_sync": result}
 
         forced_confirmed_buildings: List[str] = []
         force_confirm_failed: List[Dict[str, str]] = []
@@ -2670,7 +2669,7 @@ class ReviewFollowupTriggerService:
             emit_log=emit_log,
         )
 
-    def publish_attachment_delivery(self, *, batch_key, emit_log=print, building=""):
+    def publish_attachment_delivery(self, *, batch_key, emit_log=print, building="", include_supplements=True):
         workflow = HandoverDeliveryWorkflowService(self.config)
         try:
             result = workflow.publish_ready_batch(batch_key, emit_log, building=building)
@@ -2683,13 +2682,14 @@ class ReviewFollowupTriggerService:
             return result
         date, shift = batch_key.split("|")
         state = self._daily_report_export_state(
-            status="success", record_id=result["record_id"], record_url=result["record_url"],
+            status="success" if result.get("all_buildings_uploaded") else "pending",
+            record_id=result["record_id"], record_url=result["record_url"],
             spreadsheet_url=result["record_url"],
         )
         self._daily_report_state_service.update_export_state(
             duty_date=date, duty_shift=shift, daily_report_record_export=state,
         )
-        if not result.get("all_buildings_uploaded"):
+        if not include_supplements or not result.get("all_buildings_uploaded"):
             return result
         with attachment_record_lock(f"supplements:{batch_key}"):
             sessions = self._review_service.list_batch_sessions(batch_key)
@@ -3206,6 +3206,20 @@ class ReviewFollowupTriggerService:
 
         building = str(session.get("building", "")).strip()
         emit_log(f"[交接班][历史附件更新] 开始 building={building}, session={target_session_id}")
+        if isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
+            batch_key = str(session.get("batch_key", "")).strip()
+            workflow = HandoverDeliveryWorkflowService(self.config)
+            failures = workflow.prepare_sessions([session], emit_log)
+            cloud_result = {"status": "failed", "failed_buildings": failures} if failures else (
+                self.publish_attachment_delivery(
+                    batch_key=batch_key, emit_log=emit_log, building=building, include_supplements=False,
+                )
+            )
+            return {
+                **cloud_result, "cloud_sheet_sync": cloud_result, "batch_key": batch_key,
+                "session": self._review_service.get_session_by_id(target_session_id),
+                "batch_status": self._review_service.get_batch_status(batch_key),
+            }
         cloud_result = self._run_cloud_sheet_upload(
             batch_key=str(session.get("batch_key", "")).strip(),
             sessions=[session],

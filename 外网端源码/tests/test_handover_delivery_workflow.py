@@ -130,6 +130,38 @@ def test_attachment_does_not_replace_record_moved_to_another_shift(bitable, tmp_
     client.update_record.assert_not_called()
 
 
+def test_duplicate_record_requires_a_verified_previous_link(bitable):
+    store, client, records = bitable
+    first = store.ensure_record(DATE, SHIFT, "A楼")
+    other = deepcopy(records[0])
+    other["record_id"] = "rec-duplicate"
+    records.append(other)
+    client.update_record.reset_mock()
+    with pytest.raises(RuntimeError, match="多条匹配记录"):
+        store.ensure_record(DATE, SHIFT, "A楼")
+    client.update_record.assert_not_called()
+    selected = store.ensure_record(DATE, SHIFT, "A楼", preferred_record_url=first["record_url"])
+    assert selected["record_id"] == first["record_id"]
+    client.batch_create_records.assert_called_once()
+
+
+def test_attachment_rechecks_business_key_after_write(bitable, tmp_path):
+    store, client, records = bitable
+    local = tmp_path / "data.xlsx"
+    local.write_bytes(b"data")
+    store.ensure_record(DATE, SHIFT, "A楼")
+    original_update = client.update_record.side_effect
+
+    def update(**kwargs):
+        original_update(**kwargs)
+        if FIELD in kwargs["fields"]:
+            records[0]["fields"].pop(BUILDING_FIELD)
+
+    client.update_record.side_effect = update
+    with pytest.raises(RuntimeError, match="楼栋已变化"):
+        store.upload_files(DATE, SHIFT, {"A楼_handover.xlsx": local}, building="A楼")
+
+
 def test_cooldown_is_shared_by_stores_for_the_same_table(bitable, tmp_path):
     store, client, _ = bitable
     config = {"daily_report_bitable_export": {"target": {"app_token": str(tmp_path), "table_id": "test-table"}}}
@@ -212,6 +244,49 @@ def test_each_floor_publishes_independently_and_only_reuploads_changed_pair(tmp_
     assert all(workflow.state.for_session(row)["status"] == "uploaded" for row in sessions[1:])
 
 
+@pytest.mark.parametrize("drift", ["date_and_shift", "cleared_building"])
+def test_published_floor_is_repaired_without_overwriting_moved_record(tmp_path, monkeypatch, bitable, drift):
+    store, client, records = bitable
+    workflow = object.__new__(workflow_module.HandoverDeliveryWorkflowService)
+    workflow.config = {}
+    workflow.state = HandoverDeliveryStateService({"paths": {"runtime_state_root": tmp_path}})
+    session = {"building": "A楼", "session_id": f"A楼|{BATCH}", "batch_key": BATCH,
+               "revision": 1, "confirmed": True}
+    workflow.review = SimpleNamespace(
+        list_batch_sessions=lambda _: [session], get_cloud_batch_fast=lambda _: {},
+        register_cloud_batch=Mock(), update_cloud_sheet_sync=Mock(return_value=True),
+    )
+    monkeypatch.setattr(workflow_module, "HandoverAttachmentStore", lambda _: store)
+    artifacts = {}
+    for key in ("log", "capacity", "image", "text"):
+        path = tmp_path / key
+        path.write_bytes(key.encode())
+        artifacts[key] = str(path)
+    workflow.state.begin(session, "first")
+    workflow.state.update(session["session_id"], "first", status="ready", artifacts_ready=True, paths=artifacts)
+    assert workflow.publish_ready_batch(BATCH, lambda _: None, building="A楼")["status"] == "ok"
+    old = records[0]
+    if drift == "date_and_shift":
+        old["fields"]["日期"] += 86_400_000
+        old["fields"]["班次"] = "夜班"
+    else:
+        old["fields"].pop(BUILDING_FIELD)
+    original = deepcopy(old)
+    repaired = workflow.publish_ready_batch(BATCH, lambda _: None)
+    assert repaired["uploaded_buildings"] == ["A楼"]
+    assert repaired["status"] == "pending" and repaired["missing_buildings"] == list(workflow.BUILDINGS[1:])
+    assert len(records) == 2 and records[0] == original
+    assert records[1]["fields"][BUILDING_FIELD] == "A楼"
+    assert records[1]["fields"]["班次"] == "白班"
+    assert {file["name"] for file in records[1]["fields"][FIELD]} == {"A楼_handover.xlsx", "A楼_capacity.xlsx"}
+
+    replay = workflow.publish_ready_batch(BATCH, lambda _: None, building="A楼")
+    assert replay["status"] == "ok" and not replay["uploaded_buildings"]
+    assert client.batch_create_records.call_count == 2
+    assert client.upload_attachment_bytes.call_count == 4
+    client.batch_delete_records.assert_not_called()
+
+
 @pytest.mark.parametrize("complete", [False, True])
 def test_batch_supplements_only_run_when_all_five_uploaded(complete, tmp_path, monkeypatch):
     service = object.__new__(followup_module.ReviewFollowupTriggerService)
@@ -228,6 +303,8 @@ def test_batch_supplements_only_run_when_all_five_uploaded(complete, tmp_path, m
     service.publish_attachment_delivery(batch_key=BATCH, building="A楼")
     assert publish.call_args.kwargs["building"] == "A楼"
     assert service._attach_extra_cloud_sheet_sync_results.called is complete
+    saved = service._daily_report_state_service.update_export_state.call_args.kwargs["daily_report_record_export"]
+    assert saved["status"] == ("success" if complete else "pending")
 
 
 @pytest.mark.parametrize("shift", ["day", "night"])
@@ -261,6 +338,59 @@ def test_scheduled_confirmation_prepares_unconfirmed_buildings_before_publishing
     assert calls == ["prepare", "publish"]
     assert result["cloud_sheet_sync"]["status"] == "ok"
     service._review_service.mark_confirmed.assert_not_called()
+
+
+def test_scheduled_batch_without_sessions_remains_pending(monkeypatch):
+    service = object.__new__(followup_module.ReviewFollowupTriggerService)
+    service.config = {}
+    service._cloud_sheet_sync_service = HandoverAttachmentDeliveryService({})
+    service._review_service = SimpleNamespace(list_batch_sessions=lambda _: [])
+    prepare = Mock(return_value=[])
+    monkeypatch.setattr(followup_module, "HandoverDeliveryWorkflowService",
+                        lambda _: SimpleNamespace(prepare_sessions=prepare))
+    service.publish_attachment_delivery = Mock(return_value={
+        "status": "pending", "missing_buildings": list(workflow_module.HandoverDeliveryWorkflowService.BUILDINGS),
+    })
+    result = service.upload_pending_cloud_sheets_for_batch(batch_key=BATCH, emit_log=lambda _: None)
+    assert result["cloud_sheet_sync"]["status"] == "pending"
+    assert result["cloud_sheet_sync"]["missing_buildings"] == ["A楼", "B楼", "C楼", "D楼", "E楼"]
+
+
+def test_historical_update_repairs_only_selected_floor_without_supplements(monkeypatch):
+    service = object.__new__(followup_module.ReviewFollowupTriggerService)
+    service.config = {}
+    service._cloud_sheet_sync_service = HandoverAttachmentDeliveryService({})
+    session = {"building": "A楼", "session_id": f"A楼|{BATCH}", "batch_key": BATCH, "confirmed": True}
+    service._review_service = SimpleNamespace(
+        get_session_by_id=lambda _: session, get_batch_status=lambda _: {},
+    )
+    prepare = Mock(return_value=[])
+    monkeypatch.setattr(followup_module, "HandoverDeliveryWorkflowService",
+                        lambda _: SimpleNamespace(prepare_sessions=prepare))
+    service.publish_attachment_delivery = Mock(return_value={"status": "ok", "uploaded_buildings": ["A楼"]})
+    log = Mock()
+    result = service.force_update_cloud_sheet_for_session(session["session_id"], log)
+    assert result["status"] == "ok" and result["uploaded_buildings"] == ["A楼"]
+    prepare.assert_called_once_with([session], log)
+    service.publish_attachment_delivery.assert_called_once_with(
+        batch_key=BATCH, emit_log=log, building="A楼", include_supplements=False,
+    )
+
+
+def test_history_repair_action_is_only_enabled_for_confirmed_history_with_both_files():
+    from app.modules.handover_review.api.routes import _build_review_display_state
+
+    def action(*, confirmed=True, latest="new", capacity="capacity.xlsx"):
+        return _build_review_display_state(
+            building="A楼", latest_session_id=latest, batch_status={}, concurrency={},
+            session={"session_id": "old", "confirmed": confirmed,
+                     "output_file": "log.xlsx", "capacity_output_file": capacity},
+        )["actions"]["update_history_cloud_sync"]
+
+    assert action()["visible"] and action()["allowed"]
+    assert not action(confirmed=False)["allowed"]
+    assert not action(capacity="")["allowed"]
+    assert not action(latest="old")["visible"]
 
 
 def test_prepared_download_requires_current_generation(monkeypatch, tmp_path):

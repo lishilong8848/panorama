@@ -1626,6 +1626,11 @@ class JobService:
                         control_port=control_port,
                         python_executable=python_executable,
                     )
+                    result_path = None
+                    if normalized_handler == _ENERGY_REPORT_HANDLER:
+                        result_path = self._task_engine_store.resolve_stage_result_path(job.job_id, stage.stage_id)
+                        result_path.unlink(missing_ok=True)
+                        command.extend(["--result-file", str(result_path)])
                     popen_kwargs: Dict[str, Any] = {
                         "cwd": str(self._worker_app_dir),
                         "env": self._build_worker_env(),
@@ -1659,13 +1664,13 @@ class JobService:
                         },
                     )
 
-                    def _consume_stdout() -> None:
+                    def _consume_stdout(result_box=worker_result) -> None:
                         if process is None or process.stdout is None:
                             return
                         for raw_line in process.stdout:
                             parsed = self._parse_worker_event(raw_line)
                             if parsed:
-                                self._handle_worker_event(job, stage, parsed, worker_result)
+                                self._handle_worker_event(job, stage, parsed, result_box)
                             else:
                                 self._record_worker_text_line(job, stage, raw_line, stream="stdout")
 
@@ -1683,6 +1688,19 @@ class JobService:
                     return_code = int(process.wait())
                     stdout_thread.join(timeout=2)
                     stderr_thread.join(timeout=2)
+                    worker_result = worker_result.copy()
+                    if not worker_result and result_path is not None:
+                        try:
+                            receipt = self._parse_worker_event(result_path.read_text(encoding="utf-8"))
+                        except (OSError, UnicodeError):
+                            receipt = None
+                        if (
+                            receipt and receipt.get("type") == "result"
+                            and receipt.get("stage_id") == stage.stage_id
+                            and receipt.get("handler") == normalized_handler
+                            and isinstance(receipt.get("ok"), bool)
+                        ):
+                            worker_result = receipt
                     stderr_detail = " ".join(line for line in worker_stderr_lines if line).strip()
                     stdout_shutdown_artifact = (
                         bool(worker_result.get("ok", False))

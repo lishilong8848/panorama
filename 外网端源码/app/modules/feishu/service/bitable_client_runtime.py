@@ -240,6 +240,7 @@ class FeishuBitableClient:
         content_type_json: bool = False,
     ) -> Dict[str, Any]:
         path = urlsplit(url).path.rstrip("/")
+        media_upload = method.upper() == "POST" and path == urlsplit(self.UPLOAD_FILE_URL).path
         if method.upper() == "POST" and "/bitable/v1/apps/" in path and (
             path.endswith("/records") or path.endswith("/records/batch_create")
         ):
@@ -247,6 +248,12 @@ class FeishuBitableClient:
             params = dict(params or {})
             params.setdefault("client_token", str(uuid.uuid4()))
         api_attempts = self._api_retry_attempts()
+
+        def can_retry_api_error(body: Dict[str, Any], attempt: int) -> bool:
+            if media_upload and str(body.get("code", "")).strip() == "1061001":
+                return attempt < min(3, api_attempts)
+            return attempt < self._api_retry_limit_for_body(body, api_attempts) and self._is_retryable_api_error(body)
+
         last_error: Optional[str] = None
         for api_attempt in range(1, api_attempts + 1):
             should_retry_api = False
@@ -290,12 +297,11 @@ class FeishuBitableClient:
                         self.invalidate_token()
                         self.refresh_token(force=True)
                         continue
-                    retry_limit = self._api_retry_limit_for_body(error_body, api_attempts)
                     rate_limited = response.status_code == 429 or str(error_body.get("code")) in {"1254290", "99991400"}
                     if rate_limited and str(error_body.get("code")) != "99991403" and self._rate_limit_retry(response, api_attempt):
                         should_retry_api = True
                         break
-                    if not rate_limited and self._is_retryable_api_error(error_body) and api_attempt < retry_limit:
+                    if not rate_limited and can_retry_api_error(error_body, api_attempt):
                         detail = self._response_error_detail(response)
                         last_error = (
                             "飞书HTTP请求失败(将重试): "
@@ -329,12 +335,11 @@ class FeishuBitableClient:
                     self.refresh_token(force=True)
                     continue
 
-                retry_limit = self._api_retry_limit_for_body(body, api_attempts)
                 rate_limited = str(body.get("code")) in {"1254290", "99991400"}
                 if rate_limited and self._rate_limit_retry(response, api_attempt):
                     should_retry_api = True
                     break
-                if not rate_limited and self._is_retryable_api_error(body) and api_attempt < retry_limit:
+                if not rate_limited and can_retry_api_error(body, api_attempt):
                     last_error = f"飞书接口调用失败(将重试): {body}"
                     should_retry_api = True
                     self._api_retry_sleep(api_attempt, body)

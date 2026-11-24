@@ -1410,6 +1410,10 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         f"cloud_status={cloud_status}, failed={len(cloud_failed)}"
                         + (f", detail={failed_text}" if failed_text else "")
                     )
+                missing = cloud_result.get("missing_buildings") or []
+                if cloud_status == "pending" or (missing and cloud_status == "ok"):
+                    names = "、".join(missing) or "未确认"
+                    raise RuntimeError(f"交接班多维附件未全部上传: batch={batch_key}, 未完成楼栋={names}")
                 if status in {"failed", "partial_failed"}:
                     failed_items = [
                         item for item in (result.get("failed_buildings", []) or [])

@@ -217,7 +217,7 @@ def _format_job_wait_reason(job: Dict[str, Any]) -> str:
         elif item == "waiting:feishu_auth":
             mapped.append("等待飞书连接恢复")
         elif item == "waiting:energy_report_source":
-            mapped.append("等待内网能耗报表源文件")
+            mapped.append(str(job.get("summary") or "").strip() or "等待内网能耗报表源文件")
         elif item == "waiting:output_path":
             mapped.append("等待输出文件锁")
         elif item == "waiting:source_identity":

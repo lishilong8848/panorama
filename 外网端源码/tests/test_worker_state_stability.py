@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from app.core.app_state import AppStateRepository
 from app.modules.report_pipeline.service.job_service import JobService, JobState, StageState
+from app.worker import entry
 from app.worker.entry import _exception_detail, _invoke_handler
 from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
 from handover_log_module.service.review_session_service import ReviewSessionStoreUnavailableError
@@ -27,6 +29,25 @@ def test_worker_does_not_retry_handler_after_internal_type_error() -> None:
 
 def test_empty_exception_message_keeps_exception_type() -> None:
     assert _exception_detail(TimeoutError()) == "TimeoutError"
+
+
+def test_worker_persists_result_before_emitting_to_stdout(tmp_path, monkeypatch):
+    payload = tmp_path / "input.json"
+    payload.write_text("{}", encoding="utf-8")
+    receipt = tmp_path / "result.json"
+    monkeypatch.setattr(entry, "configure_feishu_auth_source", lambda _: None)
+    monkeypatch.setitem(entry.HANDLER_REGISTRY, "test-receipt", lambda *_: {"status": "success"})
+
+    def emit(event):
+        if event["type"] == "result":
+            assert json.loads(receipt.read_text(encoding="utf-8")) == event
+
+    monkeypatch.setattr(entry, "_emit_event", emit)
+    assert entry.main([
+        "--job-dir", str(tmp_path), "--stage-id", "main", "--handler", "test-receipt",
+        "--payload-file", str(payload), "--result-file", str(receipt),
+    ]) == 0
+    assert json.loads(receipt.read_text(encoding="utf-8"))["ok"] is True
 
 
 def test_app_state_health_snapshot_is_cached_and_marks_large_counts_approximate(tmp_path: Path) -> None:

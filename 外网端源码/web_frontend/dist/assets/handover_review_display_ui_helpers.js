@@ -411,7 +411,7 @@ export function createHandoverReviewDisplayUiHelpers(options = {}) {
         || !updateHistoryCloudSyncActionBase.value.allowed,
     });
   });
-  const showUpdateHistoryCloudSyncAction = computed(() => false);
+  const showUpdateHistoryCloudSyncAction = computed(() => Boolean(updateHistoryCloudSyncActionBase.value.visible));
   const returnToLatestActionVm = computed(() => {
     return buildReviewActionVmBase({
       baseAction: returnToLatestActionBase.value,

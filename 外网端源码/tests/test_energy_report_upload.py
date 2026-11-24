@@ -150,7 +150,11 @@ def test_legacy_worker_with_no_manifest_defers_transient_index_errors(clients, m
     bitable.list_fields.assert_not_called()
 
 
-def test_no_source_retry_on_nontransient_bridge_or_write_error(clients, monkeypatch):
+@pytest.mark.parametrize("write_error", [
+    TimeoutError("remote write outcome unknown"),
+    module.FeishuTokenTimeout("refresh timed out after entering upload"),
+])
+def test_no_source_retry_on_nontransient_bridge_or_write_error(clients, monkeypatch, write_error):
     service, bridge, bitable, _ = clients
     monkeypatch.setattr(module, "EnergyReportUploadService", lambda _: service)
     sources = bridge.source_index_batch.side_effect
@@ -159,8 +163,8 @@ def test_no_source_retry_on_nontransient_bridge_or_write_error(clients, monkeypa
         handle_energy_report_upload(service.config, {"period": "2026-10"}, lambda _: None)
     bridge.source_index_batch.side_effect = sources
     manifest = module.source_manifest(service.source_paths("2026-10", request_missing=True))
-    bitable.upload_attachment_bytes.side_effect = TimeoutError("remote write outcome unknown")
-    with pytest.raises(TimeoutError, match="remote write outcome unknown"):
+    bitable.upload_attachment_bytes.side_effect = write_error
+    with pytest.raises(type(write_error), match=str(write_error)):
         handle_energy_report_upload(service.config, {"period": "2026-10", "source_manifest": manifest}, lambda _: None)
     assert not module._source_retry_path(service.config, "2026-10").exists()
 

@@ -698,7 +698,7 @@ def handle_alarm_rule_export_upload(
 
 def handle_energy_report_upload(config, payload, emit_log, runtime=None):
     from app.modules.report_pipeline.service.energy_report_upload_service import (
-        EnergyReportSourcePending, EnergyReportUploadService, defer_source_retry,
+        EnergyReportAuthPending, EnergyReportSourcePending, EnergyReportUploadService, defer_source_retry,
     )
 
     check_cancel = runtime.raise_if_cancelled if runtime is not None else (lambda: None)
@@ -710,10 +710,11 @@ def handle_energy_report_upload(config, payload, emit_log, runtime=None):
         )
     except EnergyReportSourcePending as exc:
         check_cancel()
-        result = defer_source_retry(config, period, str(exc))
+        waiting_for = "飞书鉴权连接恢复" if isinstance(exc, EnergyReportAuthPending) else "内网源文件"
+        result = defer_source_retry(config, period, str(exc), waiting_for=waiting_for)
         emit_log(f"[月度能耗报表上传] {period} {result['summary']}：{exc}")
         if result["alert"]:
-            return {**result, "status": "failed", "error": f"{period} 内网源文件持续未就绪：{exc}；已保留月份，后续自动重试"}
+            return {**result, "status": "failed", "error": f"{period} 等待{waiting_for}超时：{exc}；已保留月份，后续自动重试"}
         return result
 
 

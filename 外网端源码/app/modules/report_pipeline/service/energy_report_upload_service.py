@@ -13,8 +13,10 @@ from typing import Any
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.feishu.service.bitable_target_resolver import BitableTargetResolver
 from app.modules.feishu.service.feishu_auth_resolver import require_feishu_auth_settings
+from app.modules.feishu.service.feishu_token_manager import FeishuTokenTimeout
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient, InternalBridgeHttpError
 from app.shared.utils.cached_json_file import load_cached_json, save_cached_json
+from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 from app.shared.utils.xlsx_archive import validate_xlsx_archive
 
 
@@ -36,6 +38,10 @@ _REQUIRED_SOURCES = tuple((building, family) for building in BUILDINGS for famil
 
 
 class EnergyReportSourcePending(FileNotFoundError):
+    pass
+
+
+class EnergyReportAuthPending(EnergyReportSourcePending):
     pass
 
 
@@ -97,8 +103,7 @@ def due_period(now: datetime) -> str:
 
 
 def _state_path(config: dict[str, Any]) -> Path:
-    root = config.get("paths", {}).get("runtime_state_root") or ".runtime"
-    return Path(root) / "energy_report_upload_completed.json"
+    return resolve_runtime_state_root(runtime_config=config) / "energy_report_upload_completed.json"
 
 
 def completed(config: dict[str, Any], period: str) -> bool:
@@ -132,7 +137,7 @@ def source_retry_due(config, period, now: datetime) -> bool:
     return now.timestamp() >= retry.get("next_at", 0)
 
 
-def defer_source_retry(config, period, detail, *, now: datetime | None = None) -> dict[str, Any]:
+def defer_source_retry(config, period, detail, *, waiting_for="内网源文件", now: datetime | None = None) -> dict[str, Any]:
     now = (now or datetime.now()).timestamp()
     path = _source_retry_path(config, period)
     with _QUEUE_LOCK:
@@ -148,7 +153,7 @@ def defer_source_retry(config, period, detail, *, now: datetime | None = None) -
         }, encoding="utf-8")
     return {
         "status": "waiting_resource", "wait_reason": SOURCE_WAIT_REASON, "period": period,
-        "summary": f"等待内网源文件；约 {delay // 60} 分钟后重试",
+        "summary": f"等待{waiting_for}；约 {delay // 60} 分钟后重试",
         "detail": detail,
         "alert": alert,
     }
@@ -401,9 +406,12 @@ class EnergyReportUploadService:
         }
         files = self._validated_files(period, paths, log=log, check_cancel=check_cancel)
         check_cancel()
-        self.ensure_schema()
-        client = self.client()
-        existing = self._month_records(client, period)
+        try:
+            self.ensure_schema()
+            client = self.client()
+            existing = self._month_records(client, period)
+        except FeishuTokenTimeout as exc:
+            raise EnergyReportAuthPending(str(exc)) from exc
         pending_path = _state_path(self.config).with_name(f"energy_report_upload_pending_{period}.json")
         try:
             pending = json.loads(pending_path.read_text(encoding="utf-8"))
