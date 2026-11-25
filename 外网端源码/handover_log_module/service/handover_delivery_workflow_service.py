@@ -6,7 +6,7 @@ import uuid
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableRateLimited
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
-from handover_log_module.service.review_session_service import ReviewSessionService
+from handover_log_module.service.review_session_service import ReviewSessionConflictError, ReviewSessionService
 from handover_log_module.service.handover_attachment_store import HandoverAttachmentStore, attachment_record_lock
 
 
@@ -20,7 +20,9 @@ class HandoverDeliveryWorkflowService:
         self.review = ReviewSessionService(self.config, initialize_generated_file_index=False)
 
     def prepare(self, session_id, generation_id, expected_revision, emit_log, runtime=None, *, expected_document_revision=None):
-        from handover_log_module.service.handover_delivery_prepare_service import HandoverDeliveryPrepareService
+        from handover_log_module.service.handover_delivery_prepare_service import (
+            HandoverDeliveryPrepareRetryableError, HandoverDeliveryPrepareService,
+        )
         self.state.update(session_id, generation_id, status="preparing", artifacts_ready=False)
         try:
             result = HandoverDeliveryPrepareService(self.runtime_config).prepare(
@@ -29,17 +31,20 @@ class HandoverDeliveryWorkflowService:
             )
             session = self.review.get_session_by_id(session_id)
             if not session or int(session.get("revision", 0)) != result["revision"]:
-                raise RuntimeError("审核内容在生成期间已变更，请重新生成")
+                raise HandoverDeliveryPrepareRetryableError("审核内容在生成期间已变更，请重新生成")
             if runtime:
                 runtime.raise_if_cancelled()
             with attachment_record_lock(f"prepare-admit:{session_id}", timeout=3):
                 if self.state.get(session_id).get("generation_id") != generation_id:
-                    raise RuntimeError("成品任务已被新版本替代")
+                    raise HandoverDeliveryPrepareRetryableError("成品任务已被新版本替代")
                 if not session.get("confirmed"):
-                    session, _ = self.review.mark_confirmed(
-                        building=session["building"], session_id=session_id, confirmed=True,
-                        base_revision=result["revision"], compare_and_set=True,
-                    )
+                    try:
+                        session, _ = self.review.mark_confirmed(
+                            building=session["building"], session_id=session_id, confirmed=True,
+                            base_revision=result["revision"], compare_and_set=True,
+                        )
+                    except ReviewSessionConflictError as exc:
+                        raise HandoverDeliveryPrepareRetryableError(str(exc)) from exc
                 return self.state.update(
                     session_id, generation_id, status="ready", artifacts_ready=True,
                     paths=result["paths"], hashes=result["hashes"], revision=int(session["revision"]), error="",
@@ -55,10 +60,14 @@ class HandoverDeliveryWorkflowService:
             building, session_id = session["building"], session["session_id"]
             try:
                 with attachment_record_lock(f"prepare-admit:{session_id}", timeout=3):
+                    session = self.review.get_session_by_id(session_id)
+                    if not session or (not confirm_unconfirmed and not session.get("confirmed")):
+                        return None
                     current = self.state.for_session(session)
-                    if current.get("status") in self.state.ACTIVE or (
-                        current.get("artifacts_ready") and self.state.artifacts_exist(current)
-                    ):
+                    if current.get("status") in self.state.ACTIVE:
+                        emit_log(f"[交接班][成品] {session_id} 已有任务在准备，等待现有任务")
+                        return None
+                    if current.get("artifacts_ready") and self.state.artifacts_exist(current):
                         return None
                     generation_id = uuid.uuid4().hex
                     self.state.begin(session, generation_id)
@@ -66,7 +75,10 @@ class HandoverDeliveryWorkflowService:
                 return None
             except Exception as exc:
                 emit_log(f"[交接班][成品] {building} 生成未完成: {exc}")
-                return {"building": building, "error": str(exc)}
+                failure = {"building": building, "error": str(exc)}
+                if getattr(exc, "retryable", False):
+                    failure["retryable"] = True
+                return failure
 
         candidates = [s for s in sessions if s.get("building") in self.BUILDINGS
                       and (s.get("confirmed") or confirm_unconfirmed)]

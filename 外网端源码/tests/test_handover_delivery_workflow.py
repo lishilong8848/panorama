@@ -221,6 +221,19 @@ def test_each_floor_publishes_independently_and_only_reuploads_changed_pair(tmp_
     assert all(len(_record_for(records, b)["fields"][FIELD]) == 2 for b in workflow.BUILDINGS)
     assert all(workflow.state.for_session(row)["status"] == "uploaded" for row in sessions)
 
+    c = sessions[2]
+    c["revision"] = 2
+    client.upload_attachment_bytes.reset_mock()
+    pending = workflow.publish_ready_batch(BATCH, lambda _: None)
+    assert pending["status"] == "pending" and pending["missing_buildings"] == ["C楼"]
+    client.upload_attachment_bytes.assert_not_called()
+    ready(c, "second")
+    recovered = workflow.publish_ready_batch(BATCH, lambda _: None)
+    assert recovered["all_buildings_uploaded"] and recovered["uploaded_buildings"] == ["C楼"]
+    assert [call.kwargs["file_name"] for call in client.upload_attachment_bytes.call_args_list] == [
+        "C楼_handover.xlsx", "C楼_capacity.xlsx",
+    ]
+
     sessions[0]["revision"] = 2
     assert workflow.state.for_session(sessions[0])["status"] == "stale"
     assert workflow.publish_ready_batch(BATCH, lambda _: None, building="A楼")["status"] == "pending"

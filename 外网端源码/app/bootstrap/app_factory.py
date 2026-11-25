@@ -12,6 +12,7 @@ import threading
 import time
 import time
 from datetime import datetime, timedelta
+from functools import partial
 from ipaddress import ip_address
 from typing import Any, Dict
 
@@ -39,6 +40,7 @@ from app.modules.report_pipeline.api.routes import (
 from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import (
     start_waiting_bridge_job,
 )
+from app.modules.report_pipeline.service.job_service import HandoverArtifactsPending
 from app.modules.shared_bridge.api.routes import router as shared_bridge_router
 from app.modules.shared_bridge.service.alarm_event_page_export_service import daily_scheduled_bucket_for_time
 from app.modules.shared_bridge.service.runtime_status_coordinator import RuntimeStatusCoordinator
@@ -88,6 +90,49 @@ _EXTERNAL_REVIEW_ALLOWED_EXACT = {
     "/favicon.ico",
 }
 _MEMORY_PRESSURE_RESPONSE_BODY = b"service temporarily unavailable: memory pressure"
+_HANDOVER_ATTACHMENT_CATCHUP_FEATURE = "handover_cloud_catchup"
+
+
+def _run_handover_attachment_catchup(runtime_config, batch_key, emit_log):
+    from handover_log_module.api.facade import load_handover_config
+    from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
+
+    service = ReviewFollowupTriggerService(load_handover_config(runtime_config))
+    result = service.upload_pending_cloud_sheets_for_batch(batch_key=batch_key, emit_log=emit_log)
+    status = str(result.get("status") or "").strip().lower()
+    cloud = result.get("cloud_sheet_sync")
+    cloud = cloud if isinstance(cloud, dict) else {}
+    cloud_status = str(cloud.get("status") or "").strip().lower()
+    failed = [item for item in cloud.get("failed_buildings") or [] if isinstance(item, dict)]
+    if cloud_status in {"failed", "partial_failed"}:
+        detail = "；".join(f"{item.get('building') or '-'}: {item.get('error') or '未知错误'}" for item in failed[:5])
+        if failed and all(item.get("retryable") for item in failed):
+            raise HandoverArtifactsPending(f"{batch_key}，{detail}")
+        raise RuntimeError(
+            f"交接班多维附件上传失败: cloud_status={cloud_status}, failed={len(failed)}"
+            + (f", detail={detail}" if detail else "")
+        )
+    missing = cloud.get("missing_buildings") or []
+    if cloud_status == "pending" or (missing and cloud_status == "ok"):
+        names = "、".join(missing) or "未确认"
+        raise HandoverArtifactsPending(f"batch={batch_key}, 未完成楼栋={names}")
+    if status in {"failed", "partial_failed"}:
+        failed_items = [item for item in result.get("failed_buildings") or [] if isinstance(item, dict)]
+        detail = "；".join(f"{item.get('building') or '-'}: {item.get('error') or '未知错误'}" for item in failed_items[:5])
+        emit_log(
+            "[交接班][多维附件调度] 班次附件已处理，附加后续链路存在失败 "
+            f"status={status}, failed={len(failed_items)}" + (f", detail={detail}" if detail else "")
+        )
+    return result
+
+
+def _resume_handover_attachment_catchup_jobs(container):
+    container.job_service.resume_deferred_local_jobs(
+        _HANDOVER_ATTACHMENT_CATCHUP_FEATURE,
+        lambda job: partial(
+            _run_handover_attachment_catchup, container.runtime_config, job.dedupe_key.rsplit(":", 1)[-1],
+        ),
+    )
 
 
 def _exception_contains_memory_error(exc: BaseException) -> bool:
@@ -802,6 +847,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             result = container.start_role_runtime_services(source=source)
             if role_mode == "external":
                 resume_chiller_mode_upload_jobs(container)
+                _resume_handover_attachment_catchup_jobs(container)
             container.add_system_log(
                 f"[调度] 执行器绑定完成: {container.scheduler_executor_name()}, "
                 f"executor_bound={container.is_scheduler_executor_bound()}"
@@ -1381,64 +1427,18 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 container.add_system_log(f"[交接班][多维附件调度] {detail}")
                 return False, detail
 
-            from handover_log_module.api.facade import load_handover_config
-            from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
-
             dedupe_key = f"handover:cloud_catchup:{slot}:{batch_key}"
-
-            def _run_cloud_catchup(emit_log):
-                service = ReviewFollowupTriggerService(load_handover_config(runtime_config))
-                result = service.upload_pending_cloud_sheets_for_duty(
-                    duty_date=duty_date,
-                    duty_shift=duty_shift,
-                    emit_log=emit_log,
-                )
-                status = str(result.get("status", "") or "").strip().lower()
-                cloud_result = result.get("cloud_sheet_sync", {}) if isinstance(result.get("cloud_sheet_sync", {}), dict) else {}
-                cloud_status = str(cloud_result.get("status", "") or "").strip().lower()
-                cloud_failed = [
-                    item for item in (cloud_result.get("failed_buildings", []) or [])
-                    if isinstance(item, dict)
-                ]
-                if cloud_status in {"failed", "partial_failed"}:
-                    failed_text = "；".join(
-                        f"{str(item.get('building', '') or '-').strip() or '-'}: {str(item.get('error', '') or '未知错误').strip() or '未知错误'}"
-                        for item in cloud_failed[:5]
-                    )
-                    raise RuntimeError(
-                        "交接班多维附件上传失败: "
-                        f"cloud_status={cloud_status}, failed={len(cloud_failed)}"
-                        + (f", detail={failed_text}" if failed_text else "")
-                    )
-                missing = cloud_result.get("missing_buildings") or []
-                if cloud_status == "pending" or (missing and cloud_status == "ok"):
-                    names = "、".join(missing) or "未确认"
-                    raise RuntimeError(f"交接班多维附件未全部上传: batch={batch_key}, 未完成楼栋={names}")
-                if status in {"failed", "partial_failed"}:
-                    failed_items = [
-                        item for item in (result.get("failed_buildings", []) or [])
-                        if isinstance(item, dict)
-                    ]
-                    failed_text = "；".join(
-                        f"{str(item.get('building', '') or '-').strip() or '-'}: {str(item.get('error', '') or '未知错误').strip() or '未知错误'}"
-                        for item in failed_items[:5]
-                    )
-                    emit_log(
-                        "[交接班][多维附件调度] 班次附件已处理，附加后续链路存在失败 "
-                        f"status={status}, failed={len(failed_items)}"
-                        + (f", detail={failed_text}" if failed_text else "")
-                    )
-                return result
 
             try:
                 job = container.job_service.start_job(
                     name=f"交接班定时确认并上传多维（{slot_name}）",
-                    run_func=_run_cloud_catchup,
+                    run_func=partial(_run_handover_attachment_catchup, runtime_config, batch_key),
                     resource_keys=["network:external", f"handover_followup:{batch_key}", f"handover_batch:{batch_key}"],
                     priority="scheduler",
-                    feature="handover_cloud_catchup",
+                    feature=_HANDOVER_ATTACHMENT_CATCHUP_FEATURE,
                     dedupe_key=dedupe_key,
                     submitted_by="scheduler",
+                    retry_deferred=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 notify.send_failure(stage=source, detail=str(exc), emit_log=container.add_system_log)
