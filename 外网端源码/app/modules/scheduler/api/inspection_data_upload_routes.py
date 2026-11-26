@@ -143,7 +143,7 @@ def latest_building_inspection_points(building_code: str, request: Request):
             group = settings.get(family, {})
             rows = InspectionDataUploadService._point_detail_rows(
                 doc, INSPECTION_SOURCE_CONTRACTS[family]["discipline"], {},
-                status_rules=group.get("status_rules", {}),
+                status_rules=group.get("status_rules", {}), baseline=group.get("baseline"),
                 corrections=corrected_samples(doc, group.get("correction_rules", {})))
             datasets[family] = {"sample_time": doc["value_time"], "points": [
                 {"id": row["测点ID"], "name": row["测点名称"], "path": row["测点路径"], "value": row["测点值"],

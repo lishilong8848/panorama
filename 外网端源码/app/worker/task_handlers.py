@@ -254,6 +254,7 @@ def handle_handover_from_download(
                 duty_date=payload.get("duty_date"),
                 duty_shift=payload.get("duty_shift"),
                 skip_manual_generated=skip_manual_generated,
+                only_if_missing=bool(payload.get("scheduler_slot")),
                 emit_log=emit_log,
             )
         result = orchestrator.run_handover_from_download(
@@ -1111,6 +1112,7 @@ def handle_handover_review_regenerate(
         duty_shift=duty_shift,
         auto_send_review_link=False,
         only_if_missing=payload.get("only_if_missing") is True,
+        protect_confirmed=True,
         emit_log=emit_log,
     )
     if payload.get("only_if_missing") is True:

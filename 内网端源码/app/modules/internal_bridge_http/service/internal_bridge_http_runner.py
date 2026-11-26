@@ -16,7 +16,8 @@ from app.modules.shared_bridge.service.shared_source_cache_service import (
     SharedSourceCacheService,
 )
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
-from app.shared.utils.report_source_json import REPORT_JSON_FAMILIES, validate_report_source_json
+from app.shared.utils.report_source_json import REPORT_JSON_FAMILIES, load_report_source_json, validate_report_source_json
+from app.modules.shared_bridge.service.handover_excel_source import HANDOVER_FAMILIES
 from pipeline_utils import get_app_dir
 
 
@@ -879,12 +880,18 @@ class InternalBridgeHttpTaskRunner:
         if not target_bucket:
             return entries
         try:
-            recovered = self._recover_exact_existing_source_file_to_index(
+            recovered = None if family in HANDOVER_FAMILIES and len(target_bucket) != 13 else self._recover_exact_existing_source_file_to_index(
                 main_cache=main_cache,
                 source_family=family,
                 building=building_name,
                 bucket_key=target_bucket,
             )
+            if not recovered and family in HANDOVER_FAMILIES and (len(target_bucket) == 13 or duty_shift in {"day", "night"}):
+                recovered = main_cache.recover_handover_excel(
+                    source_family=family, building=building_name,
+                    bucket_kind="latest" if len(target_bucket) == 13 else "date",
+                    bucket_key=target_bucket, duty_date=duty_date or target_bucket[:10], duty_shift=duty_shift,
+                )
             if recovered:
                 self._emit(
                     "[内网HTTP桥接] source-index 查询时补登记现有源文件: "
@@ -966,7 +973,13 @@ class InternalBridgeHttpTaskRunner:
             duty_date = str(context.get("duty_date", "") or "").strip()
             duty_shift = str(context.get("duty_shift", "") or "").strip().lower()
             try:
-                if source_family in REPORT_JSON_FAMILIES:
+                if source_family in HANDOVER_FAMILIES:
+                    doc = load_report_source_json(candidate_path, expected_family=source_family, expected_building=building)
+                    main_cache.validate_handover_recovered_window(doc, bucket_kind, context_bucket, duty_date, duty_shift)
+                    if bucket_kind == "latest":
+                        ctx = main_cache._infer_handover_duty_context_from_bucket_key(context_bucket)
+                        duty_date, duty_shift = ctx["duty_date"], ctx["duty_shift"]
+                elif source_family in REPORT_JSON_FAMILIES:
                     daily = {"monthly_report_family", "branch_power_family", "branch_current_family",
                              "branch_switch_family", "building_full_cabinet_power_family",
                              "air_conditioner_temperature_humidity_family"}

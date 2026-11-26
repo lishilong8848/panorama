@@ -67,6 +67,17 @@ def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
+def _usable_reading(value: Any) -> bool:
+    text = _text(value).lower()
+    if text in {"", "-", "--", "null", "none", "n/a", "无数据", "无权限", "暂无数据", "读取失败",
+                "超时", "timeout", "timed out", "permission denied"}:
+        return False
+    try:
+        return math.isfinite(float(text))
+    except ValueError:
+        return True
+
+
 def _key(value: Any) -> str:
     return re.sub(r"\s+", "", _text(value)).replace("（", "(").replace("）", ")")
 
@@ -543,48 +554,91 @@ class InspectionDataUploadService:
         if "requested_point_ids" in doc:
             requested = doc["requested_point_ids"]
             if (not isinstance(requested, list) or any(not isinstance(i, str) or not i for i in requested)
-                    or set(requested) != set(doc.get("point_ids", []))):
+                    or len(set(requested)) != len(requested) or set(doc.get("point_ids", [])) != set(requested)):
                 raise ValueError("巡检接口未返回全部请求测点；未清空多维表")
+        ids = doc.get("point_ids", [])
+        returned = set(ids)
+        marked = set()
+        for key in ("zero_filled_point_ids", "zero_filled_sample_point_ids"):
+            if key not in doc:
+                continue
+            filled = doc[key]
+            if (not isinstance(filled, list) or any(not isinstance(i, str) or i not in returned for i in filled)
+                    or len(filled) != len(set(filled)) or marked.intersection(filled) or "requested_point_ids" not in doc):
+                raise ValueError("巡检补零测点清单无效；未清空多维表")
+            marked.update(filled)
+        if marked:
+            sample_missing = set(doc.get("zero_filled_sample_point_ids", ()))
+            if (len(ids) > 2000 or any(not re.fullmatch(r"[0-9]+(?:_[0-9]+)+", i) for i in ids)
+                    or any(row[3] != "0" or (i in sample_missing and not _text(row[2]))
+                           for i, row in zip(ids, rows) if i in marked)
+                    or not any(_text(row[2]) and _usable_reading(row[3]) for i, row in zip(ids, rows) if i not in marked)):
+                raise ValueError("巡检补零缺少有效实测或占位数据无效；未清空多维表")
         return end
 
     @staticmethod
     def _point_detail_rows(entry: dict, discipline: str, notes: dict, targets: dict | None = None,
-                           status_rules: dict | None = None, corrections: dict[int, str] | None = None) -> list[dict]:
+                           status_rules: dict | None = None, corrections: dict[int, str] | None = None,
+                           *, baseline: dict | None = None, for_upload: bool = False) -> list[dict]:
         rows = []
         position = device = ""
         sample_time = int(datetime.strptime(entry["value_time"], "%Y-%m-%d %H:%M:%S")
                           .replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
         ids = entry.get("point_ids", [])
+        missing_rows = set(entry.get("zero_filled_point_ids", ()))
+        missing_samples = set(entry.get("zero_filled_sample_point_ids", ()))
+        missing = missing_rows | missing_samples
         corrections = corrections or {}
         for i, (place, name, metric, raw) in enumerate(entry["rows"]):
-            if _text(place) and _key(place) != _key(position):
-                position, device = _text(place), ""
-            if _text(name):
-                device = _text(name)
-            if not device or not _text(metric):
-                if ids:
-                    raise ValueError(f"巡检接口测点 {ids[i]} 缺少设备或名称；未清空多维表")
-                continue
-            corrected = corrections.get(i)
-            numeric = _numeric(raw, "")
-            value = f"{_round_measurement(numeric):.2f}" if numeric is not None else _text(raw)
-            if corrected is not None:
-                value = corrected
             point_id = ids[i] if ids else ""
             target = (targets or {}).get(point_id, {})
+            rule = (status_rules or {}).get(point_id, {})
+            if point_id in missing_rows:
+                known = (baseline or {}).get(point_id, {})
+                metric, path = known.get("name", ""), known.get("path", "")
+                row_position = row_device = ""
+            else:
+                if _text(place) and _key(place) != _key(position):
+                    position, device = _text(place), ""
+                if _text(name):
+                    device = _text(name)
+                if not _text(metric) or (not device and point_id not in missing_samples):
+                    if ids:
+                        raise ValueError(f"巡检接口测点 {point_id} 缺少设备或名称；未清空多维表")
+                    continue
+                row_position, row_device = position, device
+                path = " / ".join(filter(None, (position, device, _text(metric))))
+            if point_id in missing:
+                raw = corrected = None
+                parts = point_id.rsplit("_", 3)
+                discrete = len(parts) == 4 and parts[1] == "2"
+                if point_id in missing_samples and _key(metric).endswith("状态"):
+                    discrete = True
+                if discrete and rule.get("type") != "状态":
+                    rule = {"type": "状态"}
+                # No numeric placeholder for a discrete signal, even when misconfigured as direct fill.
+                numeric_target = rule.get("type") in {"直接填充", "数值"} or (not rule and not target)
+                value = "0" if for_upload and numeric_target and not discrete else ""
+            else:
+                corrected = corrections.get(i)
+                numeric = _numeric(raw, "")
+                value = f"{_round_measurement(numeric):.2f}" if numeric is not None else _text(raw)
+                if corrected is not None:
+                    value = corrected
             rows.append({
-                "记录类型": "测点明细", "楼栋": entry["building"], "专业": discipline, "位置": position,
-                "设备编号": device, "巡检表单": entry["report_name"], "测点名称": _text(metric),
-                "测点ID": point_id, "测点路径": " / ".join(filter(None, (position, device, _text(metric)))),
+                "记录类型": "测点明细", "楼栋": entry["building"], "专业": discipline, "位置": row_position,
+                "设备编号": row_device, "巡检表单": entry["report_name"], "测点名称": _text(metric),
+                "测点ID": point_id, "测点路径": path,
                 "测点值": value,
                 "测点原始值": "" if raw is None else str(raw),
                 **({CORRECTED_VALUE_FIELD: corrected} if corrected is not None else {}),
-                **status_fields((status_rules or {}).get(point_id), corrected if corrected is not None else raw),
+                **status_fields(rule, corrected if corrected is not None else raw),
                 "测点备注": notes.get(point_id, ""),
                 **{field: target[key] for key, field in POINT_TARGET_FIELDS.items() if key in target},
                 **{field: target.get("round_cells", {}).get(key, "")
                    for key, field in INSPECTION_ROUND_FIELDS.items() if "round_cells" in target},
-                "采样时间": sample_time, "数据完整性": "完整" if _text(raw) else "缺少源数据",
+                **({"采样时间": sample_time} if point_id not in missing else {}),
+                "数据完整性": "完整" if _text(raw) else "缺少源数据",
             })
         return rows
 
@@ -809,6 +863,7 @@ class InspectionDataUploadService:
         report_controls = report_operating_controls(self._internal, self.runtime_config, hvac, log)
         operating_buildings = set()
         parsed = {}
+        missing_sample_counts = Counter()
         catalog = load_catalog()
         for building in buildings:
             combined = {"rows": [], "valid_points": 0, "matched_devices": 0,
@@ -817,15 +872,27 @@ class InspectionDataUploadService:
                 cancel()
                 entry = sources[building][family]
                 group = (point_settings or {}).get(building, {}).get(family, {})
+                missing_rows = set(entry.get("zero_filled_point_ids", ()))
+                missing_samples = set(entry.get("zero_filled_sample_point_ids", ()))
+                missing_ids = missing_rows | missing_samples
                 corrections = corrected_samples(entry, group.get("correction_rules", {}))
                 point_rows = self._point_detail_rows(entry, contract["discipline"], group.get("points", {}),
-                                                     group.get("targets", {}), group.get("status_rules", {}), corrections)
+                                                     group.get("targets", {}), group.get("status_rules", {}), corrections,
+                                                     baseline=group.get("baseline"), for_upload=True)
+                real_points = [r for r in point_rows if r["测点ID"] not in missing_ids]
                 added_ids = set(entry.get("point_overrides", {}).get("add", []))
+                samples = entry["rows"]
+                if missing_ids:
+                    # Skip placeholder values without losing device labels carried by real source rows.
+                    samples = (("", "", "", None) if pid in missing_rows else
+                               (*row[:2], "", None) if pid in missing_samples else row
+                               for pid, row in zip(entry["point_ids"], samples))
                 p = self.parse_samples(
-                    entry["rows"], building=building, value_time=entry["value_time"], corrections=corrections,
+                    samples, building=building, value_time=entry["value_time"], corrections=corrections,
                     catalog=[d for d in catalog if d["discipline"] == contract["discipline"]],
                     allow_unmapped=bool(entry.get("requested_point_ids")
-                                        and any(r["测点ID"] in added_ids and r["测点值"] for r in point_rows)),
+                                        and any(r["测点ID"] in added_ids and _usable_reading(r["测点原始值"])
+                                                for r in real_points)),
                 )
                 source_time = int(datetime.strptime(entry["value_time"] if force_refresh else entry["query_end"], "%Y-%m-%d %H:%M:%S")
                                   .replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
@@ -833,7 +900,7 @@ class InspectionDataUploadService:
                 local_rows = self._local_point_rows(building, contract["discipline"], group)
                 combined["rows"].extend({"记录类型": "设备巡检", **r, "源文件时间": source_time, "源文件": source_name}
                                         for r in [*p["rows"], *point_rows])
-                operating = (operation_rows(building, entry["value_time"], point_rows,
+                operating = (operation_rows(building, entry["value_time"], real_points,
                                             group.get("operating_rules"), report_controls.get(building))
                              if family == HVAC_FAMILY else [])
                 if operating:
@@ -843,14 +910,25 @@ class InspectionDataUploadService:
                 for key in ("valid_points", "matched_devices", "missing_devices"):
                     combined[key] += p[key]
                 combined["diagnostics"].extend(f"{contract['label']}: {item}" for item in p["diagnostics"])
+                missing_sample_points = []
+                for row in point_rows:
+                    if row["测点ID"] in missing_samples:
+                        point_id, device, metric = row["测点ID"], row["设备编号"], row["测点名称"]
+                        missing_sample_points.append({"point_id": point_id, "device": device, "metric": metric, "count": 1})
+                        missing_sample_counts[point_id, device, metric] += 1
                 combined["sources"][family] = {
                     **contract, "source_family": family, "source_file": source_name,
                     "source_time": entry["value_time"] if force_refresh else entry["query_end"],
                     "bucket_kind": "latest", "bucket_key": entry["bucket_key"],
+                    **({"zero_filled_point_ids": entry["zero_filled_point_ids"]} if missing_rows else {}),
+                    **({"zero_filled_sample_point_ids": entry["zero_filled_sample_point_ids"],
+                        "missing_sample_points": missing_sample_points} if missing_samples else {}),
                     **{key: value for key, value in p.items() if key != "rows"},
                 }
                 log(f"[巡检数据处理] {building}/{contract['report_name']} 设备={len(p['rows'])}, 有效测点={p['valid_points']}, "
                     f"数值修正={len(corrections)}, 缺数据设备={p['missing_devices']}, 首个时刻={p['value_time']}")
+                if missing_ids:
+                    log(f"[巡检数据处理] {building}/{contract['label']} 缺少源数据：整行缺失={len(missing_rows)}，采样值缺失={len(missing_samples)}")
                 for item in p["diagnostics"][:10]:
                     log(f"[巡检数据处理] {building}/{contract['label']} {item}")
             parsed[building] = combined
@@ -875,6 +953,11 @@ class InspectionDataUploadService:
                            "source_file_count": sum(len(p["sources"]) for p in parsed.values()),
                            **({"point_config_read_failed": config_errors} if config_errors else {}),
                            **({"handover_pressure_read_failed": pressure_failures} if pressure_failures else {})}
+        if missing_sample_counts:
+            source_metadata["missing_sample_points"] = [
+                {"point_id": point_id, "device": device, "metric": metric, "count": count}
+                for (point_id, device, metric), count in missing_sample_counts.items()
+            ]
         if dry_run:
             return {"status": "success", "dry_run": True, "source_date": date,
                     "settings_revision": settings_revision,

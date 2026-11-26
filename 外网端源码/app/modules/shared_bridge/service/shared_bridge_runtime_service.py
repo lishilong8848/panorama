@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+import requests
+
 from app.config.config_adapter import normalize_role_mode as normalize_deployment_role_mode, resolve_shared_bridge_paths
 from app.modules.report_pipeline.service.monthly_bridge_service import (
     delete_bridge_resume_run,
@@ -24,6 +26,7 @@ from app.modules.report_pipeline.service.monthly_bridge_service import (
 )
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
+from pipeline_utils import ensure_keyword
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.shared_bridge.service.alarm_event_page_export_service import daily_scheduled_bucket_for_time
@@ -120,6 +123,7 @@ class SharedBridgeRuntimeService:
     INTERNAL_BROWSER_ALERT_QUIET_SEC = 600
     INTERNAL_BROWSER_ALERT_DEDUPE_SEC = 3600
     INTERNAL_ALERT_STATUS_REFRESH_INTERVAL_SEC = 30
+    REPORT_MISSING_NOTICE_POLL_SEC = 15
     CLEANUP_INTERVAL_SEC = 600
     BACKGROUND_SELF_HEAL_INTERVAL_SEC = 7200
     BACKGROUND_SELF_HEAL_RECENT_HOURS = 3
@@ -152,6 +156,7 @@ class SharedBridgeRuntimeService:
         self.app_version = str(app_version or "").strip()
         self.emit_log = emit_log
         self._job_service = job_service
+        self._report_missing_notice_receipt: tuple[str, str, str, float] | None = None
         self._app_state_repository = app_state_repository
         self._request_runtime_status_refresh_callback = request_runtime_status_refresh
         self._lock = threading.Lock()
@@ -204,6 +209,8 @@ class SharedBridgeRuntimeService:
             return "共享缓存按钮预热"
         if key == "artifact_self_heal":
             return "共享桥接产物后台自愈"
+        if key == "report_missing_notice":
+            return "报表缺测提醒"
         return key or "后台任务"
 
     @classmethod
@@ -1047,7 +1054,7 @@ class SharedBridgeRuntimeService:
             "log_text": f"[共享桥接] 任务={task_id} 已完成文件准备，正在自动恢复湿球温度原任务",
         }
 
-    def _build_handover_history_resume_binding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_handover_history_resume_binding(self, task: Dict[str, Any], *, require_fresh: bool = True) -> Dict[str, Any]:
         task_id = str(task.get("task_id", "") or "").strip()
         request = task.get("request", {}) if isinstance(task.get("request", {}), dict) else {}
         buildings = self._normalize_text_list(request.get("buildings", []))
@@ -1059,13 +1066,13 @@ class SharedBridgeRuntimeService:
             duty_date=duty_date,
             duty_shift=duty_shift,
             buildings=buildings,
-            require_fresh=True,
+            require_fresh=require_fresh,
         )
         capacity_entries = self.get_handover_capacity_by_date_cache_entries(
             duty_date=duty_date,
             duty_shift=duty_shift,
             buildings=buildings,
-            require_fresh=True,
+            require_fresh=require_fresh,
         )
         if len(cached_entries) < len(buildings) or len(capacity_entries) < len(buildings):
             raise RuntimeError(f"交接班历史缓存未齐全: duty_date={duty_date or '-'}, duty_shift={duty_shift or '-'}")
@@ -3283,13 +3290,16 @@ class SharedBridgeRuntimeService:
         return True
 
     def _run_background_task_worker(self, *, task_key: str, target: Callable[[], Dict[str, Any]]) -> None:
-        started_monotonic = self._mark_background_task_started(task_key)
+        quiet = task_key == "report_missing_notice"
+        started_monotonic = time.monotonic() if quiet else self._mark_background_task_started(task_key)
         try:
             result = target() if callable(target) else {}
             summary = str(result.get("summary", "") or "").strip() if isinstance(result, dict) else ""
             status = str(result.get("status", "") or "").strip().lower() if isinstance(result, dict) else ""
             if not status:
                 status = "success"
+            if quiet and status in {"idle", "unavailable"}:
+                return
             self._mark_background_task_finished(
                 task_key,
                 started_monotonic=started_monotonic,
@@ -3297,20 +3307,23 @@ class SharedBridgeRuntimeService:
                 summary=summary or self._background_task_title(task_key),
                 result=result if isinstance(result, dict) else {},
             )
-            self._finalize_background_task_schedule(task_key, result if isinstance(result, dict) else {})
+            if not quiet:
+                self._finalize_background_task_schedule(task_key, result if isinstance(result, dict) else {})
         except Exception as exc:  # noqa: BLE001
+            error_text = "" if quiet else str(exc).strip()
             self._mark_background_task_finished(
                 task_key,
                 started_monotonic=started_monotonic,
                 status="failed",
                 summary=f"{self._background_task_title(task_key)}失败",
                 result={},
-                error_text=str(exc).strip(),
+                error_text=error_text,
             )
-            self._emit_system_log(
-                f"[共享桥接][后台任务] {self._background_task_title(task_key)}失败: "
-                f"error={type(exc).__name__}: {str(exc).strip() or '-'}"
-            )
+            if not quiet:
+                self._emit_system_log(
+                    f"[共享桥接][后台任务] {self._background_task_title(task_key)}失败: "
+                    f"error={type(exc).__name__}: {error_text or '-'}"
+                )
         finally:
             with self._lock:
                 thread = self._background_task_threads.get(task_key)
@@ -3339,6 +3352,72 @@ class SharedBridgeRuntimeService:
                 paused_at + max(0, int(self.BACKGROUND_SELF_HEAL_IDLE_QUIET_SEC)) if paused_at > 0 else 0.0,
             )
             self._set_background_task_next_run(normalized_key, when_monotonic=next_check)
+
+    def _poll_report_missing_notice(self) -> Dict[str, Any]:
+        client = self._internal_bridge_http_client
+        if not self._http_bridge_should_try() or client is None:
+            return {"status": "idle"}
+        receipt = self._report_missing_notice_receipt
+        if receipt:
+            origin, notice_id, lease, deadline = receipt
+            if origin == client.base_url and time.monotonic() < deadline:
+                return self._ack_report_missing_notice(client, notice_id, lease)
+            self._report_missing_notice_receipt = None
+        notify_cfg = WebhookNotifyService(self.runtime_config)._notify_config()
+        url = str(notify_cfg.get("feishu_webhook_url") or "").strip()
+        timeout = notify_cfg.get("timeout", 10)
+        if not notify_cfg.get("enable_webhook") or not url:
+            root_notify = self.runtime_config.get("notify")
+            task_cfg = {**notify_cfg, **root_notify} if isinstance(root_notify, dict) else notify_cfg
+            if not task_cfg.get(
+                "task_failure_webhook_enabled", task_cfg.get("task_success_webhook_enabled", True),
+            ):
+                return {"status": "idle"}
+            url = str(task_cfg.get("task_failure_webhook_url") or task_cfg.get("task_success_webhook_url") or "").strip()
+            if not url:
+                return {"status": "idle"}
+            timeout = task_cfg.get("task_failure_webhook_timeout", task_cfg.get("task_success_webhook_timeout", 5))
+        keyword = str(notify_cfg.get("keyword", "事件") or "").strip()[:128]
+        try:
+            timeout = float(timeout or 5)
+        except (TypeError, ValueError, OverflowError):
+            timeout = 10
+        claimed_at = time.monotonic()
+        try:
+            notice = client.claim_report_missing_notice()
+        except Exception:
+            # Older inner builds do not expose this endpoint yet.
+            return {"status": "unavailable"}
+        if notice is None:
+            return {"status": "idle"}
+        notice_id, lease, message = (notice.get(key) for key in ("notice_id", "lease_token", "message"))
+        if (not isinstance(notice_id, str) or not re.fullmatch(r"[a-f0-9]{64}", notice_id)
+                or not isinstance(lease, str) or not re.fullmatch(r"[a-f0-9]{32}", lease)
+                or not isinstance(message, str) or not message.strip()):
+            return {"status": "failed", "summary": "缺测提醒格式无效"}
+        try:
+            response = requests.post(
+                url, json={"msg_type": "text", "content": {"text": ensure_keyword(message[:1600], keyword)}},
+                timeout=min(max(timeout, 1), 15),
+            )
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, dict) or body.get("code", body.get("StatusCode")) not in (0, "0"):
+                return {"status": "failed", "summary": "群机器人未确认缺测提醒，稍后重试"}
+        except Exception:
+            return {"status": "failed", "summary": "缺测提醒发送失败，稍后重试"}
+        self._report_missing_notice_receipt = (client.base_url, notice_id, lease, claimed_at + 300)
+        return self._ack_report_missing_notice(client, notice_id, lease)
+
+    def _ack_report_missing_notice(self, client: InternalBridgeHttpClient, notice_id: str, lease: str) -> Dict[str, Any]:
+        try:
+            acknowledged = client.acknowledge_report_missing_notice(notice_id=notice_id, lease_token=lease)
+            self._report_missing_notice_receipt = None
+            if acknowledged:
+                return {"status": "success"}
+        except Exception:
+            pass
+        return {"status": "failed", "summary": "缺测提醒已发送，桥接回执未确认"}
 
     def _refresh_internal_alert_status_cache(self) -> None:
         if self._store is None or not hasattr(self._store, "list_external_alert_projections"):
@@ -8996,6 +9075,48 @@ class SharedBridgeRuntimeService:
         self._emit_system_log(f"[共享桥接] 等待任务={job_id} 已重派内网补采 task_id={new_task_id}")
         return True
 
+    def _recover_scheduled_handover_pair(
+        self, snapshot: Dict[str, Any], payload: Dict[str, Any], task: Dict[str, Any], *, retry_download: bool = True,
+    ) -> None:
+        job_id = str(snapshot["job_id"])
+        marker = f"scheduled_handover_pair:{job_id}"
+        monotonic_now = time.monotonic()
+        previous = self._waiting_job_cache_probe_log_markers.get(marker)
+        if previous is not None and monotonic_now - previous < self.WAITING_JOB_RECONCILE_INTERVAL_SEC:
+            return
+        self._waiting_job_cache_probe_log_markers[marker] = monotonic_now
+        buildings = self._normalize_text_list(payload.get("buildings"))
+        duty_date = str(payload.get("duty_date") or "").strip()
+        duty_shift = str(payload.get("duty_shift") or "").strip()
+        if len(buildings) != 1 or not duty_date or duty_shift not in {"day", "night"}:
+            self._job_service.fail_waiting_job(job_id, error_text="单楼交接班补采缺少楼栋或班次", summary="交接班补采参数无效")
+            return
+        request = {"buildings": buildings, "duty_date": duty_date, "duty_shift": duty_shift}
+        try:
+            binding = self._build_handover_history_resume_binding(
+                {"task_id": task.get("task_id", ""), "request": request}, require_fresh=False,
+            )
+            worker_payload = binding["worker_payload"]
+            if not all([item["building"] for item in worker_payload[key]] == buildings
+                       for key in ("building_files", "capacity_building_files")):
+                raise RuntimeError("补采源文件与目标楼栋不匹配")
+        except Exception:
+            # A failed download can be superseded by the hourly collector or a manual source file.
+            retry_marker = f"{marker}:retry"
+            previous_retry = self._waiting_job_cache_probe_log_markers.get(retry_marker)
+            if not retry_download or (previous_retry is not None and monotonic_now - previous_retry < 300):
+                return
+            self._waiting_job_cache_probe_log_markers[retry_marker] = monotonic_now
+            if task.get("error"):
+                self._emit_system_log(f"[交接班调度] {buildings[0]}补采未就绪，准备重试: {task['error']}")
+            self._reissue_unbound_waiting_job(snapshot)
+        else:
+            self._job_service.resume_waiting_worker_job(
+                job_id, worker_payload={**worker_payload, "buildings": buildings}, summary=binding["summary"],
+            )
+            self._waiting_job_cache_probe_log_markers.pop(marker, None)
+            self._waiting_job_cache_probe_log_markers.pop(f"{marker}:retry", None)
+
     def _reconcile_waiting_jobs(self) -> None:
         if self._job_service is None:
             return
@@ -9012,6 +9133,18 @@ class SharedBridgeRuntimeService:
             bridge_task_id = str(snapshot.get("bridge_task_id", "") or "").strip()
             if not job_id:
                 continue
+            handover_wait_payload = {}
+            if snapshot.get("feature") == "handover_from_download" and snapshot.get("submitted_by") == "scheduler":
+                payload = self._job_service.load_job_stage_payload(job_id) or {}
+                if payload.get("wait_for_handover_pair"):
+                    handover_wait_payload = payload
+                    deadline = self._parse_datetime_text(payload.get("scheduler_stale_after"))
+                    if deadline is not None and datetime.now() >= deadline:
+                        self._job_service.cancel_job(job_id)
+                        self._waiting_job_cache_probe_log_markers.pop(f"scheduled_handover_pair:{job_id}", None)
+                        self._waiting_job_cache_probe_log_markers.pop(f"scheduled_handover_pair:{job_id}:retry", None)
+                        self._emit_system_log(f"[交接班调度] 本班补采等待已到期 job_id={job_id}, buildings={payload.get('buildings')}")
+                        continue
             if snapshot.get("feature") == "alarm_event_upload":
                 payload = self._job_service.load_job_stage_payload(job_id) or {}
                 required_bucket = str(payload.get("required_alarm_bucket") or "").strip()
@@ -9020,9 +9153,19 @@ class SharedBridgeRuntimeService:
                     self._emit_system_log(f"[共享桥接] 告警批次 {required_bucket} 已过期，结束旧等待任务 {job_id}")
                     continue
             if not bridge_task_id:
-                self._reissue_unbound_waiting_job(snapshot)
+                if handover_wait_payload:
+                    self._recover_scheduled_handover_pair(snapshot, handover_wait_payload, {})
+                else:
+                    self._reissue_unbound_waiting_job(snapshot)
                 continue
             task = self.get_task(bridge_task_id)
+            status = str((task or {}).get("status", "") or "").strip().lower()
+            if handover_wait_payload and status not in {"success", "cancelled"}:
+                self._recover_scheduled_handover_pair(
+                    snapshot, handover_wait_payload, task or {},
+                    retry_download=not task or status in {"failed", "partial_failed", "stale"},
+                )
+                continue
             if not task:
                 self._job_service.fail_waiting_job(
                     job_id,
@@ -9030,18 +9173,31 @@ class SharedBridgeRuntimeService:
                     summary="等待内网补采同步失败",
                 )
                 continue
-            status = str(task.get("status", "") or "").strip().lower()
             if status == "success":
                 try:
                     binding = self._build_waiting_job_resume_binding(task)
+                    worker_payload = binding.get("worker_payload") if isinstance(binding.get("worker_payload"), dict) else {}
+                    if handover_wait_payload:
+                        if (worker_payload.get("duty_date") != handover_wait_payload["duty_date"]
+                                or worker_payload.get("duty_shift") != handover_wait_payload["duty_shift"]
+                                or any([item.get("building") for item in worker_payload.get(key, [])] != handover_wait_payload["buildings"]
+                                       for key in ("building_files", "capacity_building_files"))):
+                            raise RuntimeError("补采回执的源文件与目标楼栋或班次不匹配")
+                        worker_payload = {**worker_payload, "buildings": handover_wait_payload["buildings"]}
                     if binding.get("log_text"):
                         self._emit_system_log(str(binding.get("log_text", "")).strip())
                     self._job_service.resume_waiting_worker_job(
                         job_id,
-                        worker_payload=binding.get("worker_payload") if isinstance(binding.get("worker_payload"), dict) else {},
+                        worker_payload=worker_payload,
                         summary=str(binding.get("summary", "") or "共享文件已到位，正在继续处理").strip() or "共享文件已到位，正在继续处理",
                     )
+                    if handover_wait_payload:
+                        self._waiting_job_cache_probe_log_markers.pop(f"scheduled_handover_pair:{job_id}", None)
+                        self._waiting_job_cache_probe_log_markers.pop(f"scheduled_handover_pair:{job_id}:retry", None)
                 except Exception as exc:  # noqa: BLE001
+                    if handover_wait_payload:
+                        self._recover_scheduled_handover_pair(snapshot, handover_wait_payload, task)
+                        continue
                     if self._reissue_branch_power_waiting_job_if_invalid_ready(
                         job_id=job_id,
                         task=task,
@@ -9181,6 +9337,7 @@ class SharedBridgeRuntimeService:
         next_artifact_self_heal = 0.0
         next_internal_alert_refresh = 0.0
         next_waiting_job_reconcile = 0.0
+        next_report_missing_notice = 0.0
         while not self._stop_event.is_set():
             now_monotonic = time.monotonic()
             try:
@@ -9188,6 +9345,9 @@ class SharedBridgeRuntimeService:
                     if now_monotonic >= next_waiting_job_reconcile:
                         self._reconcile_waiting_jobs()
                         next_waiting_job_reconcile = now_monotonic + self.WAITING_JOB_RECONCILE_INTERVAL_SEC
+                    if now_monotonic >= next_report_missing_notice:
+                        self._start_background_task_worker("report_missing_notice", target=self._poll_report_missing_notice)
+                        next_report_missing_notice = now_monotonic + self.REPORT_MISSING_NOTICE_POLL_SEC
                     if self._http_bridge_should_try():
                         self._db_status = "http"
                         self._last_error = ""

@@ -33,6 +33,7 @@ from handover_log_module.service.review_session_service import (
     ReviewSessionNotFoundError,
     ReviewSessionService,
     ReviewSessionStoreUnavailableError,
+    reuse_generated_report_pair,
 )
 from handover_log_module.service.training_management_payload_builder import (
     TrainingManagementPayloadBuilder, TRAINING_SECTION, TRAINING_COLUMNS, append_training_rows,
@@ -691,8 +692,14 @@ class ReviewFollowupTriggerService:
         sessions = self._review_service.list_batch_sessions(target_batch)
         if target_batch and isinstance(getattr(self, "_cloud_sheet_sync_service", None), HandoverAttachmentDeliveryService):
             workflow = HandoverDeliveryWorkflowService(self.config)
-            failures = workflow.prepare_sessions(sessions, emit_log, confirm_unconfirmed=True)
+            # Do not create a failed delivery version merely because a floor has only generated its log.
+            ready_sessions = [session for session in sessions if reuse_generated_report_pair(session)]
+            failures = workflow.prepare_sessions(ready_sessions, emit_log, confirm_unconfirmed=True)
             result = self.publish_attachment_delivery(batch_key=target_batch, emit_log=emit_log)
+            ready_buildings = {session["building"] for session in ready_sessions}
+            result["waiting_generation_buildings"] = [
+                building for building in result.get("missing_buildings", []) if building not in ready_buildings
+            ]
             if failures:
                 result.update(status="partial_failed", failed_buildings=[*result.get("failed_buildings", []), *failures])
             return {**result, "batch_key": target_batch, "cloud_sheet_sync": result}

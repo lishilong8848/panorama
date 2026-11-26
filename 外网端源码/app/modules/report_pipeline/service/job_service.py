@@ -45,6 +45,10 @@ class HandoverArtifactsPending(RuntimeError):
     wait_summary = "等待交接班成品就绪"
     timeout_summary = "等待交接班成品超时"
 
+    def __init__(self, detail: str, *, retry_until: float = 0) -> None:
+        super().__init__(detail)
+        self.retry_until = retry_until
+
 
 _PREWRITE_RETRY_POLICY = "prewrite_retry"
 _LOCAL_RETRY_REASONS = {kind.wait_reason: kind for kind in (PrewriteJobRetry, HandoverArtifactsPending)}
@@ -2753,6 +2757,8 @@ class JobService:
                             raise
                         now = time.time()
                         deadline = deadline or now + _PREWRITE_RETRY_WINDOW
+                        if isinstance(exc, HandoverArtifactsPending):
+                            deadline = max(deadline, exc.retry_until)
                         if now >= deadline:
                             raise TimeoutError(f"{exc.timeout_summary}: {exc}") from exc
                         count = int(deferred.get("prewrite_retry_count", 0))

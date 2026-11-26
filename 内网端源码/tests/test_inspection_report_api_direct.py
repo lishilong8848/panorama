@@ -88,12 +88,54 @@ def test_override_rules_are_submitted_and_preserved(rules, expected):
     assert body["测点列表"] == expected
 
 
-@pytest.mark.parametrize("ids", [("1_2",), ("1_2", "1_4"), ("1_2", "1_2"), ("1_2", "")])
-def test_rejects_missing_extra_duplicate_or_absent_returned_ids(ids):
+@pytest.mark.parametrize("family", list(INSPECTION_REPORT_TEMPLATES))
+@pytest.mark.parametrize("latest", [False, True])
+def test_partial_response_preserves_real_reading_and_appends_unlabelled_missing_id(family, latest):
+    client = Client(table(("1_3",)), family)
+    result = api._query_once(client, building="D楼", source_family=family, rules={}, start=START, end=END,
+                             latest_sample=latest)
+    assert result["point_ids"] == ["1_3", "1_2"]
+    assert result["zero_filled_point_ids"] == ["1_2"]
+    assert result["rows"] == [["位置", "设备", "测点0", "99" if latest else "0"], ["", "", "", "0"]]
+
+
+@pytest.mark.parametrize("cells", [b"<td></td><td>99</td>", b"<td>  </td><td>99</td>", b"<td>null</td>", b""])
+def test_missing_sample_is_filled_separately_without_using_later_columns(cells):
+    client = Client(table().replace(b"<td>0</td><td>99</td>", cells).replace(b">1</td>", b">0</td>"))
+    result = query(client, {"add": ["1_4"]})
+    assert result["point_ids"] == ["1_2", "1_3", "1_4"]
+    assert result["rows"] == [["位置", "设备", "测点0", "0"], ["位置", "设备", "测点1", "0"], ["", "", "", "0"]]
+    assert result["zero_filled_point_ids"] == ["1_4"]
+    assert result["zero_filled_sample_point_ids"] == ["1_2"]
+    assert result["missing_sample_points"] == [{"point_id": "1_2", "device": "设备", "metric": "测点0", "count": 1}]
+
+
+@pytest.mark.parametrize("literal", ["--", "timed out", "NaN", "停机", "未运行"])
+def test_nonmissing_literals_and_returned_states_are_not_padded(literal):
+    result = query(Client(table().replace(b">0</td>", f">{literal}</td>".encode())))
+    assert result["rows"][0][3] == literal
+    assert "zero_filled_sample_point_ids" not in result
+    assert "missing_sample_points" not in result
+
+
+@pytest.mark.parametrize("ids", [("1_2", "1_4"), ("1_2", "1_2"), ("1_2", "")])
+def test_rejects_extra_duplicate_or_absent_returned_ids(ids):
     client = Client(table(ids))
     with pytest.raises(ValueError, match="不完整或不符"):
         query(client)
     assert client.closed
+
+
+@pytest.mark.parametrize("html", [
+    table(()), table(("1_3",)).replace(b">0</td>", b">--</td>"),
+    table(("1_3",)).replace(b">0</td>", b">timed out</td>"),
+    table(("1_2", "1_3")).replace(b">0</td>", b">Infinity</td>").replace(b">1</td>", b">NaN</td>"),
+    table(("1_3",)).replace("测点0".encode(), b""),
+    b"<html>permission denied</html>", b'<table class="x-table"><tr>',
+])
+def test_partial_without_valid_sample_or_structure_never_fills(html):
+    with pytest.raises(ValueError):
+        query(Client(html))
 
 
 def test_rejects_out_of_window_and_invalid_overrides():
@@ -139,3 +181,74 @@ def test_service_guards_do_not_call_direct_api(monkeypatch):
     ]:
         with pytest.raises(ValueError):
             HandoverDownloadService(config).run_inspection_data_only(building=building, source_family=family)
+
+
+def test_hvac_queries_state_and_other_points_separately_in_the_same_window():
+    ids = ["55_0_444_1_602_0", "55_0_444_2_600_0", "55_0_444_1_600_0"]
+    class GroupsClient(Client):
+        def request(self, method, path, **kwargs):
+            if kwargs["params"]["op"] == "fr_dialog":
+                decoded = re.sub(r"\[([0-9a-fA-F]{2,6})\]", lambda m: chr(int(m[1], 16)), kwargs["data"]["__parameters__"])
+                self.html = table(json.loads(decoded)["测点列表"])
+            return super().request(method, path, **kwargs)
+    c = GroupsClient(b"", "hvac_inspection_family")
+    result = api._query_once(c, building="E楼", source_family=c.family, rules={"baseline":ids}, start=START, end=END)
+    params = [args["params"] for _,_,args in c.calls if args["params"]["op"] == "write"]
+    assert len(params) == 2 and params[0]["starttime"] == params[1]["starttime"] and params[0]["endtime"] == params[1]["endtime"]
+    assert result["requested_point_ids"] == ids and result["point_ids"] == [ids[1],ids[0],ids[2]]
+    assert len(result["rows"]) == 3
+
+
+@pytest.mark.parametrize("latest", [False, True])
+@pytest.mark.parametrize("empty_group", [0, 1])
+def test_hvac_header_only_group_does_not_discard_sibling_or_use_other_time(latest, empty_group):
+    family = "hvac_inspection_family"
+    ids = ["5_0_1_2_600_0", "5_0_1_1_600_0"]
+    class GroupClient(Client):
+        def request(self, method, path, **kwargs):
+            if kwargs["params"]["op"] == "fr_dialog":
+                self.html = next(self.pages)
+            return super().request(method, path, **kwargs)
+
+    def read(pages):
+        client = GroupClient(b"", family)
+        client.pages = iter(pages)
+        return api._query_once(client, building="D楼", source_family=family, rules={"baseline": ids},
+                               start=START, end=END, latest_sample=latest)
+
+    pages = [table((i,)) for i in ids]
+    pages[empty_group] = table(())
+    result = read(pages)
+    assert result["point_ids"] == [ids[1 - empty_group], ids[empty_group]]
+    assert result["zero_filled_point_ids"] == [ids[empty_group]]
+    with pytest.raises(ValueError, match="未返回有效测点"):
+        read([table(()), table(())])
+    pages[empty_group] = table(()).replace(b"09:45", b"09:44").replace(b"09:50", b"09:49")
+    with pytest.raises(ValueError, match="时刻不一致"):
+        read(pages)
+    pages[empty_group] = b"<html>permission denied</html>"
+    with pytest.raises(api.ReportGridParseError):
+        read(pages)
+    pages[empty_group] = table(()).replace(b"</table>", b"<tr><td>permission denied</td></tr></table>")
+    with pytest.raises(ValueError, match="有效空表"):
+        read(pages)
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_oversized_hvac_group_splits_only_itself_and_never_combines_different_samples(monkeypatch, mismatch):
+    calls = []
+    def read(client, init, params, points, start, end, latest, split):
+        calls.append(points)
+        if len(points) > 1:
+            raise api.ReportGridParseError("HTML body exceeds max_body_bytes")
+        return ("09:50" if mismatch and len(calls) == 4 else "09:45"), points, [["位置","设备","信号","0"]]
+    monkeypatch.setattr(api, "_read_point_chunk", read)
+    ids = ["5_0_1_2_600_0","5_0_1_1_600_0","5_0_1_1_601_0"]
+    opts = dict(building="D楼", source_family="hvac_inspection_family", rules={"baseline":ids}, start=START, end=END)
+    c = Client(b"",opts["source_family"])
+    if mismatch:
+        with pytest.raises(ValueError,match="时刻不一致"):
+            api._query_once(c, **opts)
+    else:
+        assert api._query_once(c, **opts)["point_ids"] == ids
+    assert calls == [ids[:1], ids[1:], ids[1:2], ids[2:]]

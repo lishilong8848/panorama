@@ -60,9 +60,10 @@ def corrected_samples(entry, rules):
     if not rules:
         return {}
     corrections = {}
+    missing = set(entry.get("zero_filled_point_ids", ())) | set(entry.get("zero_filled_sample_point_ids", ()))
     for index, point_id in enumerate(entry.get("point_ids", ())):
         intervals = rules.get(point_id)
-        if not intervals:
+        if not intervals or point_id in missing:
             continue
         observed = _decimal(entry["rows"][index][3], reading=True)
         if observed is None:

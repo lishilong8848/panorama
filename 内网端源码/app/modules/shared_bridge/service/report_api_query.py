@@ -112,8 +112,8 @@ def _body_parameters(
 
 def _query_once(
     client: BmsReportApiSession, *, report_name: str, query_start: str,
-    query_end: str, scale_label: str, sheet_name: str,
-) -> tuple[list[list[Any]], dict[int, str], int | None]:
+    query_end: str, scale_label: str, sheet_name: str, zero_fill_building: str, source_family: str,
+) -> tuple[list[list[Any]], dict[int, str], int | None, list[str], list[dict]]:
     row = client.find_report(report_name)
     parameters = _source_parameters(row)
     init = _init_parameters(
@@ -150,12 +150,16 @@ def _query_once(
         )
     finally:
         response.close()
+    filled_ids: list[str] = []
+    missing_samples: list[dict] = []
     rows = normalize_report_rows(
         result["grid"], result["row_ids"], expected_point_ids=points,
+        zero_fill_building=zero_fill_building, source_family=source_family, filled_ids=filled_ids,
+        missing_samples=missing_samples,
         query_start=query_start, query_end=query_end,
         time_tolerance_sec=_SCALE_SECONDS[scale_label],
     )
-    return rows, result["row_ids"], len(points) if points is not None else None
+    return rows, result["row_ids"], len(points) if points is not None else None, filled_ids, missing_samples
 
 
 def _validate_daily_hour_columns(rows: list[list[Any]], *, family: str, business_date: str,
@@ -205,9 +209,10 @@ def query_report_json(
             try:
                 with BmsReportApiSession(site) as client:
                     client.login()
-                    rows, row_ids, requested_count = _query_once(
+                    rows, row_ids, requested_count, filled_ids, missing_samples = _query_once(
                         client, report_name=report_name, query_start=query_start, query_end=query_end,
                         scale_label=scale_label, sheet_name=sheet_name,
+                        zero_fill_building=building, source_family=source_family,
                     )
                     _validate_daily_hour_columns(rows, family=source_family, business_date=business_date, start=start, end=end)
                 break
@@ -227,6 +232,9 @@ def query_report_json(
         "scale_label": scale_label,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "requested_point_count": requested_count,
-        "returned_point_count": len(row_ids),
+        # Legacy consumers require the delivered count to equal the configured count.
+        "returned_point_count": len(row_ids) + len(filled_ids),
+        **({"api_returned_point_count": len(row_ids), "zero_filled_point_ids": filled_ids} if filled_ids else {}),
+        **({"missing_sample_points": missing_samples} if missing_samples else {}),
         "sheets": [{"name": "sheet1", "rows": rows}],
     }

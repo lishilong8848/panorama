@@ -5,7 +5,9 @@ import concurrent.futures
 import copy
 import hashlib
 import json
+import logging
 import re
+import shutil
 import threading
 import time
 from datetime import datetime, time as dt_time, timedelta
@@ -25,6 +27,11 @@ from app.modules.shared_bridge.service.alarm_event_page_export_service import (
     write_alarm_event_json,
 )
 from app.modules.shared_bridge.service.alarm_external_selection import build_alarm_external_selection
+from app.modules.shared_bridge.service.report_missing_notice import (
+    MISSING_NOTICE_FIELDS,
+    ReportMissingNoticeOutbox,
+    build_report_missing_notices,
+)
 from app.modules.shared_bridge.service.bridge_status_presenter import (
     present_alarm_event_family,
     present_current_hour_refresh_overview,
@@ -44,7 +51,8 @@ from app.config.energy_report_download_config import (
     energy_report_period,
 )
 from app.shared.utils.xlsx_archive import validate_xlsx_archive
-from app.shared.utils.report_source_json import REPORT_JSON_FAMILIES, validate_report_source_json
+from app.modules.shared_bridge.service.handover_excel_source import HANDOVER_FAMILIES, handover_excel_payload, handover_sample_times
+from app.shared.utils.report_source_json import REPORT_JSON_FAMILIES, load_report_source_json, validate_report_source_json
 from app.config.inspection_data_config import (
     FAMILY_ELECTRICAL_INSPECTION,
     FAMILY_HVAC_INSPECTION,
@@ -2592,20 +2600,101 @@ class SharedSourceCacheService:
         if self.role_mode != "internal":
             raise RuntimeError(f"{action}仅允许内网端执行，外网端只读取已登记索引")
 
+    def _handover_excel_window(self, bucket_kind, bucket_key, duty_date, duty_shift):
+        if bucket_kind == "latest":
+            start = datetime.strptime(bucket_key, "%Y-%m-%d %H")
+            return start, start + timedelta(hours=1)
+        day = datetime.strptime(duty_date, "%Y-%m-%d").date()
+        day_start, night_start = self._handover_shift_boundaries()
+        if duty_shift == "day":
+            return datetime.combine(day, day_start), datetime.combine(day, night_start)
+        if duty_shift == "night":
+            return datetime.combine(day, night_start), datetime.combine(day + timedelta(days=1), day_start)
+        raise ValueError("手工交接班源文件缺少可验证的班次")
+
+    def validate_handover_recovered_window(self, doc, bucket_kind, bucket_key, duty_date, duty_shift):
+        start, end = self._handover_excel_window(bucket_kind, bucket_key, duty_date, duty_shift)
+        samples = handover_sample_times(doc["sheets"][0]["rows"][1])
+        if not start <= samples[-1] < end or samples[0] < start - timedelta(minutes=30):
+            raise ValueError(f"表内采样时间不属于目标时间桶：{doc['query_end']}，目标={bucket_key}/{duty_shift}")
+
+    def recover_handover_excel(self, *, source_family, building, bucket_kind, bucket_key, duty_date="", duty_shift=""):
+        if source_family not in HANDOVER_FAMILIES or building not in _DEFAULT_BUILDINGS or self.shared_root is None:
+            return None
+        if bucket_kind == "latest":
+            ctx = self._infer_handover_duty_context_from_bucket_key(bucket_key)
+            duty_date, duty_shift = ctx["duty_date"], ctx["duty_shift"]
+        if not duty_date or duty_shift not in {"day", "night"}:
+            return None
+        start, end = self._handover_excel_window(bucket_kind, bucket_key, duty_date, duty_shift)
+        contexts = [(bucket_kind, bucket_key, duty_shift)]
+        if bucket_kind == "date":
+            hour = min(end - timedelta(seconds=1), _now_dt()).replace(minute=0, second=0, microsecond=0)
+            while hour >= start.replace(minute=0, second=0, microsecond=0):
+                contexts.append(("latest", hour.strftime("%Y-%m-%d %H"), duty_shift))
+                hour -= timedelta(hours=1)
+        elif bucket_kind == "latest":
+            contexts.append(("date", duty_date, duty_shift))
+        contexts.append(("date", duty_date, ""))
+        for kind, key, path_shift in contexts:
+            path = self._source_target_path(source_family=source_family, building=building, bucket_kind=kind,
+                                            bucket_key=key, duty_date=duty_date, duty_shift=path_shift,
+                                            source_path=Path("manual.xlsx"))
+            if not path.is_file():
+                candidates = list(path.parent.glob("数据查询实时报表*.xlsx"))
+                if len(candidates) != 1:
+                    continue
+                path = candidates[0]
+            if not path.resolve().is_relative_to(self.shared_root.resolve()):
+                continue
+            try:
+                return self._store_entry(source_family=source_family, building=building, bucket_kind=bucket_kind,
+                                         bucket_key=bucket_key, duty_date=duty_date, duty_shift=duty_shift,
+                                         source_path=path, status="ready", metadata={"recovered_from_existing_file": True})
+            except Exception as exc:
+                self._emit(f"[交接班源文件] 跳过不可用的手工 Excel：{path.name}，原因={exc}")
+        return None
+
     def _store_entry(self, *, source_family: str, building: str, bucket_kind: str, bucket_key: str, duty_date: str, duty_shift: str, source_path: Path, status: str, metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if self.store is None:
             raise RuntimeError("共享缓存存储未初始化")
         normalized_family = self._normalize_source_family(source_family)
+        if normalized_family in HANDOVER_FAMILIES and source_path.suffix.lower() == ".xlsx":
+            with TemporaryDirectory(prefix="handover_excel_") as tmp:
+                # Validate and publish the same snapshot even if a user replaces the file.
+                snapshot = Path(tmp) / "source.xlsx"
+                before = source_path.stat()
+                shutil.copyfile(source_path, snapshot)
+                after = source_path.stat()
+                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                    raise ValueError("Excel 正在写入，暂不登记")
+                doc = handover_excel_payload(snapshot, family=normalized_family, building=building, business_date=duty_date)
+                self.validate_handover_recovered_window(doc, bucket_kind, bucket_key, duty_date, duty_shift)
+                json_path = Path(tmp) / "source.json"
+                json_path.write_text(json.dumps(doc, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+                validate_report_source_json(json_path, expected_family=normalized_family, expected_building=building)
+                raw_target = self._source_target_path(source_family=normalized_family, building=building,
+                    bucket_kind=bucket_kind, bucket_key=bucket_key, duty_date=duty_date, duty_shift=duty_shift, source_path=snapshot)
+                if source_path.resolve() != raw_target.resolve():
+                    atomic_copy_file(snapshot, raw_target, allow_overwrite_fallback=False)
+                return self._store_entry(source_family=normalized_family, building=building, bucket_kind=bucket_kind,
+                    bucket_key=bucket_key, duty_date=duty_date, duty_shift=duty_shift, source_path=json_path,
+                    status=status, metadata={**(metadata or {}), "source_format": "xlsx"})
+        notice_payload = {}
         if normalized_family in REPORT_JSON_FAMILIES and source_path.suffix.lower() == ".json":
             daily_families = {
                 FAMILY_MONTHLY_REPORT, FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT,
                 FAMILY_BRANCH_SWITCH, FAMILY_BUILDING_FULL_CABINET_POWER,
                 FAMILY_AIR_CONDITIONER_TEMPERATURE_HUMIDITY,
             }
-            validate_report_source_json(
+            doc = load_report_source_json(
                 source_path, expected_family=normalized_family, expected_building=building,
                 expected_business_date=str(duty_date or "").strip() if normalized_family in daily_families else "",
             )
+            if normalized_family in HANDOVER_FAMILIES and (metadata or {}).get("recovered_from_existing_file"):
+                self.validate_handover_recovered_window(doc, bucket_kind, bucket_key, duty_date, duty_shift)
+            notice_payload = {key: doc[key] for key in MISSING_NOTICE_FIELDS if key in doc}
+            del doc
         target_path = self._source_target_path(
             source_family=normalized_family,
             building=building,
@@ -2669,6 +2758,21 @@ class SharedSourceCacheService:
             size_bytes=int(cached["size_bytes"]),
             metadata=entry_metadata,
         )
+        if status == "ready" and not entry_metadata["alias_only"] and source_path.suffix.lower() == ".json":
+            try:
+                if normalized_family in INSPECTION_REPORT_TEMPLATES:
+                    notice_payload = self._read_inspection_document(
+                        source_path, building=building, family=normalized_family, bucket=bucket_key,
+                    )
+                if notice_payload:
+                    notices = build_report_missing_notices(
+                        notice_payload, family=normalized_family, report_label=FAMILY_LABELS[normalized_family],
+                        building=building, window=bucket_key, duty_shift=duty_shift,
+                    )
+                    if notices:
+                        ReportMissingNoticeOutbox(self.runtime_config).enqueue_many(notices)
+            except Exception:
+                logging.getLogger(__name__).warning("报表缺测提醒入队失败；共享文件已就绪")
         if normalized_family == FAMILY_ALARM_EVENT:
             try:
                 if source_path.exists() and source_path.resolve() != target_path.resolve():
@@ -4818,8 +4922,12 @@ class SharedSourceCacheService:
             },
         )
 
-    def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+    def fill_handover_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None], force_refresh: bool = False) -> Dict[str, Any]:
         self._ensure_internal_source_writer("交接班最新源文件补采")
+        existing = None if force_refresh else self.recover_handover_excel(source_family=FAMILY_HANDOVER_LOG, building=building,
+                                               bucket_kind="latest", bucket_key=bucket_key)
+        if existing:
+            return existing
         cfg = load_handover_config(self.runtime_config)
         temp_root = self._handover_temp_root(
             bucket_kind="latest",
@@ -4831,10 +4939,11 @@ class SharedSourceCacheService:
             download_browser_pool=self.download_browser_pool,
             business_root_override=temp_root,
         )
-        result = service.run(buildings=[building], switch_network=False, reuse_cached=False, emit_log=emit_log)
+        result = service.run(buildings=[building], end_time=self._handover_latest_query_end(bucket_key),
+                             switch_network=False, reuse_cached=False, emit_log=emit_log)
         success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
         if not success_files:
-            raise RuntimeError(f"本小时缓存下载失败: {building}")
+            raise RuntimeError(f"本小时缓存下载失败: {building}，{self._handover_download_error(result)}")
         item = success_files[0]
         source_path = Path(str(item.get("file_path", "") or "").strip())
         if not source_path.exists():
@@ -4863,8 +4972,12 @@ class SharedSourceCacheService:
             },
         )
 
-    def fill_handover_capacity_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None]) -> Dict[str, Any]:
+    def fill_handover_capacity_latest(self, *, building: str, bucket_key: str, emit_log: Callable[[str], None], force_refresh: bool = False) -> Dict[str, Any]:
         self._ensure_internal_source_writer("交接班容量最新源文件补采")
+        existing = None if force_refresh else self.recover_handover_excel(source_family=FAMILY_HANDOVER_CAPACITY_REPORT, building=building,
+                                               bucket_kind="latest", bucket_key=bucket_key)
+        if existing:
+            return existing
         cfg = load_handover_config(self.runtime_config)
         temp_root = self._handover_capacity_temp_root(
             bucket_kind="latest",
@@ -4876,10 +4989,11 @@ class SharedSourceCacheService:
             download_browser_pool=self.download_browser_pool,
             business_root_override=temp_root,
         )
-        result = service.run_capacity_only(buildings=[building], switch_network=False, reuse_cached=False, emit_log=emit_log)
+        result = service.run_capacity_only(buildings=[building], end_time=self._handover_latest_query_end(bucket_key),
+                                           switch_network=False, reuse_cached=False, emit_log=emit_log)
         success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
         if not success_files:
-            raise RuntimeError(f"本小时容量缓存下载失败: {building}")
+            raise RuntimeError(f"本小时容量缓存下载失败: {building}，{self._handover_download_error(result)}")
         item = success_files[0]
         source_path = Path(str(item.get("file_path", "") or "").strip())
         if not source_path.exists():
@@ -4908,6 +5022,27 @@ class SharedSourceCacheService:
             },
         )
 
+    @staticmethod
+    def _handover_download_error(result):
+        return "；".join(str(item.get("error")) for item in result.get("failed", []) if item.get("error")) or "未返回有效文件"
+
+    @staticmethod
+    def _handover_latest_query_end(bucket_key):
+        start = datetime.strptime(bucket_key, "%Y-%m-%d %H")
+        return min(_now_dt(), start + timedelta(hours=1, seconds=-1)).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _existing_handover_for_shift(self, family, buildings, duty_date, duty_shift):
+        return [entry for building in buildings if (entry := self.recover_handover_excel(
+            source_family=family, building=building, bucket_kind="date", bucket_key=duty_date,
+            duty_date=duty_date, duty_shift=duty_shift))]
+
+    def _handover_shift_query_end(self, duty_date, duty_shift):
+        start, end = self._handover_excel_window("date", duty_date, duty_date, duty_shift)
+        query_end = min(_now_dt(), end - timedelta(seconds=1))
+        if query_end < start:
+            raise ValueError("交接班目标班次尚未开始")
+        return query_end.strftime("%Y-%m-%d %H:%M:%S")
+
     def fill_handover_history(self, *, buildings: List[str], duty_date: str, duty_shift: str, emit_log: Callable[[str], None]) -> List[Dict[str, Any]]:
         self._ensure_internal_source_writer("交接班历史源文件补采")
         normalized_shift = str(duty_shift or "").strip().lower()
@@ -4925,9 +5060,14 @@ class SharedSourceCacheService:
             download_browser_pool=self.download_browser_pool,
             business_root_override=temp_root,
         )
-        result = service.run(buildings=buildings, duty_date=duty_date, duty_shift=normalized_shift, switch_network=False, reuse_cached=False, emit_log=emit_log)
+        output = self._existing_handover_for_shift(FAMILY_HANDOVER_LOG, buildings, duty_date, normalized_shift)
+        buildings = [b for b in buildings if b not in {item["building"] for item in output}]
+        if not buildings:
+            return output
+        result = service.run(buildings=buildings, duty_date=duty_date, duty_shift=normalized_shift,
+                             end_time=self._handover_shift_query_end(duty_date, normalized_shift),
+                             switch_network=False, reuse_cached=False, emit_log=emit_log)
         success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
-        output: List[Dict[str, Any]] = []
         for item in success_files:
             building = str(item.get("building", "") or "").strip()
             source_path = Path(str(item.get("file_path", "") or "").strip())
@@ -4965,16 +5105,20 @@ class SharedSourceCacheService:
             download_browser_pool=self.download_browser_pool,
             business_root_override=temp_root,
         )
+        output = self._existing_handover_for_shift(FAMILY_HANDOVER_CAPACITY_REPORT, buildings, duty_date, normalized_shift)
+        buildings = [b for b in buildings if b not in {item["building"] for item in output}]
+        if not buildings:
+            return output
         result = service.run_capacity_only(
             buildings=buildings,
             duty_date=duty_date,
             duty_shift=normalized_shift,
+            end_time=self._handover_shift_query_end(duty_date, normalized_shift),
             switch_network=False,
             reuse_cached=False,
             emit_log=emit_log,
         )
         success_files = result.get("success_files", []) if isinstance(result.get("success_files", []), list) else []
-        output: List[Dict[str, Any]] = []
         for item in success_files:
             building = str(item.get("building", "") or "").strip()
             source_path = Path(str(item.get("file_path", "") or "").strip())
@@ -6968,8 +7112,9 @@ class SharedSourceCacheService:
                             },
                         )
                     # 强制补采仅对巡检族透传：让采集函数跳过同桶 ready 的对象级缓存短路。
-                    force_inspection_fill = force_refresh_existing and normalized_family in INSPECTION_REPORT_TEMPLATES
-                    force_kwargs = {"force_refresh": True} if force_inspection_fill else {}
+                    force_fill = force_refresh_existing and (
+                        normalized_family in INSPECTION_REPORT_TEMPLATES or normalized_family in HANDOVER_FAMILIES)
+                    force_kwargs = {"force_refresh": True} if force_fill else {}
                     future = executor.submit(
                         fill_func,
                         building=building,
@@ -8089,6 +8234,8 @@ class SharedSourceCacheService:
                 "duty_shift": "",
             }
         ]
+        if normalized_family in HANDOVER_FAMILIES:
+            contexts[0].update(self._infer_handover_duty_context_from_bucket_key(bucket_key))
         if normalized_family == FAMILY_CHILLER_MODE_SWITCH:
             contexts = [
                 {
@@ -8373,6 +8520,11 @@ class SharedSourceCacheService:
                     "[共享缓存] 现有源文件登记失败，将继续补采: "
                     f"family={normalized_family} building={building} path={candidate}, error={exc}"
                 )
+        if normalized_family in HANDOVER_FAMILIES:
+            recovered = self.recover_handover_excel(source_family=normalized_family, building=building,
+                                                    bucket_kind="latest", bucket_key=bucket_key)
+            if recovered:
+                return recovered
         if not allow_directory_scan or normalized_family in INSPECTION_REPORT_TEMPLATES:
             return None
         for scanned in self._scan_existing_latest_file_candidates(

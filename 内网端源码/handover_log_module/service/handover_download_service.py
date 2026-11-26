@@ -19,10 +19,12 @@ from app.config.energy_report_download_config import (
     energy_report_period,
 )
 from app.modules.shared_bridge.service.report_api_query import query_report_json
+from app.modules.shared_bridge.service.handover_excel_source import HANDOVER_FAMILIES, handover_excel_payload
 from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.report_source_json import validate_report_source_json
 
 from handover_log_module.repository.download_gateway import (
+    DownloadGateway,
     download_handover_xlsx_batch,
     set_runtime_config,
 )
@@ -880,6 +882,10 @@ class HandoverDownloadService:
                     registered = self._source_file_cache_service.register_downloaded_source(
                         identity=identity, file_path=str(target), emit_log=emit_log,
                     )
+                    if payload.get("zero_filled_point_ids"):
+                        missing = payload["zero_filled_point_ids"]
+                        emit_log(f"[动环报表API][{building}] {template_name}实际返回{payload['api_returned_point_count']}个测点，"
+                                 f"未返回的{len(missing)}个按0交付，ID示例={','.join(missing[:5])}")
                     emit_log(f"[动环报表API][{building}] 获取成功: family={family}, rows={len(payload['sheets'][0]['rows'])}")
                     return {"building": building, "success": True, "file_path": registered or str(target)}
                 except Exception as exc:  # noqa: BLE001
@@ -963,14 +969,23 @@ class HandoverDownloadService:
             "chiller_mode_switch": "chiller_mode_switch_family",
         }
         family = api_families.get(report_kind)
+        api_success = []
+        api_errors = {}
         if family:
-            return self._run_report_api(
+            api_result = self._run_report_api(
                 buildings=target_buildings, family=family, template_name=template_name,
                 start_time=start_time, end_time=end_time_text, scale_label=scale_label,
                 sheet_name=sheet_name, duty_date=duty_date_text, duty_shift=duty_shift_text,
                 is_shift_window=is_shift_window, source_business_date=source_business_date,
                 reuse_cached=reuse_cached, emit_log=emit_log,
             )
+            if family not in HANDOVER_FAMILIES or not api_result["failed"]:
+                return api_result
+            api_success = api_result["success_files"]
+            api_errors = {i["building"]: i.get("error", "") for i in api_result["failed"]}
+            target_buildings = list(api_errors)
+            reuse_cached = False
+            emit_log(f"[交接班下载] API失败，使用同一时间窗原样导出Excel：{','.join(target_buildings)}")
 
         query_result_timeout_ms = _as_int(download_cfg.get("query_result_timeout_ms", 20000), 20000)
         download_event_timeout_ms = _as_int(download_cfg.get("download_event_timeout_ms", 120000), 120000)
@@ -995,7 +1010,7 @@ class HandoverDownloadService:
         download_dir.mkdir(parents=True, exist_ok=True)
 
         pending_buildings: List[str] = []
-        reused_results: List[Dict[str, Any]] = []
+        reused_results: List[Dict[str, Any]] = list(api_success)
         if reuse_cached:
             for building in target_buildings:
                 identity = self._source_file_cache_service.build_download_identity(
@@ -1029,13 +1044,16 @@ class HandoverDownloadService:
 
         downloaded_results: List[Dict[str, Any]] = []
         if pending_buildings:
-            set_runtime_config(
-                {
+            browser_config = {
                     "handover_log": self.config,
                     "download": self.config.get("_global_download", {}),
                     "network": self.config.get("network", {}),
-                }
-            )
+            }
+            if api_errors:
+                download_batch = DownloadGateway(browser_config).download_handover_xlsx_batch
+            else:
+                set_runtime_config(browser_config)
+                download_batch = download_handover_xlsx_batch
             emit_log(f"[交接班下载] 执行模式: {'并发' if parallel_by_building else '串行'}")
             emit_log(
                 "[交接班下载] 下载参数: "
@@ -1071,7 +1089,7 @@ class HandoverDownloadService:
                         f"刻度={scale_label}, sheet={sheet_name or '-'}"
                     )
 
-            downloaded_results = download_handover_xlsx_batch(
+            browser_args = dict(
                 buildings=pending_buildings,
                 start_time=start_time,
                 end_time=end_time_text,
@@ -1096,8 +1114,26 @@ class HandoverDownloadService:
                 debug_step_log=debug_step_log,
                 browser_pool=self._download_browser_pool,
             )
+            try:
+                downloaded_results = download_batch(**browser_args)
+            except Exception as exc:
+                if not api_errors:
+                    raise
+                downloaded_results = [{"building": b, "success": False, "error": str(exc)} for b in pending_buildings]
 
             for item in downloaded_results:
+                if api_errors:
+                    b = item["building"]
+                    if item.get("success"):
+                        try:
+                            excel = handover_excel_payload(Path(item["file_path"]), family=family, building=b,
+                                                           query_start=start_time, query_end=end_time_text)
+                            emit_log(f"[交接班下载][{b}] Excel兜底已通过源表校验："
+                                     f"{excel['returned_point_count']} 个测点，等待登记共享文件")
+                        except Exception as exc:
+                            item.update(success=False, error=str(exc), file_path="")
+                    if not item.get("success"):
+                        item["error"] = f"API: {api_errors[b]}；Excel: {item.get('error', '')}"
                 if not bool(item.get("success")):
                     continue
                 building = str(item.get("building", "")).strip()

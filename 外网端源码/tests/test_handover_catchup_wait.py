@@ -1,10 +1,12 @@
 import time
+from datetime import datetime
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from app.bootstrap import app_factory
 from app.bootstrap.app_factory import (
     _HANDOVER_ATTACHMENT_CATCHUP_FEATURE,
     _resume_handover_attachment_catchup_jobs,
@@ -13,6 +15,7 @@ from app.bootstrap.app_factory import (
 from app.modules.report_pipeline.service import job_service as jobs
 from handover_log_module.service import review_followup_trigger_service as followup
 from handover_log_module.service.handover_delivery_workflow_service import HandoverDeliveryWorkflowService
+from handover_log_module.service.handover_generation_guard import generation_lock
 
 
 BATCH = "2026-11-24|day"
@@ -79,6 +82,33 @@ def test_pending_handover_releases_resources_and_resumes_same_batch_after_restar
         restarted.shutdown_task_engine()
 
 
+def test_late_generation_keeps_original_upload_job_past_default_window(monkeypatch, tmp_path):
+    monkeypatch.setattr(jobs, "_PREWRITE_RETRY_WINDOW", .05)
+    monkeypatch.setattr(jobs, "_PREWRITE_RETRY_DELAYS", (.25,))
+    cutoff = time.time() + 5
+    monkeypatch.setattr(app_factory, "_handover_attachment_retry_until", lambda *_: cutoff)
+    upload = _mock_upload(monkeypatch, {
+        "status": "partial_failed", "failed_buildings": [{"building": "A楼", "error": "request failed"}],
+        "missing_buildings": ["A楼", "C楼"], "waiting_generation_buildings": ["C楼"],
+    }, {"status": "ok"})
+    config = {"paths": {"runtime_state_root": str(tmp_path)}}
+    engine, _ = _engine(tmp_path, config, monkeypatch)
+    try:
+        job = _start(engine, config)
+        assert job.done_event.wait(5) and job.status == "success", job.error
+        assert [call.kwargs["batch_key"] for call in upload.call_args_list] == [BATCH, BATCH]
+        assert not engine._job_failure_status(job)
+    finally:
+        engine.shutdown_task_engine()
+
+
+@pytest.mark.parametrize(("shift", "expected"), [("day", "02:30"), ("night", "16:30")])
+def test_extended_upload_deadline_uses_next_generation_time(shift, expected):
+    config = {"handover_log": {"scheduler": {"morning_time": "02:00", "afternoon_time": "16:00:00"}}}
+    until = app_factory._handover_attachment_retry_until(config, f"2026-11-24|{shift}")
+    assert datetime.fromtimestamp(until).strftime("%Y-%m-%d %H:%M") == f"2026-11-25 {expected}"
+
+
 def test_pending_handover_expires_and_names_missing_floor_once(monkeypatch, tmp_path):
     monkeypatch.setattr(jobs, "_PREWRITE_RETRY_WINDOW", .15)
     upload = _mock_upload(monkeypatch, {"status": "pending", "missing_buildings": ["C楼"]})
@@ -119,3 +149,16 @@ def test_preparing_batch_does_not_replace_artifacts_that_became_ready_after_init
     workflow.state.for_session.assert_called_once_with(latest)
     workflow.state.begin.assert_not_called()
     workflow.prepare.assert_not_called()
+
+
+def test_upload_prepares_other_floor_while_same_floor_generation_is_running():
+    workflow = object.__new__(HandoverDeliveryWorkflowService)
+    sessions = [{"building": building, "session_id": f"{building}|{BATCH}", "confirmed": True, "revision": 1}
+                for building in ("B楼", "C楼")]
+    workflow.review = SimpleNamespace(get_session_by_id=Mock(return_value=sessions[0]))
+    workflow.state = SimpleNamespace(ACTIVE=(), for_session=Mock(return_value={}), begin=Mock())
+    workflow.prepare = Mock()
+    with generation_lock("C楼", "2026-11-24", "day"):
+        failed = workflow.prepare_sessions(sessions, lambda _: None, confirm_unconfirmed=True)
+    assert [item["building"] for item in failed if item["retryable"]] == ["C楼"]
+    assert workflow.prepare.call_args.args[0] == f"B楼|{BATCH}"

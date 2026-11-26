@@ -4,6 +4,8 @@ import json
 import threading
 from pathlib import Path
 
+import pytest
+
 from handover_log_module.service.handover_download_service import HandoverDownloadService
 
 
@@ -42,21 +44,29 @@ def test_handover_and_capacity_use_api_json(tmp_path, monkeypatch):
     assert json.loads(Path(capacity_result["success_files"][0]["file_path"]).read_text(encoding="utf-8"))["building"] == "A楼"
 
 
-def test_branch_api_retains_business_date_and_sheet(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind,building,template,sheet", [
+    ("power", "A楼", "列头柜支路电流", "支路功率"),
+    ("current", "A楼", "列头柜支路电流", "支路电流"),
+    ("switch", "C楼", "列头柜支路开关状态", "开关"),
+    ("switch", "E楼", "列头柜支路开关", "开关"),
+])
+def test_branch_api_retains_business_date_and_sheet(tmp_path, monkeypatch, kind, building, template, sheet):
     calls = []
     def query(site, **kwargs):
         calls.append(kwargs)
         return _payload(site, **kwargs)
 
     monkeypatch.setattr("handover_log_module.service.handover_download_service.query_report_json", query)
-    service = HandoverDownloadService(_config(), business_root_override=tmp_path)
-    result = service.run_branch_power_only(
-        buildings=["A楼"], start_time="2026-11-02 23:50:00", end_time="2026-11-04 02:20:00",
+    config = _config()
+    config["sites"][0]["building"] = building
+    service = HandoverDownloadService(config, business_root_override=tmp_path)
+    result = getattr(service, f"run_branch_{kind}_only")(
+        buildings=[building], start_time="2026-11-02 23:50:00", end_time="2026-11-04 02:20:00",
         business_date="2026-11-03", reuse_cached=False, emit_log=lambda _: None,
     )
     assert not result["failed"]
-    assert calls[0]["source_family"] == "branch_power_family"
-    assert calls[0]["sheet_name"] == "支路功率"
+    assert calls[0]["source_family"] == f"branch_{kind}_family"
+    assert calls[0]["report_name"] == template and calls[0]["sheet_name"] == sheet
     assert calls[0]["business_date"] == "2026-11-03"
 
 

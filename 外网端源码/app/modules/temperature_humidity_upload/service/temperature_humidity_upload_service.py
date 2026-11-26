@@ -400,7 +400,7 @@ class TemperatureHumidityUploadService:
         return selected
 
     @staticmethod
-    def _json_sheet(source_path: Path, *, building: str, source_date: str = "") -> Tuple[str, List[List[Any]]]:
+    def _json_sheet(source_path: Path, *, building: str, source_date: str = "") -> Tuple[str, List[List[Any]], set[int]]:
         if source_path.stat().st_size > 128 * 1024 * 1024:
             raise ValueError(f"{building} 空调温湿度源文件 JSON 超过大小限制")
         try:
@@ -452,15 +452,22 @@ class TemperatureHumidityUploadService:
                         f"{building} 空调温湿度源文件 JSON 第{sheet_index}个工作表"
                         f"第{row_index}行不是有效的一维数组"
                     )
-        return sheets[0]["name"], sheets[0]["rows"]
+        gaps = payload.get("missing_sample_points", [])
+        missing_first = {
+            gap["row_number"] for gap in gaps if isinstance(gap, dict)
+            and type(gap.get("row_number")) is int and gap.get("first_sample_missing") is True
+            and gap.get("zero_filled") is False
+        } if isinstance(gaps, list) else set()
+        return sheets[0]["name"], sheets[0]["rows"], missing_first
 
     @staticmethod
     def parse_workbook(file_path: Path | str, *, building: str, source_date: str = "") -> Dict[str, Any]:
         source_path = Path(file_path)
         workbook = None
+        missing_first: set[int] = set()
         try:
             if source_path.suffix.lower() == ".json":
-                sheet_name, source_rows = TemperatureHumidityUploadService._json_sheet(
+                sheet_name, source_rows, missing_first = TemperatureHumidityUploadService._json_sheet(
                     source_path, building=building, source_date=source_date
                 )
                 sheet_rows = (row[2:5] for row in source_rows)
@@ -478,6 +485,7 @@ class TemperatureHumidityUploadService:
             temperature_rows: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
             status_rows: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
             current_temperature_position = ""
+            unparsed_status_count = 0
             for row_index, values in enumerate(sheet_rows, start=1):
                 column_c = _text(values[0] if len(values) > 0 else None)
                 column_d = _text(values[1] if len(values) > 1 else None)
@@ -510,6 +518,9 @@ class TemperatureHumidityUploadService:
 
                 # 运行状态行结束当前温湿度合并单元格分组，避免后续缺位置行误沿用旧位置。
                 current_temperature_position = ""
+                if row_index in missing_first and column_e is None:
+                    unparsed_status_count += 1
+                    continue
                 status = _running_status(column_e)
                 if not status:
                     raw_status = _text(column_e) or "空"
@@ -543,7 +554,7 @@ class TemperatureHumidityUploadService:
                 "rows": rows,
                 "temperature_location_count": len(temperature_rows),
                 "status_location_count": len(status_rows),
-                "unparsed_status_count": 0,
+                "unparsed_status_count": unparsed_status_count,
             }
         finally:
             if workbook is not None:

@@ -306,6 +306,7 @@ def initialize_point_baseline(config, datasets):
 
     required = {(b, f) for b in ("D楼", "E楼") for f in INSPECTION_SOURCE_CONTRACTS}
     captured = {}
+    partial = set()
     buckets = set()
     for doc in datasets:
         key = doc["building"], doc["source_family"]
@@ -314,6 +315,8 @@ def initialize_point_baseline(config, datasets):
         bucket = doc["bucket_key"]
         buckets.add(bucket)
         InspectionDataUploadService._validate_dataset(doc, bucket[:10], bucket)
+        if doc.get("zero_filled_point_ids"):
+            partial.add(key)
         ids = doc.get("point_ids", [])
         if (not 1 <= len(ids) <= 2000 or not doc.get("requested_point_ids")
                 or any(not _POINT_ID.fullmatch(i) or len(i) > 100 for i in ids)):
@@ -332,6 +335,8 @@ def initialize_point_baseline(config, datasets):
             groups = settings.setdefault(building, {})
             group = groups.setdefault(family, {"points": {}, "remove": []})
             if "baseline" not in group:
+                if (building, family) in partial:
+                    raise ValueError("巡检基线包含缺失测点，请等待完整实测；未写入基线")
                 _validate_effective_count(baseline, group["points"], group["remove"])
                 group["baseline"] = baseline
                 changed = True

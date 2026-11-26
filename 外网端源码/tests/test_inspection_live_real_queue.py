@@ -56,7 +56,7 @@ def queue(tmp_path, monkeypatch):
     app = FastAPI()
     app.state.container = container
     app.include_router(router)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://192.168.1.5", client=("192.168.1.6", 5000)) as client:
         try:
             yield client, container, LiveRequestStore(config), output
         finally:

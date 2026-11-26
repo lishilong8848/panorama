@@ -4443,8 +4443,17 @@ class SharedBridgeRuntimeService:
                 self._store.append_event(task_id=task_id, stage_id=stage_id, side="internal", level="info", event_type="await_external", payload={"message": "内网下载完成，等待外网继续处理"})
                 self._request_runtime_status_refresh(reason=f"handover_internal_download_completed:{task_id}")
             else:
+                failed_sources = []
+                for label, source_result in (("交接班日志", handover_result), ("容量表", capacity_result)):
+                    for item in source_result.get("failed", []) or []:
+                        if isinstance(item, dict) and str(item.get("building", "")).strip():
+                            failed_sources.append(f"{item['building']}/{label}：{str(item.get('error') or '下载失败')[:240]}")
+                if not failed_sources:
+                    no_capacity = sorted(handover_artifact_buildings - capacity_artifact_buildings)
+                    failed_sources = [f"{building}/容量表：未登记配套源文件" for building in no_capacity]
                 error_text = (
-                    str(handover_result.get("error", "") or "").strip()
+                    "；".join(failed_sources)
+                    or str(handover_result.get("error", "") or "").strip()
                     or str(capacity_result.get("error", "") or "").strip()
                     or "内网下载未产生完整且可匹配的交接班共享源文件"
                 )

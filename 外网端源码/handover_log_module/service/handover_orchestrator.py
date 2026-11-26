@@ -1091,16 +1091,28 @@ class HandoverOrchestrator:
         source_mode: str = "from_file",
         auto_send_review_link: bool = True,
         only_if_missing: bool = False,
+        protect_confirmed: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
+        preserved_log = ""
+        existing = None
+        if only_if_missing or protect_confirmed:
+            existing = self._review_session_service.get_session_for_building_duty_fast(building, duty_date, duty_shift)
         if only_if_missing:
             # Recheck under the per-building generation lock: another process may have finished
             # while this worker was preparing shared inputs.
-            existing = self._review_session_service.get_session_for_building_duty_fast(building, duty_date, duty_shift)
             reused = reuse_generated_report_pair(existing)
             if reused:
                 emit_log(f"[交接班][审核生成] {reused['session_id']} 已生成，复用现有文件，不重复生成")
                 return {"results": [], "reused_report_pair": reused}
+            if isinstance(existing, dict):
+                if existing.get("manual_regenerated") or existing.get("confirmed"):
+                    raise RuntimeError(f"{building} 已人工生成或确认，自动任务不会覆盖现有文件")
+                candidate = str(existing.get("output_file") or "").strip()
+                if candidate and Path(candidate).is_file() and Path(candidate).stat().st_size > 0:
+                    preserved_log = candidate
+        if protect_confirmed and isinstance(existing, dict) and existing.get("confirmed"):
+            raise RuntimeError(f"{building} 已确认上传，未覆盖现有文件")
         summary = RunSummary(mode="from_existing_file")
         result = BuildingResult(building=building, data_file=data_file)
         duty_date_text = str(duty_date or "").strip()
@@ -1290,9 +1302,10 @@ class HandoverOrchestrator:
                 fixed_cell_values=fixed_cell_values,
                 date_ref_override=date_ref_override,
                 category_payloads=normalized_category_payloads,
+                write_output_file=not preserved_log,
                 emit_log=emit_log,
             )
-            result.output_file = filled["output_file"]
+            result.output_file = preserved_log or filled["output_file"]
             result.fills = filled["fills"]
             result.missing_metrics = sorted(list(filled["missing_metric_to_cell"].keys()))
             metric_origin_context = self._build_metric_origin_context(
@@ -1422,6 +1435,17 @@ class HandoverOrchestrator:
             result.capacity_status = capacity_status
             result.capacity_error = capacity_error
             result.capacity_warnings = list(capacity_warnings)
+            capacity_required = bool(capacity_source_file_text) or only_if_missing
+            capacity_ready = False
+            if capacity_status.lower() in {"success", "ok"} and capacity_output_file:
+                capacity_path = Path(capacity_output_file)
+                try:
+                    capacity_ready = capacity_path.is_file() and capacity_path.stat().st_size > 0
+                except OSError:
+                    pass
+            if capacity_required and not capacity_ready:
+                result.capacity_status = "failed"
+                result.capacity_error = capacity_error or "未生成可用容量报表文件"
             review_session: Dict[str, Any] = {}
             if duty_date_text and duty_shift_text and result.output_file:
                 managed_source_file_cache: Dict[str, Any] = {}
@@ -1505,7 +1529,7 @@ class HandoverOrchestrator:
                         f"building={building}, session_id={review_session.get('session_id', '-')}, "
                         f"output={result.output_file}"
                     )
-                    if auto_send_review_link:
+                    if auto_send_review_link and (not capacity_required or capacity_ready):
                         try:
                             delivery_state = self._review_link_delivery_service.send_for_session(
                                 review_session,
@@ -1520,7 +1544,7 @@ class HandoverOrchestrator:
                                 "[交接班][审核链接发送] 自动发送失败但不阻断主流程 "
                                 f"building={building}, error={exc}"
                             )
-                    else:
+                    elif not auto_send_review_link:
                         skipped_delivery_state = {
                             "status": "skipped_auto_disabled",
                             "last_attempt_at": "",
@@ -1567,6 +1591,12 @@ class HandoverOrchestrator:
                     emit_log(f"[交接班][审核会话] 登记失败 building={building}: {exc}")
             if not result.alarm_summary:
                 result.alarm_summary = dict(resolved_alarm_summary or {})
+            if capacity_required and not capacity_ready:
+                failed_stage = "容量报表"
+                raise RuntimeError(f"{building} 容量报表生成失败: {result.capacity_error}")
+            if capacity_required and not review_session:
+                failed_stage = "审核会话登记"
+                raise RuntimeError(f"{building} 成品未登记到审核页: {'；'.join(result.errors) or '未返回会话'}")
             result.success = True
             emit_log(
                 "[文件上传成功] 功能=交接班日志 阶段=输出完成 楼栋="
@@ -1766,6 +1796,7 @@ class HandoverOrchestrator:
         auto_send_review_link: bool = True,
         skip_manual_generated: bool = False,
         only_if_missing: bool = False,
+        protect_confirmed: bool = False,
         emit_log: Callable[[str], None] = print,
     ) -> Dict[str, Any]:
         summary = RunSummary(mode="from_existing_files")
@@ -1930,6 +1961,7 @@ class HandoverOrchestrator:
                     source_mode="from_file",
                     auto_send_review_link=auto_send_review_link,
                     only_if_missing=only_if_missing,
+                    protect_confirmed=protect_confirmed,
                     emit_log=emit_log,
                 ))
             except Exception as exc:  # noqa: BLE001

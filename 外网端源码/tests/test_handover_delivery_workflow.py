@@ -321,12 +321,17 @@ def test_batch_supplements_only_run_when_all_five_uploaded(complete, tmp_path, m
 
 
 @pytest.mark.parametrize("shift", ["day", "night"])
-def test_scheduled_confirmation_prepares_unconfirmed_buildings_before_publishing(monkeypatch, shift):
+def test_scheduled_confirmation_prepares_unconfirmed_buildings_before_publishing(monkeypatch, tmp_path, shift):
     service = object.__new__(followup_module.ReviewFollowupTriggerService)
     service.config = {}
     service._cloud_sheet_sync_service = HandoverAttachmentDeliveryService({})
     batch_key = f"{DATE}|{shift}"
-    rows = [{"building": building, "confirmed": False} for building in workflow_module.HandoverDeliveryWorkflowService.BUILDINGS]
+    log_file, capacity = tmp_path / "log.xlsx", tmp_path / "capacity.xlsx"
+    log_file.write_bytes(b"log")
+    capacity.write_bytes(b"capacity")
+    rows = [{"building": building, "confirmed": False, "session_id": f"{building}|{batch_key}",
+             "output_file": str(log_file), "capacity_output_file": str(capacity), "capacity_status": "success"}
+            for building in workflow_module.HandoverDeliveryWorkflowService.BUILDINGS]
     service._review_service = SimpleNamespace(
         list_batch_sessions=lambda key: rows if key == batch_key else [],
         build_batch_key=lambda duty_date, duty_shift: f"{duty_date}|{duty_shift}",

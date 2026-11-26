@@ -93,6 +93,27 @@ _MEMORY_PRESSURE_RESPONSE_BODY = b"service temporarily unavailable: memory press
 _HANDOVER_ATTACHMENT_CATCHUP_FEATURE = "handover_cloud_catchup"
 
 
+def _handover_attachment_retry_until(runtime_config, batch_key):
+    duty_date, _, shift = batch_key.partition("|")
+    if shift not in {"day", "night"}:
+        return 0
+    handover = runtime_config.get("handover_log") or {}
+    scheduler = handover.get("scheduler") or {}
+    key, fallback = ("morning_time", "02:00:00") if shift == "day" else ("afternoon_time", "12:00:00")
+    clock = str(scheduler.get(key) or fallback).strip()
+    try:
+        duty_day = datetime.strptime(duty_date, "%Y-%m-%d")
+    except ValueError:
+        return 0
+    try:
+        parts = clock.split(":")
+        clock_time = datetime.strptime(clock, "%H:%M" if len(parts) == 2 else "%H:%M:%S").time()
+    except ValueError:
+        clock_time = datetime.strptime(fallback, "%H:%M:%S").time()
+    # Allow data admitted just before the next generation time to finish and upload.
+    return (datetime.combine(duty_day.date() + timedelta(days=1), clock_time) + timedelta(minutes=30)).timestamp()
+
+
 def _run_handover_attachment_catchup(runtime_config, batch_key, emit_log):
     from handover_log_module.api.facade import load_handover_config
     from handover_log_module.service.review_followup_trigger_service import ReviewFollowupTriggerService
@@ -104,6 +125,12 @@ def _run_handover_attachment_catchup(runtime_config, batch_key, emit_log):
     cloud = cloud if isinstance(cloud, dict) else {}
     cloud_status = str(cloud.get("status") or "").strip().lower()
     failed = [item for item in cloud.get("failed_buildings") or [] if isinstance(item, dict)]
+    missing = cloud.get("missing_buildings") or []
+    waiting_for_generation = cloud.get("waiting_generation_buildings") or []
+    if cloud_status in {"pending", "ok", "failed", "partial_failed"} and waiting_for_generation:
+        names = "、".join(waiting_for_generation)
+        raise HandoverArtifactsPending(f"batch={batch_key}, 等待生成楼栋={names}",
+                                       retry_until=_handover_attachment_retry_until(runtime_config, batch_key))
     if cloud_status in {"failed", "partial_failed"}:
         detail = "；".join(f"{item.get('building') or '-'}: {item.get('error') or '未知错误'}" for item in failed[:5])
         if failed and all(item.get("retryable") for item in failed):
@@ -112,10 +139,10 @@ def _run_handover_attachment_catchup(runtime_config, batch_key, emit_log):
             f"交接班多维附件上传失败: cloud_status={cloud_status}, failed={len(failed)}"
             + (f", detail={detail}" if detail else "")
         )
-    missing = cloud.get("missing_buildings") or []
     if cloud_status == "pending" or (missing and cloud_status == "ok"):
         names = "、".join(missing) or "未确认"
-        raise HandoverArtifactsPending(f"batch={batch_key}, 未完成楼栋={names}")
+        raise HandoverArtifactsPending(f"batch={batch_key}, 未完成楼栋={names}",
+                                       retry_until=_handover_attachment_retry_until(runtime_config, batch_key))
     if status in {"failed", "partial_failed"}:
         failed_items = [item for item in result.get("failed_buildings") or [] if isinstance(item, dict)]
         detail = "；".join(f"{item.get('building') or '-'}: {item.get('error') or '未知错误'}" for item in failed_items[:5])
@@ -1595,26 +1622,26 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                         )
                         container.add_system_log(f"[交接班调度] {detail}")
                         return True, detail
+                    completed_buildings = {row["building"] for row in batch_completion.get("rows", []) if row.get("complete")}
                     manually_regenerated = [
                         building
                         for building in target_buildings
-                        if review_service.is_manual_regenerated_for_duty(
+                        if building not in completed_buildings and review_service.is_manual_regenerated_for_duty(
                             building=building,
                             duty_date=duty_date,
                             duty_shift=duty_shift,
                         )
                     ]
+                    skip_buildings = completed_buildings.union(manually_regenerated)
+                    target_buildings = [building for building in target_buildings if building not in skip_buildings]
                     if manually_regenerated:
-                        target_buildings = [
-                            building for building in target_buildings if building not in set(manually_regenerated)
-                        ]
                         container.add_system_log(
                             "[交接班调度] 跳过已手动重新生成楼栋: "
                             f"duty_date={duty_date}, duty_shift={duty_shift}, buildings={','.join(manually_regenerated)}"
                         )
                     if not target_buildings:
                         detail = (
-                            "本班所有楼栋已在审核页手动重新生成，调度跳过："
+                            "本班各楼已生成或已在审核页手动重新生成，调度跳过："
                             f"duty_date={duty_date}, duty_shift={duty_shift}"
                         )
                         container.add_system_log(f"[交接班调度] {detail}")
@@ -1631,89 +1658,24 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                     duty_shift=duty_shift,
                     buildings=target_buildings,
                 )
-                if (
-                    len(cached_entries) < len(target_buildings)
-                    or len(capacity_entries) < len(target_buildings)
-                ):
-                    dedupe_key = f"handover:scheduler:{slot}:{duty_date}:{duty_shift}"
-                    job, bridge_task = start_waiting_bridge_job(
-                        job_service=container.job_service,
-                        bridge_service=bridge_service,
-                        name=job_name,
-                        worker_handler="handover_from_download",
-                        worker_payload={
-                            "buildings": target_buildings,
-                            "end_time": None,
-                            "duty_date": duty_date,
-                            "duty_shift": duty_shift,
-                            "scheduler_slot": slot,
-                            "scheduler_submitted_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-                            "scheduler_stale_after": scheduler_stale_after,
-                            "skip_if_batch_fully_generated_and_sent": True,
-                        },
-                        resource_keys=["shared_bridge:handover"],
-                        priority="scheduler",
-                        feature="handover_from_download",
-                        dedupe_key=dedupe_key,
-                        submitted_by="scheduler",
-                        bridge_get_or_create_name="get_or_create_handover_from_download_task",
-                        bridge_create_name="create_handover_from_download_task",
-                        bridge_kwargs={
-                            "buildings": target_buildings,
-                            "end_time": None,
-                            "duty_date": duty_date,
-                            "duty_shift": duty_shift,
-                            "requested_by": "scheduler",
-                        },
-                    )
-                    detail = (
-                        "交接班共享文件未齐全，等待内网补采同步："
-                        f"duty_date={duty_date}, duty_shift={duty_shift}, "
-                        f"日志={len(cached_entries)}/{len(target_buildings)}, "
-                        f"容量={len(capacity_entries)}/{len(target_buildings)}"
-                    )
-                    accepted_detail = (
-                        f"{detail} 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'}, job_id={job.job_id}"
-                    )
-                    container.add_system_log(f"[交接班调度] {accepted_detail}")
-                    return True, accepted_detail
+                from app.modules.report_pipeline.service.handover_scheduled_generation import submit_handover_scheduled_generation
 
-                def _run_from_cache(emit_log):
-                    orchestrator = OrchestratorService(runtime_config)
-                    building_files = [
-                        (
-                            str(item.get("building", "") or "").strip(),
-                            str(item.get("file_path", "") or "").strip(),
-                        )
-                        for item in cached_entries
-                    ]
-                    capacity_building_files = [
-                        (
-                            str(item.get("building", "") or "").strip(),
-                            str(item.get("file_path", "") or "").strip(),
-                        )
-                        for item in capacity_entries
-                    ]
-                    return orchestrator.run_handover_from_files(
-                        building_files=building_files,
-                        capacity_building_files=capacity_building_files,
-                        end_time=None,
-                        duty_date=duty_date,
-                        duty_shift=duty_shift,
-                        skip_manual_generated=True,
-                        emit_log=emit_log,
-                    )
-
-                job = _start_external_cache_job(
-                    name=f"{job_name}-共享文件",
-                    feature="handover_cache_latest",
-                    resource_key="shared_bridge:handover",
-                    run_func=_run_from_cache,
-                    dedupe_key=f"handover:scheduler:{slot}:{duty_date}:{duty_shift}",
-                )
-                detail = (
-                    "已提交交接班共享文件继续处理任务 "
-                    f"job_id={job.job_id}, duty_date={duty_date}, duty_shift={duty_shift}"
+                detail = submit_handover_scheduled_generation(
+                    job_service=container.job_service,
+                    bridge_service=bridge_service,
+                    name=job_name,
+                    payload={
+                        "buildings": target_buildings,
+                        "end_time": None,
+                        "duty_date": duty_date,
+                        "duty_shift": duty_shift,
+                        "scheduler_slot": slot,
+                        "scheduler_submitted_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "scheduler_stale_after": scheduler_stale_after,
+                        "skip_if_batch_fully_generated_and_sent": True,
+                    },
+                    log_entries=cached_entries,
+                    capacity_entries=capacity_entries,
                 )
                 container.add_system_log(f"[交接班调度] {detail}")
                 return True, detail

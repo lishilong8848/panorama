@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from ipaddress import ip_address
+import re
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -22,6 +24,7 @@ from app.modules.system_screenshot_capture.service.system_screenshot_capture_ser
     cancel_system_screenshot_capture,
 )
 from app.modules.internal_bridge_http.service.internal_bridge_http_runner import InternalBridgeHttpTaskRunner
+from app.modules.shared_bridge.service.report_missing_notice import ReportMissingNoticeOutbox
 
 
 router = APIRouter(prefix="/api/internal-bridge", tags=["internal-bridge"])
@@ -99,7 +102,7 @@ def _require_enabled_and_authorized(request: Request) -> Dict[str, Any]:
     return cfg
 
 
-def _inspection_force_peer_allowed(request: Request, bridge: Dict[str, Any]) -> bool:
+def _bridge_private_peer_allowed(request: Request, bridge: Dict[str, Any]) -> bool:
     # The existing bridge authorization already checked an explicit allowlist.
     allowed = bridge.get("allowed_client_ips", [])
     if isinstance(allowed, list) and any(str(item or "").strip() for item in allowed):
@@ -137,6 +140,36 @@ def _runtime_config(request: Request) -> Dict[str, Any]:
     container = getattr(request.app.state, "container", None)
     runtime_config = getattr(container, "runtime_config", {}) if container is not None else {}
     return runtime_config if isinstance(runtime_config, dict) else {}
+
+
+def _report_missing_notice_outbox(request: Request) -> ReportMissingNoticeOutbox:
+    bridge = _require_enabled_and_authorized(request)
+    if not _bridge_private_peer_allowed(request, bridge):
+        raise HTTPException(status_code=403, detail="当前客户端不允许处理缺测提醒")
+    return ReportMissingNoticeOutbox(_runtime_config(request))
+
+
+@router.post("/report-missing-notices/claim")
+def claim_report_missing_notice(request: Request) -> Dict[str, Any]:
+    outbox = _report_missing_notice_outbox(request)
+    try:
+        return {"notice": outbox.claim()}
+    except (OSError, sqlite3.Error):
+        raise HTTPException(status_code=503, detail="缺测提醒队列暂不可用") from None
+
+
+@router.post("/report-missing-notices/ack")
+def acknowledge_report_missing_notice(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
+    outbox = _report_missing_notice_outbox(request)
+    notice_id, lease_token = payload.get("notice_id"), payload.get("lease_token")
+    if not isinstance(notice_id, str) or not re.fullmatch(r"[a-f0-9]{64}", notice_id):
+        raise HTTPException(status_code=400, detail="缺测提醒编号无效")
+    if not isinstance(lease_token, str) or not re.fullmatch(r"[a-f0-9]{32}", lease_token):
+        raise HTTPException(status_code=400, detail="缺测提醒领取凭证无效")
+    try:
+        return {"ok": outbox.acknowledge(notice_id, lease_token)}
+    except (OSError, sqlite3.Error):
+        raise HTTPException(status_code=503, detail="缺测提醒队列暂不可用") from None
 
 
 def _alarm_rule_export_state_file(config: Dict[str, Any]) -> str | None:
@@ -500,7 +533,7 @@ def refresh_internal_latest_source_cache(
             raise ValueError("force_refresh 必须为布尔值")
         inspection_force_authorized = False
         if force_refresh and source_family.strip().lower() in INSPECTION_REPORT_TEMPLATES:
-            if not _inspection_force_peer_allowed(request, bridge):
+            if not _bridge_private_peer_allowed(request, bridge):
                 raise HTTPException(status_code=403, detail="仅允许内网桥接客户端请求巡检强制补采")
             inspection_force_authorized = True
         return _runner(request).refresh_latest_source_cache(

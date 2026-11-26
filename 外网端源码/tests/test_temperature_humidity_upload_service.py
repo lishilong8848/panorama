@@ -406,6 +406,20 @@ def _write_json(path: Path, payload) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
+def test_api_report_with_marked_missing_state_does_not_upload_false_shutdown(tmp_path):
+    payload = _json_payload()
+    source = tmp_path / "source.json"
+    payload["sheets"][0]["rows"][3][4] = None
+    payload["missing_sample_points"] = [{"row_number": 4, "point_id": "1_0_2_2_600_0",
+                                         "first_sample_missing": True, "zero_filled": False, "count": 1}]
+    _write_json(source, payload)
+    result = TemperatureHumidityUploadService.parse_workbook(source, building="A楼")
+    assert result["unparsed_status_count"] == 1
+    assert result["temperature_location_count"] == 2 and result["status_location_count"] == 1
+    statuses = [r for r in result["rows"] if "running_status" in r]
+    assert [r["position"] for r in statuses] == ["空调二运行状态"]
+
+
 @pytest.mark.parametrize("excel_suffix", [".xlsx", ".xlsm"])
 def test_json_and_excel_parse_the_same_first_sheet(tmp_path, excel_suffix):
     payload = _json_payload()

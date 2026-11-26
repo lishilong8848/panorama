@@ -370,6 +370,7 @@ def handover_inspection_rows(runtime_config, bridge, hvac, building_rows, log, *
         taken = set()
         for row in rows:
             if (row.get("专业") != "暖通" or row.get("目标巡检表") != WORKBOOKS[building]
+                    or row.get("数据完整性") == "缺少源数据"
                     or str(row.get("目标工作表", "")).strip() != SHEET or row.get("测点值") in ("", None)):
                 continue
             taken.update(str(row.get(field) or "").strip()

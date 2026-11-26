@@ -6522,7 +6522,6 @@ def _submit_review_regeneration_locked(
 
     duty_date = str(target.get("duty_date", "") or "").strip()
     duty_shift = str(target.get("duty_shift", "") or "").strip().lower()
-    batch_key = str(target.get("batch_key", "") or "").strip() or service.build_batch_key(duty_date, duty_shift)
     if uploaded_sources:
         active_finder = getattr(container.job_service, "find_active_job_by_dedupe_key", None)
         if callable(active_finder) and active_finder(f"handover_review_regenerate:{session_id_text}"):
@@ -6560,10 +6559,7 @@ def _submit_review_regeneration_locked(
         run_func=_run,
         worker_handler="handover_review_regenerate",
         worker_payload=worker_payload,
-        resource_keys=(
-            _handover_resource_keys(building=building) if uploaded_sources else
-            _handover_resource_keys("shared_bridge:handover", building=building, batch_key=batch_key)
-        ),
+        resource_keys=_handover_resource_keys(building=building),
         priority="manual",
         feature="handover_review_regenerate",
         submitted_by="manual",

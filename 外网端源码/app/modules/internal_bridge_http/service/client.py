@@ -302,6 +302,20 @@ class InternalBridgeHttpClient:
         payload = self._request("POST", f"/api/internal-bridge/tasks/{urllib.parse.quote(task_text)}/cancel")
         return bool(payload.get("ok", False))
 
+    def claim_report_missing_notice(self) -> Dict[str, Any] | None:
+        payload = self._request(
+            "POST", "/api/internal-bridge/report-missing-notices/claim", timeout_sec=3, max_attempts=1,
+        )
+        notice = payload.get("notice")
+        return notice if isinstance(notice, dict) else None
+
+    def acknowledge_report_missing_notice(self, *, notice_id: str, lease_token: str) -> bool:
+        payload = self._request(
+            "POST", "/api/internal-bridge/report-missing-notices/ack",
+            payload={"notice_id": notice_id, "lease_token": lease_token}, timeout_sec=3,
+        )
+        return payload.get("ok") is True
+
     def source_index(
         self,
         *,

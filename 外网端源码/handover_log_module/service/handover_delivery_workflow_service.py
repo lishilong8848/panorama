@@ -6,6 +6,7 @@ import uuid
 from app.modules.feishu.service.bitable_client_runtime import FeishuBitableRateLimited
 from handover_log_module.api.facade import load_handover_config
 from handover_log_module.service.handover_delivery_state_service import HandoverDeliveryStateService
+from handover_log_module.service.handover_generation_guard import try_host_file_lock
 from handover_log_module.service.review_session_service import ReviewSessionConflictError, ReviewSessionService
 from handover_log_module.service.handover_attachment_store import HandoverAttachmentStore, attachment_record_lock
 
@@ -82,8 +83,18 @@ class HandoverDeliveryWorkflowService:
 
         candidates = [s for s in sessions if s.get("building") in self.BUILDINGS
                       and (s.get("confirmed") or confirm_unconfirmed)]
+
+        def prepare_when_generation_idle(session):
+            try:
+                with try_host_file_lock(session["session_id"], namespace="generation") as locked:
+                    if not locked:
+                        return {"building": session["building"], "error": "本楼正在生成交接班文件", "retryable": True}
+                    return prepare_one(session)
+            except OSError as exc:
+                return {"building": session["building"], "error": f"本楼文件锁暂不可用: {exc}", "retryable": True}
+
         with ThreadPoolExecutor(max_workers=len(self.BUILDINGS), thread_name_prefix="handover-delivery") as pool:
-            return [failure for failure in pool.map(prepare_one, candidates) if failure]
+            return [failure for failure in pool.map(prepare_when_generation_idle, candidates) if failure]
 
     def _current_batch(self, batch_key):
         rows = self.state.batch(batch_key)

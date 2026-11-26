@@ -3,6 +3,7 @@ import hashlib
 import os
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from functools import wraps
@@ -11,18 +12,20 @@ from pathlib import Path
 
 _SLOTS = threading.BoundedSemaphore(5)
 _SLOT_WAIT_TIMEOUT_SEC = 60
+_GENERATION_LOCK_WAIT_SEC = 600
 
 
 @contextmanager
 def generation_lock(building, duty_date, duty_shift):
-    with try_host_file_lock(f"{building}|{duty_date}|{duty_shift}", namespace="generation") as locked:
+    with try_host_file_lock(f"{building}|{duty_date}|{duty_shift}", namespace="generation",
+                            wait_sec=_GENERATION_LOCK_WAIT_SEC) as locked:
         if not locked:
-            raise RuntimeError(f"{building} {duty_date}/{duty_shift} 正在生成，本次重复请求未执行，请等待原任务完成")
+            raise TimeoutError(f"{building} {duty_date}/{duty_shift} 同楼生成排队超时，本次未修改文件")
         yield
 
 
 @contextmanager
-def try_host_file_lock(key: str, *, namespace: str):
+def try_host_file_lock(key: str, *, namespace: str, wait_sec: float = 0):
     key = hashlib.sha256(key.encode("utf-8")).hexdigest()
     root = Path(tempfile.gettempdir()) / f"panorama_handover_{namespace}_locks"
     root.mkdir(parents=True, exist_ok=True)
@@ -32,17 +35,24 @@ def try_host_file_lock(key: str, *, namespace: str):
         if os.fstat(fd).st_size == 0:
             os.write(fd, b"0")
         os.lseek(fd, 0, os.SEEK_SET)
-        try:
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except OSError as exc:
-            if exc.errno not in {11, 13, 35, 36} and getattr(exc, "winerror", None) not in {32, 33, 36}:
-                raise
+        deadline = time.monotonic() + wait_sec
+        while not locked:
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError as exc:
+                if exc.errno not in {11, 13, 35, 36} and getattr(exc, "winerror", None) not in {32, 33, 36}:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(remaining, 0.2))
         yield locked
     finally:
         try:
