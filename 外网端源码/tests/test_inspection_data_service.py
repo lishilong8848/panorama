@@ -474,11 +474,12 @@ class SnapshotSources:
         for entry in self.entries.values():
             set_dataset_end(entry, module.datetime.now().replace(microsecond=0))
 
-    def get_inspection_snapshot(self, *, source_date, bucket_key):
+    def get_inspection_snapshot(self, *, source_date, bucket_key, building=""):
         self.queries.append((source_date, bucket_key))
         bucket = bucket_key or f'{source_date} 10'
         return {'ok': True, 'bucket_key': bucket,
-                'datasets': [entry for entry in self.entries.values() if entry['bucket_key'] == bucket]}
+                'datasets': [entry for entry in self.entries.values() if entry['bucket_key'] == bucket
+                             and (not building or entry['building'] == building)]}
 
     def refresh_latest_source_cache(self, **kwargs):
         self.refreshes.append(kwargs)
@@ -649,10 +650,8 @@ def test_partial_config_failure_uploads_only_verified_building(tmp_path, monkeyp
 @pytest.mark.parametrize("building", ["D楼", "E楼"])
 def test_scoped_run_collects_and_writes_only_requested_building(tmp_path, monkeypatch, building):
     internal = SnapshotSources(inspection_datasets(tmp_path))
-    internal.get_latest_inspection_points = Mock(side_effect=lambda building: {
-        "ok": True, "datasets": [doc for (owner, _), doc in internal.entries.items() if owner == building],
-    })
-    internal.get_inspection_snapshot = Mock(side_effect=AssertionError("single-building upload queried both buildings"))
+    internal.get_latest_inspection_points = Mock(side_effect=AssertionError("upload queried the UI latest endpoint"))
+    internal.get_inspection_snapshot = Mock(wraps=internal.get_inspection_snapshot)
     cloud = Cloud()
     config = {"paths": {"runtime_state_root": str(tmp_path)}}
     service = InspectionDataUploadService(config, internal_client=internal, bitable_client=cloud)
@@ -660,7 +659,9 @@ def test_scoped_run_collects_and_writes_only_requested_building(tmp_path, monkey
     expected_table = module.DEFAULT_CONFIG["tables"][building]
     result = service.run(building=building)
     assert result["buildings"] == [building] and result["status"] == "success"
-    internal.get_latest_inspection_points.assert_called_once_with(building=building)
+    now = module.datetime.now()
+    internal.get_inspection_snapshot.assert_called_once_with(building=building, source_date=now.strftime('%Y-%m-%d'),
+                                                            bucket_key=module.inspection_hour_bucket(now))
     assert {table for _, table in cloud.events} == {expected_table}
 
 
@@ -812,8 +813,8 @@ def test_split_result_reports_four_files_and_both_timestamps(tmp_path, monkeypat
             assert metadata['label'] == contract['label']
             assert metadata['source_family'] == family
             assert metadata['source_file'] == f"巡检接口/{contract['report_name']}"
-            assert metadata['source_time'] == f'2026-10-27 10:0{index*5}:00'
-            assert metadata['value_time'] == f'2026-10-27 09:{40+index*5}:00'
+            assert metadata['query_end'] == f'2026-10-27 10:0{index*5}:00'
+            assert metadata['source_time'] == metadata['value_time'] == f'2026-10-27 09:{40+index*5}:00'
             assert metadata['matched_devices'] == 1
             if not dry_run:
                 rows = [r['fields'] for r in cloud.rows[module.DEFAULT_CONFIG['tables'][building]]]
@@ -998,6 +999,21 @@ def test_upload_starts_only_after_last_current_bucket_source_arrives(tmp_path, p
     assert internal.refreshes == [
         {'source_family': 'hvac_inspection_family', 'buildings': ['E楼'], 'target_bucket_key': '2026-10-30 10'},
     ]
+
+
+def test_recent_query_end_does_not_qualify_a_previous_period_sample(tmp_path, polling_clock, monkeypatch):
+    internal = SnapshotSources(inspection_datasets(tmp_path))
+    entry = internal.entries["D楼", "electrical_inspection_family"]
+    set_dataset_end(entry, datetime(2026, 10, 30, 10, 5))
+    entry["value_time"] = "2026-10-30 09:55:00"
+    cloud = Cloud()
+    monkeypatch.setattr(module, 'BACKUP_ROOT', tmp_path / 'backups')
+    service = InspectionDataUploadService(
+        {'inspection_data_upload': {'wait_source_timeout_sec': 0}}, internal_client=internal, bitable_client=cloud,
+    )
+    with pytest.raises(RuntimeError, match="09:55:00 不属于本时段"):
+        service.run(building="D楼", source_date="2026-10-30", source_bucket_key="2026-10-30 10")
+    assert not cloud.events
 
 
 def test_expired_scheduled_slot_does_not_refresh_or_clear(tmp_path, polling_clock):

@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from app.modules.shared_bridge.service.report_api_query import query_report_json
+from app.modules.shared_bridge.service.report_api_transform import ReportNoSamples
+from app.modules.shared_bridge.service.report_missing_notice import enqueue_empty_report_notice
 from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.report_source_json import validate_report_source_json
 
@@ -564,6 +566,10 @@ async def _run_download_tasks_by_building(
             _log_file_success(feature=feature, stage=success_stage, building=building,
                               file_path=str(target), upload_date=date_text, detail="动环报表API")
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, ReportNoSamples):
+                enqueue_empty_report_notice(config, family="monthly_report_family", report_label="全景平台月报",
+                                            building=building, window=date_text,
+                                            query_start=task.start_time, query_end=task.end_time)
             outcome = DownloadOutcome(building=building, success=False, error=str(exc), used_url="动环报表API")
             _log_file_failure(feature=feature, stage=failure_stage, building=building,
                               file_path="-", upload_date=date_text, error=str(exc))

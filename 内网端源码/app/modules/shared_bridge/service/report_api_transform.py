@@ -10,6 +10,11 @@ _TIME_RE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}(?::\d{2})?$")
 _MISSING_SAMPLES = {"", "-", "--", "—", "nan", "inf", "infinity", "null", "none", "n/a", "无数据", "暂无数据"}
 _STATUS_SAMPLES = {"制冷", "预冷", "板换", "停机", "运行", "停止", "合闸", "分闸", "开启", "关闭"}
 _BRANCH_FAMILIES = {"branch_power_family", "branch_current_family", "branch_switch_family"}
+_DAILY_FAMILIES = _BRANCH_FAMILIES | {"building_full_cabinet_power_family", "monthly_report_family"}
+
+
+class ReportNoSamples(ValueError):
+    """A parsed report has no real readings in the required data window."""
 
 # C楼 CMDB device 25_0_220, model 0_2370. Key by the full legacy ID, never by suffix alone.
 _C_UPS_LABELS = {
@@ -27,6 +32,16 @@ def _header_time(value: Any) -> datetime | None:
         return datetime.fromisoformat(text.replace("/", "-"))
     except ValueError:
         return None
+
+
+def daily_required_hours(family: str, business_date: str, start: datetime, end: datetime) -> set[datetime]:
+    if family not in _DAILY_FAMILIES or not business_date:
+        return set()
+    day = datetime.strptime(business_date, "%Y-%m-%d")
+    if start > day or end < day + timedelta(days=1):
+        return set()
+    count = 25 if family == "monthly_report_family" else 24
+    return {day + timedelta(hours=hour) for hour in range(count)}
 
 
 def is_usable_report_sample(value: Any, family: str) -> bool:
@@ -109,6 +124,7 @@ def normalize_report_rows(
     query_start: str = "",
     query_end: str = "",
     time_tolerance_sec: int = 0,
+    business_date: str = "",
 ) -> list[list[Any]]:
     if not isinstance(grid, list) or not grid or any(not isinstance(row, list) for row in grid):
         raise ValueError("报表接口未返回有效数据")
@@ -122,6 +138,7 @@ def normalize_report_rows(
     _, header_index, timestamps = max(candidates, key=lambda item: (item[0], item[1]))
     if len(set(timestamps)) != len(timestamps):
         raise ValueError("报表接口时间表头重复")
+    business_hours = set()
     if query_start and query_end:
         try:
             start = datetime.strptime(query_start, "%Y-%m-%d %H:%M:%S")
@@ -131,21 +148,31 @@ def normalize_report_rows(
         tolerance = timedelta(seconds=max(0, int(time_tolerance_sec)))
         if end < start or any(value < start - tolerance or value > end + tolerance for value in timestamps):
             raise ValueError("报表接口返回时间超出查询窗口")
+        business_hours = daily_required_hours(source_family, business_date, start, end)
     body = grid[header_index + 1:]
-    if not body:
-        raise ValueError("报表接口没有数据行")
     real_row_count = len(body)
     header = grid[header_index]
-    columns = [i for i, cell in enumerate(header) if _header_time(cell) is not None]
-    has_real_sample = any(
-        (expected_point_ids is None or r in row_ids) and i < len(row)
-        and is_usable_report_sample(row[i], source_family)
-        for r, row in enumerate(body, header_index + 1) for i in columns
-    ) if missing_samples is not None or expected_point_ids is not None or source_family in {
-        "handover_log_family", "handover_capacity_report_family"
-    } else False
-    if source_family in {"handover_log_family", "handover_capacity_report_family"} and not has_real_sample:
-        raise ValueError("交接班报表接口没有可用的实际采样")
+    column_times = {i: stamp for i, cell in enumerate(header) if (stamp := _header_time(cell)) is not None}
+    columns = list(column_times)
+    business_complete = business_hours.issubset(timestamps)
+    check_samples = missing_samples is not None or expected_point_ids is not None or source_family in {
+        "handover_log_family", "handover_capacity_report_family",
+    }
+    no_samples = ReportNoSamples if business_complete and check_samples else ValueError
+    if not body:
+        raise no_samples("报表接口没有数据行")
+    # Padding cannot prove that a business day has data. Let the normal hour-column validator
+    # diagnose incomplete headers instead of treating those responses as confirmed empty reports.
+    sample_columns = columns
+    if business_hours and business_complete:
+        if source_family == "monthly_report_family":
+            first, last = min(business_hours), max(business_hours)
+            sample_columns = [i for i, stamp in column_times.items() if first <= stamp <= last]
+        else:
+            sample_columns = [i for i, stamp in column_times.items() if stamp in business_hours]
+    if check_samples and not any(i < len(row) and is_usable_report_sample(row[i], source_family)
+                                 for row in body for i in sample_columns):
+        raise no_samples("报表没有可用的实际采样，不允许全表补零")
     actual = [value for index, value in row_ids.items() if index > header_index and value]
     if expected_point_ids is not None:
         expected = list(expected_point_ids)
@@ -170,7 +197,8 @@ def normalize_report_rows(
             if any(r not in row_ids and any(v is not None and str(v).strip() for v in row)
                    for r, row in enumerate(body, header_index + 1)):
                 raise ValueError("报表接口存在无ID的非空数据行，无法确认缺少的测点")
-            if not has_real_sample:
+            if not any(i < len(row) and is_usable_report_sample(row[i], source_family)
+                       for r, row in enumerate(body, header_index + 1) if r in row_ids for i in sample_columns):
                 raise ValueError("报表没有可用的实际采样，不允许全表补零")
             if len(body) + len(missing) + 3 > 50000 or (len(body) + len(missing)) * len(header) > 4_000_000:
                 raise ValueError("补零后报表超过行数或单元格限制")
@@ -201,8 +229,6 @@ def normalize_report_rows(
     if missing_samples is not None:
         actual_rows = body[:real_row_count]
         gaps = _fill_sample_gaps(actual_rows, row_ids, header_index, columns, source_family)
-        if gaps and not has_real_sample:
-            raise ValueError("报表没有可用的实际采样，不允许全表补零")
         if gaps:
             body[:len(actual_rows)] = actual_rows
             missing_samples.extend(gaps)

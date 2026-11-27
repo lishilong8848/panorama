@@ -226,6 +226,27 @@ def test_existing_canonical_file_recovered_and_other_hour_not_reused(family, cac
     assert cache.store.list_source_cache_entries(source_family=family)[0]["status"] == "failed"
 
 
+def test_recovery_rejects_current_file_with_previous_bucket_sample(cache, monkeypatch):
+    monkeypatch.setattr(
+        "app.modules.shared_bridge.service.shared_source_cache_service.inspection_hour_bucket",
+        lambda stamp=None: BUCKET if stamp is None else inspection_hour_bucket(stamp),
+    )
+    family = FAMILY_ELECTRICAL_INSPECTION
+    path = write_snapshot(cache, family)
+    doc = dataset(family)
+    doc.update(query_start="2026-10-27 07:45:00", query_end="2026-10-27 08:05:00",
+               value_time="2026-10-27 07:45:00")
+    path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    assert not cache._register_existing_latest_file_if_present(source_family=family, building="D楼", bucket_key=BUCKET)
+    assert not cache.read_inspection_snapshot(source_date=BUCKET[:10], bucket_key=BUCKET, building="D楼")["datasets"]
+
+    doc["value_time"] = "2026-10-27 08:00:00"
+    path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    assert cache._register_existing_latest_file_if_present(source_family=family, building="D楼", bucket_key=BUCKET)
+    result = cache.read_inspection_snapshot(source_date=BUCKET[:10], bucket_key=BUCKET, building="D楼")
+    assert result["datasets"] == [doc]
+
+
 def test_fill_uses_pool_atomic_store_and_latest_index(family, cache, tmp_path, monkeypatch):
     pool = object()
     cache.download_browser_pool = pool
@@ -273,6 +294,10 @@ def test_inspection_http_returns_same_bucket_json_and_ignores_legacy_xlsx(cache)
         assert response.status_code == 200
         assert response.json()["bucket_key"] == BUCKET
         assert len(response.json()["datasets"]) == 4
+        scoped = client.get(url, params={"source_date": BUCKET[:10], "bucket_key": BUCKET, "building": "D楼"}).json()
+        assert {(doc["building"], doc["source_family"]) for doc in scoped["datasets"]} == {
+            ("D楼", family) for family in INSPECTION_REPORT_TEMPLATES
+        }
         assert client.get(url, params={"source_date": BUCKET[:10], "bucket_key": "2026-10-27 10"}).json()["datasets"] == []
         assert client.get(url, params={"source_date": BUCKET[:10], "bucket_key": "2026-10-27 11"}).status_code == 400
         app.state.container.runtime_config["internal_bridge_http"]["allowed_client_ips"] = ["192.0.2.10"]
@@ -616,11 +641,17 @@ def test_first_api_sample_does_not_use_later_values():
         ["", "位置", "设备", "启停状态", "0", "1"],
         ["", "位置", "设备", "温度", "", "99"],
     ]
-    stamp, rows = _first_sample(grid, datetime(2026, 10, 30, 9, 47), datetime(2026, 10, 30, 10, 7))
+    stamp, rows = _first_sample(grid, datetime(2026, 10, 30, 9, 37), datetime(2026, 10, 30, 9, 57))
     assert stamp == "2026-10-30 09:50:00"
     assert rows == [["位置", "设备", "启停状态", "0"], ["位置", "设备", "温度", ""]]
     with pytest.raises(ValueError, match="查询窗口"):
         _first_sample(grid, datetime(2026, 10, 30, 10), datetime(2026, 10, 30, 10, 20))
+    with pytest.raises(ValueError, match="本时段真实采样时间"):
+        _first_sample(grid, datetime(2026, 10, 30, 9, 47), datetime(2026, 10, 30, 10, 7))
+    grid[0].append("2026-10-30 10:00:00")
+    grid[1].append("2")
+    stamp, rows = _first_sample(grid, datetime(2026, 10, 30, 9, 47), datetime(2026, 10, 30, 10, 7))
+    assert stamp == "2026-10-30 10:00:00" and rows[0][3] == "2"
 
 
 @pytest.mark.parametrize("feature", [{}, {"enabled": False}, {"enabled": "false"}])

@@ -44,8 +44,8 @@ class Internal:
                 if doc["source_family"] == kwargs["source_family"]:
                     doc["collection_started_at"] = int(time.time()*1000)
         return {"ok": True, "accepted": True}
-    def get_latest_inspection_points(self, **kwargs):
-        return {"ok": True, "datasets": copy.deepcopy(self.documents)}
+    def get_inspection_snapshot(self, **kwargs):
+        return {"ok": True, "bucket_key": kwargs["bucket_key"], "datasets": copy.deepcopy(self.documents)}
 
 
 @pytest.mark.parametrize("stale_kind", ["prior_collection", "old_sample", "missing_collection"])

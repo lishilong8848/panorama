@@ -2,86 +2,41 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 import uuid
 from contextlib import closing, contextmanager
 
-from app.modules.shared_bridge.service.report_api_transform import _C_UPS_LABELS
 from app.shared.utils.runtime_temp_workspace import resolve_runtime_state_root
 
 
-MISSING_NOTICE_FIELDS = (
-    "zero_filled_point_ids", "missing_sample_points", "zero_filled_sample_point_ids",
-    "report_name", "query_start", "query_end",
-)
 _PENDING_TTL = 86400
 _DEDUPE_TTL = 30 * 86400
-_DETAIL_CHARS = 950
+_LEGACY_PARTIAL_NOTICE = "【报表缺测提醒】共享源文件已就绪\n%"
 
 
 def _text(value: object, limit: int = 64) -> str:
     return " ".join(value[:limit * 2].split())[:limit] if isinstance(value, str) else ""
 
 
-def _items(value: object) -> list:
-    return value if isinstance(value, list) else []
-
-
-def _identity(value: object) -> str:
-    return value.strip() if isinstance(value, str) else ""
-
-
-def build_report_missing_notices(
-    payload: dict, *, family: str, report_label: str, building: str, window: str, duty_shift: str,
-) -> list[tuple[str, str]]:
-    whole = dict.fromkeys(
-        point for value in _items(payload.get("zero_filled_point_ids")) if (point := _identity(value))
-    )
-    samples = {}
-    for item in _items(payload.get("missing_sample_points")):
-        if not isinstance(item, dict):
-            continue
-        point, device, metric = (_identity(item.get(key)) for key in ("point_id", "device", "metric"))
-        count = item.get("count")
-        if (point or (device and metric)) and point not in whole and type(count) is int and count > 0:
-            label = _text(" / ".join(filter(None, (point, device, metric))), 112)
-            samples[(point, device, metric, count)] = f"{label} ({min(count, 999999)}条)"
-    reported_ids = {point for point, _, _, _ in samples}
-    for value in _items(payload.get("zero_filled_sample_point_ids")):
-        point = _identity(value)
-        if point and point not in whole and point not in reported_ids:
-            samples[(point, "", "", 0)] = _text(point)
-    if not (whole or samples):
-        return []
-
-    identity = [family, building, window, duty_shift, sorted(whole), sorted(samples)]
+def enqueue_empty_report_notice(
+    runtime_config: dict, *, family: str, report_label: str, building: str, window: str,
+    duty_shift: str = "", query_start: str = "", query_end: str = "",
+) -> None:
+    identity = ["all_samples_missing", family, building, window, duty_shift]
     key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-    report_name = _text(payload.get("report_name")) or report_label
     window_label = " ".join(filter(None, (_text(window), _text(duty_shift))))
-    heading = [
-        "【报表缺测提醒】共享源文件已就绪",
-        f"报表：{report_name}｜楼栋：{_text(building)}｜窗口：{window_label}",
+    lines = [
+        "【报表缺测提醒】本窗口所有测点均无有效实测，未发布空报表",
+        f"报表：{_text(report_label)}｜楼栋：{_text(building)}｜窗口：{window_label}",
     ]
-    start, end = (_text(payload.get(key)) for key in ("query_start", "query_end"))
-    if start and end:
-        heading.append(f"查询范围：{start} 至 {end}")
-    heading.append(f"未返回测点：{len(whole)} 个；缺读数测点：{len(samples)} 个。补零不代表真实值。")
-    known_labels = _C_UPS_LABELS if building == "C楼" and family == "handover_capacity_report_family" else {}
-    details = [f"未返回：{_text(point, 112)}" + (f" / {known_labels[point]}" if point in known_labels else "")
-               for point in sorted(whole)]
-    details.extend(f"缺读数：{samples[item]}" for item in sorted(samples))
-    batches: list[list[str]] = [[]]
-    length = 0
-    for line in details:
-        if length + len(line) + 1 > _DETAIL_CHARS:
-            batches.append([])
-            length = 0
-        batches[-1].append(line)
-        length += len(line) + 1
-    return [(key if index == 1 else hashlib.sha256(f"{key}:{index}".encode()).hexdigest(),
-             "\n".join([*heading, f"测点清单 {index}/{len(batches)}", *batch]))
-            for index, batch in enumerate(batches, 1)]
+    if query_start and query_end:
+        lines.append(f"查询范围：{_text(query_start)} 至 {_text(query_end)}")
+    try:
+        ReportMissingNoticeOutbox(runtime_config).enqueue(key, "\n".join(lines))
+    except Exception:
+        logging.getLogger(__name__).warning("整表无数据提醒入队失败")
 
 
 class ReportMissingNoticeOutbox:
@@ -112,6 +67,11 @@ class ReportMissingNoticeOutbox:
         conn.execute(
             "UPDATE report_missing_notices SET message = NULL WHERE message IS NOT NULL AND created_at <= ?",
             (now - _PENDING_TTL,),
+        )
+        # Partial-gap alerts from older builds are no longer delivered.
+        conn.execute(
+            "UPDATE report_missing_notices SET message = NULL WHERE message LIKE ?",
+            (_LEGACY_PARTIAL_NOTICE,),
         )
 
     def enqueue(self, notice_id: str, message: str) -> None:

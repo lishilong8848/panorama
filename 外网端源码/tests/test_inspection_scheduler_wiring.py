@@ -15,9 +15,11 @@ from app.modules.scheduler.service import inspection_data_scheduler as schedulin
 
 
 class Clock(datetime):
+    hour_minute = (1, 10)
+
     @classmethod
     def now(cls, tz=None):
-        return cls(2026, 10, 27, 12, 0, 0)
+        return cls(2026, 10, 27, *cls.hour_minute, tzinfo=tz)
 
 
 class Orchestrator:
@@ -48,6 +50,7 @@ class Orchestrator:
 @pytest.fixture
 def setup_scheduler(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduling, "datetime", Clock)
+    monkeypatch.setattr(Clock, "hour_minute", (1, 10))
     jobs = []
 
     def submit(slot):
@@ -125,6 +128,7 @@ def test_slots_only_succeed_after_job_completion(setup_scheduler):
     assert len(jobs) == 1
     finish_job(jobs[0], completed)
     assert scheduler.state["last_success_slot"] == "2026-10-27 01:10:00"
+    Clock.hour_minute = (13, 10)
     scheduler._fire(trigger_source="slot:13:10:00")
     assert len(jobs) == 2
     finish_job(jobs[1], completed)
@@ -190,10 +194,13 @@ def test_busy_does_not_queue_unbounded_work(setup_scheduler):
     assert len([key for key in scheduler.orchestrator.jobs if ":retry:" in key]) == 1
     scheduler.is_busy = lambda: False
     scheduler._fire(trigger_source="retry:2026-10-27 01:10:00")
+    finish_job(jobs[0], completed)
+    Clock.hour_minute = (13, 10)
+    scheduler.is_busy = lambda: True
     scheduler._fire(trigger_source="slot:13:10:00")
     assert len(jobs) == 1
     assert scheduler.state["slots"]["2026-10-27 13:10:00"]["attempts"] == 0
-    finish_job(jobs[0], completed)
+    scheduler.is_busy = lambda: False
     scheduler._fire(trigger_source="retry:2026-10-27 13:10:00")
     assert len(jobs) == 2
     finish_job(jobs[1], completed)
@@ -421,6 +428,24 @@ def test_old_deferred_slots_expire_without_submission(setup_scheduler):
     assert "2026-10-25 01:10:00" not in scheduler.state["slots"]
 
 
+def test_same_day_stale_slot_is_not_replayed_after_busy_window_or_restart(setup_scheduler):
+    scheduler, jobs, _ = setup_scheduler
+    old = "2026-10-27 10:20:00"
+    new = "2026-10-27 18:20:00"
+    clock = Clock
+    clock.hour_minute = (18, 20)
+    scheduler.reconfigure({**scheduler.cfg, "run_times": [old[11:], new[11:]], "catch_up_if_missed": True})
+    scheduler.state["slots"][old] = {"status": "deferred", "attempts": 0}
+    scheduler.start()
+    scheduler._fire(trigger_source=f"retry:{old}")
+    assert not jobs
+    assert scheduler.state["slots"][old]["status"] == "expired"
+    assert scheduler.state["slots"][old]["detail"] == "past_period"
+    assert not scheduler.orchestrator.get_job(f"inspection_data_upload:catchup:{old}")
+    scheduler._fire(trigger_source=f"slot:{new[11:]}")
+    assert len(jobs) == 1 and scheduler.state["slots"][new]["status"] == "submitted"
+
+
 def test_removed_pending_slot_is_not_restored(setup_scheduler):
     scheduler, jobs, _ = setup_scheduler
     scheduler._fire(trigger_source="slot:01:10:00")
@@ -433,6 +458,7 @@ def test_removed_pending_slot_is_not_restored(setup_scheduler):
     scheduler.start()
     assert not scheduler._watchers
     assert scheduler.state["slots"]["2026-10-27 01:10:00"]["status"] == "expired"
+    Clock.hour_minute = (14, 10)
     scheduler._fire(trigger_source="slot:14:10:00")
     assert len(jobs) == 2
 

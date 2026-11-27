@@ -728,7 +728,8 @@ class AppContainer:
             run_callback=self._submit_inspection_data_upload,
             lookup_job=self._lookup_inspection_data_job,
             find_slot_job=self._find_inspection_data_slot_job,
-            is_busy=self._job_busy_for_feature_prefixes("inspection_data_upload"),
+            # A scheduled batch can queue behind scoped retries without being overtaken by later retries.
+            is_busy=lambda: bool(self.job_service.find_active_job_by_dedupe_key("inspection_data_upload")),
             orchestrator=self.ensure_scheduler_orchestrator(), schedule_kind="daily",
             source_name="巡检数据处理",
         )
@@ -740,6 +741,9 @@ class AppContainer:
 
         if slot[:10] != datetime.now().strftime("%Y-%m-%d"):
             raise ValueError("巡检快照不补传历史调度日期")
+        bucket = inspection_hour_bucket(datetime.fromisoformat(slot))
+        if bucket != inspection_hour_bucket(datetime.now()):
+            raise ValueError("巡检调度时段已结束，不派发旧时段")
         if self._configured_deployment_snapshot().get("role_mode") != "external":
             raise ValueError("巡检数据处理仅允许在外网端执行")
         if not self.runtime_config.get("inspection_data_upload", {}).get("enabled", True):
@@ -748,7 +752,7 @@ class AppContainer:
             name=f"巡检数据处理 {slot}", worker_handler="inspection_data_upload",
             worker_payload={
                 "source_date": slot[:10], "dry_run": False,
-                "source_bucket_key": inspection_hour_bucket(datetime.fromisoformat(slot)),
+                "source_bucket_key": bucket,
             },
             resource_keys=["inspection_data_upload:D", "inspection_data_upload:E"], priority="scheduler",
             feature="inspection_data_upload", dedupe_key="inspection_data_upload",

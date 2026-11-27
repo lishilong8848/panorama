@@ -4,7 +4,7 @@ import copy
 import threading
 from datetime import datetime, timedelta
 
-from app.config.inspection_data_config import normalize_inspection_scheduler
+from app.config.inspection_data_config import inspection_hour_bucket, normalize_inspection_scheduler
 from app.modules.scheduler.service.apscheduler_orchestrator import (
     ApschedulerSchedulerFacade,
     _run_registered_scheduler_job,
@@ -60,7 +60,9 @@ class InspectionDataScheduler(ApschedulerSchedulerFacade):
         cutoff = f"{now - timedelta(days=1):%Y-%m-%d}"
         changed = False
         for slot, row in list(self.state["slots"].items()):
-            obsolete = slot[:10] != today or slot[11:] not in self.cfg["run_times"]
+            configured_today = slot[:11] == f"{today} " and slot[11:] in self.cfg["run_times"]
+            old_period = configured_today and inspection_hour_bucket(datetime.fromisoformat(slot)) < inspection_hour_bucket(now)
+            obsolete = not configured_today or old_period
             if obsolete:
                 for kind in ("retry", "catchup"):
                     self.orchestrator.remove_job(f"{self.scheduler_key}:{kind}:{slot}")
@@ -68,7 +70,8 @@ class InspectionDataScheduler(ApschedulerSchedulerFacade):
                 if watcher:
                     watcher[0].set()
                 if row.get("status") in {"submitted", "dispatching", "deferred", "failed"}:
-                    row.update(status="expired", detail="past_day" if slot[:10] != today else "slot_removed")
+                    detail = "past_day" if slot[:10] < today else "past_period" if old_period else "slot_removed"
+                    row.update(status="expired", detail=detail)
                     changed = True
             if slot[:10] < cutoff:
                 del self.state["slots"][slot]
@@ -131,7 +134,9 @@ class InspectionDataScheduler(ApschedulerSchedulerFacade):
                 if self.cfg["catch_up_if_missed"]:
                     for run_time in self.cfg["run_times"]:
                         slot = f"{self.started_at:%Y-%m-%d} {run_time}"
-                        if datetime.fromisoformat(slot) <= self.started_at and slot not in self.state["slots"]:
+                        planned_at = datetime.fromisoformat(slot)
+                        if (inspection_hour_bucket(planned_at) == inspection_hour_bucket(self.started_at)
+                                and planned_at <= self.started_at and slot not in self.state["slots"]):
                             self._schedule_date(slot, "catchup", self.started_at + timedelta(seconds=1))
             except Exception:
                 self.stop()
@@ -164,12 +169,13 @@ class InspectionDataScheduler(ApschedulerSchedulerFacade):
             self.cfg["retry_failed_in_same_period"] and row.get("status") == "failed"
             and row.get("attempts", 0) < 2
         )
+        slot_is_current = inspection_hour_bucket(datetime.fromisoformat(slot)) == inspection_hour_bucket(when)
         if (self._active and eligible
-                and slot[:10] == f"{when:%Y-%m-%d}"
+                and slot_is_current
                 and slot[11:] in self.cfg["run_times"]):
             self._schedule_date(slot, "retry", when)
-        elif eligible and slot[:10] != f"{when:%Y-%m-%d}":
-            row.update(status="expired", detail="past_day")
+        elif eligible and not slot_is_current:
+            row.update(status="expired", detail="past_day" if slot[:10] != f"{when:%Y-%m-%d}" else "past_period")
             self._save_state()
 
     def _finish(self, slot, status, detail=""):
@@ -242,7 +248,8 @@ class InspectionDataScheduler(ApschedulerSchedulerFacade):
             kind, value = trigger_source.split(":", 1)
             slot = f"{now:%Y-%m-%d} {value}" if kind == "slot" else value
             rows = self.state["slots"]
-            if slot[:10] != f"{now:%Y-%m-%d}" or slot[11:] not in self.cfg["run_times"]:
+            if (slot[:11] != f"{now:%Y-%m-%d} " or slot[11:] not in self.cfg["run_times"]
+                    or inspection_hour_bucket(datetime.fromisoformat(slot)) != inspection_hour_bucket(now)):
                 return
             row = rows.get(slot, {})
             if row.get("status") in {"submitted", "dispatching", "success", "expired"} or row.get("attempts", 0) >= 2:

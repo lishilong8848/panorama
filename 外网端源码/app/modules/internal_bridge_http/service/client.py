@@ -495,9 +495,10 @@ class InternalBridgeHttpClient:
             },
         )
 
-    def get_inspection_snapshot(self, *, source_date: str, bucket_key: str = "") -> Dict[str, Any]:
+    def get_inspection_snapshot(self, *, source_date: str, bucket_key: str = "", building: str = "") -> Dict[str, Any]:
         return self._request("GET", "/api/internal-bridge/inspection/snapshot",
-                             query={"source_date": source_date, "bucket_key": bucket_key})
+                             query={"source_date": source_date, "bucket_key": bucket_key,
+                                    **({"building": building} if building else {})})
 
     def put_inspection_point_rules(self, rules: dict, *, revision: int) -> Dict[str, Any]:
         return self._request("PUT", "/api/internal-bridge/inspection/point-rules",

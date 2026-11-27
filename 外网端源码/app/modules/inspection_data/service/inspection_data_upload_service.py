@@ -699,17 +699,10 @@ class InspectionDataUploadService:
                                                                  target_bucket_key=requested_bucket, force_refresh=True)
                             forced.add(family)
                             retry_dispatch_at.update({(b, family): time.monotonic() + 15 for b in buildings})
-                if scoped_building and source_date == today:
-                    payload = internal.get_latest_inspection_points(building=scoped_building)
-                    if payload.get("ok") and isinstance(payload.get("datasets"), list):
-                        # This read API may legitimately return the last usable
-                        # slot. Only the requested slot may feed a fresh batch.
-                        payload = {**payload, "bucket_key": requested_bucket, "datasets": [
-                            doc for doc in payload["datasets"]
-                            if not isinstance(doc, dict) or doc.get("bucket_key") == requested_bucket
-                        ]}
-                else:
-                    payload = internal.get_inspection_snapshot(source_date=source_date, bucket_key=requested_bucket)
+                payload = internal.get_inspection_snapshot(
+                    source_date=source_date, bucket_key=requested_bucket,
+                    **({"building": scoped_building} if scoped_building else {}),
+                )
             except Exception as exc:
                 if not self._retryable_source_error(exc) and not (scoped_building and "409" in str(exc)):
                     raise
@@ -718,6 +711,7 @@ class InspectionDataUploadService:
                     log(f"[巡检数据处理] 内网暂不可用，保留原数据并等待: {exc}")
                     last_error_log = time.monotonic()
             selected = {b: {} for b in buildings}
+            rejected = {}
             bucket = payload.get("bucket_key", "")
             if payload.get("ok"):
                 if requested_bucket and bucket != requested_bucket:
@@ -730,7 +724,7 @@ class InspectionDataUploadService:
                         raise ValueError("巡检接口测点响应无效；未清空多维表")
                     if doc.get("building") not in selected:
                         continue
-                    captured = self._validate_dataset(doc, source_date, bucket)
+                    self._validate_dataset(doc, source_date, bucket)
                     building, family = doc["building"], doc["source_family"]
                     if (building, family) in seen:
                         raise ValueError("巡检接口返回重复楼栋和专业；未清空多维表")
@@ -738,6 +732,7 @@ class InspectionDataUploadService:
                     if source_date == today and point_settings is not None:
                         expected = rules.get(building, {}).get(family, {})
                         if doc.get("point_overrides", {}) != expected:
+                            rejected[building, family] = "测点配置与本轮不一致"
                             continue
                         if expected:
                             ids = set(doc.get("point_ids", []))
@@ -746,20 +741,28 @@ class InspectionDataUploadService:
                             if (not doc.get("requested_point_ids") or not added <= ids or ids & removed
                                     or (baseline is not None and ids != (set(baseline) | added) - removed)):
                                 raise ValueError("巡检接口返回的测点与已保存清单不符；未清空多维表")
-                    sampled_ms = int(datetime.strptime(doc["value_time"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
+                    sampled = datetime.strptime(doc["value_time"], "%Y-%m-%d %H:%M:%S")
+                    if source_date == today and inspection_hour_bucket(sampled) != requested_bucket:
+                        rejected[building, family] = f"实测时间 {doc['value_time']} 不属于本时段"
+                        continue
+                    sampled_ms = int(sampled.replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
                     if not_before is not None and sampled_ms < not_before:
                         continue
                     if force_refresh and (type(doc.get("collection_started_at")) is not int
                                           or doc["collection_started_at"] < collection_floor):
                         continue
-                    age = (datetime.now() - captured).total_seconds()
+                    age = (datetime.now() - sampled).total_seconds()
                     if source_date == today and (age < -300 or age > max(1, int(self.cfg["max_source_age_minutes"])) * 60):
+                        rejected[building, family] = f"实测时间 {doc['value_time']} 超出有效范围"
                         continue
                     selected[building][family] = doc
             missing = [(b, family) for b, family in required if family not in selected[b]]
             if not missing:
                 return selected
-            missing_labels = ','.join(f"{b}/{SOURCE_FAMILIES[family]['label']}" for b, family in missing)
+            missing_labels = ','.join(
+                f"{b}/{SOURCE_FAMILIES[family]['label']}({rejected.get((b, family), '未收到本时段快照')})"
+                for b, family in missing
+            )
             if time.monotonic() >= deadline or datetime.now().strftime("%Y-%m-%d") != source_date:
                 raise RuntimeError(f"{source_date} 巡检接口数据未齐或过期: {missing_labels}；未清空多维表")
             if requested_bucket != inspection_hour_bucket(datetime.now()):
@@ -894,7 +897,7 @@ class InspectionDataUploadService:
                                         and any(r["测点ID"] in added_ids and _usable_reading(r["测点原始值"])
                                                 for r in real_points)),
                 )
-                source_time = int(datetime.strptime(entry["value_time"] if force_refresh else entry["query_end"], "%Y-%m-%d %H:%M:%S")
+                source_time = int(datetime.strptime(entry["value_time"], "%Y-%m-%d %H:%M:%S")
                                   .replace(tzinfo=LOCAL_TZ).timestamp() * 1000)
                 source_name = f"巡检接口/{entry['report_name']}"
                 local_rows = self._local_point_rows(building, contract["discipline"], group)
@@ -918,7 +921,7 @@ class InspectionDataUploadService:
                         missing_sample_counts[point_id, device, metric] += 1
                 combined["sources"][family] = {
                     **contract, "source_family": family, "source_file": source_name,
-                    "source_time": entry["value_time"] if force_refresh else entry["query_end"],
+                    "source_time": entry["value_time"], "query_end": entry["query_end"],
                     "bucket_kind": "latest", "bucket_key": entry["bucket_key"],
                     **({"zero_filled_point_ids": entry["zero_filled_point_ids"]} if missing_rows else {}),
                     **({"zero_filled_sample_point_ids": entry["zero_filled_sample_point_ids"],

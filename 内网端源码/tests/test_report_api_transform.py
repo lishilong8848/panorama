@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.modules.shared_bridge.service.report_api_transform import is_usable_report_sample, normalize_report_rows
+from app.modules.shared_bridge.service.report_api_transform import ReportNoSamples, is_usable_report_sample, normalize_report_rows
 
 
 @pytest.mark.parametrize("value,usable", [
@@ -132,3 +132,36 @@ def test_sample_gaps_preserve_negative_values_and_written_state_tokens():
     rows = normalize_report_rows(grid, {}, source_family="handover_log_family", missing_samples=missing)
     assert [row[4:] for row in rows[3:]] == [["-1", 0], ["运行", None]]
     assert [item["zero_filled"] for item in missing] == [True, False]
+
+
+@pytest.mark.parametrize("family", ["branch_power_family", "branch_current_family", "branch_switch_family",
+                                     "building_full_cabinet_power_family", "monthly_report_family"])
+def test_full_day_requires_a_real_reading_in_business_hours(family):
+    from datetime import datetime, timedelta
+
+    day = datetime(2026, 11, 26)
+    times = [(day + timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S") for i in range(-1, 27)]
+    before, after, midnight = 0, 27, 25
+    labels = ["房间", "机列", "支路"] if family.startswith("branch_") else ["", "E楼", "设备", "功率"]
+    values = ["0"] * len(times)
+    for index in (before, midnight, after):
+        values[index] = "--"
+    mixed = list(values)
+    mixed[1] = "--"  # Business date 00:00.
+    gaps = []
+    rows = normalize_report_rows(
+        [[""] * len(labels) + times, [*labels, *values], [*labels, *mixed]],
+        {1: "1_2", 2: "2_3"}, source_family=family, missing_samples=gaps, business_date="2026-11-26",
+        query_start="2026-11-25 23:50:00", query_end="2026-11-27 02:20:00", time_tolerance_sec=3600,
+    )
+    assert [item["count"] for item in gaps] == [3, 4]
+    assert rows[3][len(labels) + 1] == "0"
+    assert rows[3][-1] == (None if family == "monthly_report_family" else 0)
+    padding_only = ["--"] * len(times)
+    padding_only[before] = padding_only[after] = "1"
+    options = dict(source_family=family, missing_samples=[], business_date="2026-11-26",
+                   query_start="2026-11-25 23:50:00", query_end="2026-11-27 02:20:00", time_tolerance_sec=3600)
+    with pytest.raises(ReportNoSamples):
+        normalize_report_rows([[""] * len(labels) + times, labels + padding_only], {1: "1_2"}, **options)
+    padding_only[midnight if family == "monthly_report_family" else 1] = "0"
+    normalize_report_rows([[""] * len(labels) + times, labels + padding_only], {1: "1_2"}, **options)

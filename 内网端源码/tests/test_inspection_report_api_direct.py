@@ -12,8 +12,8 @@ from handover_log_module.service.handover_download_service import HandoverDownlo
 
 
 FAMILY = next(iter(INSPECTION_REPORT_TEMPLATES))
-START = datetime(2026, 11, 4, 9, 40)
-END = datetime(2026, 11, 4, 10)
+START = datetime(2026, 11, 4, 9, 35)
+END = datetime(2026, 11, 4, 9, 55)
 
 
 def table(ids=("1_2", "1_3"), stamp="2026-11-04 09:45:00"):
@@ -65,7 +65,7 @@ def test_direct_protocol_default_points_and_first_sample(building, family):
     result = api._query_once(client, building=building, source_family=family, rules={}, start=START, end=END)
     assert result == {"schema_version": 1, "building": building, "source_family": family,
                       "report_name": INSPECTION_REPORT_TEMPLATES[family],
-                      "query_start": "2026-11-04 09:40:00", "query_end": "2026-11-04 10:00:00",
+                      "query_start": "2026-11-04 09:35:00", "query_end": "2026-11-04 09:55:00",
                       "value_time": "2026-11-04 09:45:00", "rows": [["位置", "设备", "测点0", "0"], ["位置", "设备", "测点1", "1"]],
                       "point_ids": ["1_2", "1_3"], "requested_point_ids": ["1_2", "1_3"], "point_overrides": {}}
     assert client.closed
@@ -140,7 +140,7 @@ def test_partial_without_valid_sample_or_structure_never_fills(html):
 
 def test_rejects_out_of_window_and_invalid_overrides():
     with pytest.raises(ValueError, match="查询窗口"):
-        query(Client(table(stamp="2026-11-04 09:35:00")))
+        query(Client(table(stamp="2026-11-04 09:30:00")))
     for rules in ({"baseline": []}, {"remove": ["1_2", "1_3"]}, {"add": ["bad"]}):
         with pytest.raises(ValueError):
             query(Client(table()), rules)

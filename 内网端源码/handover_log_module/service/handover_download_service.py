@@ -19,6 +19,8 @@ from app.config.energy_report_download_config import (
     energy_report_period,
 )
 from app.modules.shared_bridge.service.report_api_query import query_report_json
+from app.modules.shared_bridge.service.report_api_transform import ReportNoSamples
+from app.modules.shared_bridge.service.report_missing_notice import enqueue_empty_report_notice
 from app.modules.shared_bridge.service.handover_excel_source import HANDOVER_FAMILIES, handover_excel_payload
 from app.shared.utils.atomic_file import atomic_write_text
 from app.shared.utils.report_source_json import validate_report_source_json
@@ -891,7 +893,8 @@ class HandoverDownloadService:
                 except Exception as exc:  # noqa: BLE001
                     if attempt == max_attempts:
                         emit_log(f"[动环报表API][{building}] 获取失败: family={family}, error={exc}")
-                        return {"building": building, "success": False, "file_path": "", "error": str(exc)}
+                        return {"building": building, "success": False, "file_path": "", "error": str(exc),
+                                **({"all_samples_missing": True} if isinstance(exc, ReportNoSamples) else {})}
                     else:
                         emit_log(f"[动环报表API][{building}] 获取失败，准备重试: family={family}, attempt={attempt}/{max_attempts}")
                         if retry_wait:
@@ -971,6 +974,16 @@ class HandoverDownloadService:
         family = api_families.get(report_kind)
         api_success = []
         api_errors = {}
+        api_empty = set()
+
+        def notify_empty(building):
+            enqueue_empty_report_notice(
+                {"paths": self.config.get("_global_paths", {})}, family=family,
+                report_label=sheet_name or template_name, building=building,
+                window=source_business_date or duty_date_text or end_time_text[:13], duty_shift=duty_shift_text or "",
+                query_start=start_time, query_end=end_time_text,
+            )
+
         if family:
             api_result = self._run_report_api(
                 buildings=target_buildings, family=family, template_name=template_name,
@@ -979,7 +992,10 @@ class HandoverDownloadService:
                 is_shift_window=is_shift_window, source_business_date=source_business_date,
                 reuse_cached=reuse_cached, emit_log=emit_log,
             )
+            api_empty = {i["building"] for i in api_result["failed"] if i.get("all_samples_missing")}
             if family not in HANDOVER_FAMILIES or not api_result["failed"]:
+                for building in api_empty:
+                    notify_empty(building)
                 return api_result
             api_success = api_result["success_files"]
             api_errors = {i["building"]: i.get("error", "") for i in api_result["failed"]}
@@ -1131,9 +1147,13 @@ class HandoverDownloadService:
                             emit_log(f"[交接班下载][{b}] Excel兜底已通过源表校验："
                                      f"{excel['returned_point_count']} 个测点，等待登记共享文件")
                         except Exception as exc:
+                            if isinstance(exc, ReportNoSamples):
+                                api_empty.add(b)
                             item.update(success=False, error=str(exc), file_path="")
                     if not item.get("success"):
                         item["error"] = f"API: {api_errors[b]}；Excel: {item.get('error', '')}"
+                        if b in api_empty:
+                            notify_empty(b)
                 if not bool(item.get("success")):
                     continue
                 building = str(item.get("building", "")).strip()

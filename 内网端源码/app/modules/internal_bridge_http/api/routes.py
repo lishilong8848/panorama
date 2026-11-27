@@ -269,10 +269,10 @@ def put_inspection_point_rules(request: Request, payload: Dict[str, Any]) -> Dic
 
 
 @router.get("/inspection/snapshot")
-def get_inspection_snapshot(request: Request, source_date: str, bucket_key: str = "") -> Dict[str, Any]:
+def get_inspection_snapshot(request: Request, source_date: str, bucket_key: str = "", building: str = "") -> Dict[str, Any]:
     cache = _inspection_cache(request)
     try:
-        return cache.read_inspection_snapshot(source_date=source_date, bucket_key=bucket_key)
+        return cache.read_inspection_snapshot(source_date=source_date, bucket_key=bucket_key, building=building)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

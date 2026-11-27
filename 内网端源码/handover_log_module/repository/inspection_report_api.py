@@ -4,12 +4,13 @@ import math
 import re
 from datetime import datetime, timedelta
 
-from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES
+from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES, inspection_hour_bucket
 from app.modules.shared_bridge.service.report_api_query import (
     _body_parameters, _encode_parameters, _init_parameters, _point_parameters,
     _report_session_id, _source_parameters,
 )
 from app.modules.shared_bridge.service.report_api_session import BmsReportApiSession, ReportApiError, ReportApiUnauthorized
+from app.modules.shared_bridge.service.report_api_transform import ReportNoSamples
 from app.modules.shared_bridge.service.report_grid_parser import ReportGridParseError, parse_report_grid
 
 
@@ -25,6 +26,7 @@ def _usable_reading(value) -> bool:
 
 
 def _first_sample(grid: list, start: datetime, end: datetime, *, ids=None, sample_ids=None, latest=False, allow_empty=False) -> tuple[str, list]:
+    bucket = inspection_hour_bucket(end)
     for header_index, row in enumerate(grid[:40]):
         candidates = []
         for column, value in enumerate(row[4:], 4):
@@ -36,6 +38,8 @@ def _first_sample(grid: list, start: datetime, end: datetime, *, ids=None, sampl
                 if latest:
                     continue
                 raise ValueError("巡检接口返回的首个时刻不在本次查询窗口内")
+            if inspection_hour_bucket(stamp) != bucket:
+                continue
             candidates.append((stamp, column))
             if not latest:
                 break
@@ -57,8 +61,8 @@ def _first_sample(grid: list, start: datetime, end: datetime, *, ids=None, sampl
             raise ValueError("巡检分组不是有效空表")
         if allow_empty or any(sample[3] not in (None, "") for sample in rows):
             return stamp.strftime("%Y-%m-%d %H:%M:%S"), rows
-        raise ValueError("巡检接口未返回有效测点")
-    raise ValueError("巡检接口缺少窗口内真实采样时间" if latest else "巡检接口缺少时间表头")
+        raise ReportNoSamples("巡检接口未返回有效测点")
+    raise ValueError("巡检接口缺少本时段真实采样时间或时间表头")
 
 
 def _select_points(current: list[str], rules: dict) -> list[str]:
@@ -115,7 +119,7 @@ def _query_once(client, *, building: str, source_family: str, rules: dict, start
         sample_ids.extend(ids)
         rows.extend(samples)
     if not any(_usable_reading(sample[3]) for sample in rows):
-        raise ValueError("巡检接口未返回有效测点")
+        raise ReportNoSamples("巡检接口未返回有效测点")
     missing_samples = []
     position = device = ""
     for point_id, row in zip(sample_ids, rows):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from app.modules.shared_bridge.service.report_api_session import (
@@ -10,7 +10,7 @@ from app.modules.shared_bridge.service.report_api_session import (
     ReportApiError,
     ReportApiUnauthorized,
 )
-from app.modules.shared_bridge.service.report_api_transform import normalize_report_rows
+from app.modules.shared_bridge.service.report_api_transform import daily_required_hours, normalize_report_rows
 from app.modules.shared_bridge.service.report_grid_parser import parse_report_grid
 
 
@@ -113,6 +113,7 @@ def _body_parameters(
 def _query_once(
     client: BmsReportApiSession, *, report_name: str, query_start: str,
     query_end: str, scale_label: str, sheet_name: str, zero_fill_building: str, source_family: str,
+    business_date: str = "",
 ) -> tuple[list[list[Any]], dict[int, str], int | None, list[str], list[dict]]:
     row = client.find_report(report_name)
     parameters = _source_parameters(row)
@@ -158,18 +159,15 @@ def _query_once(
         missing_samples=missing_samples,
         query_start=query_start, query_end=query_end,
         time_tolerance_sec=_SCALE_SECONDS[scale_label],
+        business_date=business_date,
     )
     return rows, result["row_ids"], len(points) if points is not None else None, filled_ids, missing_samples
 
 
 def _validate_daily_hour_columns(rows: list[list[Any]], *, family: str, business_date: str,
                                  start: datetime, end: datetime) -> None:
-    daily = {"monthly_report_family", "branch_power_family", "branch_current_family",
-             "branch_switch_family", "building_full_cabinet_power_family"}
-    if family not in daily or not business_date:
-        return
-    day = datetime.strptime(business_date, "%Y-%m-%d")
-    if start > day or end < day + timedelta(days=1):
+    required = daily_required_hours(family, business_date, start, end)
+    if not required:
         return
     available = set()
     for value in rows[1]:
@@ -177,8 +175,7 @@ def _validate_daily_hour_columns(rows: list[list[Any]], *, family: str, business
             available.add(datetime.fromisoformat(str(value or "").strip().replace("/", "-")))
         except ValueError:
             continue
-    count = 25 if family == "monthly_report_family" else 24
-    missing = [day + timedelta(hours=i) for i in range(count) if day + timedelta(hours=i) not in available]
+    missing = sorted(required - available)
     if missing:
         raise ReportApiError("动环报表缺少业务日小时列: " + ",".join(x.strftime("%Y-%m-%d %H:%M") for x in missing))
 
@@ -212,7 +209,7 @@ def query_report_json(
                     rows, row_ids, requested_count, filled_ids, missing_samples = _query_once(
                         client, report_name=report_name, query_start=query_start, query_end=query_end,
                         scale_label=scale_label, sheet_name=sheet_name,
-                        zero_fill_building=building, source_family=source_family,
+                        zero_fill_building=building, source_family=source_family, business_date=business_date,
                     )
                     _validate_daily_hour_columns(rows, family=source_family, business_date=business_date, start=start, end=end)
                 break

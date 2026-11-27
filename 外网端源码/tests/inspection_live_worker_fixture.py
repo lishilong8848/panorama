@@ -58,9 +58,9 @@ def main():
             set_dataset_end(doc, upload.datetime.now().replace(microsecond=0))
             doc["collection_started_at"] = int(time.time() * 1000)
             return {"ok": True, "accepted": True}
-        def get_latest_inspection_points(self, **kwargs):
+        def get_inspection_snapshot(self, **kwargs):
             assert kwargs["building"] == building
-            return {"ok": True, "datasets": copy.deepcopy(list(documents.values()))}
+            return {"ok": True, "bucket_key": kwargs["bucket_key"], "datasets": copy.deepcopy(list(documents.values()))}
 
     cloud_path = output / ("cloud-" + name + ".json")
     class IsolatedCloud(Cloud):

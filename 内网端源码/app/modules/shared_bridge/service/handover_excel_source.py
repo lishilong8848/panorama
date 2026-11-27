@@ -5,7 +5,9 @@ import re
 from zipfile import ZipFile
 
 from handover_log_module.repository.excel_reader import load_workbook_quietly
-from app.modules.shared_bridge.service.report_api_transform import _header_time, is_usable_report_sample, normalize_report_rows
+from app.modules.shared_bridge.service.report_api_transform import (
+    ReportNoSamples, _header_time, is_usable_report_sample, normalize_report_rows,
+)
 
 
 HANDOVER_FAMILIES = {"handover_log_family", "handover_capacity_report_family"}
@@ -51,7 +53,7 @@ def handover_excel_payload(path: Path, *, family: str, building: str,
         raise ValueError(f"交接班 Excel 位置列楼栋不匹配：预期{building}，实际{sorted(floors)}")
     if not any(len(row) > 4 and row[3] and any(is_usable_report_sample(v, family)
                for v in row[4:4 + len(times)]) for row in rows[3:]):
-        raise ValueError("交接班 Excel 没有有效测点读数")
+        raise ReportNoSamples("交接班 Excel 没有有效测点读数")
     return {
         "schema_version": 1, "source_family": family, "building": building, "source_format": "xlsx",
         "business_date": business_date, "query_start": times[0].strftime("%Y-%m-%d %H:%M:%S"),

@@ -10,6 +10,7 @@ import pytest
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
 from app.modules.internal_bridge_http.service.internal_bridge_http_runner import InternalBridgeHttpTaskRunner
+from app.modules.shared_bridge.service.report_missing_notice import ReportMissingNoticeOutbox
 from app.modules.shared_bridge.service.shared_source_cache_service import SharedSourceCacheService
 from handover_log_module.service import handover_download_service as download
 
@@ -191,6 +192,27 @@ def test_failed_api_and_wrong_building_fallback_return_both_causes(monkeypatch, 
     assert not result["success_files"]
     assert "API: 接口超时" in result["failed"][0]["error"]
     assert "Excel:" in result["failed"][0]["error"] and "楼栋不匹配" in result["failed"][0]["error"]
+
+
+@pytest.mark.parametrize("fallback_reading", [0, "--"])
+def test_no_data_alert_waits_for_excel_fallback(monkeypatch, tmp_path, fallback_reading):
+    paths = {"runtime_state_root": str(tmp_path / "state")}
+    svc = download.HandoverDownloadService({
+        "_global_paths": paths,
+        "download": {"report_kind": "capacity", "template_name": "交接班容量报表", "scale_label": "5分钟", "max_retries": 1},
+        "sites": [{"building": "C楼", "enabled": True}],
+    }, business_root_override=tmp_path)
+    monkeypatch.setattr(download, "query_report_json", Mock(side_effect=download.ReportNoSamples("API无实测")))
+    raw = workbook(tmp_path / "source.xlsx", value=fallback_reading)
+    monkeypatch.setattr(download.DownloadGateway, "download_handover_xlsx_batch", lambda *_args, **_kwargs: [
+        {"building": "C楼", "success": True, "file_path": str(raw)},
+    ])
+    result = svc.run(buildings=["C楼"], start_time="2026-11-26 08:55:00", end_time="2026-11-26 09:15:00")
+    notice = ReportMissingNoticeOutbox({"paths": paths}).claim()
+    if fallback_reading == 0:
+        assert result["success_files"] and notice is None
+    else:
+        assert result["failed"] and "所有测点均无有效实测" in notice["message"]
 
 
 def test_night_bridge_failure_reports_the_only_incomplete_building(monkeypatch):

@@ -5,7 +5,6 @@ import concurrent.futures
 import copy
 import hashlib
 import json
-import logging
 import re
 import shutil
 import threading
@@ -27,11 +26,8 @@ from app.modules.shared_bridge.service.alarm_event_page_export_service import (
     write_alarm_event_json,
 )
 from app.modules.shared_bridge.service.alarm_external_selection import build_alarm_external_selection
-from app.modules.shared_bridge.service.report_missing_notice import (
-    MISSING_NOTICE_FIELDS,
-    ReportMissingNoticeOutbox,
-    build_report_missing_notices,
-)
+from app.modules.shared_bridge.service.report_api_transform import ReportNoSamples
+from app.modules.shared_bridge.service.report_missing_notice import enqueue_empty_report_notice
 from app.modules.shared_bridge.service.bridge_status_presenter import (
     present_alarm_event_family,
     present_current_hour_refresh_overview,
@@ -2680,7 +2676,6 @@ class SharedSourceCacheService:
                 return self._store_entry(source_family=normalized_family, building=building, bucket_kind=bucket_kind,
                     bucket_key=bucket_key, duty_date=duty_date, duty_shift=duty_shift, source_path=json_path,
                     status=status, metadata={**(metadata or {}), "source_format": "xlsx"})
-        notice_payload = {}
         if normalized_family in REPORT_JSON_FAMILIES and source_path.suffix.lower() == ".json":
             daily_families = {
                 FAMILY_MONTHLY_REPORT, FAMILY_BRANCH_POWER, FAMILY_BRANCH_CURRENT,
@@ -2693,7 +2688,6 @@ class SharedSourceCacheService:
             )
             if normalized_family in HANDOVER_FAMILIES and (metadata or {}).get("recovered_from_existing_file"):
                 self.validate_handover_recovered_window(doc, bucket_kind, bucket_key, duty_date, duty_shift)
-            notice_payload = {key: doc[key] for key in MISSING_NOTICE_FIELDS if key in doc}
             del doc
         target_path = self._source_target_path(
             source_family=normalized_family,
@@ -2758,21 +2752,6 @@ class SharedSourceCacheService:
             size_bytes=int(cached["size_bytes"]),
             metadata=entry_metadata,
         )
-        if status == "ready" and not entry_metadata["alias_only"] and source_path.suffix.lower() == ".json":
-            try:
-                if normalized_family in INSPECTION_REPORT_TEMPLATES:
-                    notice_payload = self._read_inspection_document(
-                        source_path, building=building, family=normalized_family, bucket=bucket_key,
-                    )
-                if notice_payload:
-                    notices = build_report_missing_notices(
-                        notice_payload, family=normalized_family, report_label=FAMILY_LABELS[normalized_family],
-                        building=building, window=bucket_key, duty_shift=duty_shift,
-                    )
-                    if notices:
-                        ReportMissingNoticeOutbox(self.runtime_config).enqueue_many(notices)
-            except Exception:
-                logging.getLogger(__name__).warning("报表缺测提醒入队失败；共享文件已就绪")
         if normalized_family == FAMILY_ALARM_EVENT:
             try:
                 if source_path.exists() and source_path.resolve() != target_path.resolve():
@@ -4751,8 +4730,17 @@ class SharedSourceCacheService:
         return rules
 
     def _inspection_selection_matches(self, entry: dict, metadata: dict) -> bool:
-        if entry.get("bucket_key") != inspection_hour_bucket():
+        bucket_key = entry.get("bucket_key")
+        if bucket_key != inspection_hour_bucket():
             return True
+        # Older cache rows lack the real sample timestamp; replay only if the whole query was in this slot.
+        stamp = str(metadata.get("value_time") or metadata.get("query_start") or "")
+        if stamp:
+            try:
+                if inspection_hour_bucket(datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")) != bucket_key:
+                    return False
+            except ValueError:
+                return False
         rules = self._inspection_point_rules()
         return metadata.get("point_overrides", {}) == rules.get(entry.get("building"), {}).get(entry.get("source_family"), {})
 
@@ -4789,11 +4777,19 @@ class SharedSourceCacheService:
             business_root_override=self._tmp_root / self._family_dir_name(source_family) / self._bucket_path_segment(bucket_key) / building,
         )
         collection_started_at = int(time.time() * 1000)
-        result = service.run_inspection_data_only(building=building, source_family=source_family, emit_log=emit_log)
+        try:
+            result = service.run_inspection_data_only(building=building, source_family=source_family, emit_log=emit_log)
+        except ReportNoSamples:
+            if not self._stop_event.is_set() and inspection_hour_bucket() == bucket_key:
+                enqueue_empty_report_notice(self.runtime_config, family=source_family, building=building,
+                                            report_label=INSPECTION_REPORT_TEMPLATES[source_family], window=bucket_key)
+            raise
         if force_refresh_existing:
             result = {**result, "collection_started_at": collection_started_at}
         if inspection_hour_bucket(datetime.strptime(result["query_end"], "%Y-%m-%d %H:%M:%S")) != bucket_key:
             raise RuntimeError("巡检接口查询时间已跨时段，不登记到旧时段")
+        if inspection_hour_bucket(datetime.strptime(result["value_time"], "%Y-%m-%d %H:%M:%S")) != bucket_key:
+            raise RuntimeError("巡检接口实测时间不属于本时段，不登记旧采样")
         if self._stop_event.is_set():
             raise RuntimeError("巡检接口采集已取消")
         self._tmp_root.mkdir(parents=True, exist_ok=True)
@@ -4807,6 +4803,7 @@ class SharedSourceCacheService:
                 metadata={
                     "family": source_family, "building": building, "template_name": INSPECTION_REPORT_TEMPLATES[source_family],
                     "query_start": result["query_start"], "query_end": result["query_end"], "scale_label": "5分钟",
+                    "value_time": result["value_time"],
                     "point_overrides": result.get("point_overrides", {}),
                 },
             )
@@ -4825,7 +4822,7 @@ class SharedSourceCacheService:
             raise ValueError("巡检快照标识或测点数据无效")
         return doc
 
-    def read_inspection_snapshot(self, *, source_date: str, bucket_key: str = "") -> Dict[str, Any]:
+    def read_inspection_snapshot(self, *, source_date: str, bucket_key: str = "", building: str = "") -> Dict[str, Any]:
         if self.store is None or self.role_mode != "internal":
             raise RuntimeError("巡检接口缓存未初始化")
         if datetime.strptime(source_date, "%Y-%m-%d").date().isoformat() != source_date:
@@ -4835,7 +4832,10 @@ class SharedSourceCacheService:
             if bucket_key not in buckets:
                 raise ValueError("巡检时段必须是所选日期的偶数整点")
             buckets = [bucket_key]
-        required = [(building, family) for building in ("D楼", "E楼") for family in INSPECTION_REPORT_TEMPLATES]
+        if building and building not in {"D楼", "E楼"}:
+            raise ValueError("巡检测点只支持 D楼、E楼")
+        required = [(b, family) for b in ((building,) if building else ("D楼", "E楼"))
+                    for family in INSPECTION_REPORT_TEMPLATES]
         by_bucket = {bucket: {} for bucket in buckets}
         for building, family in required:
             entries = self.store.list_source_cache_entries(
@@ -8503,6 +8503,7 @@ class SharedSourceCacheService:
                 if normalized_family in INSPECTION_REPORT_TEMPLATES:
                     doc = self._read_inspection_document(candidate, building=building, family=normalized_family, bucket=bucket_key)
                     metadata["point_overrides"] = doc.get("point_overrides", {})
+                    metadata["value_time"] = doc.get("value_time", "")
                     if not self._inspection_selection_matches(doc, metadata):
                         continue
                 return self.store_existing_source_file(
