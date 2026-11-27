@@ -818,6 +818,7 @@ class AppContainer:
         if watchdog is not None and watchdog.is_stopped():
             return {"ok": False, "skipped": "补传巡检已停止（关闭中），不再派发"}
         from app.modules.inspection_data.service.point_settings import (
+            point_config_retry_pending,
             read_inspection_upload_retrigger,
             read_inspection_retrigger_dispatch_state,
             record_inspection_retrigger_dispatch,
@@ -826,6 +827,8 @@ class AppContainer:
         marker = read_inspection_upload_retrigger(self.runtime_config, building=building)
         if not marker:
             return {"ok": False, "skipped": "无待补派标记"}
+        if point_config_retry_pending(self.runtime_config, building):
+            return {"ok": False, "skipped": "飞书测点配置核验退避中，待补传标记保留"}
         dedupe_key = f"inspection_data_upload:retrigger:{building[0]}"
         if self.job_service.find_active_job_by_dedupe_key(dedupe_key):
             return {"ok": False, "skipped": "已有排队补派等待"}
@@ -859,7 +862,7 @@ class AppContainer:
         from itertools import cycle
         from time import monotonic
 
-        from app.modules.inspection_data.service.point_config_bitable import POINT_CONFIG_TABLES, point_config_client
+        from app.modules.inspection_data.service.point_config_bitable import POINT_CONFIG_TABLES
         from app.modules.inspection_data.service.point_settings import refresh_cloud_point_settings
 
         interval = self.runtime_config.get("inspection_data_upload", {}).get(
@@ -870,8 +873,6 @@ class AppContainer:
             interval = 10.0
         next_check = 0.0
         buildings = cycle(POINT_CONFIG_TABLES)
-        building_due = {}
-        retry_delay = {}
         previous_errors = {}
 
         def poll_and_dispatch():
@@ -885,34 +886,16 @@ class AppContainer:
             if (now >= next_check
                     and self._configured_deployment_snapshot().get("role_mode") == "external"
                     and self.runtime_config.get("inspection_data_upload", {}).get("enabled", True)):
-                # Check at most one building per tick; skip buildings cooling down.
-                for _ in POINT_CONFIG_TABLES:
-                    building = next(buildings)
-                    if now >= building_due.get(building, 0.0):
-                        break
-                else:
-                    return self.dispatch_pending_inspection_retrigger()
+                building = next(buildings)
                 try:
-                    client = point_config_client(self.runtime_config)
-                    client.timeout = min(client.timeout, 8)
-                    client.request_retry_count = 0
-                    client.api_retry_attempt_limit = 1
-                    _, _, errors = refresh_cloud_point_settings(self.runtime_config, buildings=(building,), client=client)
+                    _, _, errors = refresh_cloud_point_settings(self.runtime_config, buildings=(building,), use_cache=True)
                     error = errors.get(building)
                 except Exception as exc:
                     error = str(exc)
                 if error and previous_errors.get(building) != error:
                     self.add_system_log(f"[巡检数据处理] {building}飞书测点配置待核验：{error}")
                 previous_errors[building] = error
-                finished_at = monotonic()
-                if error:
-                    delay = min(retry_delay.get(building, 15) * 2, 300)
-                    retry_delay[building] = delay
-                else:
-                    retry_delay.pop(building, None)
-                    delay = 30
-                building_due[building] = finished_at + delay
-                next_check = finished_at + 15
+                next_check = monotonic() + 15
             return self.dispatch_pending_inspection_retrigger()
 
         return InspectionRetriggerWatchdog(

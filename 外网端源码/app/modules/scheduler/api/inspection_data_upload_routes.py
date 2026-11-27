@@ -40,7 +40,7 @@ def _read_point_settings(config, *, building=None, fresh=False):
             if cached:
                 return cached
         buildings = (building,) if building else None
-        settings, _, errors = refresh_cloud_point_settings(config, buildings=buildings)
+        settings, _, errors = refresh_cloud_point_settings(config, buildings=buildings, use_cache=not fresh)
         if errors:
             raise PointConfigUnavailable("；".join(f"{b}：{message}" for b, message in errors.items()))
         return settings

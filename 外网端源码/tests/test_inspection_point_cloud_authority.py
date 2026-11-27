@@ -1,13 +1,18 @@
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
+import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.modules.inspection_data.service import point_config_bitable as cloud
 from app.modules.inspection_data.service import point_settings as settings
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.scheduler.api.inspection_data_upload_routes import router
 
 
@@ -134,6 +139,9 @@ def test_save_writes_only_changed_cloud_fields_and_never_touches_other_building(
     assert updated["settings"][D][HVAC]["points"][BASE_POINT] == "多维表直接修改"
     assert client.fields(D)["人工列"] == "保留"
     assert bridge.put_inspection_point_rules.call_args.args[0][E] == settings.query_rules(before)[E]
+    client.read.clear()
+    after, _, errors = settings.refresh_cloud_point_settings(config, buildings=(D,), use_cache=True)
+    assert not errors and not client.read and after[D] == updated["settings"][D]
 
 
 def test_pending_local_and_conflicting_cloud_edit_cannot_overwrite(setup):
@@ -195,6 +203,8 @@ def test_background_polls_each_building_and_dispatches_fresh_revision(setup, mon
     d_table = cloud.POINT_CONFIG_TABLES[D]
     client.fail_read.add(d_table)
     client.timeout = 30
+    after_expiry = time.time() + settings.POINT_CONFIG_CACHE_SEC
+    monkeypatch.setattr("time.time", lambda: after_expiry)
     monkeypatch.setattr(cloud, "point_config_client", lambda _: client)
     monotonic = Mock(side_effect=[0.0, 0.0, 20.0, 20.0])
     monkeypatch.setattr("time.monotonic", monotonic)
@@ -225,6 +235,8 @@ def test_background_backs_off_only_failed_building_and_resets_on_recovery(setup,
     client.timeout = 30
     client.read.clear()
     now = 0
+    after_expiry = time.time() + settings.POINT_CONFIG_CACHE_SEC
+    monkeypatch.setattr("time.time", lambda: after_expiry + now)
     monkeypatch.setattr("time.monotonic", lambda: now)
     dispatch = Mock(return_value={"ok": True})
     container = SimpleNamespace(runtime_config=config, add_system_log=Mock(),
@@ -233,10 +245,10 @@ def test_background_backs_off_only_failed_building_and_resets_on_recovery(setup,
     watchdog = AppContainer._build_inspection_retrigger_watchdog(container)
     e_checks = []
     d_checks = []
-    for now in range(0, 1126, 15):
-        if now in (1065, 1125):
+    for now in range(0, 1396, 15):
+        if now in (1065, 1395):
             client.fail_read.remove(e_table)
-        elif now == 1095:
+        elif now == 1365:
             client.fail_read.add(e_table)
         client.read.clear()
         assert watchdog._dispatch() == {"ok": True}
@@ -248,13 +260,10 @@ def test_background_backs_off_only_failed_building_and_resets_on_recovery(setup,
         if now < 1065:
             assert settings.load_point_settings(config)[E] == cached[E]
 
-    assert e_checks == [15, 45, 105, 225, 465, 765, 1065, 1095, 1125]
-    assert d_checks == list(range(0, 1126, 30))
-    assert dispatch.call_count == len(range(0, 1126, 15))
+    assert e_checks == [15, 45, 105, 225, 465, 765, 1065, 1365, 1395]
+    assert d_checks == list(range(0, 1396, settings.POINT_CONFIG_CACHE_SEC))
+    assert dispatch.call_count == len(range(0, 1396, 15))
     assert container.add_system_log.call_count == 2
-    assert client.timeout == 8
-    assert client.request_retry_count == 0
-    assert client.api_retry_attempt_limit == 1
     assert EXTRA_POINT in settings.load_point_settings(config)[E][ELECTRICAL]["points"]
     assert not client.writes
 
@@ -273,3 +282,93 @@ def test_verified_review_cache_does_not_repeat_slow_cloud_reads(setup):
         client.fields(D)["测点备注"] = "飞书修改后手工刷新"
         assert api.get(url + "?fresh=true").json()["settings"][ELECTRICAL]["points"][BASE_POINT] == "飞书修改后手工刷新"
         assert client.read == [cloud.POINT_CONFIG_TABLES[D]]
+
+
+def test_freshness_is_persisted_and_credentials_cannot_reuse_other_cache(setup, monkeypatch):
+    config, client, _ = setup
+    client.app_id, client.app_secret = "app-one", "secret-one"
+    now = time.time()
+    monkeypatch.setattr("time.time", lambda: now)
+    _, revision, _ = settings.refresh_cloud_point_settings(config, buildings=(D,), use_cache=True)
+    restarted = FakeConfigBitable()
+    restarted.app_id, restarted.app_secret = client.app_id, client.app_secret
+    _, cached_revision, errors = settings.refresh_cloud_point_settings(
+        config, buildings=(D,), client=restarted, use_cache=True)
+    assert not errors and cached_revision == revision and restarted.read == []
+    assert "secret-one" not in settings._path(config).read_text(encoding="utf-8")
+    restarted.app_secret = "rotated"
+    _, new_revision, errors = settings.refresh_cloud_point_settings(
+        config, buildings=(D,), client=restarted, use_cache=True)
+    assert not errors and new_revision == revision and restarted.read == [cloud.POINT_CONFIG_TABLES[D]]
+    now += settings.POINT_CONFIG_CACHE_SEC
+    _, checked_revision, _ = settings.refresh_cloud_point_settings(config, buildings=(D,), client=restarted, use_cache=True)
+    assert checked_revision == revision and len(restarted.read) == 2
+
+
+def test_automatic_checks_share_backoff_but_independent_floor_keeps_working(setup, monkeypatch):
+    from app.bootstrap.container import AppContainer
+
+    config, client, _ = setup
+    known, _, _ = settings.refresh_cloud_point_settings(config)
+    d_table, e_table = cloud.POINT_CONFIG_TABLES[D], cloud.POINT_CONFIG_TABLES[E]
+    change_on_cloud(client, E, EXTRA_POINT, "B6")
+    client.fail_read.add(d_table)
+    client.read.clear()
+    now = time.time() + settings.POINT_CONFIG_CACHE_SEC
+    monkeypatch.setattr("time.time", lambda: now)
+    verified, _, errors = settings.refresh_cloud_point_settings(config, use_cache=True)
+    assert set(errors) == {D} and verified[D] == known[D] and EXTRA_POINT in verified[E][ELECTRICAL]["points"]
+    assert client.read == [d_table, e_table]
+    assert settings.refresh_cloud_point_settings(config, use_cache=True)[2] == errors
+    assert client.read == [d_table, e_table]
+    container = SimpleNamespace(runtime_config=config, inspection_retrigger_watchdog=None,
+                                _configured_deployment_snapshot=lambda: {"role_mode": "external"})
+    assert "退避中" in AppContainer._dispatch_inspection_retrigger(container, D)["skipped"]
+    assert settings.read_inspection_upload_retrigger(config, building=D) is not None
+    client.fail_read.clear()
+    assert not settings.refresh_cloud_point_settings(config, buildings=(D,), use_cache=False)[2]
+    assert client.read == [d_table, e_table, d_table]
+    assert not settings.point_config_retry_pending(config, D)
+
+
+def test_simultaneous_checks_of_expired_table_do_one_cloud_read(setup):
+    config, client, _ = setup
+    started, release = threading.Event(), threading.Event()
+    original = client.list_records
+
+    def paused(*args, **kwargs):
+        started.set()
+        assert release.wait(4)
+        return original(*args, **kwargs)
+
+    client.list_records = paused
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(settings.refresh_cloud_point_settings, config, buildings=(D,), use_cache=True)
+        assert started.wait(4)
+        second = pool.submit(settings.refresh_cloud_point_settings, config, buildings=(D,), use_cache=True)
+        release.set()
+        assert first.result(timeout=5) == second.result(timeout=5)
+    assert client.read == [cloud.POINT_CONFIG_TABLES[D]]
+
+
+def test_point_reader_reuses_session_and_retries_only_the_failed_page(monkeypatch):
+    client = FeishuBitableClient(
+        "fake-id", "fake-secret", "fake-base", "", "", timeout=30,
+        date_text_to_timestamp_ms_fn=lambda **_: 0, canonical_metric_name_fn=str, dimension_mapping={},
+    )
+    monkeypatch.setattr(FeishuBitableClient, "refresh_token", lambda *args, **kwargs: "fake-token")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    session = MagicMock()
+    session.__enter__.return_value = session
+    response1, response2 = Mock(status_code=200), Mock(status_code=200)
+    response1.json.return_value = {"code": 0, "data": {"items": [{"record_id": "a"}], "has_more": True, "page_token": "next"}}
+    response2.json.return_value = {"code": 0, "data": {"items": [{"record_id": "b"}], "has_more": False}}
+    session.request.side_effect = [response1, requests.exceptions.ConnectTimeout("page 2"), response2]
+    monkeypatch.setattr(cloud.requests, "Session", lambda: session)
+    with cloud.point_config_reader(client) as reader:
+        assert cloud.read_building_point_records(reader, D) == [{"record_id": "a"}, {"record_id": "b"}]
+    calls = session.request.call_args_list
+    assert [call.kwargs["params"].get("page_token") for call in calls] == [None, "next", "next"]
+    assert all(call.kwargs["timeout"] == (8, 20) for call in calls)
+    session.__exit__.assert_called_once()
+    assert client.request_sender is None and client.request_timeout is None and client.request_retry_count == 3

@@ -3395,6 +3395,11 @@ class SharedBridgeRuntimeService:
                 or not isinstance(lease, str) or not re.fullmatch(r"[a-f0-9]{32}", lease)
                 or not isinstance(message, str) or not message.strip()):
             return {"status": "failed", "summary": "缺测提醒格式无效"}
+        if message.lstrip().startswith("【报表缺测提醒】共享源文件已就绪"):
+            # Older inner instances still enqueue partial-gap pages. Acknowledge without contacting the robot.
+            self._report_missing_notice_receipt = (client.base_url, notice_id, lease, claimed_at + 300)
+            result = self._ack_report_missing_notice(client, notice_id, lease)
+            return {"status": "idle"} if result["status"] == "success" else result
         try:
             response = requests.post(
                 url, json={"msg_type": "text", "content": {"text": ensure_keyword(message[:1600], keyword)}},
@@ -3417,7 +3422,7 @@ class SharedBridgeRuntimeService:
                 return {"status": "success"}
         except Exception:
             pass
-        return {"status": "failed", "summary": "缺测提醒已发送，桥接回执未确认"}
+        return {"status": "failed", "summary": "缺测提醒处理后，桥接回执未确认"}
 
     def _refresh_internal_alert_status_cache(self) -> None:
         if self._store is None or not hasattr(self._store, "list_external_alert_projections"):

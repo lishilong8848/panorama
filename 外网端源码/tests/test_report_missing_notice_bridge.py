@@ -130,6 +130,31 @@ def test_lost_bridge_ack_retries_receipt_without_resending_robot_message(runtime
     post.assert_called_once()
 
 
+@pytest.mark.parametrize("detail", ["测点清单 132/318\n缺读数：40_0_1", "未返回测点：0 个；缺读数测点：1 个。"])
+def test_legacy_partial_notice_is_acknowledged_but_not_sent(runtime, monkeypatch, detail):
+    service, calls, post = runtime
+    client = service._internal_bridge_http_client
+    monkeypatch.setattr(client, "claim_report_missing_notice", Mock(return_value={
+        "notice_id": NOTICE_ID, "lease_token": LEASE,
+        "message": f"【报表缺测提醒】共享源文件已就绪\n报表：支路功率\n{detail}",
+    }))
+    assert service._poll_report_missing_notice() == {"status": "idle"}
+    assert len(calls) == 1 and calls[0][0].endswith("/ack")
+    assert json.loads(calls[0][1]) == {"notice_id": NOTICE_ID, "lease_token": LEASE}
+    post.assert_not_called()
+
+
+def test_all_samples_missing_notice_still_sends(runtime, monkeypatch):
+    service, _, post = runtime
+    client = service._internal_bridge_http_client
+    message = "【报表缺测提醒】本窗口所有测点均无有效实测，未发布空报表"
+    monkeypatch.setattr(client, "claim_report_missing_notice", Mock(return_value={
+        "notice_id": NOTICE_ID, "lease_token": LEASE, "message": message,
+    }))
+    assert service._poll_report_missing_notice()["status"] == "success"
+    assert message in post.call_args.kwargs["json"]["content"]["text"]
+
+
 @pytest.mark.parametrize("status", ["idle", "unavailable"])
 def test_idle_poll_does_not_touch_background_ui_or_logs(runtime, status):
     service, _, _ = runtime

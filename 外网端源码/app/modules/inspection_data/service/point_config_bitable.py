@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from copy import copy
+
+import requests
 
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableClient
 from app.modules.inspection_data.service.chiller_operating_points import CONTROL_GROUPS, OPERATING_ROLE_FIELD
 from app.modules.inspection_data.service.point_correction import CORRECTION_RULE_FIELD, normalize_correction_rules
 from app.modules.inspection_data.service.point_status import (
@@ -100,6 +105,22 @@ def point_config_client(config):
     from app.modules.inspection_data.service.inspection_data_upload_service import InspectionDataUploadService
 
     return InspectionDataUploadService(config).make_bitable_client()
+
+
+@contextmanager
+def point_config_reader(client):
+    if not isinstance(client, FeishuBitableClient):
+        yield client
+        return
+    with requests.Session() as session:
+        reader = copy(client)
+        reader.request_sender = session.request
+        reader.request_timeout = (min(8, client.timeout), min(20, client.timeout))
+        reader.timeout = min(8, client.timeout)
+        reader.request_retry_count = 1
+        reader.request_retry_interval_sec = 0.5
+        reader.api_retry_attempt_limit = 1
+        yield reader
 
 
 def _record_snapshot(rows):

@@ -848,7 +848,7 @@ class InspectionDataUploadService:
 
         require_current_bucket()
         point_settings, settings_revision, config_errors = refresh_cloud_point_settings(
-            self.runtime_config, buildings=requested, client=self.make_bitable_client(), schedule=not dry_run)
+            self.runtime_config, buildings=requested, client=self.make_bitable_client(), schedule=not dry_run, use_cache=True)
         if set(point_settings or {}) != set(self.cfg["buildings"]):
             raise RuntimeError("D/E楼尚未完成飞书测点配置的首次核验；保留原巡检数据")
         buildings = [b for b in requested if b not in config_errors]

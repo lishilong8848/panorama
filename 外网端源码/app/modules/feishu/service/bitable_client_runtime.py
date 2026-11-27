@@ -74,6 +74,8 @@ class FeishuBitableClient:
         self.timeout = int(auth.get("timeout", timeout) or timeout)
         self.request_retry_count = max(0, int(auth.get("request_retry_count", request_retry_count) or request_retry_count))
         self.api_retry_attempt_limit: Optional[int] = None
+        self.request_sender: Optional[Callable[..., requests.Response]] = None
+        self.request_timeout: Optional[tuple[float, float]] = None
         self.request_retry_interval_sec = max(0.0, float(auth.get("request_retry_interval_sec", request_retry_interval_sec) or request_retry_interval_sec))
         self._tenant_access_token: Optional[str] = None
         self._date_text_to_timestamp_ms_fn = date_text_to_timestamp_ms_fn
@@ -184,12 +186,12 @@ class FeishuBitableClient:
     def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         total_attempts = self.request_retry_count + 1
         req_kwargs = dict(kwargs)
-        timeout = req_kwargs.pop("timeout", self.timeout)
+        timeout = req_kwargs.pop("timeout", self.request_timeout or self.timeout)
         last_exc: Optional[Exception] = None
 
         for attempt in range(1, total_attempts + 1):
             try:
-                response = requests.request(
+                response = (self.request_sender or requests.request)(
                     method=method,
                     url=url,
                     timeout=timeout,

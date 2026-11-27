@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -10,7 +11,10 @@ from contextlib import contextmanager
 from os import fstat
 from pathlib import Path
 
+import requests
+
 from app.config.inspection_data_config import INSPECTION_ROUND_FIELDS, INSPECTION_SOURCE_CONTRACTS
+from app.modules.feishu.service.bitable_client_runtime import FeishuBitableRateLimited
 from app.modules.internal_bridge_http.service.client import InternalBridgeHttpClient
 from app.modules.inspection_data.service.chiller_operating_points import normalize_operating_rules
 from app.modules.inspection_data.service.point_correction import normalize_correction_rules
@@ -23,6 +27,7 @@ _LOCK = threading.Lock()
 _BUILDING_LOCKS = {building: threading.Lock() for building in ("D楼", "E楼")}
 _RETRIGGER_LOCK = threading.Lock()
 EMPTY_POINT_GROUP = {"points": {}, "remove": []}
+POINT_CONFIG_CACHE_SEC = 300
 
 
 class PointSettingsConflict(ValueError):
@@ -54,24 +59,27 @@ def load_point_settings(config):
     return _settings_snapshot(config)[0]
 
 
-def _save_settings(config, settings, *, cloud_buildings=(), changed_buildings=()):
+def _save_settings(config, settings, *, cloud_buildings=(), changed_buildings=(), cloud_checks=None):
     old_revision = _settings_snapshot(config)[1]
     revision = max(time.time_ns(), old_revision + 1)
     previous = _cloud_point_metadata(config).get("cloud_revisions", {})
     versions = {b: revision if b in changed_buildings else previous.get(b, old_revision) for b in cloud_buildings}
     payload = {"revision": revision, "settings": settings, "cloud_buildings": sorted(cloud_buildings),
-               "cloud_revisions": versions}
+               "cloud_revisions": versions, "cloud_checks": cloud_checks or {}}
     atomic_write_text(_path(config), json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 @contextmanager
-def _settings_write_lock(config, *, building=None):
+def _settings_write_lock(config, *, building=None, wait_timeout=None):
     suffix = f"_{building[0]}" if building else ""
     path = _path(config).with_name(f"inspection_point_settings{suffix}.lock.db")
     path.parent.mkdir(parents=True, exist_ok=True)
     # The scheduler worker and the web process must serialize Feishu writes as well as local edits.
-    with (_BUILDING_LOCKS[building] if building else _LOCK):
-        connection = sqlite3.connect(path, timeout=10)
+    lock = _BUILDING_LOCKS[building] if building else _LOCK
+    if not lock.acquire(timeout=-1 if wait_timeout is None else wait_timeout):
+        raise OSError("巡检测点配置正在同步，请稍后再试")
+    try:
+        connection = sqlite3.connect(path, timeout=10 if wait_timeout is None else wait_timeout)
         try:
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -80,6 +88,8 @@ def _settings_write_lock(config, *, building=None):
             yield
         finally:
             connection.close()
+    finally:
+        lock.release()
 
 
 def load_or_restore_point_settings(config):
@@ -143,7 +153,15 @@ def verified_review_point_settings(config, building=None):
     return {b: saved["settings"][b] for b in verified}
 
 
-def _remember_cloud_settings(config, observed, *, schedule=True):
+def _save_cloud_checks(config, checks):
+    saved = _cloud_point_metadata(config)
+    if "settings" not in saved:
+        settings, revision = _settings_snapshot(config)
+        saved = {"settings": settings, "revision": revision}
+    atomic_write_text(_path(config), json.dumps({**saved, "cloud_checks": checks}, ensure_ascii=False), encoding="utf-8")
+
+
+def _remember_cloud_settings(config, observed, *, schedule=True, verified_scopes=None):
     """Under the settings lock, retain only cloud-verified configurations for bridging."""
     verified = _cloud_buildings(config)
     cached, _ = _settings_snapshot(config)
@@ -161,36 +179,109 @@ def _remember_cloud_settings(config, observed, *, schedule=True):
         if building not in verified or previous != groups:
             changed.add(building)
         settings[building] = groups
+    checks = _cloud_point_metadata(config).get("cloud_checks", {})
+    for building in observed:
+        if verified_scopes and building in verified_scopes:
+            checks[building] = {"scope": verified_scopes[building], "verified_at": time.time()}
+        else:
+            checks.pop(building, None)
     if changed:
-        _save_settings(config, settings, cloud_buildings=verified | observed.keys(), changed_buildings=changed)
+        _save_settings(config, settings, cloud_buildings=verified | observed.keys(), changed_buildings=changed,
+                       cloud_checks=checks)
+    else:
+        _save_cloud_checks(config, checks)
     if schedule:
         for building in changed:
             request_inspection_upload_retrigger(config, reason="飞书巡检测点配置已变更", building=building)
     return changed
 
 
-def refresh_cloud_point_settings(config, *, buildings=None, client=None, schedule=True):
+def _point_cloud_scope(client, table_id):
+    identity = [table_id]
+    for key in ("app_id", "app_secret", "app_token"):
+        value = getattr(client, key, "")
+        identity.append(value if isinstance(value, str) else "")
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+
+def _point_check_error(exc):
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return "飞书巡检配置连接超时"
+    if isinstance(exc, requests.exceptions.ReadTimeout) or (
+            isinstance(exc, requests.exceptions.ConnectionError) and "Read timed out" in str(exc)):
+        return "飞书巡检配置读取超时"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "飞书巡检配置连接暂不可用"
+    if isinstance(exc, FeishuBitableRateLimited):
+        return "飞书巡检配置读取限流"
+    return str(exc)
+
+
+def _point_check_retrying(check, now):
+    failed_at, retry_at = check.get("failed_at"), check.get("retry_at")
+    return (isinstance(failed_at, (int, float)) and isinstance(retry_at, (int, float))
+            and failed_at <= now < retry_at)
+
+
+def point_config_retry_pending(config, building):
+    check = _cloud_point_metadata(config).get("cloud_checks", {}).get(building, {})
+    return _point_check_retrying(check, time.time())
+
+
+def refresh_cloud_point_settings(config, *, buildings=None, client=None, schedule=True, use_cache=False):
     """Read each requested table independently; a failed read never changes its last verified copy."""
-    from app.modules.inspection_data.service.point_config_bitable import POINT_CONFIG_TABLES, point_config_client, read_point_config_bitable
+    from app.modules.inspection_data.service.point_config_bitable import (
+        POINT_CONFIG_TABLES, point_config_client, point_config_reader, read_point_config_bitable,
+    )
 
     client = client or point_config_client(config)
     errors = {}
     requested = tuple(POINT_CONFIG_TABLES if buildings is None else buildings)
     for building in requested:
         try:
-            for _ in range(2):
-                before = (load_point_settings(config) or {}).get(building)
-                groups = read_point_config_bitable(config, client=client, buildings=(building,))[building]
-                _validate_cloud_groups(building, groups)
-                with _settings_write_lock(config, building=building), _settings_write_lock(config):
-                    if (load_point_settings(config) or {}).get(building) != before:
+            # Recheck under the per-building lock so the watchdog and worker cannot both read an expired table.
+            with _settings_write_lock(config, building=building, wait_timeout=10):
+                table = POINT_CONFIG_TABLES[building]
+                scope = _point_cloud_scope(client, table)
+                saved = _cloud_point_metadata(config)
+                check = saved.get("cloud_checks", {}).get(building, {})
+                now = time.time()
+                if use_cache and check.get("scope") == scope:
+                    verified_at = check.get("verified_at")
+                    if (building in saved.get("cloud_buildings", ()) and building in (saved.get("settings") or {})
+                            and isinstance(verified_at, (int, float)) and 0 <= now - verified_at < POINT_CONFIG_CACHE_SEC):
                         continue
-                    _remember_cloud_settings(config, {building: groups}, schedule=schedule)
-                    break
-            else:
-                raise PointSettingsConflict(f"{building}飞书测点正在同步，请稍后重试")
+                    if _point_check_retrying(check, now):
+                        errors[building] = check["error"]
+                        continue
+                try:
+                    with point_config_reader(client) as reader:
+                        for _ in range(2):
+                            before = (load_point_settings(config) or {}).get(building)
+                            groups = read_point_config_bitable(config, client=reader, buildings=(building,))[building]
+                            _validate_cloud_groups(building, groups)
+                            if _point_cloud_scope(reader, table) != scope:
+                                raise PointConfigUnavailable("核验期间飞书鉴权已变更，请重新核验")
+                            with _settings_write_lock(config):
+                                if (load_point_settings(config) or {}).get(building) != before:
+                                    continue
+                                _remember_cloud_settings(config, {building: groups}, schedule=schedule,
+                                                         verified_scopes={building: scope})
+                                break
+                        else:
+                            raise PointSettingsConflict(f"{building}飞书测点正在同步，请稍后重试")
+                except Exception as exc:
+                    with _settings_write_lock(config):
+                        checks = _cloud_point_metadata(config).get("cloud_checks", {})
+                        delay = min(300, 2 * (check.get("retry_delay", 15) if check.get("scope") == scope else 15))
+                        now = time.time()
+                        checks[building] = {"scope": scope, "failed_at": now, "retry_delay": delay,
+                                            "retry_at": now + max(delay, getattr(exc, "retry_after", 0)),
+                                            "error": _point_check_error(exc)}
+                        _save_cloud_checks(config, checks)
+                    raise
         except Exception as exc:
-            errors[building] = str(exc)
+            errors[building] = _point_check_error(exc)
     with _settings_write_lock(config):
         settings, revision = _settings_snapshot(config)
         verified = _cloud_buildings(config)
@@ -649,7 +740,8 @@ def save_point_group(config, *, building, family, points, remove, expected_group
             confirmed = read_point_config_bitable(config, client=client, buildings=(building,), snapshots=rows)
             _validate_cloud_groups(building, confirmed[building])
             with _settings_write_lock(config):
-                _remember_cloud_settings(config, confirmed)
+                _remember_cloud_settings(config, confirmed,
+                                         verified_scopes={building: _point_cloud_scope(client, POINT_CONFIG_TABLES[building])})
         except PointSettingsConflict:
             raise
         except Exception as exc:
