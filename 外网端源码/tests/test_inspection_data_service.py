@@ -148,6 +148,46 @@ def test_alarm_health_does_not_imply_running(tmp_path):
     assert '启停状态' not in row
 
 
+@pytest.mark.parametrize(("raw", "missing", "expected"), [
+    ("4.99", False, "关闭"), ("5.00", False, None), ("5.01", False, "开启"),
+    ("0.00", False, "关闭"), ("0", True, None),
+])
+def test_configured_fan_control_sets_same_device_status(raw, missing, expected):
+    fan, temperature, other_fan = "55_0_439_1_608_0", "55_0_439_1_600_0", "55_0_440_1_608_0"
+    device = "E-212-CRAH-01"
+    doc = {
+        "building": "E楼", "report_name": "暖通巡检表", "value_time": "2026-11-27 12:45:00",
+        "point_ids": [fan, temperature, other_fan],
+        "rows": [
+            ["空调区1 E-212", device, "室内风机转速", raw],
+            [None, None, "送风温度", "20.30"],
+            [None, "E-212-CRAH-02", "室内风机转速", "0.00"],
+        ],
+    }
+    if missing:
+        doc["zero_filled_sample_point_ids"] = [fan]
+    status_rule = {"type": "状态", "intervals": [
+        {"min": "0", "max": "4.99", "status": "not_running"},
+        {"min": "5.01", "max": "100", "status": "normal"},
+    ]}
+    rules = {fan: status_rule, other_fan: status_rule}
+    note = device + "｜2F包间精密空调巡检表｜整机启停：室内风机转速"
+    details = InspectionDataUploadService._point_detail_rows(
+        doc, "暖通", {fan: note, other_fan: note}, status_rules=rules,
+    )
+    fan_states = module._fan_control_states(details, doc["point_ids"], rules)
+    catalog = [row for row in module.load_catalog() if row["building"] == "E楼" and row["discipline"] == "暖通"]
+    result = InspectionDataUploadService.parse_samples(
+        doc["rows"], building="E楼", value_time=doc["value_time"], fan_states=fan_states, catalog=catalog,
+    )
+    devices = {alias: row for item, row in zip(catalog, result["rows"]) for alias in module._device_aliases(item)}
+    assert fan_states == {0: expected or ""}
+    assert devices[device].get("启停状态") == expected
+    assert "启停状态" not in devices["E-212-CRAH-02"]
+    assert len(result["diagnostics"]) == 1 and "E-212-CRAH-02" in result["diagnostics"][0]
+    assert details[0]["测点原始值"] == ("" if missing else raw)
+
+
 @pytest.mark.parametrize(('building', 'source_name'), [
     ('D楼', 'D-178-柴发并机系统'), ('E楼', '柴发并机系统'),
 ])

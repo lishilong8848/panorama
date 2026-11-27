@@ -293,6 +293,18 @@ def _on_off(value: Any) -> str:
     return ""
 
 
+def _fan_control_states(point_rows, point_ids, status_rules):
+    readings = {
+        row["测点ID"]: status_fields(status_rules[row["测点ID"]], row["测点原始值"]).get("状态判定")
+        for row in point_rows
+        if row["测点名称"] == "室内风机转速" and "｜整机启停：" in row["测点备注"]
+        and row["测点备注"].partition("｜")[0] == row["设备编号"]
+        and status_rules.get(row["测点ID"], {}).get("type") == "状态"
+    }
+    return {i: {"√": "开启", "△": "关闭"}.get(readings[point_id], "")
+            for i, point_id in enumerate(point_ids) if point_id in readings}
+
+
 def _round_measurement(value: float) -> float:
     if abs(value) >= 1e16:
         return value
@@ -426,7 +438,7 @@ class InspectionDataUploadService:
     @staticmethod
     def parse_samples(samples, *, building: str, catalog=None, value_time: str, allow_unmapped: bool = False,
                       matched_rows: dict[tuple[int, str], list[int]] | None = None,
-                      corrections: dict[int, str] | None = None) -> dict[str, Any]:
+                      corrections: dict[int, str] | None = None, fan_states: dict[int, str] | None = None) -> dict[str, Any]:
         devices = [d for d in (load_catalog() if catalog is None else catalog) if d["building"] == building]
         if not devices:
             raise ValueError(f"不支持的巡检楼栋: {building}")
@@ -437,6 +449,7 @@ class InspectionDataUploadService:
         readings: dict[int, dict[str, Any]] = defaultdict(dict)
         corrected_fields = set()
         corrections = corrections or {}
+        fan_states = fan_states or {}
         diagnostics: list[str] = []
         valid_count = 0
         position = device_name = ""
@@ -460,6 +473,11 @@ class InspectionDataUploadService:
             if _key(c) in {"设备", "设备编号", "监控对象"} and _key(d) in {"点位", "测点", "监控指标", "指标"}:
                 continue
             metric = _key(d)
+            if row_number - 1 in fan_states:
+                raw = fan_states[row_number - 1]
+                if not raw:
+                    continue
+                metric = "启停状态"
             source_device = _key(device_name)
             parallel_point = (re.fullmatch(r"([1-9]\d*)#_(电池电压_V|冷却液温度_℃)", metric)
                               if source_device in {"柴发并机系统", f"{building[0]}-178-柴发并机系统"} else None)
@@ -949,8 +967,10 @@ class InspectionDataUploadService:
 
                     samples = (sample_for_device(pid, row) for pid, row in zip(entry["point_ids"], samples))
                 usable_unmapped = added_ids | (unnamed & set(group.get("targets", {})))
+                fan_states = (_fan_control_states(point_rows, entry.get("point_ids", []), group.get("status_rules", {}))
+                              if family == HVAC_FAMILY else {})
                 p = self.parse_samples(
-                    samples, building=building, value_time=entry["value_time"], corrections=corrections,
+                    samples, building=building, value_time=entry["value_time"], corrections=corrections, fan_states=fan_states,
                     catalog=[d for d in catalog if d["discipline"] == contract["discipline"]],
                     allow_unmapped=bool(entry.get("requested_point_ids")
                                         and any(r["测点ID"] in usable_unmapped and _usable_reading(r["测点原始值"])
