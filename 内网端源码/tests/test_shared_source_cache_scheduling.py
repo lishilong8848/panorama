@@ -209,7 +209,7 @@ def test_inspection_fill_does_not_require_browser_pool(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "load_handover_config", lambda _config: {})
     gateway = Mock()
     gateway.run_inspection_data_only.return_value = {
-        "query_start": "2026-01-01 09:00:00", "query_end": "2026-01-01 10:00:00",
+        "query_start": "2026-01-01 09:40:00", "query_end": "2026-01-01 10:00:00", "value_time": "2026-01-01 10:00:00",
     }
     factory = Mock(return_value=gateway)
     monkeypatch.setattr(module, "HandoverDownloadService", factory)

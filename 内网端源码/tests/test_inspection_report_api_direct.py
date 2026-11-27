@@ -99,6 +99,48 @@ def test_partial_response_preserves_real_reading_and_appends_unlabelled_missing_
     assert result["rows"] == [["位置", "设备", "测点0", "99" if latest else "0"], ["", "", "", "0"]]
 
 
+@pytest.mark.parametrize("building", ["D楼", "E楼"])
+@pytest.mark.parametrize("family", list(INSPECTION_REPORT_TEMPLATES))
+def test_unnamed_non_point_value_rows_do_not_discard_legitimate_samples(building, family):
+    layout = b"<tr><td colspan='4'></td><td>9999</td><td>7</td></tr>"
+    html = table().replace(b"</tr>", b"</tr>" + layout, 1).replace(b"</table>", layout + b"</table>")
+    result = api._query_once(Client(html, family), building=building, source_family=family,
+                             rules={}, start=START, end=END)
+    assert result["point_ids"] == ["1_2", "1_3"]
+    assert [row[3] for row in result["rows"]] == ["0", "1"]
+    assert result["value_time"] == "2026-11-04 09:45:00"
+    assert "zero_filled_point_ids" not in result and "unlabelled_point_ids" not in result
+
+
+def test_identified_row_without_name_is_missing_and_does_not_leak_a_reading_or_previous_device():
+    html = table(("1_2", "1_3", "1_4"))
+    html = html.replace("<td>设备</td><td>测点1</td>".encode(), "<td>新设备</td><td> </td>".encode())
+    html = html.replace("<td>位置</td><td>设备</td><td>测点2</td>".encode(), "<td></td><td></td><td>测点2</td>".encode())
+    html = html.replace(b"<td>1</td><td>99</td>", b"<td>--</td><td>99</td>")
+    result = query(Client(html), {"add": ["1_4"]})
+    assert result["point_ids"] == ["1_2", "1_4", "1_3"]
+    assert result["zero_filled_point_ids"] == result["unlabelled_point_ids"] == ["1_3"]
+    assert result["rows"] == [["位置", "设备", "测点0", "0"], ["位置", "新设备", "测点2", "2"], ["", "", "", "0"]]
+
+
+@pytest.mark.parametrize("value", ["0", "83.42"])
+def test_requested_point_without_a_name_keeps_its_actual_reading(value):
+    html = table(("1_3",)).replace("测点0".encode(), b"").replace(b">0</td>", f">{value}</td>".encode())
+    result = query(Client(html))
+    assert result["requested_point_ids"] == ["1_2", "1_3"]
+    assert result["point_ids"] == ["1_3", "1_2"]
+    assert result["unlabelled_point_ids"] == ["1_3"]
+    assert result["zero_filled_point_ids"] == ["1_2"]
+    assert result["rows"][0] == ["位置", "设备", "1_3", value]
+
+
+@pytest.mark.parametrize("point", ["1_2", "1_4"])
+def test_unnamed_rows_do_not_hide_duplicate_or_foreign_ids(point):
+    html = table(("1_2", point)).replace("测点1".encode(), b"")
+    with pytest.raises(ValueError, match="不完整或不符"):
+        query(Client(html))
+
+
 @pytest.mark.parametrize("cells", [b"<td></td><td>99</td>", b"<td>  </td><td>99</td>", b"<td>null</td>", b""])
 def test_missing_sample_is_filled_separately_without_using_later_columns(cells):
     client = Client(table().replace(b"<td>0</td><td>99</td>", cells).replace(b">1</td>", b">0</td>"))
@@ -130,7 +172,7 @@ def test_rejects_extra_duplicate_or_absent_returned_ids(ids):
     table(()), table(("1_3",)).replace(b">0</td>", b">--</td>"),
     table(("1_3",)).replace(b">0</td>", b">timed out</td>"),
     table(("1_2", "1_3")).replace(b">0</td>", b">Infinity</td>").replace(b">1</td>", b">NaN</td>"),
-    table(("1_3",)).replace("测点0".encode(), b""),
+    table(("1_3",)).replace("测点0".encode(), b"").replace(b">0</td>", b">--</td>"),
     b"<html>permission denied</html>", b'<table class="x-table"><tr>',
 ])
 def test_partial_without_valid_sample_or_structure_never_fills(html):
@@ -221,6 +263,11 @@ def test_hvac_header_only_group_does_not_discard_sibling_or_use_other_time(lates
     result = read(pages)
     assert result["point_ids"] == [ids[1 - empty_group], ids[empty_group]]
     assert result["zero_filled_point_ids"] == [ids[empty_group]]
+    pages[empty_group] = (table((ids[empty_group],)).replace("测点0".encode(), b"")
+                          .replace(b">0</td>", b">--</td>").replace(b">99</td>", b">--</td>"))
+    result = read(pages)
+    assert result["unlabelled_point_ids"] == result["zero_filled_point_ids"] == [ids[empty_group]]
+    assert result["rows"][0][-1] == ("99" if latest else "0")
     with pytest.raises(ValueError, match="未返回有效测点"):
         read([table(()), table(())])
     pages[empty_group] = table(()).replace(b"09:45", b"09:44").replace(b"09:50", b"09:49")
@@ -241,7 +288,7 @@ def test_oversized_hvac_group_splits_only_itself_and_never_combines_different_sa
         calls.append(points)
         if len(points) > 1:
             raise api.ReportGridParseError("HTML body exceeds max_body_bytes")
-        return ("09:50" if mismatch and len(calls) == 4 else "09:45"), points, [["位置","设备","信号","0"]]
+        return ("09:50" if mismatch and len(calls) == 4 else "09:45"), points, [["位置","设备","信号","0"]], []
     monkeypatch.setattr(api, "_read_point_chunk", read)
     ids = ["5_0_1_2_600_0","5_0_1_1_600_0","5_0_1_1_601_0"]
     opts = dict(building="D楼", source_family="hvac_inspection_family", rules={"baseline":ids}, start=START, end=END)

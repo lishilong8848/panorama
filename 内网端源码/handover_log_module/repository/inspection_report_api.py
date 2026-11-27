@@ -25,8 +25,10 @@ def _usable_reading(value) -> bool:
         return True
 
 
-def _first_sample(grid: list, start: datetime, end: datetime, *, ids=None, sample_ids=None, latest=False, allow_empty=False) -> tuple[str, list]:
+def _first_sample(grid: list, start: datetime, end: datetime, *, ids=None, sample_ids=None,
+                  unlabelled_ids=None, latest=False, allow_empty=False) -> tuple[str, list]:
     bucket = inspection_hour_bucket(end)
+    row_ids = ids or {}
     for header_index, row in enumerate(grid[:40]):
         candidates = []
         for column, value in enumerate(row[4:], 4):
@@ -48,16 +50,35 @@ def _first_sample(grid: list, start: datetime, end: datetime, *, ids=None, sampl
         stamp, column = max(candidates)
         rows = []
         body = grid[header_index + 1:]
+        carried_place = carried_device = ""
         for i, line in enumerate(body, header_index + 1):
-            if len(line) <= 3 or not line[3]:
-                if ids is not None and (i in ids or str(i) in ids or any(line[4:])):
-                    raise ValueError("巡检接口测点行缺少名称")
-                continue
-            rows.append([*line[1:4], line[column] if len(line) > column else None])
+            point = row_ids.get(i, row_ids.get(str(i), ""))
+            place, device, metric = (line[1:4] + [""] * 3)[:3]
+            value = line[column] if len(line) > column else None
+            if not str(metric or "").strip():
+                if not point:
+                    continue
+                if unlabelled_ids is not None:
+                    unlabelled_ids.append(point)
+                if not _usable_reading(value):
+                    # A missing reading cannot be attributed to a device, but its labels can continue the report layout.
+                    if place and place != carried_place:
+                        carried_place, carried_device = place, ""
+                    if device:
+                        carried_device = device
+                    continue
+                metric = point
+            if carried_place and not place:
+                place = carried_place
+            if carried_device and not device and (not carried_place or carried_place == place):
+                device = carried_device
+            carried_place = carried_device = ""
+            rows.append([place, device, metric, value])
             if sample_ids is not None:
-                sample_ids.append((ids or {}).get(i, (ids or {}).get(str(i), "")))
+                sample_ids.append(point)
         if not rows and allow_empty and any(str(cell or "").strip() not in ("", "无数据", "暂无数据")
-                                            for line in body for cell in line):
+                                            for i, line in enumerate(body, header_index + 1)
+                                            if i not in row_ids and str(i) not in row_ids for cell in line):
             raise ValueError("巡检分组不是有效空表")
         if allow_empty or any(sample[3] not in (None, "") for sample in rows):
             return stamp.strftime("%Y-%m-%d %H:%M:%S"), rows
@@ -99,12 +120,12 @@ def _query_once(client, *, building: str, source_family: str, rules: dict, start
             (states if len(parts) == 4 and parts[1] == "2" else measurements).append(point)
         groups = [group for group in (states, measurements) if group]
     pending = list(reversed(groups))
-    sample_ids, rows = [], []
+    sample_ids, rows, unlabelled_ids = [], [], []
     value_time = None
     while pending:
         ids_to_read = pending.pop()
         try:
-            when, ids, samples = _read_point_chunk(
+            when, ids, samples, unnamed_ids = _read_point_chunk(
                 client, init, parameters, ids_to_read, start, end, latest_sample, len(ids_to_read) != len(selected_ids),
             )
         except ReportGridParseError as exc:
@@ -118,6 +139,7 @@ def _query_once(client, *, building: str, source_family: str, rules: dict, start
         value_time = when
         sample_ids.extend(ids)
         rows.extend(samples)
+        unlabelled_ids.extend(unnamed_ids)
     if not any(_usable_reading(sample[3]) for sample in rows):
         raise ReportNoSamples("巡检接口未返回有效测点")
     missing_samples = []
@@ -144,6 +166,7 @@ def _query_once(client, *, building: str, source_family: str, rules: dict, start
         "value_time": value_time, "rows": rows, "point_ids": sample_ids,
         "requested_point_ids": selected_ids, "point_overrides": rules,
         **({"zero_filled_point_ids": missing} if missing else {}),
+        **({"unlabelled_point_ids": unlabelled_ids} if unlabelled_ids else {}),
         **({"zero_filled_sample_point_ids": [item["point_id"] for item in missing_samples],
             "missing_sample_points": missing_samples} if missing_samples else {}),
     }
@@ -173,15 +196,25 @@ def _read_point_chunk(client, init, parameters, selected_ids, start, end, latest
         parsed = parse_report_grid(response.iter_content(chunk_size=65536), encoding=encoding)
     finally:
         response.close()
+    expected = set(selected_ids)
+
+    def point_mismatch(ids):
+        missing = sorted(expected - set(ids))
+        extra = sorted(set(ids) - expected)
+        return ValueError(f"巡检测点返回不完整或不符: 缺少={','.join(missing[:10]) or '-'}; 多出={','.join(extra[:10]) or '-'}")
+
+    row_ids = parsed["row_ids"]
+    returned = set(row_ids.values())
+    if not returned <= expected or len(returned) != len(row_ids):
+        raise point_mismatch(returned)
     sample_ids: list[str] = []
-    value_time, rows = _first_sample(parsed["grid"], start, end, ids=parsed["row_ids"], sample_ids=sample_ids,
-                                     latest=latest_sample, allow_empty=split)
-    if (not set(sample_ids) <= set(selected_ids) or len(sample_ids) != len(set(sample_ids))
-            or len(sample_ids) != len(parsed["row_ids"])):
-        missing = sorted(set(selected_ids) - set(sample_ids))
-        extra = sorted(set(sample_ids) - set(selected_ids))
-        raise ValueError(f"巡检测点返回不完整或不符: 缺少={','.join(missing[:10]) or '-'}; 多出={','.join(extra[:10]) or '-'}")
-    return value_time, sample_ids, rows
+    unlabelled_ids: list[str] = []
+    value_time, rows = _first_sample(parsed["grid"], start, end, ids=row_ids, sample_ids=sample_ids,
+                                     unlabelled_ids=unlabelled_ids, latest=latest_sample, allow_empty=split)
+    accounted = set(sample_ids) | set(unlabelled_ids)
+    if any(not point for point in sample_ids) or accounted != returned:
+        raise point_mismatch(accounted)
+    return value_time, sample_ids, rows, unlabelled_ids
 
 
 def query_inspection_report(site: dict, *, building: str, source_family: str, config: dict) -> dict:

@@ -90,6 +90,29 @@ def test_only_real_added_points_can_enable_unmapped_upload(scenario):
     assert service.run(source_date=DATE, building="D楼", dry_run=True)["status"] == "success"
 
 
+def test_unnamed_real_readings_still_upload_by_id_to_configured_inspection_cells(scenario):
+    doc, service, cloud, _ = scenario
+    doc.update(zero_filled_point_ids=[STATE, UNKNOWN], unlabelled_point_ids=[REAL, FREQ])
+    doc["rows"][0] = ["", "", REAL, "1"]
+    doc["rows"][2] = ["", "", FREQ, "42.25"]
+    result = service.run(source_date=DATE, building="D楼")
+    assert result["results"]["D楼"]["sources"][HVAC_FAMILY]["unlabelled_point_ids"] == [REAL, FREQ]
+    rows = [r["fields"] for r in cloud.rows[upload.DEFAULT_CONFIG["tables"]["D楼"]]]
+    points = {row["测点ID"]: row for row in rows if row.get("测点ID") in IDS}
+    assert points[REAL]["目标单元格"] == "A4" and points[REAL]["测点原始值"] == "1"
+    assert points[FREQ]["目标单元格"] == "C4" and points[FREQ]["测点原始值"] == "42.25"
+    assert points[FREQ]["测点名称"] == "1#二次泵频率反馈"
+    assert "采样时间" in points[REAL] and "采样时间" in points[FREQ]
+    assert all("启停状态" not in row for row in rows if row.get("记录类型") == "设备巡检" and row["专业"] == "暖通")
+
+
+def test_unnamed_point_restores_device_labels_only_when_known_by_the_same_id():
+    point = {"name": "温度", "path": "机房A / 空调1 / 温度"}
+    assert upload._confirmed_unnamed_labels(["", ""], REAL, {REAL: point}) == ("机房A", "空调1", "温度")
+    assert upload._confirmed_unnamed_labels(["机房B", ""], REAL, {REAL: point}) == ("机房B", "", "温度")
+    assert upload._confirmed_unnamed_labels(["", ""], STATE, {REAL: point}) == ("", "", "")
+
+
 def test_missing_samples_keep_source_identity_and_are_summarized_separately(scenario):
     doc, service, cloud, _ = scenario
     room, device = doc["rows"][0][:2]
@@ -154,6 +177,7 @@ def test_missing_ups_sample_does_not_transfer_the_next_reading_to_the_previous_u
     {"point_ids": IDS[:-1]}, {"value_time": "2026-10-27 00:00:00"},
     {"zero_filled_sample_point_ids": [STATE]}, {"zero_filled_sample_point_ids": [REAL, REAL]},
     {"zero_filled_sample_point_ids": ["7_0_9"]}, {"zero_filled_sample_point_ids": REAL},
+    {"unlabelled_point_ids": [REAL]}, {"unlabelled_point_ids": [REAL, REAL]}, {"unlabelled_point_ids": ["7_0_9"]},
 ])
 def test_corrupt_transport_is_rejected_without_repair_or_writes(scenario, invalid):
     doc, service, cloud, _ = scenario

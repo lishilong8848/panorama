@@ -78,6 +78,19 @@ def _usable_reading(value: Any) -> bool:
         return True
 
 
+def _confirmed_unnamed_labels(row, point_id, baseline):
+    place, device = map(_text, row[:2])
+    known = (baseline or {}).get(point_id, {})
+    name = _text(known.get("name"))
+    parts = _text(known.get("path")).rsplit(" / ", 2)
+    if (len(parts) == 3 and name and _key(parts[2]) == _key(name)
+            and (not place or _key(place) == _key(parts[0]))
+            and (not device or _key(device) == _key(parts[1]))):
+        place = place or parts[0]
+        device = device or parts[1]
+    return place, device, name
+
+
 def _key(value: Any) -> str:
     return re.sub(r"\s+", "", _text(value)).replace("（", "(").replace("）", ")")
 
@@ -574,6 +587,17 @@ class InspectionDataUploadService:
                            for i, row in zip(ids, rows) if i in marked)
                     or not any(_text(row[2]) and _usable_reading(row[3]) for i, row in zip(ids, rows) if i not in marked)):
                 raise ValueError("巡检补零缺少有效实测或占位数据无效；未清空多维表")
+        if "unlabelled_point_ids" in doc:
+            unnamed = doc["unlabelled_point_ids"]
+            if (not isinstance(unnamed, list) or "requested_point_ids" not in doc
+                    or any(not isinstance(pid, str) or pid not in returned
+                           or not re.fullmatch(r"[0-9]+(?:_[0-9]+)+", pid) for pid in unnamed)
+                    or len(unnamed) != len(set(unnamed))):
+                raise ValueError("巡检缺名称测点清单无效；未清空多维表")
+            real_unnamed = set(unnamed) - set(doc.get("zero_filled_point_ids", ()))
+            if any(row[2] != pid or pid in marked or not _usable_reading(row[3])
+                   for pid, row in zip(ids, rows) if pid in real_unnamed):
+                raise ValueError("巡检缺名称测点没有对应实测；未清空多维表")
         return end
 
     @staticmethod
@@ -587,6 +611,7 @@ class InspectionDataUploadService:
         ids = entry.get("point_ids", [])
         missing_rows = set(entry.get("zero_filled_point_ids", ()))
         missing_samples = set(entry.get("zero_filled_sample_point_ids", ()))
+        unnamed = set(entry.get("unlabelled_point_ids", ()))
         missing = missing_rows | missing_samples
         corrections = corrections or {}
         for i, (place, name, metric, raw) in enumerate(entry["rows"]):
@@ -597,6 +622,14 @@ class InspectionDataUploadService:
                 known = (baseline or {}).get(point_id, {})
                 metric, path = known.get("name", ""), known.get("path", "")
                 row_position = row_device = ""
+            elif point_id in unnamed:
+                row_position, row_device, name_by_id = _confirmed_unnamed_labels((place, name), point_id, baseline)
+                metric = name_by_id or point_id
+                path = " / ".join(filter(None, (row_position, row_device, name_by_id)))
+                if _text(place) and _key(place) != _key(position):
+                    position, device = _text(place), ""
+                if _text(name):
+                    device = _text(name)
             else:
                 if _text(place) and _key(place) != _key(position):
                     position, device = _text(place), ""
@@ -894,23 +927,33 @@ class InspectionDataUploadService:
                 missing_rows = set(entry.get("zero_filled_point_ids", ()))
                 missing_samples = set(entry.get("zero_filled_sample_point_ids", ()))
                 missing_ids = missing_rows | missing_samples
+                unnamed = set(entry.get("unlabelled_point_ids", ()))
+                baseline = group.get("baseline")
                 corrections = corrected_samples(entry, group.get("correction_rules", {}))
                 point_rows = self._point_detail_rows(entry, contract["discipline"], group.get("points", {}),
                                                      group.get("targets", {}), group.get("status_rules", {}), corrections,
-                                                     baseline=group.get("baseline"), for_upload=True)
+                                                     baseline=baseline, for_upload=True)
                 real_points = [r for r in point_rows if r["测点ID"] not in missing_ids]
                 added_ids = set(entry.get("point_overrides", {}).get("add", []))
                 samples = entry["rows"]
-                if missing_ids:
-                    # Skip placeholder values without losing device labels carried by real source rows.
-                    samples = (("", "", "", None) if pid in missing_rows else
-                               (*row[:2], "", None) if pid in missing_samples else row
-                               for pid, row in zip(entry["point_ids"], samples))
+                if missing_ids or unnamed:
+                    def sample_for_device(pid, row):
+                        if pid in missing_rows:
+                            return "", "", "", None
+                        if pid in missing_samples:
+                            return (*row[:2], "", None)
+                        if pid in unnamed:
+                            place, device, name = _confirmed_unnamed_labels(row, pid, baseline)
+                            return (place, device, name, row[3]) if name and device else (*row[:2], "", None)
+                        return row
+
+                    samples = (sample_for_device(pid, row) for pid, row in zip(entry["point_ids"], samples))
+                usable_unmapped = added_ids | (unnamed & set(group.get("targets", {})))
                 p = self.parse_samples(
                     samples, building=building, value_time=entry["value_time"], corrections=corrections,
                     catalog=[d for d in catalog if d["discipline"] == contract["discipline"]],
                     allow_unmapped=bool(entry.get("requested_point_ids")
-                                        and any(r["测点ID"] in added_ids and _usable_reading(r["测点原始值"])
+                                        and any(r["测点ID"] in usable_unmapped and _usable_reading(r["测点原始值"])
                                                 for r in real_points)),
                 )
                 source_time = int(datetime.strptime(entry["value_time"], "%Y-%m-%d %H:%M:%S")
@@ -940,6 +983,7 @@ class InspectionDataUploadService:
                     "source_time": entry["value_time"], "query_end": entry["query_end"],
                     "bucket_kind": "latest", "bucket_key": entry["bucket_key"],
                     **({"zero_filled_point_ids": entry["zero_filled_point_ids"]} if missing_rows else {}),
+                    **({"unlabelled_point_ids": entry["unlabelled_point_ids"]} if unnamed else {}),
                     **({"zero_filled_sample_point_ids": entry["zero_filled_sample_point_ids"],
                         "missing_sample_points": missing_sample_points} if missing_samples else {}),
                     **{key: value for key, value in p.items() if key != "rows"},

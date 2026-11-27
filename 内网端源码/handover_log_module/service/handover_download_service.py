@@ -81,7 +81,9 @@ class HandoverDownloadService:
         if site is None:
             raise ValueError("楼栋站点未配置或未启用")
         result = query_inspection_report(site, building=building, source_family=source_family, config=self.config)
-        emit_log(f"[巡检接口] {building}/{INSPECTION_REPORT_TEMPLATES[source_family]} 测点={len(result['rows'])}")
+        skipped = len(result.get("unlabelled_point_ids", ()))
+        emit_log(f"[巡检接口] {building}/{INSPECTION_REPORT_TEMPLATES[source_family]} "
+                 f"实测时间={result['value_time']}, 测点={len(result['rows'])}, 缺名称={skipped}")
         return result
 
     def run_energy_report_only(
