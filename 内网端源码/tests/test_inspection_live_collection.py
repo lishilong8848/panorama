@@ -266,8 +266,14 @@ def test_non_force_and_other_family_calls_keep_legacy_tokenless_behavior(monkeyp
 
 
 def test_runner_backstop_refuses_unverified_inspection_force(tmp_path, monkeypatch):
+    from app.modules.internal_bridge_http.service import internal_bridge_http_runner as runner_module
+
+    monkeypatch.setattr(runner_module, "inspection_hour_bucket", lambda: BUCKET)
     runtime = SharedBridgeRuntimeService(runtime_config=bridge_runtime_config(root=tmp_path), app_version="test")
     cache_service = Mock()
+    cache_service.start_building_latest_refresh.return_value = {
+        "accepted": True, "running": True, "reason": "started",
+    }
     runtime._source_cache_service = cache_service
     runner = InternalBridgeHttpTaskRunner(runtime_service=runtime, emit_log=lambda _line: None)
 
@@ -282,13 +288,41 @@ def test_runner_backstop_refuses_unverified_inspection_force(tmp_path, monkeypat
         force_refresh=True, inspection_force_authorized=True,
     )
     assert result["ok"] is True
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and not cache_service.start_building_latest_refresh.called:
-        time.sleep(0.01)
+    assert result["results"][0]["reason"] == "started"
     kwargs = cache_service.start_building_latest_refresh.call_args.kwargs
     assert kwargs["source_family"] == FAMILY_ELECTRICAL_INSPECTION
     assert kwargs["force_refresh"] is True
     assert "inspection_force_authorized" not in kwargs
+
+
+def test_bridge_reports_actual_inspection_admission_and_skips_expired_requests(tmp_path, monkeypatch):
+    from app.modules.internal_bridge_http.service import internal_bridge_http_runner as runner_module
+
+    monkeypatch.setattr(runner_module, "inspection_hour_bucket", lambda: BUCKET)
+    runtime = SharedBridgeRuntimeService(runtime_config=bridge_runtime_config(root=tmp_path), app_version="test")
+    runtime._source_cache_service = cache_service = Mock()
+    cache_service.start_building_latest_refresh.side_effect = [
+        {"accepted": False, "running": False, "reason": "disabled"},
+        {"accepted": False, "running": True, "reason": "already_running"},
+        {"accepted": False, "running": False, "reason": "already_ready"},
+    ]
+    runner = InternalBridgeHttpTaskRunner(runtime_service=runtime, emit_log=lambda _line: None)
+    result = runner.refresh_latest_source_cache(source_family=FAMILY_ELECTRICAL_INSPECTION,
+                                                buildings=["D楼", "E楼"], target_bucket_key=BUCKET)
+    assert result["ok"] is False and result["accepted_count"] == 0
+    assert [(row["building"], row["reason"]) for row in result["results"]] == [
+        ("D楼", "disabled"), ("E楼", "already_running"),
+    ]
+    assert cache_service.start_building_latest_refresh.call_count == 2
+
+    expired = runner.refresh_latest_source_cache(source_family=FAMILY_ELECTRICAL_INSPECTION,
+                                                 buildings=["D楼"], target_bucket_key="2026-10-01 08")
+    assert expired["ok"] is False and expired["results"][0]["reason"] == "expired_bucket"
+    assert cache_service.start_building_latest_refresh.call_count == 2
+
+    ready = runner.refresh_latest_source_cache(source_family=FAMILY_ELECTRICAL_INSPECTION,
+                                               buildings=["E楼"], target_bucket_key=BUCKET)
+    assert ready["ok"] is True and ready["already_ready_count"] == 1 and ready["accepted_count"] == 0
 
 
 # --------------------------------------------------------------------------- automatic skip

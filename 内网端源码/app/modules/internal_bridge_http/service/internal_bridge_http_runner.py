@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES
+from app.config.inspection_data_config import INSPECTION_REPORT_TEMPLATES, inspection_hour_bucket
 
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
 from app.modules.shared_bridge.service.shared_bridge_store import SharedBridgeStore
@@ -1229,6 +1229,7 @@ class InternalBridgeHttpTaskRunner:
         family = str(source_family or "").strip()
         target_buildings = [str(item or "").strip() for item in (buildings or []) if str(item or "").strip()]
         bucket_key = str(target_bucket_key or "").strip()
+        is_inspection = family in INSPECTION_REPORT_TEMPLATES
         if not family:
             raise ValueError("source_family 不能为空")
         if force_refresh:
@@ -1253,20 +1254,9 @@ class InternalBridgeHttpTaskRunner:
                 raise ValueError("巡检数据源文件时间桶必须为 YYYY-MM-DD HH") from exc
             if parsed_bucket.strftime("%Y-%m-%d %H") != bucket_key:
                 raise ValueError("巡检数据源文件时间桶必须为 YYYY-MM-DD HH")
-        accepted = len(target_buildings)
-        results: List[Dict[str, Any]] = [
-            {
-                "building": building,
-                "source_family": family,
-                "accepted": True,
-                "running": True,
-                "reason": "queued",
-                "bucket_key": bucket_key,
-            }
-            for building in target_buildings
-        ]
-
-        def _start_one(building: str) -> None:
+        def _start_one(building: str) -> Dict[str, Any]:
+            if is_inspection and bucket_key and bucket_key != inspection_hour_bucket():
+                return {"reason": "expired_bucket"}
             try:
                 result = self._main_service.start_building_latest_source_cache_refresh(
                     source_family=family,
@@ -1279,27 +1269,35 @@ class InternalBridgeHttpTaskRunner:
                     "[内网HTTP桥接] 源文件补采启动结果: "
                     f"family={family}, building={building}, bucket={bucket_key or '-'}, reason={reason or '-'}"
                 )
+                return result if isinstance(result, dict) else {"reason": "unconfirmed"}
             except Exception as exc:  # noqa: BLE001
                 self._emit(
                     "[内网HTTP桥接] 源文件补采后台启动失败: "
                     f"family={family}, building={building}, bucket={bucket_key or '-'}, error={exc}"
                 )
+                return {"reason": "start_failed"}
 
+        results = []
         for building in target_buildings:
-            thread = threading.Thread(
-                target=_start_one,
-                args=(building,),
-                name=f"internal-http-source-refresh-{family}-{building}",
-                daemon=True,
-            )
-            thread.start()
+            if is_inspection:
+                # The cache service starts its own background collector. Only admission is synchronous.
+                result = _start_one(building)
+            else:
+                threading.Thread(target=_start_one, args=(building,),
+                                 name=f"internal-http-source-refresh-{family}-{building}", daemon=True).start()
+                result = {"accepted": True, "running": True, "reason": "queued"}
+            results.append({
+                "building": building, "source_family": family, "bucket_key": result.get("bucket_key") or bucket_key,
+                "accepted": result.get("accepted") is True, "running": result.get("running") is True,
+                "reason": result.get("reason") or "unconfirmed",
+            })
         return {
-            "ok": accepted > 0,
+            "ok": all(row["accepted"] or row["running"] or row["reason"] == "already_ready" for row in results),
             "source_family": family,
             "target_bucket_key": bucket_key,
             "requested_buildings": target_buildings,
-            "accepted_count": accepted,
-            "already_ready_count": 0,
+            "accepted_count": sum(row["accepted"] for row in results),
+            "already_ready_count": sum(row["reason"] == "already_ready" for row in results),
             "results": results,
         }
 

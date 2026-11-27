@@ -48,6 +48,25 @@ class Internal:
         return {"ok": True, "bucket_key": kwargs["bucket_key"], "datasets": copy.deepcopy(self.documents)}
 
 
+@pytest.mark.parametrize("force_refresh", [False, True])
+def test_rejected_collection_reports_the_building_and_never_writes_a_batch(force_refresh):
+    building = "E楼" if force_refresh else "D楼"
+    internal = Internal([], collect=False)
+    internal.refresh_latest_source_cache = Mock(return_value={"ok": False, "results": [
+        {"building": building, "reason": "disabled", "accepted": False, "running": False},
+    ]})
+    cloud = Cloud()
+    service = InspectionDataUploadService({"inspection_data_upload": {"wait_source_timeout_sec": 30}},
+                                          internal_client=internal, bitable_client=cloud)
+
+    with pytest.raises(RuntimeError, match=fr"内网未受理巡检补采.*{building}（内网采集服务未启用"):
+        service.run(building=building, force_refresh=force_refresh,
+                    not_before=int(time.time()*1000) - 1000 if force_refresh else None)
+    internal.refresh_latest_source_cache.assert_called_once()
+    assert internal.refresh_latest_source_cache.call_args.kwargs["buildings"] == [building]
+    assert cloud.events == []
+
+
 @pytest.mark.parametrize("stale_kind", ["prior_collection", "old_sample", "missing_collection"])
 def test_same_bucket_cached_or_old_sample_never_satisfies_live_request(tmp_path, stale_kind):
     documents = docs(tmp_path)

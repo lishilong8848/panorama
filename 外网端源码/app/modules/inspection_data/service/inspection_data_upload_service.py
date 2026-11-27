@@ -695,8 +695,8 @@ class InspectionDataUploadService:
                 if force_refresh and not pending_sync:
                     for family in SOURCE_FAMILIES:
                         if family not in forced:
-                            internal.refresh_latest_source_cache(source_family=family, buildings=list(buildings),
-                                                                 target_bucket_key=requested_bucket, force_refresh=True)
+                            self._request_inspection_refresh(internal, family, list(buildings), requested_bucket,
+                                                             force_refresh=True)
                             forced.add(family)
                             retry_dispatch_at.update({(b, family): time.monotonic() + 15 for b in buildings})
                 payload = internal.get_inspection_snapshot(
@@ -774,10 +774,8 @@ class InspectionDataUploadService:
                     continue
                 cancel()
                 try:
-                    internal.refresh_latest_source_cache(source_family=family, buildings=refresh_buildings,
-                                                         target_bucket_key=requested_bucket,
-                                                         **({"force_refresh": True} if force_refresh else {}))
-                    # A queued acknowledgement does not prove that the download started.
+                    self._request_inspection_refresh(internal, family, refresh_buildings, requested_bucket,
+                                                     force_refresh=force_refresh)
                     retry_dispatch_at.update({(b, family): time.monotonic() + (15 if force_refresh else 60) for b in refresh_buildings})
                 except Exception as exc:
                     if not self._retryable_source_error(exc):
@@ -790,6 +788,24 @@ class InspectionDataUploadService:
             while time.monotonic() < wake:
                 cancel()
                 time.sleep(max(0, min(0.25, wake-time.monotonic())))
+
+    @staticmethod
+    def _request_inspection_refresh(internal, family, buildings, bucket, *, force_refresh):
+        receipt = internal.refresh_latest_source_cache(source_family=family, buildings=buildings,
+                                                       target_bucket_key=bucket,
+                                                       **({"force_refresh": True} if force_refresh else {}))
+        if not isinstance(receipt, dict) or receipt.get("ok") is not False:
+            return
+        reasons = {"disabled": "内网采集服务未启用或尚未就绪",
+                   "invalid_building": "楼栋巡检源未启用或不受支持",
+                   "invalid_bucket": "巡检时段无效", "expired_bucket": "巡检时段已切换",
+                   "start_failed": "内网未能启动采集任务"}
+        rejected = [f"{row['building']}（{reasons.get(row.get('reason'), '内网未确认受理')}）"
+                    for row in (receipt.get("results") or [])
+                    if isinstance(row, dict) and row.get("building") in buildings and not row.get("accepted")
+                    and not row.get("running") and row.get("reason") != "already_ready"]
+        detail = "、".join(rejected) or f"{'、'.join(buildings)}（内网未确认受理）"
+        raise RuntimeError(f"内网未受理巡检补采：{SOURCE_FAMILIES[family]['label']} {detail}；保留原巡检数据")
 
     @staticmethod
     def _retryable_source_error(exc):
