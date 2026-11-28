@@ -38,6 +38,7 @@ from app.modules.report_pipeline.api.routes import (
     start_chiller_mode_upload_job,
 )
 from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import (
+    DAY_METRIC_SINGLE_SCHEDULER_PREFIX,
     start_waiting_bridge_job,
 )
 from app.modules.report_pipeline.service.job_service import HandoverArtifactsPending
@@ -253,6 +254,63 @@ def _source_cache_entry_file_ready(item: Dict[str, Any]) -> bool:
     if _is_unc_path_text(file_path):
         return _source_index_entry_reports_file_verified(item)
     return is_accessible_cached_file_path(file_path)
+
+
+def _schedule_day_metric_upload(container, bridge_service, *, source: str, now: datetime, submit_cached) -> tuple[bool, str]:
+    from handover_log_module.api.facade import load_handover_config
+    from handover_log_module.core.shift_window import build_duty_window
+
+    target_date = now.date().isoformat()
+    target_buildings = list(dict.fromkeys(
+        str(item).strip() for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()
+    ))
+    if not target_buildings:
+        raise RuntimeError("共享桥接未配置可用楼栋，无法执行12项独立上传调度")
+    cached_by_building = {
+        item["building"]: item
+        for item in bridge_service.get_day_metric_by_date_cache_entries(selected_dates=[target_date], buildings=target_buildings)
+        if isinstance(item, dict) and item.get("building") in target_buildings
+        and item.get("duty_date") == target_date and _source_cache_entry_file_ready(item)
+    }
+    keys = {building: f"{DAY_METRIC_SINGLE_SCHEDULER_PREFIX}{target_date}:{building}" for building in target_buildings}
+    active = {building for building, key in keys.items() if container.job_service.find_active_job_by_dedupe_key(key)}
+    ready = [building for building in target_buildings if building in cached_by_building and building not in active]
+    missing = [building for building in target_buildings if building not in cached_by_building and building not in active]
+    details = []
+    submitted = bool(ready)
+    if ready:
+        details.append(submit_cached(target_date, ready, [cached_by_building[building] for building in ready]))
+    if missing:
+        shift_windows = load_handover_config(container.runtime_config).get("download", {}).get("shift_windows", {})
+        day_window = build_duty_window(duty_date=target_date, duty_shift="day", shift_windows=shift_windows)
+        if now < datetime.fromisoformat(day_window.start_time):
+            detail = f"等待源文件：{target_date} 白班尚未开始，暂不补采 {','.join(missing)}"
+            details.append(detail if ready else f"skip:{detail}")
+        else:
+            for building in missing:
+                request = {"selected_dates": [target_date], "building_scope": "single", "building": building}
+                job, _ = start_waiting_bridge_job(
+                    job_service=container.job_service,
+                    bridge_service=bridge_service,
+                    name=f"{source}-{building}",
+                    worker_handler="day_metric_from_download",
+                    worker_payload=request,
+                    resource_keys=["shared_bridge:day_metric"],
+                    priority="scheduler",
+                    feature="day_metric_from_download",
+                    dedupe_key=keys[building],
+                    submitted_by="scheduler",
+                    bridge_get_or_create_name="get_or_create_day_metric_from_download_task",
+                    bridge_create_name="create_day_metric_from_download_task",
+                    bridge_kwargs=request,
+                    defer_dispatch=True,
+                )
+                details.append(f"已登记{building}补采 job_id={job.job_id}")
+                submitted = True
+    if active:
+        detail = f"已有12项补采任务，等待 {','.join(sorted(active))}"
+        details.append(detail if details else f"skip:already_waiting {detail}")
+    return submitted, "；".join(details)
 
 
 class _SourceNoCacheStaticFiles(StaticFiles):
@@ -1913,58 +1971,7 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
             container.add_system_log(f"[12项独立上传调度] {detail}")
             return False, detail
 
-        target_date = datetime.now().strftime("%Y-%m-%d")
-        target_buildings = [item for item in bridge_service.get_source_cache_buildings() if str(item or "").strip()]
-        if not target_buildings:
-            detail = "共享桥接未配置可用楼栋，无法执行12项独立上传调度"
-            container.add_system_log(f"[12项独立上传调度] {detail}")
-            return False, detail
-
-        try:
-            cached_by_building = {
-                item["building"]: item
-                for item in bridge_service.get_day_metric_by_date_cache_entries(
-                    selected_dates=[target_date],
-                    buildings=target_buildings,
-                )
-                if item.get("building") in target_buildings
-                and item.get("duty_date") == target_date
-                and _source_cache_entry_file_ready(item)
-            }
-            cached_entries = [cached_by_building[building] for building in target_buildings if building in cached_by_building]
-            if len(cached_entries) < len(target_buildings):
-                container.add_system_log(
-                    "[12项独立上传调度] 按日共享缓存未齐全，外网端不写共享索引，等待内网补采同步"
-                )
-                dedupe_key = f"day_metric_upload:scheduler:{target_date}:{'|'.join(sorted(target_buildings))}"
-                job, bridge_task = start_waiting_bridge_job(
-                    job_service=container.job_service,
-                    bridge_service=bridge_service,
-                    name=source,
-                    worker_handler="day_metric_from_download",
-                    worker_payload={"selected_dates": [target_date], "building_scope": "all_enabled", "building": None},
-                    resource_keys=["shared_bridge:day_metric"],
-                    priority="scheduler",
-                    feature="day_metric_from_download",
-                    dedupe_key=dedupe_key,
-                    submitted_by="scheduler",
-                    bridge_get_or_create_name="get_or_create_day_metric_from_download_task",
-                    bridge_create_name="create_day_metric_from_download_task",
-                    bridge_kwargs={
-                        "selected_dates": [target_date],
-                        "building_scope": "all_enabled",
-                        "building": None,
-                        "requested_by": "scheduler",
-                    },
-                )
-                accepted_detail = (
-                    "等待内网补采同步：12项当日源文件尚未全部到位。"
-                    f" 已受理共享桥接任务 task_id={str(bridge_task.get('task_id', '') or '-').strip() or '-'},"
-                    f" date={target_date}, job_id={job.job_id}"
-                )
-                container.add_system_log(f"[12项独立上传调度] {accepted_detail}")
-                return True, accepted_detail
-
+        def _submit_cached(target_date, target_buildings, cached_entries):
             def _run_from_cache(emit_log):
                 started_at = datetime.now()
                 source_units = [
@@ -2008,9 +2015,14 @@ def create_app(*, enable_lifespan: bool = True) -> FastAPI:
                 run_func=_run_from_cache,
                 dedupe_key=dedupe_key,
             )
-            detail = f"已提交12项独立上传共享文件处理任务 job_id={job.job_id}, date={target_date}"
+            return f"已提交12项独立上传共享文件处理任务 job_id={job.job_id}, date={target_date}"
+
+        try:
+            ok, detail = _schedule_day_metric_upload(
+                container, bridge_service, source=source, now=datetime.now(), submit_cached=_submit_cached,
+            )
             container.add_system_log(f"[12项独立上传调度] {detail}")
-            return True, detail
+            return ok, detail
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
             container.add_system_log(f"[12项独立上传调度] 提交失败：{error_text}")

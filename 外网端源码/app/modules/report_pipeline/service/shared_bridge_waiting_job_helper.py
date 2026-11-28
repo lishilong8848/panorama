@@ -3,6 +3,17 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple
 
 
+DAY_METRIC_SINGLE_SCHEDULER_PREFIX = "day_metric_upload:scheduler:single:"
+
+
+def is_scheduled_day_metric_single(snapshot: Dict[str, Any]) -> bool:
+    return (
+        snapshot.get("feature") == "day_metric_from_download"
+        and snapshot.get("submitted_by") == "scheduler"
+        and str(snapshot.get("dedupe_key") or "").startswith(DAY_METRIC_SINGLE_SCHEDULER_PREFIX)
+    )
+
+
 def start_waiting_bridge_job(
     *,
     job_service,
@@ -19,6 +30,7 @@ def start_waiting_bridge_job(
     bridge_create_name: str,
     bridge_kwargs: Dict[str, Any],
     summary: str = "等待内网补采同步",
+    defer_dispatch: bool = False,
 ) -> Tuple[Any, Dict[str, Any]]:
     dispatch_payload = {
         "get_or_create_name": bridge_get_or_create_name,
@@ -40,6 +52,8 @@ def start_waiting_bridge_job(
         wait_reason="waiting:shared_bridge",
         summary=summary,
     )
+    if defer_dispatch:
+        return job, {"task_id": "", "status": "dispatch_pending", "transport": "http"}
     task_kwargs = dict(bridge_kwargs or {})
     task_kwargs["resume_job_id"] = getattr(job, "job_id", "")
     task_kwargs.setdefault("requested_by", submitted_by)

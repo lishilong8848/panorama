@@ -22,6 +22,7 @@ from app.modules.network.service.wifi_switch_service import WifiSwitchService
 from app.modules.feishu.service.feishu_auth_resolver import configure_feishu_auth_source
 from app.modules.report_pipeline.service.job_service import JobService
 from app.modules.shared_bridge.service.shared_bridge_runtime_service import SharedBridgeRuntimeService
+from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import is_scheduled_day_metric_single
 from app.modules.shared_bridge.service.bridge_status_presenter import (
     apply_external_source_cache_backfill_overlays,
 )
@@ -631,11 +632,27 @@ class AppContainer:
             runtime_state_root=self._runtime_state_root_text(),
             emit_log=self.add_system_log,
             run_callback=self.day_metric_upload_scheduler_callback or self._day_metric_upload_scheduler_run_callback,
-            is_busy=self._job_busy_for_feature_prefixes("day_metric"),
+            is_busy=self._day_metric_upload_scheduler_busy,
             orchestrator=self.ensure_scheduler_orchestrator(),
             schedule_kind="interval",
             source_name="12项独立上传",
         )
+
+    def _day_metric_upload_scheduler_busy(self) -> bool:
+        jobs = self.job_service.list_jobs(
+            limit=1000, statuses=("queued", "running", "waiting_resource"), include_results=False,
+        )
+        for job in jobs:
+            if not str(job.get("feature") or "").startswith("day_metric"):
+                continue
+            if (
+                job.get("status") == "waiting_resource"
+                and job.get("wait_reason") == "waiting:shared_bridge"
+                and is_scheduled_day_metric_single(job)
+            ):
+                continue
+            return True
+        return False
 
     def _build_branch_power_upload_scheduler(self) -> ApschedulerSchedulerFacade:
         features = self.config.get("features", {}) if isinstance(self.config, dict) else {}

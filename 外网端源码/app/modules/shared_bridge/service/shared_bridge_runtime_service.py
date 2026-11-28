@@ -25,6 +25,7 @@ from app.modules.report_pipeline.service.monthly_bridge_service import (
     run_bridge_resume_upload,
 )
 from app.modules.report_pipeline.service.monthly_cache_continue_service import run_monthly_from_file_items
+from app.modules.report_pipeline.service.shared_bridge_waiting_job_helper import is_scheduled_day_metric_single
 from app.modules.notify.service.webhook_notify_service import WebhookNotifyService
 from pipeline_utils import ensure_keyword
 from app.modules.report_pipeline.service.orchestrator_service import OrchestratorService
@@ -473,9 +474,15 @@ class SharedBridgeRuntimeService:
             raise RuntimeError("共享目录中没有可继续上传的12项源文件")
         selected_dates = self._normalize_text_list(internal_result.get("selected_dates", []))
         buildings = self._normalize_text_list(internal_result.get("selected_buildings", []))
+        building_scope = str(request.get("building_scope") or "").strip() or "all_enabled"
+        requested_building = str(request.get("building") or "").strip()
         if task.get("requested_by") == "scheduler":
             selected_dates = self._normalize_text_list(request.get("selected_dates", []))
             buildings = self.get_source_cache_buildings()
+            if building_scope == "single":
+                if requested_building not in buildings:
+                    raise RuntimeError("12项定时补采楼栋无效")
+                buildings = [requested_building]
             expected = {(day, building) for day in selected_dates for building in buildings}
             actual = {(item["duty_date"], item["building"]) for item in source_units}
             if not expected or actual != expected or len(source_units) != len(expected):
@@ -490,8 +497,8 @@ class SharedBridgeRuntimeService:
                 "selected_dates": selected_dates,
                 "buildings": buildings,
                 "source_units": source_units,
-                "building_scope": str(request.get("building_scope", "") or "").strip() or "all_enabled",
-                "building": str(request.get("building", "") or "").strip() or None,
+                "building_scope": building_scope,
+                "building": requested_building or None,
                 "bridge_task_id": task_id,
             },
             "summary": "共享文件已到位，正在继续上传12项数据",
@@ -2929,12 +2936,18 @@ class SharedBridgeRuntimeService:
             return None
         payload = copy.deepcopy(bridge_kwargs if isinstance(bridge_kwargs, dict) else {})
         requested_by = str(payload.get("requested_by", "") or "manual").strip() or "manual"
+        scheduled_day_metric_single = (
+            get_or_create_name == "get_or_create_day_metric_from_download_task"
+            and requested_by == "scheduler"
+            and payload.get("building_scope") == "single"
+        )
         try:
             task = client.create_task(
                 get_or_create_name=get_or_create_name,
                 create_name=create_name,
                 payload=payload,
                 requested_by=requested_by,
+                **({"max_attempts": 1} if scheduled_day_metric_single else {}),
             )
             if isinstance(task, dict):
                 task["transport"] = "http"
@@ -3818,19 +3831,31 @@ class SharedBridgeRuntimeService:
                 return self.get_cached_tasks(limit=safe_limit)
             raise
 
-    def get_task(self, task_id: str) -> Dict[str, Any] | None:
+    def get_task(self, task_id: str, *, require_http_result: bool = False) -> Dict[str, Any] | None:
         task_text = str(task_id or "").strip()
         if self._http_bridge_should_try() and task_text:
             try:
                 task = self._internal_bridge_http_client.get_task(task_text) if self._internal_bridge_http_client else None
+                if require_http_result and (not isinstance(task, dict) or task.get("task_id") != task_text or not task.get("status")):
+                    raise RuntimeError("内网端返回的补采任务状态无效")
                 if isinstance(task, dict):
                     task["transport"] = "http"
                     self._cache_task_detail(task)
                     return task
             except Exception as exc:  # noqa: BLE001
+                if require_http_result and self._http_bridge_forced() and getattr(exc.__cause__, "code", None) == 404:
+                    return None
                 self._emit_http_bridge_issue_log("读取任务", exc)
                 if self._http_bridge_forced():
-                    return self.get_cached_task(task_text)
+                    cached = self.get_cached_task(task_text)
+                    if require_http_result and cached is None:
+                        raise
+                    return cached
+        if require_http_result and self._http_bridge_forced():
+            cached = self.get_cached_task(task_text)
+            if cached is None:
+                raise RuntimeError("内网端桥接暂不可查询，尚未核实补采任务")
+            return cached
         if not self._store:
             return self.get_cached_task(task_text)
         try:
@@ -9038,6 +9063,27 @@ class SharedBridgeRuntimeService:
             )
         )
 
+    def _try_resume_scheduled_day_metric_from_cache(self, job_id: str, request: Dict[str, Any], *, task_id: str = "") -> bool:
+        # A published file survives dispatch reply loss or bridge task cleanup.
+        dates = self._normalize_text_list(request.get("selected_dates", []))
+        building = str(request.get("building") or "").strip()
+        if len(dates) != 1 or request.get("building_scope") != "single" or not building:
+            return False
+        try:
+            entries = self.get_day_metric_by_date_cache_entries(selected_dates=dates, buildings=[building], require_fresh=True)
+            if not entries:
+                return False
+            binding = self._build_day_metric_resume_binding_from_artifacts({
+                "task_id": task_id, "requested_by": "scheduler", "request": request,
+                "result": {"internal": {"source_units": entries}},
+            })
+        except (RuntimeError, OSError, ValueError):
+            return False
+        self._job_service.resume_waiting_worker_job(
+            job_id, worker_payload=binding["worker_payload"], summary=binding["summary"],
+        )
+        return True
+
     def _reissue_unbound_waiting_job(self, snapshot: Dict[str, Any]) -> bool:
         if self._job_service is None:
             return False
@@ -9063,6 +9109,11 @@ class SharedBridgeRuntimeService:
         task_kwargs = copy.deepcopy(bridge_kwargs)
         task_kwargs["resume_job_id"] = job_id
         task_kwargs.setdefault("requested_by", str(dispatch.get("requested_by", "") or snapshot.get("submitted_by", "") or "waiting_retry").strip() or "waiting_retry")
+        day_metric_single = is_scheduled_day_metric_single(snapshot)
+        if day_metric_single and self._try_resume_scheduled_day_metric_from_cache(job_id, task_kwargs):
+            self._waiting_job_cache_probe_log_markers.pop(marker, None)
+            return True
+        dispatch_label = "派发内网补采" if day_metric_single else "重派内网补采"
         try:
             new_task = self.create_http_bridge_task(
                 get_or_create_name=get_or_create_name,
@@ -9070,14 +9121,17 @@ class SharedBridgeRuntimeService:
                 bridge_kwargs=task_kwargs,
             )
         except Exception as exc:  # noqa: BLE001
-            self._emit_system_log(f"[共享桥接] 等待任务={job_id} 重派内网补采暂不可用，继续等待: {exc}")
+            self._emit_system_log(f"[共享桥接] 等待任务={job_id} {dispatch_label}暂不可用，继续等待: {exc}")
             return True
         new_task_id = str((new_task or {}).get("task_id", "") or "").strip() if isinstance(new_task, dict) else ""
         if not new_task_id:
-            self._emit_system_log(f"[共享桥接] 等待任务={job_id} 重派内网补采暂未返回任务，继续等待")
+            self._emit_system_log(f"[共享桥接] 等待任务={job_id} {dispatch_label}暂未返回任务，继续等待")
             return True
         self._job_service.bind_bridge_task(job_id, new_task_id)
-        self._emit_system_log(f"[共享桥接] 等待任务={job_id} 已重派内网补采 task_id={new_task_id}")
+        if day_metric_single:
+            self._waiting_job_cache_probe_log_markers.pop(marker, None)
+        self._emit_system_log(f"[共享桥接] 等待任务={job_id} 已取得内网补采回执 task_id={new_task_id}"
+                              if day_metric_single else f"[共享桥接] 等待任务={job_id} 已重派内网补采 task_id={new_task_id}")
         return True
 
     def _recover_scheduled_handover_pair(
@@ -9163,7 +9217,14 @@ class SharedBridgeRuntimeService:
                 else:
                     self._reissue_unbound_waiting_job(snapshot)
                 continue
-            task = self.get_task(bridge_task_id)
+            day_metric_single = is_scheduled_day_metric_single(snapshot)
+            if day_metric_single:
+                try:
+                    task = self.get_task(bridge_task_id, require_http_result=True)
+                except Exception:  # The bridge has not confirmed the bound task is gone.
+                    continue
+            else:
+                task = self.get_task(bridge_task_id)
             status = str((task or {}).get("status", "") or "").strip().lower()
             if handover_wait_payload and status not in {"success", "cancelled"}:
                 self._recover_scheduled_handover_pair(
@@ -9172,6 +9233,10 @@ class SharedBridgeRuntimeService:
                 )
                 continue
             if not task:
+                if day_metric_single:
+                    payload = self._job_service.load_job_stage_payload(job_id) or {}
+                    if self._try_resume_scheduled_day_metric_from_cache(job_id, payload, task_id=bridge_task_id):
+                        continue
                 self._job_service.fail_waiting_job(
                     job_id,
                     error_text="绑定补采任务丢失",

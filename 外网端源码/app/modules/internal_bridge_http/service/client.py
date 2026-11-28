@@ -244,6 +244,7 @@ class InternalBridgeHttpClient:
         create_name: str,
         payload: Dict[str, Any],
         requested_by: str,
+        max_attempts: int | None = None,
     ) -> Dict[str, Any]:
         return self._request(
             "POST",
@@ -255,6 +256,7 @@ class InternalBridgeHttpClient:
                 "payload": payload if isinstance(payload, dict) else {},
                 "requested_by": str(requested_by or "").strip() or "external_http",
             },
+            **({"max_attempts": max_attempts} if max_attempts is not None else {}),
         )
 
     def create_alarm_event_window_query_task(
